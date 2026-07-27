@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CINSIDE 数据源管理系统</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; background: #f0f2f5; color: #1f2937; }
+
+    /* ===== 顶栏 ===== */
+    .topbar { background: linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%); color: #fff; padding: 0 24px; height: 56px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+    .topbar .logo { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+    .topbar .logo .badge { background: rgba(255,255,255,.2); padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 400; }
+    .topbar .nav { display: flex; gap: 4px; }
+    .topbar .nav a { color: rgba(255,255,255,.8); text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 14px; transition: .2s; }
+    .topbar .nav a:hover, .topbar .nav a.active { background: rgba(255,255,255,.15); color: #fff; }
+    .topbar .user { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .topbar .user .avatar { width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,.25); display: flex; align-items: center; justify-content: center; font-weight: 600; }
+
+    /* ===== 主体 ===== */
+    .main { max-width: 1400px; margin: 0 auto; padding: 20px 24px; }
+
+    /* 统计卡片 */
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
+    .stat-card { background: #fff; border-radius: 10px; padding: 16px 20px; box-shadow: 0 1px 3px rgba(0,0,0,.08); display: flex; align-items: center; gap: 14px; }
+    .stat-card .icon { width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 22px; }
+    .stat-card .icon.blue { background: #dbeafe; color: #2563eb; }
+    .stat-card .icon.green { background: #d1fae5; color: #059669; }
+    .stat-card .icon.amber { background: #fef3c7; color: #d97706; }
+    .stat-card .icon.purple { background: #ede9fe; color: #7c3aed; }
+    .stat-card .val { font-size: 24px; font-weight: 700; line-height: 1.2; }
+    .stat-card .lbl { font-size: 12px; color: #6b7280; }
+
+    /* 搜索栏 */
+    .toolbar { background: #fff; border-radius: 10px; padding: 14px 20px; box-shadow: 0 1px 3px rgba(0,0,0,.08); margin-bottom: 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .search-box { flex: 1; min-width: 240px; position: relative; }
+    .search-box input { width: 100%; padding: 9px 12px 9px 36px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; outline: none; transition: .2s; }
+    .search-box input:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,.1); }
+    .search-box .icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: #9ca3af; font-size: 16px; }
+    .filter-select { padding: 9px 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; background: #fff; cursor: pointer; }
+    .btn { padding: 9px 16px; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; font-weight: 500; transition: .2s; }
+    .btn-primary { background: #2563eb; color: #fff; }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-ghost { background: #f3f4f6; color: #374151; }
+    .btn-ghost:hover { background: #e5e7eb; }
+
+    /* 学生表格 */
+    .table-wrap { background: #fff; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.08); overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead { background: #f9fafb; }
+    th { padding: 12px 16px; text-align: left; font-weight: 600; color: #6b7280; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; border-bottom: 1px solid #e5e7eb; white-space: nowrap; }
+    td { padding: 12px 16px; border-bottom: 1px solid #f3f4f6; white-space: nowrap; }
+    tr:hover td { background: #f9fafb; }
+    tr:last-child td { border-bottom: none; }
+    .student-id { font-family: "SF Mono", "Fira Code", monospace; font-size: 12px; color: #2563eb; font-weight: 600; }
+    .student-name { font-weight: 600; color: #1f2937; }
+    .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+    .tag-biz { background: #dbeafe; color: #1e40af; }
+    .tag-hum { background: #fef3c7; color: #92400e; }
+    .tag-shanghai { background: #d1fae5; color: #065f46; }
+    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .dot-green { background: #10b981; }
+    .dot-amber { background: #f59e0b; }
+    .dot-gray { background: #9ca3af; }
+
+    .pagination { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; font-size: 13px; color: #6b7280; }
+    .pagination .pages { display: flex; gap: 4px; }
+    .pagination .pages button { width: 32px; height: 32px; border: 1px solid #e5e7eb; background: #fff; border-radius: 6px; cursor: pointer; font-size: 13px; }
+    .pagination .pages button.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+    .pagination .pages button:hover:not(.active) { background: #f3f4f6; }
+  </style>
+</head>
+<body>
+
+<!-- ===== 顶栏 ===== -->
+<div class="topbar">
+  <div class="logo">
+    CINSIDE <span class="badge">数据源 Admin</span>
+  </div>
+  <div class="nav">
+    <a href="#" class="active">学生管理</a>
+    <a href="#">申请记录</a>
+    <a href="#">统计报表</a>
+    <a href="#">系统设置</a>
+  </div>
+  <div class="user">
+    <div class="avatar">A</div>
+    <span>admin@cinside.local</span>
+  </div>
+</div>
+
+<!-- ===== 主体 ===== -->
+<div class="main">
+
+  <!-- 统计卡片 -->
+  <div class="stats">
+    <div class="stat-card">
+      <div class="icon blue">👥</div>
+      <div><div class="val">237</div><div class="lbl">学生总数</div></div>
+    </div>
+    <div class="stat-card">
+      <div class="icon green">✓</div>
+      <div><div class="val">189</div><div class="lbl">已提交申请</div></div>
+    </div>
+    <div class="stat-card">
+      <div class="icon amber">⏳</div>
+      <div><div class="val">38</div><div class="lbl">待审核</div></div>
+    </div>
+    <div class="stat-card">
+      <div class="icon purple">📋</div>
+      <div><div class="val">10</div><div class="lbl">本月新增</div></div>
+    </div>
+  </div>
+
+  <!-- 搜索栏 -->
+  <div class="toolbar">
+    <div class="search-box">
+      <span class="icon">🔍</span>
+      <input type="text" id="searchInput" placeholder="搜索学生姓名、ID、邮箱..." oninput="filterTable()">
+    </div>
+    <select class="filter-select" id="streamFilter" onchange="filterTable()">
+      <option value="">全部 Stream</option>
+      <option value="BIZ">BIZ</option>
+      <option value="HUM">HUM</option>
+    </select>
+    <select class="filter-select" id="centerFilter" onchange="filterTable()">
+      <option value="">全部中心</option>
+      <option value="Shanghai">Shanghai</option>
+    </select>
+    <button class="btn btn-ghost" onclick="exportData()">导出 Excel</button>
+    <button class="btn btn-primary" onclick="alert('演示模式：添加学生功能未开放')">+ 新增学生</button>
+  </div>
+
+  <!-- 学生表格 -->
+  <div class="table-wrap">
+    <table id="studentTable">
+      <thead>
+        <tr>
+          <th>学生 ID</th>
+          <th>姓名</th>
+          <th>邮箱</th>
+          <th>家长邮箱</th>
+          <th>学生电话</th>
+          <th>家长电话</th>
+          <th>Stream</th>
+          <th>中心</th>
+          <th>出生日期</th>
+          <th>年龄</th>
+          <th>监护人</th>
+          <th>状态</th>
+        </tr>
+      </thead>
+      <tbody id="studentBody">
+      </tbody>
+    </table>
+    <div class="pagination">
+      <span id="pageInfo">显示 1-15 / 共 15 条</span>
+      <div class="pages">
+        <button>‹</button>
+        <button class="active">1</button>
+        <button>2</button>
+        <button>3</button>
+        <button>›</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ===== 学生数据（来自 20260716 Transferring students.xlsx）=====
+const students = [
+  { id: "2026-RU-3418", name: "Sofia Kochukova", email: "sk6485480@gmail.com", guardianEmail: "Gela134@gmail.com", phone: "7 (926) 768-21-74", guardianPhone: "79857643380", stream: "BIZ", center: "Shanghai", dob: "2008-11-12", age: 17, guardian: "yes", status: "submitted" },
+  { id: "2026-RU-3436", name: "Polina Vinogradova", email: "pvin071107@mail.ru", guardianEmail: "nvin1908@mail.ru", phone: "89127800510", guardianPhone: "89824372500", stream: "HUM", center: "Shanghai", dob: "2007-11-07", age: 18, guardian: "no need", status: "submitted" },
+  { id: "2026-RU-3604", name: "Oleg Petrov", email: "caxapocek@gmail.com", guardianEmail: "Filanovich@inbox.ru", phone: "79005674322", guardianPhone: "79114889881", stream: "BIZ", center: "Shanghai", dob: "2008-03-11", age: 18, guardian: "no need", status: "submitted" },
+  { id: "2026-RU-3638", name: "Dmitry Minkin", email: "dmitry4396@gmail.com", guardianEmail: "215133@mail.ru", phone: "89505637084", guardianPhone: "79506490535", stream: "BIZ", center: "Shanghai", dob: "2008-09-20", age: 17, guardian: "YES", status: "pending" },
+  { id: "2026-RU-3483", name: "Vankin Nikita", email: "nik.vnkn@yandex.ru", guardianEmail: "svetlanavankina1@gmail.com", phone: "79170645758", guardianPhone: "79185923748", stream: "BIZ", center: "Shanghai", dob: "2008-07-09", age: 18, guardian: "no need", status: "submitted" },
+  { id: "2026-RU-3672", name: "Nikolaev Nikita", email: "Nikitron130181@yandex.ru", guardianEmail: "Allmax3@yandex.ru", phone: "79194528820", guardianPhone: "79124912470", stream: "HUM", center: "Shanghai", dob: "2007-12-25", age: 18, guardian: "no need", status: "submitted" },
+  { id: "2026-RU-3669", name: "Vlada Forsheneva", email: "ladaforshe@yandex.ru", guardianEmail: "Ynafor@yandex.ru", phone: "8925833-11-30", guardianPhone: "8-926-970-29-56", stream: "HUM", center: "Shanghai", dob: "2008-11-11", age: 17, guardian: "YES", status: "pending" },
+  { id: "2026-RU-3728", name: "Kirill Permiakov", email: "Kiri.permiakov@gmail.com", guardianEmail: "sushka57@mail.ru", phone: "89137141572", guardianPhone: "89832498339", stream: "BIZ", center: "Shanghai", dob: "2008-09-19", age: 17, guardian: "YES", status: "submitted" },
+  { id: "2026-RU-3749", name: "Sofiia Merkulova", email: "sonyamerkulova28@icloud.com", guardianEmail: "Kirill.merkulov@outlook.com", phone: "7 925 422 22 24", guardianPhone: "7 925 455 55 54", stream: "HUM", center: "Shanghai", dob: "2008-11-28", age: 17, guardian: "yes", status: "submitted" },
+  { id: "2026-RU-3790", name: "Agata Katkova", email: "agathak2280@gmail.com", guardianEmail: "elka_izh@mail.ru", phone: "79128556701", guardianPhone: "89199036635", stream: "HUM", center: "Shanghai", dob: "2008-04-17", age: 18, guardian: "no need", status: "submitted" },
+  { id: "2026-RU-3796", name: "Vasilisa Chernitsyna", email: "cernicynavasilisa@gmail.com", guardianEmail: "cernicynavasilisa@gmail.com", phone: "79106108356", guardianPhone: "79106108356", stream: "BIZ", center: "Shanghai", dob: "2007-06-29", age: 19, guardian: "no need", status: "submitted" },
+  { id: "2026-RU-3777", name: "Egor Gorbushin", email: "gev.79.gev@yandex.ru", guardianEmail: "gev.79.gev@yandex.ru", phone: "89129846859", guardianPhone: "89129846859", stream: "BIZ", center: "Shanghai", dob: "2008-06-09", age: 18, guardian: "no need", status: "pending" },
+  { id: "2026-RU-3806", name: "Kungurtsev Aleksandr", email: "grishakeksik08@mail.ru", guardianEmail: "nmapple@mail.ru", phone: "—", guardianPhone: "—", stream: "HUM", center: "Shanghai", dob: "2008-01-20", age: 18, guardian: "—", status: "pending" },
+  { id: "2026-RU-3813", name: "Damba Rinchen", email: "drt0808@mail.ru", guardianEmail: "Soyanovna73@mail.ru", phone: "—", guardianPhone: "—", stream: "BIZ", center: "Shanghai", dob: "—", age: 18, guardian: "—", status: "pending" },
+  { id: "2026-RU-3823", name: "Danilova Milana", email: "milddns07@gmail.com", guardianEmail: "ksuz83iv@yandex.ru", phone: "79379420349", guardianPhone: "89176606959", stream: "HUM", center: "Shanghai", dob: "2007-11-21", age: 18, guardian: "no need", status: "submitted" },
+];
+
+function statusBadge(s) {
+  if (s === "submitted") return '<span class="status-dot dot-green"></span>已提交';
+  if (s === "pending") return '<span class="status-dot dot-amber"></span>待审核';
+  return '<span class="status-dot dot-gray"></span>未提交';
+}
+
+function renderTable(list) {
+  const tbody = document.getElementById("studentBody");
+  if (list.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;padding:40px;color:#9ca3af;">未找到匹配的学生记录</td></tr>';
+  } else {
+    tbody.innerHTML = list.map(s => `
+      <tr>
+        <td class="student-id">${s.id}</td>
+        <td class="student-name">${s.name}</td>
+        <td>${s.email}</td>
+        <td>${s.guardianEmail}</td>
+        <td>${s.phone}</td>
+        <td>${s.guardianPhone}</td>
+        <td><span class="tag ${s.stream === 'BIZ' ? 'tag-biz' : 'tag-hum'}">${s.stream}</span></td>
+        <td><span class="tag tag-shanghai">${s.center}</span></td>
+        <td>${s.dob}</td>
+        <td>${s.age}</td>
+        <td>${s.guardian}</td>
+        <td>${statusBadge(s.status)}</td>
+      </tr>
+    `).join("");
+  }
+  document.getElementById("pageInfo").textContent = `显示 1-${list.length} / 共 ${list.length} 条`;
+}
+
+function filterTable() {
+  const q = document.getElementById("searchInput").value.toLowerCase();
+  const sf = document.getElementById("streamFilter").value;
+  const cf = document.getElementById("centerFilter").value;
+  const filtered = students.filter(s => {
+    const matchQ = !q || s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q) || s.email.toLowerCase().includes(q);
+    const matchS = !sf || s.stream === sf;
+    const matchC = !cf || s.center === cf;
+    return matchQ && matchS && matchC;
+  });
+  renderTable(filtered);
+}
+
+function exportData() {
+  alert("演示模式：数据已从 Excel 导入，无需再次导出");
+}
+
+// 初始渲染
+renderTable(students);
+</script>
+</body>
+</html>

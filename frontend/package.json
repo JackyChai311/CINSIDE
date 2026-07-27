@@ -1,0 +1,115 @@
+{
+  "name": "cinside-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
+    "build:backend": "cd /d ..\\backend && .venv\\Scripts\\pyinstaller.exe cinside-backend.spec --clean --noconfirm",
+    "electron:build": "npm run build && npm run build:backend && electron-builder",
+    "electron:build:portable": "npm run build && npm run build:backend && electron-builder --win portable"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "lucide-react": "^0.408.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.19",
+    "concurrently": "^8.2.2",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "png-to-ico": "^3.0.2",
+    "postcss": "^8.4.39",
+    "sharp": "^0.35.3",
+    "tailwindcss": "^3.4.6",
+    "typescript": "^5.5.3",
+    "vite": "^5.3.4",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.cinside.app",
+    "productName": "CINSIDE",
+    "forceCodeSigning": false,
+    "directories": {
+      "output": "../dist-electron"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "../assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend/dist/cinside-backend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../mock-university",
+        "to": "mock-university",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../demo-pages",
+        "to": "demo-pages",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../samples",
+        "to": "samples",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "../assets/app-icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CINSIDE",
+      "installerIcon": "../assets/app-icon.ico",
+      "uninstallerIcon": "../assets/app-icon.ico",
+      "installerHeaderIcon": "../assets/app-icon.ico",
+      "deleteAppDataOnUninstall": false
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "JackyChai311",
+        "repo": "CINSIDE"
+      }
+    ]
+  }
+}

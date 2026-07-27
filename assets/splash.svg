@@ -1,0 +1,19 @@
+<svg width="800" height="200" xmlns="http://www.w3.org/2000/svg">
+  <!-- 白色背景 -->
+  <rect width="800" height="200" fill="#FFFFFF"/>
+
+  <!-- CINSIDE 文字 -->
+  <text x="50" y="130"
+        font-family="Arial, sans-serif"
+        font-size="80"
+        font-weight="bold"
+        fill="#000000">
+    CINSIDE
+  </text>
+
+  <!-- 紫色竖线光标 -->
+  <rect x="420" y="70" width="8" height="60" fill="#8A2BE2"/>
+
+  <!-- 紫色下划线光标 -->
+  <rect x="435" y="120" width="30" height="8" fill="#8A2BE2"/>
+</svg>

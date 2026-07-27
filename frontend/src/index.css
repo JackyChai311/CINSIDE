@@ -1,0 +1,92 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  /* 渐变背景：浅蓝紫 → 白，给玻璃质感提供底层色彩 */
+  background:
+    radial-gradient(1200px 800px at 10% 10%, #e0e7ff 0%, transparent 60%),
+    radial-gradient(1000px 700px at 90% 20%, #fce7f3 0%, transparent 55%),
+    radial-gradient(900px 600px at 50% 100%, #dbeafe 0%, transparent 60%),
+    linear-gradient(135deg, #f6f7fb 0%, #eef2ff 100%);
+  background-attachment: fixed;
+  color: #1f2937;
+  font-feature-settings: "cv11", "ss01";
+}
+
+/* 自定义滚动条：细、半透明、美观 */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(99,102,241,.18); border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(99,102,241,.35); }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* tab 切换无蓝色高亮 */
+button { -webkit-tap-highlight-color: transparent; }
+
+/* ============ 玻璃质感工具类 ============ */
+/* 玻璃面板：半透明 + 背景模糊 + 细边 + 阴影 */
+@layer components {
+  .glass {
+    @apply border border-white/40 bg-white/55 backdrop-blur-xl;
+    box-shadow:
+      0 1px 0 0 rgba(255,255,255,.6) inset,
+      0 8px 32px -8px rgba(31, 41, 55, .18);
+  }
+  /* 更深的玻璃（用于网页框、需要更强对比的区域） */
+  .glass-strong {
+    @apply border border-white/50 bg-white/70 backdrop-blur-2xl;
+    box-shadow:
+      0 1px 0 0 rgba(255,255,255,.7) inset,
+      0 12px 40px -10px rgba(31, 41, 55, .22);
+  }
+  /* 玻璃描边：仅边框 + 模糊，几乎无背景 */
+  .glass-frame {
+    @apply border border-white/50 bg-white/30 backdrop-blur-md;
+    box-shadow:
+      0 1px 0 0 rgba(255,255,255,.5) inset,
+      0 4px 20px -6px rgba(31, 41, 55, .12);
+  }
+  /* 实心卡片（保留给数据面板，与玻璃区拉开层次） */
+  .panel-solid {
+    @apply rounded-xl border border-slate-200 bg-white;
+    box-shadow: 0 1px 3px -1px rgba(31, 41, 55, .08), 0 8px 24px -12px rgba(31, 41, 55, .12);
+  }
+}
+
+/* ============ 元素选择模式：网页内的拾取光标 ============ */
+/* 通过 insertCSS 注入到 BrowserView，激活时给整个页面加上十字光标 + 高亮悬停 */
+.cinside-picking,
+.cinside-picking * {
+  cursor: crosshair !important;
+}
+.cinside-picking *:hover {
+  outline: 2px dashed #6366f1 !important;
+  outline-offset: 1px !important;
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, .15) !important;
+}
+
+/* ============ 动画 ============ */
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, .45); }
+  50% { box-shadow: 0 0 0 8px rgba(99, 102, 241, 0); }
+}
+.animate-glow-pulse { animation: glow-pulse 1.6s ease-in-out infinite; }
+
+@keyframes scan-line {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(2000%); }
+}
+.scan-line {
+  position: absolute;
+  left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(99,102,241,.7), transparent);
+  animation: scan-line 2.4s linear infinite;
+  pointer-events: none;
+}

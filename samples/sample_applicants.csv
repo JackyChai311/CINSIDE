@@ -1,0 +1,4 @@
+name,passport_no,nationality,birth_date,gender,passport_issue,passport_expiry,email,phone,university_name,university_url
+ZHANG SAN,E12345678,CHINESE,1995-03-15,M,2020-06-10,2030-06-09,zhang.san@example.com,+86 138 0000 0000,Demo University,http://localhost:8000/mock/index.html
+LI SI,G98765432,CHINESE,1998-11-22,F,2021-04-18,2031-04-17,lisi@example.com,+86 139 1111 2222,Demo University,http://localhost:8000/mock/index.html
+WANG WU,PE2233445,CHINESE,1992-07-08,M,2019-09-30,2029-09-29,ww@example.com,+86 137 8888 9999,Demo University,http://localhost:8000/mock/index.html

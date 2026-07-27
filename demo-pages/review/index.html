@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>East China International University — Application Review</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, "Segoe UI", Robota, "Helvetica Neue", sans-serif; background: #f0f2f5; color: #1f2937; }
+
+    /* ===== 顶栏 ===== */
+    .topbar { background: #4f46e5; color: #fff; padding: 0 24px; height: 56px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+    .topbar .brand { font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+    .topbar .brand .logo-icon { width: 32px; height: 32px; background: rgba(255,255,255,.2); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; }
+    .topbar .nav { display: flex; gap: 4px; }
+    .topbar .nav a { color: rgba(255,255,255,.75); text-decoration: none; padding: 8px 14px; border-radius: 6px; font-size: 14px; }
+    .topbar .nav a:hover, .topbar .nav a.active { background: rgba(255,255,255,.15); color: #fff; }
+    .topbar .user { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .topbar .user .avatar { width: 30px; height: 30px; border-radius: 50%; background: rgba(255,255,255,.25); display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; }
+
+    /* ===== 搜索区 ===== */
+    .search-section { background: #fff; border-bottom: 1px solid #e5e7eb; padding: 16px 24px; }
+    .search-section .inner { max-width: 1100px; margin: 0 auto; display: flex; gap: 12px; align-items: center; }
+    .search-section input { flex: 1; padding: 10px 14px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; outline: none; }
+    .search-section input:focus { border-color: #4f46e5; box-shadow: 0 0 0 3px rgba(79,70,229,.1); }
+    .search-section .btn { padding: 10px 20px; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; font-weight: 500; }
+    .search-section .btn-search { background: #4f46e5; color: #fff; }
+    .search-section .btn-search:hover { background: #4338ca; }
+    .search-hint { font-size: 12px; color: #9ca3af; margin-top: 6px; max-width: 1100px; margin-left: auto; margin-right: auto; }
+
+    /* ===== 申请详情 ===== */
+    .container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+    .app-header { background: #fff; border-radius: 12px; padding: 24px 28px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); display: flex; justify-content: space-between; align-items: flex-start; }
+    .app-header h1 { font-size: 20px; margin-bottom: 4px; }
+    .app-header .meta { color: #6b7280; font-size: 13px; line-height: 1.6; }
+    .app-header .status-badge { padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 600; }
+    .status-submitted { background: #d1fae5; color: #065f46; }
+    .status-pending { background: #fef3c7; color: #92400e; }
+
+    /* 表单分区 */
+    .section { background: #fff; border-radius: 12px; padding: 24px 28px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+    .section h2 { font-size: 16px; font-weight: 600; margin-bottom: 18px; padding-bottom: 10px; border-bottom: 2px solid #eef2ff; display: flex; align-items: center; gap: 8px; }
+    .section h2 .num { width: 24px; height: 24px; background: #4f46e5; color: #fff; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 12px; }
+
+    .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .field { display: flex; flex-direction: column; }
+    .field.full { grid-column: 1 / -1; }
+    .field label { font-size: 12px; color: #6b7280; margin-bottom: 5px; font-weight: 500; }
+    .field input, .field select, .field textarea { padding: 9px 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; background: #f9fafb; color: #374151; }
+    .field input[readonly] { background: #f3f4f6; cursor: default; }
+    .field .note { font-size: 11px; color: #9ca3af; margin-top: 4px; }
+
+    /* 搜索结果下拉 */
+    .search-results { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; margin-top: 4px; max-height: 300px; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,.1); display: none; }
+    .search-results.show { display: block; }
+    .search-result-item { padding: 12px 16px; border-bottom: 1px solid #f3f4f6; cursor: pointer; }
+    .search-result-item:hover { background: #f9fafb; }
+    .search-result-item:last-child { border-bottom: none; }
+    .search-result-item .name { font-weight: 600; font-size: 14px; }
+    .search-result-item .sub { font-size: 12px; color: #6b7280; margin-top: 2px; }
+
+    .actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 8px; }
+    .btn { padding: 10px 20px; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; font-weight: 500; transition: .2s; }
+    .btn-primary { background: #4f46e5; color: #fff; }
+    .btn-primary:hover { background: #4338ca; }
+    .btn-ghost { background: #f3f4f6; color: #374151; }
+    .btn-ghost:hover { background: #e5e7eb; }
+
+    .empty-state { text-align: center; padding: 80px 20px; color: #9ca3af; }
+    .empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+    .empty-state .title { font-size: 18px; font-weight: 600; color: #6b7280; margin-bottom: 6px; }
+    .empty-state .desc { font-size: 14px; }
+
+    /* ===== 难度选择 ===== */
+    .difficulty-select { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #6b7280; }
+    .difficulty-select select { padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 13px; background: #fff; cursor: pointer; outline: none; }
+    .difficulty-select select:focus { border-color: #4f46e5; }
+
+    /* ===== 弹窗（困难模式：学生信息以弹窗形式展示） ===== */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: center; justify-content: center; z-index: 100; backdrop-filter: blur(2px); }
+    .modal-overlay.show { display: flex; }
+    .modal-dialog { background: #f8fafc; width: min(860px, 92vw); max-height: 88vh; border-radius: 14px; box-shadow: 0 20px 60px rgba(0,0,0,.3); display: flex; flex-direction: column; overflow: hidden; }
+    .modal-header { background: #4f46e5; color: #fff; padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; }
+    .modal-header .title { font-size: 15px; font-weight: 600; }
+    .modal-close { background: rgba(255,255,255,.2); border: none; color: #fff; width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 15px; line-height: 1; }
+    .modal-close:hover { background: rgba(255,255,255,.35); }
+    .modal-body { padding: 18px 20px; overflow-y: auto; }
+    .modal-loading { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 70px 0; color: #6b7280; gap: 12px; }
+    .modal-loading .spinner { width: 34px; height: 34px; border: 3px solid #e0e7ff; border-top-color: #4f46e5; border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<!-- ===== 顶栏 ===== -->
+<div class="topbar">
+  <div class="brand">
+    <div class="logo-icon">🎓</div>
+    East China International University
+  </div>
+  <div class="nav">
+    <a href="#">Dashboard</a>
+    <a href="#" class="active">Applications</a>
+    <a href="#">Students</a>
+    <a href="#">Reports</a>
+  </div>
+  <div class="user">
+    <div class="avatar">R</div>
+    <span>registrar@eciu.edu</span>
+  </div>
+</div>
+
+<!-- ===== 搜索区 ===== -->
+<div class="search-section">
+  <div class="inner">
+    <input type="text" id="searchInput" placeholder="输入学生 ID 或姓名搜索已提交的申请..." oninput="showResults(this.value)" onfocus="showResults(this.value)">
+    <button class="btn btn-search" onclick="doSearch()">搜索</button>
+    <div class="difficulty-select">
+      <label for="difficulty">难度</label>
+      <select id="difficulty">
+        <option value="easy">简单 · 页内展示</option>
+        <option value="hard">困难 · 弹窗展示</option>
+      </select>
+    </div>
+  </div>
+  <div class="search-hint">提示：试试搜索 2026-RU-3418 或 Sofia</div>
+</div>
+
+<!-- ===== 搜索结果下拉 ===== -->
+<div class="container" style="position:relative;">
+  <div class="search-results" id="searchResults"></div>
+</div>
+
+<!-- ===== 申请详情（简单模式：页面内渲染） ===== -->
+<div id="appDetail">
+  <!-- 内容由 JS 动态渲染 -->
+</div>
+
+<!-- ===== 弹窗（困难模式：学生信息以弹窗形式出现） ===== -->
+<div class="modal-overlay" id="studentModal">
+  <div class="modal-dialog">
+    <div class="modal-header">
+      <span class="title">学生申请详情</span>
+      <button class="modal-close" onclick="closeStudentModal()" title="关闭">✕</button>
+    </div>
+    <div class="modal-body" id="modalBody">
+      <!-- 内容由 JS 动态渲染 -->
+    </div>
+  </div>
+</div>
+
+<script>
+// ===== 学生申请数据（模拟大学系统中已提交的申请，部分故意与 Excel 不一致）=====
+const applications = {
+  "2026-RU-3418": {
+    name: "Sofia Kochukova",
+    appId: "ECIU-2026-0041",
+    status: "submitted",
+    submitDate: "2026-07-14",
+    // 故意错误：name 多了空格, email 打错域名, dob 格式不同, phone 格式不同
+    fields: {
+      name: { value: "Sofia  Kochukova", label: "Full Name (as in passport)" },
+      email: { value: "sk6485480@gmail.con", label: "Email Address" },
+      phone: { value: "+7 926 768 21 74", label: "Phone Number" },
+      dob: { value: "2008/11/12", label: "Date of Birth" },
+      gender: { value: "Female", label: "Gender" },
+      nationality: { value: "Russian", label: "Nationality" },
+      stream: { value: "BIZ", label: "Program Stream" },
+      center: { value: "Shanghai", label: "IFP Center" },
+      guardianName: { value: "Gela Kochukova", label: "Guardian Name" },
+      guardianEmail: { value: "Gela134@gmail.com", label: "Guardian Email" },
+      guardianPhone: { value: "79857643380", label: "Guardian Phone" },
+      address: { value: "Shanghai, China", label: "Current Address" },
+    }
+  },
+  "2026-RU-3436": {
+    name: "Polina Vinogradova",
+    appId: "ECIU-2026-0042",
+    status: "submitted",
+    submitDate: "2026-07-13",
+    // 故意错误：phone 多了前缀, guardianEmail 大写
+    fields: {
+      name: { value: "Polina Vinogradova", label: "Full Name (as in passport)" },
+      email: { value: "pvin071107@mail.ru", label: "Email Address" },
+      phone: { value: "+8 912 780 05 10", label: "Phone Number" },
+      dob: { value: "2007-11-07", label: "Date of Birth" },
+      gender: { value: "Female", label: "Gender" },
+      nationality: { value: "Russian", label: "Nationality" },
+      stream: { value: "HUM", label: "Program Stream" },
+      center: { value: "Shanghai", label: "IFP Center" },
+      guardianName: { value: "Natalia Vinogradova", label: "Guardian Name" },
+      guardianEmail: { value: "NVIN1908@MAIL.RU", label: "Guardian Email" },
+      guardianPhone: { value: "89824372500", label: "Guardian Phone" },
+      address: { value: "Shanghai, China", label: "Current Address" },
+    }
+  },
+  "2026-RU-3604": {
+    name: "Oleg Petrov",
+    appId: "ECIU-2026-0043",
+    status: "submitted",
+    submitDate: "2026-07-12",
+    // 故意错误：name 拼写错误, dob 格式不同
+    fields: {
+      name: { value: "Oleg  Petrov", label: "Full Name (as in passport)" },
+      email: { value: "caxapocek@gmail.com", label: "Email Address" },
+      phone: { value: "79005674322", label: "Phone Number" },
+      dob: { value: "2008/03/11", label: "Date of Birth" },
+      gender: { value: "Male", label: "Gender" },
+      nationality: { value: "Russian", label: "Nationality" },
+      stream: { value: "BIZ", label: "Program Stream" },
+      center: { value: "Shanghai", label: "IFP Center" },
+      guardianName: { value: "Filanovich Petrov", label: "Guardian Name" },
+      guardianEmail: { value: "Filanovich@inbox.ru", label: "Guardian Email" },
+      guardianPhone: { value: "79114889881", label: "Guardian Phone" },
+      address: { value: "Shanghai, China", label: "Current Address" },
+    }
+  },
+  "2026-RU-3483": {
+    name: "Vankin Nikita",
+    appId: "ECIU-2026-0044",
+    status: "pending",
+    submitDate: "2026-07-15",
+    // 故意错误：email 域名打错
+    fields: {
+      name: { value: "Vankin Nikita", label: "Full Name (as in passport)" },
+      email: { value: "nik.vnkn@yandex.con", label: "Email Address" },
+      phone: { value: "79170645758", label: "Phone Number" },
+      dob: { value: "2008-07-09", label: "Date of Birth" },
+      gender: { value: "Male", label: "Gender" },
+      nationality: { value: "Russian", label: "Nationality" },
+      stream: { value: "BIZ", label: "Program Stream" },
+      center: { value: "Shanghai", label: "IFP Center" },
+      guardianName: { value: "Svetlana Vankina", label: "Guardian Name" },
+      guardianEmail: { value: "svetlanavankina1@gmail.com", label: "Guardian Email" },
+      guardianPhone: { value: "79185923748", label: "Guardian Phone" },
+      address: { value: "Shanghai, China", label: "Current Address" },
+    }
+  },
+};
+
+const searchIndex = Object.entries(applications).map(([id, app]) => ({
+  id, name: app.name, appId: app.appId, status: app.status
+}));
+
+function showResults(query) {
+  const box = document.getElementById("searchResults");
+  if (!query || query.trim().length < 1) {
+    box.classList.remove("show");
+    return;
+  }
+  const q = query.toLowerCase();
+  const matches = searchIndex.filter(s =>
+    s.id.toLowerCase().includes(q) || s.name.toLowerCase().includes(q) || s.appId.toLowerCase().includes(q)
+  );
+  if (matches.length === 0) {
+    box.innerHTML = '<div class="search-result-item" style="color:#9ca3af;">未找到匹配的申请记录</div>';
+  } else {
+    box.innerHTML = matches.map(s => `
+      <div class="search-result-item" onclick="loadApplication('${s.id}')">
+        <div class="name">${s.name}</div>
+        <div class="sub">${s.id} · ${s.appId} · ${s.status === 'submitted' ? '已提交' : '待审核'}</div>
+      </div>
+    `).join("");
+  }
+  box.classList.add("show");
+}
+
+function doSearch() {
+  const q = document.getElementById("searchInput").value;
+  if (!q.trim()) return;
+  const match = searchIndex.find(s =>
+    s.id.toLowerCase() === q.toLowerCase().trim() || s.name.toLowerCase() === q.toLowerCase().trim()
+  );
+  if (match) {
+    loadApplication(match.id);
+  } else {
+    showResults(q);
+  }
+}
+
+function loadApplication(studentId) {
+  document.getElementById("searchInput").value = studentId;
+  document.getElementById("searchResults").classList.remove("show");
+
+  const difficulty = document.getElementById("difficulty").value;
+  if (difficulty === "hard") {
+    // 困难模式：弹窗形式展示（模拟真实系统的 modal 详情页，含加载延迟）
+    openStudentModal(studentId);
+    return;
+  }
+
+  // 简单模式：页面内直接渲染
+  renderApplicationInto(document.getElementById("appDetail"), studentId);
+}
+
+// ===== 困难模式：弹窗 =====
+function openStudentModal(studentId) {
+  const overlay = document.getElementById("studentModal");
+  const body = document.getElementById("modalBody");
+  overlay.classList.add("show");
+  // 模拟网络加载延迟（考验自动化工具的等待/容错能力）
+  body.innerHTML = `
+    <div class="modal-loading">
+      <div class="spinner"></div>
+      <div>正在加载学生申请信息…</div>
+    </div>`;
+  const delay = 600 + Math.floor(Math.random() * 900); // 600-1500ms 随机延迟
+  setTimeout(() => {
+    // 弹窗可能被用户提前关闭
+    if (!overlay.classList.contains("show")) return;
+    renderApplicationInto(body, studentId);
+  }, delay);
+}
+
+function closeStudentModal() {
+  document.getElementById("studentModal").classList.remove("show");
+}
+
+// 点击遮罩空白处关闭弹窗
+document.getElementById("studentModal").addEventListener("click", (e) => {
+  if (e.target.id === "studentModal") closeStudentModal();
+});
+
+// ===== 渲染学生申请详情到指定容器（页内 / 弹窗共用） =====
+function renderApplicationInto(container, studentId) {
+  const app = applications[studentId];
+  if (!app) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="icon">📭</div>
+        <div class="title">未找到申请记录</div>
+        <div class="desc">请检查学生 ID 是否正确</div>
+      </div>`;
+    return;
+  }
+
+  const f = app.fields;
+  const statusClass = app.status === "submitted" ? "status-submitted" : "status-pending";
+  const statusText = app.status === "submitted" ? "已提交" : "待审核";
+
+  container.innerHTML = `
+    <div class="container">
+      <div class="app-header">
+        <div>
+          <h1>Graduate Application — ${app.name}</h1>
+          <div class="meta">
+            Application ID: <strong>${app.appId}</strong><br>
+            Student ID: <strong>${studentId}</strong><br>
+            Submitted: ${app.submitDate}
+          </div>
+        </div>
+        <div class="status-badge ${statusClass}">${statusText}</div>
+      </div>
+
+      <div class="section">
+        <h2><span class="num">1</span> Personal Information</h2>
+        <div class="field-grid">
+          <div class="field">
+            <label>${f.name.label}</label>
+            <input id="name" value="${f.name.value}" readonly>
+          </div>
+          <div class="field">
+            <label>${f.gender.label}</label>
+            <input id="gender" value="${f.gender.value}" readonly>
+          </div>
+          <div class="field">
+            <label>${f.dob.label}</label>
+            <input id="birth_date" value="${f.dob.value}" readonly>
+          </div>
+          <div class="field">
+            <label>${f.nationality.label}</label>
+            <input id="nationality" value="${f.nationality.value}" readonly>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2><span class="num">2</span> Contact Information</h2>
+        <div class="field-grid">
+          <div class="field">
+            <label>${f.email.label}</label>
+            <input id="email" value="${f.email.value}" readonly>
+          </div>
+          <div class="field">
+            <label>${f.phone.label}</label>
+            <input id="phone" value="${f.phone.value}" readonly>
+          </div>
+          <div class="field full">
+            <label>${f.address.label}</label>
+            <input id="address" value="${f.address.value}" readonly>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2><span class="num">3</span> Guardian Information</h2>
+        <div class="field-grid">
+          <div class="field">
+            <label>${f.guardianName.label}</label>
+            <input id="guardian_name" value="${f.guardianName.value}" readonly>
+          </div>
+          <div class="field">
+            <label>${f.guardianEmail.label}</label>
+            <input id="guardian_email" value="${f.guardianEmail.value}" readonly>
+          </div>
+          <div class="field">
+            <label>${f.guardianPhone.label}</label>
+            <input id="guardian_phone" value="${f.guardianPhone.value}" readonly>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2><span class="num">4</span> Program Details</h2>
+        <div class="field-grid">
+          <div class="field">
+            <label>${f.stream.label}</label>
+            <input id="stream" value="${f.stream.value}" readonly>
+          </div>
+          <div class="field">
+            <label>${f.center.label}</label>
+            <input id="center" value="${f.center.value}" readonly>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="actions">
+          <button class="btn btn-ghost" onclick="alert('演示模式：打印功能未开放')">打印</button>
+          <button class="btn btn-ghost" onclick="alert('演示模式：导出功能未开放')">导出 PDF</button>
+          <button class="btn btn-primary" onclick="alert('演示模式：审核操作未开放')">审核通过</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// 点击页面其他位置关闭搜索结果
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".search-section") && !e.target.closest(".search-results")) {
+    document.getElementById("searchResults").classList.remove("show");
+  }
+});
+
+// 默认加载第一个学生
+loadApplication("2026-RU-3418");
+</script>
+</body>
+</html>

@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>East China International University — New Application</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; background: #f0f2f5; color: #1f2937; }
+
+    /* ===== 顶栏 ===== */
+    .topbar { background: #059669; color: #fff; padding: 0 24px; height: 56px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+    .topbar .brand { font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+    .topbar .brand .logo-icon { width: 32px; height: 32px; background: rgba(255,255,255,.2); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; }
+    .topbar .nav { display: flex; gap: 4px; }
+    .topbar .nav a { color: rgba(255,255,255,.75); text-decoration: none; padding: 8px 14px; border-radius: 6px; font-size: 14px; }
+    .topbar .nav a:hover, .topbar .nav a.active { background: rgba(255,255,255,.15); color: #fff; }
+    .topbar .user { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .topbar .user .avatar { width: 30px; height: 30px; border-radius: 50%; background: rgba(255,255,255,.25); display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; }
+
+    /* ===== 进度条 ===== */
+    .progress-bar { background: #fff; border-bottom: 1px solid #e5e7eb; padding: 12px 24px; }
+    .progress-bar .inner { max-width: 900px; margin: 0 auto; display: flex; align-items: center; gap: 8px; }
+    .step { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #9ca3af; }
+    .step .dot { width: 28px; height: 28px; border-radius: 50%; border: 2px solid #d1d5db; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; background: #fff; }
+    .step.active .dot { border-color: #059669; background: #059669; color: #fff; }
+    .step.active { color: #059669; font-weight: 600; }
+    .step.done .dot { border-color: #059669; background: #059669; color: #fff; }
+    .step.done { color: #059669; }
+    .step-line { flex: 1; height: 2px; background: #e5e7eb; min-width: 20px; }
+    .step-line.done { background: #059669; }
+
+    /* ===== 主体 ===== */
+    .container { max-width: 900px; margin: 0 auto; padding: 24px; }
+
+    .section { background: #fff; border-radius: 12px; padding: 28px 32px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+    .section h2 { font-size: 16px; font-weight: 600; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 2px solid #ecfdf5; display: flex; align-items: center; gap: 8px; }
+    .section h2 .num { width: 24px; height: 24px; background: #059669; color: #fff; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 12px; }
+    .section h2 .req { color: #ef4444; font-size: 13px; margin-left: 4px; }
+
+    .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .field { display: flex; flex-direction: column; }
+    .field.full { grid-column: 1 / -1; }
+    .field label { font-size: 13px; color: #374151; margin-bottom: 6px; font-weight: 500; display: flex; align-items: center; gap: 4px; }
+    .field label .req { color: #ef4444; }
+    .field input, .field select, .field textarea {
+      padding: 10px 14px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; background: #fff; color: #1f2937; outline: none; transition: .2s;
+    }
+    .field input:focus, .field select:focus, .field textarea:focus {
+      border-color: #059669; box-shadow: 0 0 0 3px rgba(5,150,105,.1);
+    }
+    .field input::placeholder { color: #d1d5db; }
+    .field .hint { font-size: 11px; color: #9ca3af; margin-top: 4px; }
+
+    .actions { display: flex; gap: 12px; justify-content: flex-end; }
+    .btn { padding: 11px 24px; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; font-weight: 500; transition: .2s; }
+    .btn-primary { background: #059669; color: #fff; }
+    .btn-primary:hover { background: #047857; }
+    .btn-ghost { background: #f3f4f6; color: #374151; }
+    .btn-ghost:hover { background: #e5e7eb; }
+
+    .info-banner { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 10px; padding: 14px 20px; margin-bottom: 16px; display: flex; align-items: flex-start; gap: 10px; font-size: 13px; color: #065f46; }
+    .info-banner .icon { font-size: 18px; flex-shrink: 0; }
+  </style>
+</head>
+<body>
+
+<!-- ===== 顶栏 ===== -->
+<div class="topbar">
+  <div class="brand">
+    <div class="logo-icon">🎓</div>
+    East China International University
+  </div>
+  <div class="nav">
+    <a href="#">Dashboard</a>
+    <a href="#" class="active">New Application</a>
+    <a href="#">My Applications</a>
+    <a href="#">Help</a>
+  </div>
+  <div class="user">
+    <div class="avatar">A</div>
+    <span>applicant@eciu.edu</span>
+  </div>
+</div>
+
+<!-- ===== 进度条 ===== -->
+<div class="progress-bar">
+  <div class="inner">
+    <div class="step active"><div class="dot">1</div> Personal Info</div>
+    <div class="step-line"></div>
+    <div class="step"><div class="dot">2</div> Contact</div>
+    <div class="step-line"></div>
+    <div class="step"><div class="dot">3</div> Guardian</div>
+    <div class="step-line"></div>
+    <div class="step"><div class="dot">4</div> Program</div>
+    <div class="step-line"></div>
+    <div class="step"><div class="dot">5</div> Review</div>
+  </div>
+</div>
+
+<!-- ===== 表单 ===== -->
+<div class="container">
+
+  <div class="info-banner">
+    <span class="icon">ℹ️</span>
+    <div>请填写以下申请表单。标有 <strong>*</strong> 的字段为必填项。填写完成后点击「Submit Application」提交申请。</div>
+  </div>
+
+  <!-- 1. Personal Information -->
+  <div class="section">
+    <h2><span class="num">1</span> Personal Information</h2>
+    <div class="field-grid">
+      <div class="field">
+        <label>Full Name (as in passport) <span class="req">*</span></label>
+        <input id="name" type="text" placeholder="e.g. Sofia Kochukova">
+      </div>
+      <div class="field">
+        <label>Gender <span class="req">*</span></label>
+        <select id="gender">
+          <option value="">-- Select --</option>
+          <option value="Male">Male</option>
+          <option value="Female">Female</option>
+          <option value="Other">Other</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Date of Birth <span class="req">*</span></label>
+        <input id="birth_date" type="date">
+      </div>
+      <div class="field">
+        <label>Nationality <span class="req">*</span></label>
+        <input id="nationality" type="text" placeholder="e.g. Russian">
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. Contact Information -->
+  <div class="section">
+    <h2><span class="num">2</span> Contact Information</h2>
+    <div class="field-grid">
+      <div class="field">
+        <label>Email Address <span class="req">*</span></label>
+        <input id="email" type="email" placeholder="e.g. student@gmail.com">
+      </div>
+      <div class="field">
+        <label>Phone Number <span class="req">*</span></label>
+        <input id="phone" type="tel" placeholder="e.g. +7 926 768 21 74">
+      </div>
+      <div class="field full">
+        <label>Current Address</label>
+        <input id="address" type="text" placeholder="e.g. Shanghai, China">
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. Guardian Information -->
+  <div class="section">
+    <h2><span class="num">3</span> Guardian Information</h2>
+    <div class="field-grid">
+      <div class="field">
+        <label>Guardian Name</label>
+        <input id="guardian_name" type="text" placeholder="e.g. Gela Kochukova">
+      </div>
+      <div class="field">
+        <label>Guardian Email</label>
+        <input id="guardian_email" type="email" placeholder="e.g. guardian@gmail.com">
+      </div>
+      <div class="field">
+        <label>Guardian Phone</label>
+        <input id="guardian_phone" type="tel" placeholder="e.g. 79857643380">
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Program Details -->
+  <div class="section">
+    <h2><span class="num">4</span> Program Details</h2>
+    <div class="field-grid">
+      <div class="field">
+        <label>Program Stream <span class="req">*</span></label>
+        <select id="stream">
+          <option value="">-- Select --</option>
+          <option value="BIZ">BIZ (Business)</option>
+          <option value="HUM">HUM (Humanities)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>IFP Center <span class="req">*</span></label>
+        <select id="center">
+          <option value="">-- Select --</option>
+          <option value="Shanghai">Shanghai</option>
+          <option value="Beijing">Beijing</option>
+        </select>
+      </div>
+      <div class="field full">
+        <label>Student ID (from data source)</label>
+        <input id="student_id" type="text" placeholder="e.g. 2026-RU-3418">
+        <div class="hint">如有数据源系统学生 ID，请填写以便关联</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 提交 -->
+  <div class="section">
+    <div class="actions">
+      <button class="btn btn-ghost" onclick="clearForm()">Clear All</button>
+      <button class="btn btn-ghost" onclick="alert('演示模式：保存草稿功能未开放')">Save Draft</button>
+      <button class="btn btn-primary" onclick="submitForm()">Submit Application</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function submitForm() {
+  const required = ["name", "gender", "birth_date", "nationality", "email", "phone", "stream", "center"];
+  const missing = required.filter(id => !document.getElementById(id).value.trim());
+  if (missing.length > 0) {
+    const labels = missing.map(id => document.querySelector(`label[for="${id}"]`)?.textContent?.trim() || id);
+    alert("请填写以下必填字段：\n" + labels.join("\n"));
+    return;
+  }
+  alert("演示模式：申请提交成功！（这只是演示页面，不会真正提交数据）");
+}
+
+function clearForm() {
+  if (!confirm("确定要清空所有已填内容吗？")) return;
+  document.querySelectorAll("input[type='text'], input[type='email'], input[type='tel'], input[type='date'], textarea").forEach(el => el.value = "");
+  document.querySelectorAll("select").forEach(el => el.selectedIndex = 0);
+}
+</script>
+</body>
+</html>
