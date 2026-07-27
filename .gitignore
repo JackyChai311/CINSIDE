@@ -1,27 +1,29 @@
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-*.egg-info/
-
-# 上传文件
-_uploads/
-
-# 前端
+# Dependencies
 node_modules/
-dist/
-.vite/
-dist-electron/
+.venv/
+__pycache__/
+*.pyc
 
-# 后端构建
+# Build outputs
+dist/
+dist-electron/
 backend/dist/
 backend/build/
+frontend/dist/
 
-# IDE / 系统
-.DS_Store
-.idea/
-*.log
-
-# 环境变量
+# Environment
 .env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
+cinside-debug.log

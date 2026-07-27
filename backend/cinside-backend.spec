@@ -38,9 +38,12 @@ hiddenimports += [
     'pdfminer',
 ]
 
+# 收集 app 包的所有子模块（config, routers, services, agents 等）
+hiddenimports += collect_submodules('app')
+
 a = Analysis(
-    ['app/main.py'],
-    pathex=[],
+    ['run.py'],
+    pathex=[os.path.abspath('.')],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
