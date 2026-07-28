@@ -4,6 +4,8 @@
 - PDF/DOCX/PPTX/XLSX/HTML 等 → 微软开源 MarkItDown 转 markdown 文本
 - PNG/JPG/WEBP/BMP 等图片     → 配置的 Vision LLM（与护照 OCR 同一套 API）识别文字
 - 提取出全文后，再用一次 Vision LLM 把目标字段结构化成 JSON（供左右对比 / 填入网页）
+
+图片预处理：自动旋转到正面（EXIF 方向）+ 裁剪白边，提升 OCR 识别率。
 """
 from __future__ import annotations
 
@@ -24,6 +26,52 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 def is_image_file(filename: str) -> bool:
     ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     return ext in IMAGE_EXTS
+
+
+# ============ 图片预处理：自动旋转 + 裁剪白边 ============
+def preprocess_image(content: bytes) -> tuple[bytes, str | None]:
+    """对图片做预处理：EXIF 自动旋转到正面 + 裁剪白边。
+
+    返回: (处理后的图片 bytes, base64 预览或 None)
+    如果 PIL 不可用或处理失败，返回原始内容。
+    """
+    try:
+        from PIL import Image, ImageOps
+
+        img = Image.open(io.BytesIO(content))
+
+        # 1. EXIF 自动旋转到正面（手机拍摄的照片方向纠正）
+        img = ImageOps.exif_transpose(img)
+
+        # 2. 转 RGB（去除 alpha 通道，方便后续处理）
+        if img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGB")
+
+        # 3. 裁剪白边：用 getbbox 检测非白色内容区域
+        #    先转灰度，再反转，bbox 即为有内容区域
+        gray = img.convert("L")
+        # 阈值 245：接近白色视为背景
+        bbox = gray.point(lambda x: 0 if x > 245 else 255).getbbox()
+        if bbox:
+            # bbox = (left, upper, right, lower)
+            # 只在边距 > 10px 时裁剪，避免误裁
+            margin = 10
+            left, upper, right, lower = bbox
+            w, h = img.size
+            if (left > margin or upper > margin or
+                    right < w - margin or lower < h - margin):
+                img = img.crop(bbox)
+
+        # 4. 输出处理后的图片 bytes + base64 预览
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=92)
+        processed = buf.getvalue()
+        b64_preview = base64.b64encode(processed).decode()
+        return processed, b64_preview
+    except Exception:
+        # PIL 不可用或处理失败，返回原始内容
+        b64_preview = base64.b64encode(content).decode()
+        return content, b64_preview
 
 
 # ============ MarkItDown 提取（PDF/Office 文档） ============
@@ -148,10 +196,15 @@ async def extract_fields_from_text(text: str, target_fields: list[str]) -> dict[
 async def extract_document(content: bytes, filename: str, target_fields: list[str] | None = None) -> dict:
     """提取文档文字 + 可选的字段结构化。
 
-    返回: { filename, method, text, fields }
+    返回: { filename, method, text, fields, processed_image }
     method: "markitdown" | "vision_ocr"
+    processed_image: base64 编码的预处理后图片预览（仅图片文件有值）
     """
+    processed_image: str | None = None
+
     if is_image_file(filename):
+        # 图片：先预处理（自动旋转到正面 + 裁剪白边），再 OCR
+        content, processed_image = preprocess_image(content)
         text = await ocr_image_bytes(content)
         method = "vision_ocr"
     else:
@@ -170,4 +223,5 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
         "method": method,
         "text": text,
         "fields": fields,
+        "processed_image": processed_image,
     }
