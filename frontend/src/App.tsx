@@ -641,24 +641,38 @@ export default function App() {
   const [rightRecords, setRightRecords] = useState<ApplicantRecord[]>([]);
   const [rightExcelUploading, setRightExcelUploading] = useState(false);
   const rightExcelInputRef = useRef<HTMLInputElement>(null);
-  // 常用网页收藏（左右侧共享，持久化到 localStorage）
-  const [favoriteSites, setFavoriteSites] = useState<{ name: string; url: string }[]>(() => {
+  // 常用网页收藏（左右侧分开存储，各自持久化到 localStorage）
+  // 左侧通常为数据源/Excel 系统，右侧通常为审查目标网页，收藏内容不同
+  const [leftFavoriteSites, setLeftFavoriteSites] = useState<{ name: string; url: string }[]>(() => {
     try {
-      const raw = localStorage.getItem("cinside-favorite-sites");
+      const raw = localStorage.getItem("cinside-favorite-sites-left");
+      if (raw) return JSON.parse(raw);
+      // 旧版共享数据迁移：首次读取旧 key 作为左侧初始值
+      const legacy = localStorage.getItem("cinside-favorite-sites");
+      return legacy ? JSON.parse(legacy) : [];
+    } catch { return []; }
+  });
+  const [rightFavoriteSites, setRightFavoriteSites] = useState<{ name: string; url: string }[]>(() => {
+    try {
+      const raw = localStorage.getItem("cinside-favorite-sites-right");
       return raw ? JSON.parse(raw) : [];
     } catch { return []; }
   });
-  const handleAddFavoriteSite = (name: string, url: string) => {
-    setFavoriteSites(prev => {
+  const handleAddFavoriteSite = (side: "left" | "right") => (name: string, url: string) => {
+    const setFn = side === "left" ? setLeftFavoriteSites : setRightFavoriteSites;
+    const storageKey = side === "left" ? "cinside-favorite-sites-left" : "cinside-favorite-sites-right";
+    setFn(prev => {
       const next = [...prev, { name, url }];
-      try { localStorage.setItem("cinside-favorite-sites", JSON.stringify(next)); } catch {}
+      try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch {}
       return next;
     });
   };
-  const handleRemoveFavoriteSite = (url: string) => {
-    setFavoriteSites(prev => {
+  const handleRemoveFavoriteSite = (side: "left" | "right") => (url: string) => {
+    const setFn = side === "left" ? setLeftFavoriteSites : setRightFavoriteSites;
+    const storageKey = side === "left" ? "cinside-favorite-sites-left" : "cinside-favorite-sites-right";
+    setFn(prev => {
       const next = prev.filter(s => s.url !== url);
-      try { localStorage.setItem("cinside-favorite-sites", JSON.stringify(next)); } catch {}
+      try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch {}
       return next;
     });
   };
@@ -692,6 +706,8 @@ selectedExcelColumnRef.current = selectedExcelColumn;
   const [pickTarget, setPickTarget] = useState<PickTarget>("right");
   const [rightPicked, setRightPicked] = useState<PickedElementInfo | null>(null);
   const [leftPicked, setLeftPicked] = useState<PickedElementInfo | null>(null);
+  const rightPickedRef = useRef<PickedElementInfo | null>(null);
+  rightPickedRef.current = rightPicked;
   const [mappings, setMappings] = useState<FieldMapping[]>([]);
 
   // 头像提取模式（左侧浏览器拾取头像元素）
@@ -882,6 +898,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   const [docExtract, setDocExtract] = useState<DocExtractState | null>(null);
   const [docExtracting, setDocExtracting] = useState(false);
   const [docSignal, setDocSignal] = useState(0); // 递增触发 ResultsPanel 切换到文档对比tab
+  const docExtractRef = useRef<DocExtractState | null>(null);
+  docExtractRef.current = docExtract;
 
   // ============ 功能2：本地文件提取 → 人工审核 → 填入右侧网页 ============
   const [docFillData, setDocFillData] = useState<{
@@ -2093,6 +2111,38 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     // 调后端提取并弹审查面板（异步，不阻塞继续拾取）
     api.extractDocumentUrl(url, targetFields)
       .then((result) => {
+        // 内联构建对比条目（避免前向引用 buildDocEntries）
+        const norm = (s: string) => (s || "").trim().toLowerCase().replace(/\s+/g, "");
+        const entries: DocCompareEntry[] = targetFields.map((f) => {
+          const leftVal = selected?.fields?.[f] || "";
+          const rightVal = result.fields[f] || "";
+          const l = norm(leftVal);
+          const r = norm(rightVal);
+          let match: FieldMatch = "mismatch";
+          if (!r) match = "missing";
+          else if (!l) match = "unknown";
+          else if (l === r) match = "match";
+          else if (l.includes(r) || r.includes(l)) match = "partial";
+          return {
+            field: f,
+            label: FIELD_LABELS[f] || f,
+            left_value: leftVal,
+            right_value: rightVal,
+            match,
+          };
+        });
+        // 同步更新文件处理面板（验证报告 > 文件处理 + 提取元素）
+        setDocExtract({
+          filename: result.filename,
+          method: result.method,
+          text: result.text,
+          fields: result.fields,
+          entries,
+          source: url,
+          file_url: url,
+          processed_image: result.processed_image,
+        });
+        setDocSignal((s) => s + 1);
         setDocExtractPanel({
           imageUrl: url,
           filename: result.filename,
@@ -2482,7 +2532,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     // 计算变量替换后的值
     let resolvedValue = mark.value || "";
     if (mark.variableField) {
-      const v = record.fields[mark.variableField] ?? record.passport_fields?.[mark.variableField] ?? "";
+      const v = record.fields[mark.variableField] ?? record.passport_fields?.[mark.variableField] ?? docExtractRef.current?.fields?.[mark.variableField] ?? "";
       resolvedValue = String(v ?? "").trim();
       rlog(`[executeMark] Excel取值: field=${mark.variableField}, raw=${JSON.stringify(record.fields[mark.variableField])}, resolved="${resolvedValue}"`);
     }
@@ -2693,7 +2743,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       let leftFound = true;
 
       if (mp.left_source === "passport") {
-        leftValue = record.passport_fields?.[mp.left_field] || "";
+        leftValue = record.passport_fields?.[mp.left_field] || docExtractRef.current?.fields?.[mp.left_field] || "";
       } else if (mp.left_source === "database") {
         // database 来源：left_field 是左侧网页的CSS选择器，直接从左网页读取值
         try {
@@ -3555,6 +3605,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
           fields: result.fields,
           entries,
           source: url,
+          file_url: url,
+          processed_image: result.processed_image,
         });
         rlog(`[doc] 提取完成: ${result.filename} (${result.method})，${result.text.length} 字符`);
         setSuccessToast(`文档提取完成：${result.filename}`);
@@ -4585,6 +4637,34 @@ type: info.type,
 }
   }, [addPickedMark, selected, pendingAction, inputTarget, performRealClick, performInputValue, detectVariableField, teachingPhase, setSuccessToast, recyclePickedMark, runDocExtractFromUrl]);
 
+  // 审查/录入模式下，点击「提取元素」面板中的字段卡片 → 注入为左侧来源（合成拾取值）
+  // 提取值天然是「来源/真值」，因此始终填充 leftPicked，不区分当前 pickTarget
+  // 合成 PickedElementInfo 的 tag="doc-extract"，selector=字段名，value=提取值
+  // ElementSelectBar 保存时识别 tag="doc-extract" → left_source="passport"
+  // compareFieldsForRecord 比对时从 record.passport_fields 或 docExtract.fields 读取
+  const onPickExtractedField = useCallback((_side: "left" | "right", field: string, value: string) => {
+    const label = FIELD_LABELS[field] || field;
+    const info: PickedElementInfo = {
+      selector: field,
+      label: `${label} · ${value}`,
+      value,
+      tag: "doc-extract",
+      type: "text",
+      text: value,
+      rect: { x: 0, y: 0, width: 0, height: 0 },
+    };
+    rlog("[onPickExtractedField]", { field, value });
+    setLeftPicked(info);
+    // 审查模式：若右侧已选则两侧完成（等待保存）；否则切到右侧选核对元素
+    // 录入模式：左侧来源已选，切到右侧选要填入的输入框
+    setPickTarget((prev) => {
+      if (prev === "right" && rightPickedRef.current) return null; // 审查模式右侧已选 → 完成
+      return "right"; // 其他情况 → 切到右侧
+    });
+    // 停止左侧网页拾取（合成值不需要网页点击）
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
+  }, []);
+
   const saveMapping = (m: FieldMapping) => {
     setMappings((prev) => [
       ...prev.filter((x) => x.right_selector !== m.right_selector),
@@ -4595,13 +4675,14 @@ type: info.type,
       const isEntry = addingStepMode === "entry";
       const isExcelSource = m.left_source === "excel";
       const isManualSource = m.left_source === "manual";
+      const isPassportSource = m.left_source === "passport";
       // 来源是左网页时，m.left_field 是左网页元素的 selector，需要运行时读取
-      const leftWebSelector = (!isExcelSource && !isManualSource) ? m.left_field : undefined;
+      const leftWebSelector = (!isExcelSource && !isManualSource && !isPassportSource) ? m.left_field : undefined;
       // label中的来源描述
-      const sourceLabel = isExcelSource ? "Excel" : isManualSource ? "固定值" : "左网页";
+      const sourceLabel = isExcelSource ? "Excel" : isManualSource ? "固定值" : isPassportSource ? "护照提取" : "左网页";
       addPickedMark({
         side: "right",
-        source: isExcelSource ? "excel" : "web",
+        source: isExcelSource ? "excel" : isPassportSource ? "passport" : "web",
         selector: m.right_selector,
         label: `${addingStepMode === "review" ? "审查" : "录入"} · ${m.right_label || m.right_selector} ← ${sourceLabel}「${isManualSource ? (selected?.fields?.[m.left_field] || m.left_field) : m.left_field}」`,
         value: isManualSource ? m.left_field : "",
@@ -4613,8 +4694,8 @@ type: info.type,
         type: "",
         inputTarget: isEntry ? m.right_selector : undefined,
         inputTargetLabel: isEntry ? (m.right_label || m.right_selector) : undefined,
-        // Excel来源：从record.fields按字段名取值；左网页/固定值：不设variableField，运行时处理
-        variableField: isEntry && isExcelSource ? m.left_field : undefined,
+        // Excel来源：从record.fields按字段名取值；护照来源：从docExtract.fields取值；左网页/固定值：不设variableField
+        variableField: isEntry && (isExcelSource || isPassportSource) ? m.left_field : undefined,
         excelField: isExcelSource ? m.left_field : undefined,
         sourceSelector: isEntry ? leftWebSelector : undefined,
       });
@@ -5746,9 +5827,9 @@ type: info.type,
                   }}
                   excelTabTitle="数据源"
                   newTabTitle="CINSIDE SEARCH"
-                  favoriteSites={favoriteSites}
-                  onAddFavoriteSite={handleAddFavoriteSite}
-                  onRemoveFavoriteSite={handleRemoveFavoriteSite}
+                  favoriteSites={leftFavoriteSites}
+                  onAddFavoriteSite={handleAddFavoriteSite("left")}
+                  onRemoveFavoriteSite={handleRemoveFavoriteSite("left")}
                   hasExcelData={records.length > 0}
                   onRequestAddExcel={() => browserExcelInputRef.current?.click()}
                   onCloseExcel={handleCloseLeftExcel}
@@ -5866,9 +5947,9 @@ type: info.type,
                   onRequestAddExcel={() => rightExcelInputRef.current?.click()}
                   onCloseExcel={handleCloseRightExcel}
                   newTabTitle="CINSIDE SEARCH"
-                  favoriteSites={favoriteSites}
-                  onAddFavoriteSite={handleAddFavoriteSite}
-                  onRemoveFavoriteSite={handleRemoveFavoriteSite}
+                  favoriteSites={rightFavoriteSites}
+                  onAddFavoriteSite={handleAddFavoriteSite("right")}
+                  onRemoveFavoriteSite={handleRemoveFavoriteSite("right")}
                   picking={(selectMode && pickTarget === "right") || (pendingAction === "click" && (pickTarget === "right" || (teachingPhase !== "idle" && !!nextClickLabel) || addingClickMode)) || (pendingAction === "input" && pickTarget === "right") || !!bindInputSide || (teachingPhase !== "idle" && !!nextClickLabel && pickTarget === "right")}
                   onPickedElement={onRightPicked}
                   verifyStatus={verifyStatus}
@@ -6127,6 +6208,9 @@ type: info.type,
                   docExtract={docExtract}
                   docExtracting={docExtracting}
                   switchToDocSignal={docSignal}
+                  pickTarget={pickTarget}
+                  addingStepMode={addingStepMode}
+                  onPickExtractedField={onPickExtractedField}
                   // 任务队列
                   taskQueue={taskQueue}
                   queueRunning={queueRunning}
