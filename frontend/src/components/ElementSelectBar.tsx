@@ -60,8 +60,6 @@ interface Props {
   hasConfirmClick?: boolean;
   /** 教学阶段推进：data-source → review */
   onAdvanceTeaching?: () => void;
-  /** 完成教学并保存模板 */
-  onFinishTeaching?: () => void;
   /** 中止教学 */
   onAbortTeaching?: () => void;
   /** 教学模式中选中的 Excel LOOP 列 */
@@ -86,8 +84,6 @@ interface Props {
   onExitAddingStepMode?: () => void;
   /** 当前添加步骤模式 */
   addingStepMode?: "review" | "entry" | null;
-  /** 完成教学并立即开始 LOOP 批量执行 */
-  onFinishAndRunBatch?: () => void;
   /** 是否处于添加点击按钮模式 */
   addingClickMode?: boolean;
   /** 已添加的点击按钮数量（确认人物之后） */
@@ -116,6 +112,10 @@ interface Props {
   cardsGenerated?: boolean;
   /** LOOP 行范围框选（0-based 闭区间） */
   rowRange?: { start: number; end: number } | null;
+  /** 打开保存 SKILL 弹窗 */
+  onRequestSaveSkill?: () => void;
+  /** 打开保存 SKILL 弹窗并立即执行 */
+  onRequestSaveSkillAndRun?: () => void;
 }
 
 export default function ElementSelectBar({
@@ -139,7 +139,6 @@ entryCount = 0,
 hasBoundInputs = false,
 hasConfirmClick = false,
 onAdvanceTeaching,
-  onFinishTeaching,
   onAbortTeaching,
   selectedExcelColumn,
   bindInputSide,
@@ -152,7 +151,6 @@ onStartAddReviewSteps,
 onStartAddEntrySteps,
 onExitAddingStepMode,
 addingStepMode,
-onFinishAndRunBatch,
 addingClickMode = false,
 clickStepCount = 0,
 onStartAddClickStep,
@@ -167,6 +165,8 @@ onExitAddDocExtractMode,
 onDocFileExtract,
 cardsGenerated = false,
 rowRange = null,
+onRequestSaveSkill,
+onRequestSaveSkillAndRun,
 }: Props) {
   const [leftSource, setLeftSource] = useState<LeftSource>("database");
   const [excelField, setExcelField] = useState<string>("");
@@ -200,12 +200,12 @@ rowRange = null,
 
   if (!active) return null;
 
-  // 步骤判定（录入模式：先左侧来源 → 后右侧输入框，与审查模式顺序相反）
+  // 步骤判定（审查模式：先右侧元素 → 后左侧来源；录入模式：先左侧来源 → 后右侧输入框，顺序相反）
   const isEntryMode = addingStepMode === "entry";
   const leftDone = !!leftPicked || (leftSource === "excel" && !!excelField) || leftSource === "manual";
   const step = isEntryMode
     ? (leftDone ? (rightPicked ? 3 : 2) : 1)
-    : (rightPicked ? (leftPicked || leftSource ? 3 : 2) : 1);
+    : (rightPicked ? (leftDone ? 3 : 2) : 1);
 
   const canSave = Boolean(rightPicked && (leftPicked || (leftSource === "excel" && excelField) || leftSource === "manual"));
 
@@ -249,7 +249,7 @@ rowRange = null,
       highlight={pickTarget === "right"}
     >
       {isEntryMode && !leftDone ? (
-        <span className="text-[11px] text-slate-400">先完成上一步</span>
+        <span className="text-[10px] text-slate-400">先完成上一步</span>
       ) : rightPicked ? (
         <PickedChip
           label={rightPicked.label || rightPicked.selector}
@@ -257,7 +257,7 @@ rowRange = null,
           tone="right"
         />
       ) : (
-        <span className="text-[11px] text-slate-500">
+        <span className="text-[10px] text-slate-500">
           {pickTarget === "right"
             ? isEntryMode
               ? "现在到右侧网页点击要填入的输入框…"
@@ -278,7 +278,7 @@ rowRange = null,
       highlight={pickTarget === "left"}
     >
       {!isEntryMode && !rightPicked ? (
-        <span className="text-[11px] text-slate-400">先完成上一步</span>
+        <span className="text-[10px] text-slate-400">先完成上一步</span>
       ) : (
         <div className="flex flex-wrap items-center gap-1.5">
           <button
@@ -328,15 +328,42 @@ rowRange = null,
           <span className="text-sm font-semibold text-slate-800">
             {addingStepMode === "review" ? "添加审查步骤 · 选择映射" : addingStepMode === "entry" ? "添加录入步骤 · 选择映射" : "步骤设置 · 元素选择"}
           </span>
-          {teachingPhase !== "idle" && (
-            <span className="flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-medium text-indigo-700">
-              <Repeat2 className="h-2.5 w-2.5" />
-              LOOP 流程
-            </span>
-          )}
           <span className="rounded-full bg-brand-100 px-2 py-0.5 text-[10px] font-medium text-brand-700">
             已配 {mappingCount} 项
           </span>
+          {/* 完成按钮组：保存为 SKILL / 保存并执行 */}
+          {onRequestSaveSkill && teachingPhase !== "idle" && (
+            <button
+              onClick={onRequestSaveSkill}
+              disabled={
+                (teachingPhase === "data-source" ? dataSourceCount : teachingPhase === "entry" ? entryCount : reviewCount) === 0
+              }
+              className={[
+                "flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
+                (teachingPhase === "data-source" ? dataSourceCount : teachingPhase === "entry" ? entryCount : reviewCount) === 0
+                  ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                  : "bg-emerald-600 text-white hover:bg-emerald-700",
+              ].join(" ")}
+            >
+              <CheckCircle2 className="h-3 w-3" />
+              保存为 SKILL
+            </button>
+          )}
+          {onRequestSaveSkillAndRun && appMode !== "review" && teachingPhase !== "idle" && (
+            <button
+              onClick={onRequestSaveSkillAndRun}
+              disabled={(appMode === "entry" ? entryCount : dataSourceCount + reviewCount) === 0}
+              className={[
+                "flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
+                (appMode === "entry" ? entryCount : dataSourceCount + reviewCount) === 0
+                  ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                  : "bg-brand-600 text-white hover:bg-brand-700",
+              ].join(" ")}
+            >
+              <Play className="h-3 w-3" />
+              保存并执行
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {/* LOOP流程中步骤指示器移到子面板顶部 */}
@@ -394,20 +421,21 @@ rowRange = null,
       {/* 步骤内容：addingStepMode时显示为子面板（LOOP步骤4展开的映射配置） */}
       <div className={[
         "flex-1 overflow-y-auto pr-1",
-        addingStepMode ? "mt-2 space-y-2 rounded-xl border border-indigo-200 bg-white px-3 py-2 shadow-sm" : "space-y-2.5",
-        teachingPhase !== "idle" && !addingStepMode ? "mt-2 space-y-2" : "",
+        addingStepMode ? "mt-1.5 space-y-1.5 rounded-xl border-2 border-indigo-200 bg-gradient-to-br from-indigo-50/70 to-violet-50/40 px-2.5 py-2 shadow-sm" : "space-y-2.5",
+        teachingPhase !== "idle" && !addingStepMode ? "mt-1.5 space-y-1.5 rounded-xl border-2 border-indigo-200 bg-gradient-to-br from-indigo-50/70 to-violet-50/40 px-2.5 py-2 shadow-sm" : "",
         "order-2",
       ].join(" ")}>
-        {/* LOOP流程中，在子面板顶部显示步骤指示器 */}
+        {/* LOOP流程中，在子面板顶部显示步骤指示器（与 LOOP 向导同款紧凑风格） */}
         {teachingPhase !== "idle" && (
-          <div className="mb-1 flex items-center gap-1.5 border-b border-slate-100 pb-2">
-            <span className="text-[10px] font-medium text-slate-500">映射配置</span>
-            <div className="ml-auto flex items-center gap-1 text-[11px]">
+          <div className="mb-1 flex items-center gap-1.5 border-b border-indigo-100 pb-1.5">
+            <Repeat2 className="h-3 w-3 text-indigo-600" />
+            <span className="text-[10px] font-bold text-indigo-800">映射配置</span>
+            <div className="ml-auto flex items-center gap-1">
               {[1, 2, 3].map((n) => (
                 <span
                   key={n}
                   className={[
-                    "flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-semibold transition-all",
+                    "flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-bold transition-all",
                     n < step
                       ? "bg-emerald-500 text-white"
                       : n === step
@@ -434,15 +462,15 @@ rowRange = null,
           highlight={false}
         >
           {rightPicked && (leftPicked || leftSource) ? (
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-1">
               {/* 右侧已选 */}
-              <span className="rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-emerald-200">
+              <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-emerald-200">
                 右: {rightPicked.label || rightPicked.selector}
               </span>
-              <ArrowRight className="h-3 w-3 text-slate-400" />
+              <ArrowRight className="h-2.5 w-2.5 text-slate-400" />
               {/* 左侧来源 + 字段 */}
               {leftPicked ? (
-                <span className="rounded-md bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700 ring-1 ring-blue-200">
+                <span className="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 ring-1 ring-blue-200">
                   {leftPicked.tag === "excel-cell" ? "Excel" : "左网页"}: {leftPicked.label || leftPicked.selector}
                 </span>
               ) : (
@@ -450,7 +478,7 @@ rowRange = null,
                   <select
                     value={leftSource}
                     onChange={(e) => setLeftSource(e.target.value as LeftSource)}
-                    className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] outline-none"
+                    className="rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px] outline-none"
                   >
                     <option value="excel">Excel</option>
                     <option value="database">数据库</option>
@@ -461,7 +489,7 @@ rowRange = null,
                     <select
                       value={excelField}
                       onChange={(e) => setExcelField(e.target.value)}
-                      className="max-w-[160px] rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] outline-none"
+                      className="max-w-[140px] rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px] outline-none"
                     >
                       {excelFields.length === 0 && <option value="">无字段</option>}
                       {excelFields.map((f) => (
@@ -474,28 +502,28 @@ rowRange = null,
               <select
                 value={method}
                 onChange={(e) => setMethod(e.target.value as VerifyMethod)}
-                className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] outline-none"
+                className="rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px] outline-none"
                 title="验证方式"
               >
-                <option value="smart">智能匹配</option>
-                <option value="exact">精确匹配</option>
+                <option value="smart">智能</option>
+                <option value="exact">精确</option>
               </select>
               <button
                 onClick={handleSave}
                 disabled={!canSave}
-                className="flex items-center gap-1 rounded-lg bg-brand-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                className="flex items-center gap-0.5 rounded bg-brand-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-slate-300"
               >
-                <Check className="h-3 w-3" /> 保存映射
+                <Check className="h-2.5 w-2.5" /> 保存
               </button>
               <button
                 onClick={onResetRound}
-                className="rounded-lg px-2 py-1 text-[11px] text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                className="rounded px-1.5 py-0.5 text-[10px] text-slate-400 hover:bg-slate-100 hover:text-slate-600"
               >
                 重选
               </button>
             </div>
           ) : (
-            <span className="text-[11px] text-slate-400">
+            <span className="text-[10px] text-slate-400">
               {isEntryMode ? "先完成左侧来源选择" : "先完成右侧元素选择"}
             </span>
           )}
@@ -526,10 +554,13 @@ rowRange = null,
             <div className="space-y-1.5">
               {/* Step 1 */}
               <div className="flex items-center gap-2 text-[11px]">
-                <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-[9px] font-bold text-white">
-                  <Check className="h-2.5 w-2.5" />
+                <span className={[
+                  "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white",
+                  selectedExcelColumn ? "bg-emerald-500" : "bg-slate-300",
+                ].join(" ")}>
+                  {selectedExcelColumn ? <Check className="h-2.5 w-2.5" /> : 1}
                 </span>
-                <div className="flex flex-1 flex-wrap items-center gap-1.5">
+                <div className={`flex flex-1 flex-wrap items-center gap-1.5 rounded-md ${selectedExcelColumn ? "picking-breath" : ""}`}>
                   {selectedExcelColumn ? (
                     <>
                       <span className="text-emerald-700 font-medium">
@@ -548,7 +579,7 @@ rowRange = null,
                     </>
                   ) : (
                     <span className="text-brand-700 font-medium animate-glow-pulse">
-                      ① 在 Excel 视图点击一列表头选中 LOOP 列
+                      在 Excel 视图点击一列表头选中 LOOP 列
                     </span>
                   )}
                 </div>
@@ -609,32 +640,28 @@ rowRange = null,
                             : "cursor-not-allowed bg-slate-200 text-slate-400",
                         ].join(" ")}
                       >
-                        绑定输入框/点击
+                        搜索输入
                       </button>
-                      <span className="text-slate-500">可跳过：需要把 LOOP 列填入输入框或做前置点击时才配置；否则直接进行下一步</span>
                     </>
                   )}
                 </div>
               </div>
 
-              {/* Step 3 */}
+              {/* Step 3 — 点击任务（支持单侧网页点击，可添加多个） */}
               <div className="flex items-center gap-2 text-[11px]">
                 <span className={[
                   "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white",
-                  pendingAction === "click" && (nextClickLabel === "搜索" || nextClickLabel === "确认人物") ? "bg-brand-600 animate-glow-pulse" :
                   pendingAction === "click" && addingClickMode ? "bg-orange-500 animate-glow-pulse" :
-                  hasConfirmClick ? "bg-emerald-500" : "bg-slate-300",
+                  clickStepCount > 0 ? "bg-emerald-500" : "bg-slate-300",
                 ].join(" ")}>
-                  {hasConfirmClick && pendingAction !== "click" ? <Check className="h-2.5 w-2.5" /> : 3}
+                  {clickStepCount > 0 && !(pendingAction === "click" && addingClickMode) ? <Check className="h-2.5 w-2.5" /> : 3}
                 </span>
                 <div className="flex flex-1 flex-wrap items-center gap-1.5">
-                  {pendingAction === "click" && nextClickLabel === "搜索" ? (
-                    <span className="text-brand-700 font-medium">请点击搜索按钮… <span className="text-slate-400 font-normal">（左右网页皆可，点错可再点同一元素回收）</span></span>
-                  ) : pendingAction === "click" && nextClickLabel === "确认人物" ? (
-                    <span className="text-brand-700 font-medium">请点击搜索结果中的人物… <span className="text-slate-400 font-normal">（左右网页皆可，点错可再点同一元素回收）</span></span>
-                  ) : pendingAction === "click" && addingClickMode ? (
+                  {pendingAction === "click" && addingClickMode ? (
                     <>
-                      <span className="text-orange-700 font-medium animate-glow-pulse">正在添加点击按钮 — 点击网页上要点击的元素（已添加 {clickStepCount} 个）</span>
+                      <span className="text-orange-700 font-medium animate-glow-pulse">
+                        正在添加点击任务 — 点击任意侧网页上的元素（已添加 {clickStepCount} 个）
+                      </span>
                       {onExitAddClickMode && (
                         <button
                           onClick={onExitAddClickMode}
@@ -644,9 +671,9 @@ rowRange = null,
                         </button>
                       )}
                     </>
-                  ) : hasConfirmClick ? (
+                  ) : clickStepCount > 0 ? (
                     <>
-                      <span className="text-emerald-700 font-medium">✓ 已确认人物 <span className="text-slate-400 font-normal">（点击已选元素可回收重选）</span></span>
+                      <span className="text-emerald-700 font-medium">✓ 已添加 {clickStepCount} 个点击任务</span>
                       {onStartAddClickStep && !addingStepMode && (
                         <button
                           onClick={onStartAddClickStep}
@@ -659,14 +686,15 @@ rowRange = null,
                           ].join(" ")}
                         >
                           <Plus className="h-2.5 w-2.5" />
-                          点击按钮{clickStepCount > 0 ? ` (${clickStepCount})` : ""}
+                          继续添加
                         </button>
                       )}
                     </>
                   ) : (
                     <>
+                      <span className="text-slate-500">点击任意侧网页元素（可添加多个）</span>
                       <button
-                        onClick={onStartConfirmPerson}
+                        onClick={onStartAddClickStep}
                         disabled={!!bindInputSide}
                         className={[
                           "rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
@@ -675,9 +703,8 @@ rowRange = null,
                             : "bg-brand-600 text-white hover:bg-brand-700",
                         ].join(" ")}
                       >
-                        确认人物
+                        点击任务
                       </button>
-                      <span className="text-slate-500">点击后选择搜索按钮和确认人物按钮</span>
                     </>
                   )}
                 </div>
@@ -792,11 +819,6 @@ rowRange = null,
                           录入步骤
                         </button>
                       )}
-                      {(reviewCount + entryCount === 0) && (
-                        <span className="text-[10px] text-slate-400">
-                          按 S 绑定输入框 · 空格点击按钮
-                        </span>
-                      )}
                     </>
                   )}
                 </div>
@@ -855,63 +877,6 @@ rowRange = null,
               )}
             </div>
           )}
-
-          <div className="mt-2 flex items-center justify-end gap-2">
-            {onAbortTeaching && (
-              <button
-                onClick={onAbortTeaching}
-                className="rounded-md px-2 py-1 text-[10px] font-medium text-slate-500 hover:bg-slate-100 hover:text-rose-600"
-              >
-                取消
-              </button>
-            )}
-            {appMode !== "entry" && teachingPhase === "data-source" && onAdvanceTeaching && (
-              <button
-                onClick={onAdvanceTeaching}
-                disabled={dataSourceCount === 0}
-                className={[
-                  "rounded-md px-2 py-1 text-[10px] font-medium transition-all",
-                  dataSourceCount === 0
-                    ? "cursor-not-allowed text-slate-400"
-                    : "text-indigo-700 hover:bg-indigo-100",
-                ].join(" ")}
-              >
-                添加审查步骤 →
-              </button>
-            )}
-            {onFinishTeaching && (
-              <button
-                onClick={onFinishTeaching}
-                disabled={
-                  (teachingPhase === "data-source" ? dataSourceCount : teachingPhase === "entry" ? entryCount : reviewCount) === 0
-                }
-                className={[
-                  "flex items-center gap-1 rounded-md px-2.5 py-1 text-[10px] font-medium transition-all",
-                  (teachingPhase === "data-source" ? dataSourceCount : teachingPhase === "entry" ? entryCount : reviewCount) === 0
-                    ? "cursor-not-allowed bg-slate-200 text-slate-400"
-                    : "bg-emerald-600 text-white hover:bg-emerald-700",
-                ].join(" ")}
-              >
-                <CheckCircle2 className="h-3 w-3" />
-                完成配置 · 保存模板
-              </button>
-            )}
-            {onFinishAndRunBatch && appMode !== "review" && (
-              <button
-                onClick={onFinishAndRunBatch}
-                disabled={(appMode === "entry" ? entryCount : dataSourceCount + reviewCount) === 0}
-                className={[
-                  "flex items-center gap-1 rounded-md px-2.5 py-1 text-[10px] font-medium transition-all",
-                  (appMode === "entry" ? entryCount : dataSourceCount + reviewCount) === 0
-                    ? "cursor-not-allowed bg-slate-200 text-slate-400"
-                    : "bg-brand-600 text-white hover:bg-brand-700",
-                ].join(" ")}
-              >
-                <Play className="h-3 w-3" />
-                {appMode === "entry" ? "完成并开始录入" : "完成并开始 LOOP"}
-              </button>
-            )}
-          </div>
         </div>
       )}
     </div>
@@ -936,14 +901,14 @@ function StepRow({
   return (
     <div
       className={[
-        "flex items-start gap-2 rounded-xl px-2.5 py-2 transition-all",
+        "flex items-start gap-1.5 rounded-lg px-2 py-1.5 transition-all",
         active ? "bg-white/70" : "bg-white/30",
         highlight ? "ring-1 ring-brand-300" : "",
       ].join(" ")}
     >
       <span
         className={[
-          "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
+          "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full",
           done
             ? "bg-emerald-500 text-white"
             : active
@@ -951,10 +916,10 @@ function StepRow({
             : "bg-slate-200 text-slate-500",
         ].join(" ")}
       >
-        {done ? <Check className="h-3 w-3" /> : icon}
+        {done ? <Check className="h-2.5 w-2.5" /> : icon}
       </span>
       <div className="min-w-0 flex-1">
-        <div className="mb-0.5 text-[11px] font-medium text-slate-700">{label}</div>
+        <div className="mb-0.5 text-[10px] font-medium text-slate-700">{label}</div>
         <div className="flex flex-wrap items-center gap-1.5">{children}</div>
       </div>
     </div>

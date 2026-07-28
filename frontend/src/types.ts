@@ -226,8 +226,12 @@ export interface WorkflowTemplate {
   id: string;
   /** 模板名称 */
   name: string;
+  /** 图标（emoji 字符） */
+  icon?: string;
   /** 创建时间 */
   createdAt: number;
+  /** 更新时间 */
+  updatedAt?: number;
   /** 来源记录 ID（教 AI 时用的那张卡片） */
   sourceRecordId?: string;
   /** 应用模式：审查流 / 录入流 */

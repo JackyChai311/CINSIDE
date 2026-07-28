@@ -31,6 +31,7 @@ class _Store:
     """内存存储。"""
     records: dict[str, ApplicantRecord] = field(default_factory=dict)
     passports: dict[str, PassportData] = field(default_factory=dict)  # record_id -> PassportData
+    right_records: dict[str, ApplicantRecord] = field(default_factory=dict)  # 右侧参考Excel数据
     tasks: dict[str, VerificationResult] = field(default_factory=dict)
     reports: dict[str, VerificationReport] = field(default_factory=dict)  # task_id -> 新格式报告
     # 每个 task 的进度订阅者（WebSocket 连接）
@@ -63,6 +64,21 @@ def get_record(rid: str) -> Optional[ApplicantRecord]:
 
 def get_passport(rid: str) -> Optional[PassportData]:
     return store.passports.get(rid)
+
+
+# ========== 右侧参考Excel管理 ==========
+def upsert_right_records(records: list[ApplicantRecord]) -> None:
+    store.right_records.clear()
+    for r in records:
+        store.right_records[r.record_id] = r
+
+
+def list_right_records() -> list[ApplicantRecord]:
+    return list(store.right_records.values())
+
+
+def clear_right_records() -> None:
+    store.right_records.clear()
 
 
 # ========== 任务进度推送 ==========

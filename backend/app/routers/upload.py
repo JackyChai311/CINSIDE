@@ -12,14 +12,14 @@ from ..config import settings
 from ..models import ApplicantRecord, PassportData
 from ..services.excel_parser import parse_bytes
 from ..services.passport_ocr import extract_passport
-from ..services.task_manager import list_records, upsert_passport, upsert_records
+from ..services.task_manager import clear_right_records, list_records, list_right_records, upsert_passport, upsert_records, upsert_right_records
 
 router = APIRouter(prefix="/api", tags=["upload"])
 
 
 @router.post("/upload/excel")
 async def upload_excel(file: UploadFile = File(...)):
-    """上传 Excel/CSV，解析成 records。"""
+    """上传 Excel/CSV，解析成 records（左侧数据源）。"""
     content = await file.read()
     if not content:
         raise HTTPException(400, "empty file")
@@ -31,6 +31,26 @@ async def upload_excel(file: UploadFile = File(...)):
         raise HTTPException(400, f"解析失败: {e}")
 
     upsert_records(records)
+    return {
+        "count": len(records),
+        "records": [r.model_dump() for r in records],
+    }
+
+
+@router.post("/upload/excel-right")
+async def upload_excel_right(file: UploadFile = File(...)):
+    """上传右侧参考 Excel/CSV，解析成 right_records（不覆盖左侧数据源）。"""
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "empty file")
+    try:
+        records = await parse_bytes(content, file.filename or "upload.xlsx")
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    except Exception as e:
+        raise HTTPException(400, f"解析失败: {e}")
+
+    upsert_right_records(records)
     return {
         "count": len(records),
         "records": [r.model_dump() for r in records],
@@ -68,6 +88,19 @@ def get_records():
         d["passport_fields"] = p.fields if p else {}
         out.append(d)
     return {"records": out}
+
+
+@router.get("/records-right")
+def get_right_records():
+    """列出右侧参考Excel的所有记录。"""
+    return {"records": [r.model_dump() for r in list_right_records()]}
+
+
+@router.delete("/records-right")
+def clear_right_records_endpoint():
+    """清空右侧参考Excel数据。"""
+    clear_right_records()
+    return {"ok": True}
 
 
 @router.delete("/records")

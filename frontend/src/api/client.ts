@@ -58,6 +58,21 @@ export const api = {
     );
   },
 
+  uploadExcelRight: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return jsonFetch<{ count: number; records: ApplicantRecord[] }>(
+      `${BASE}/upload/excel-right`,
+      { method: "POST", body: fd }
+    );
+  },
+
+  listRightRecords: () =>
+    jsonFetch<{ records: ApplicantRecord[] }>(`${BASE}/records-right`),
+
+  clearRightRecords: () =>
+    jsonFetch<{ ok: boolean }>(`${BASE}/records-right`, { method: "DELETE" }),
+
   uploadPassport: (recordId: string, file: File) => {
     const fd = new FormData();
     fd.append("file", file);

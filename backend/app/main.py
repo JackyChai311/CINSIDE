@@ -83,6 +83,7 @@ for _candidate in [
     get_resource_path("mock-university"),
     Path(sys.executable).resolve().parent / "mock-university",
     Path(sys.executable).resolve().parent.parent / "mock-university",
+    Path(__file__).resolve().parent.parent.parent / "mock-university",
 ]:
     if _candidate.exists():
         _MOCK_DIR = _candidate
@@ -97,6 +98,7 @@ for _candidate in [
     get_resource_path("demo-pages"),
     Path(sys.executable).resolve().parent / "demo-pages",
     Path(sys.executable).resolve().parent.parent / "demo-pages",
+    Path(__file__).resolve().parent.parent.parent / "demo-pages",
 ]:
     if _candidate.exists():
         _DEMO_DIR = _candidate

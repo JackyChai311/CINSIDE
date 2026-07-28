@@ -187,6 +187,37 @@ def _read_xlsx_all_sheets(source: str | bytes) -> list[tuple[str, list[str], lis
     return sheets
 
 
+def _read_xls_all_sheets(source: str | bytes) -> list[tuple[str, list[str], list[list]]]:
+    """读取旧版 .xls 的所有 sheet，返回 [(sheet_name, header_keys, data_rows), ...]。"""
+    try:
+        import xlrd
+    except ImportError as e:
+        raise RuntimeError("缺少依赖 xlrd，请执行: pip install xlrd") from e
+
+    if isinstance(source, (bytes, bytearray)):
+        wb = xlrd.open_workbook(file_contents=bytes(source), on_demand=True)
+    else:
+        wb = xlrd.open_workbook(source, on_demand=True)
+
+    sheets: list[tuple[str, list[str], list[list]]] = []
+    for sheet_name in wb.sheet_names():
+        ws = wb.sheet_by_name(sheet_name)
+        if ws.nrows < 1:
+            continue
+        header = ws.row_values(0)
+        header_keys = [str(h).strip() if h is not None else "" for h in header]
+        data_rows: list[list] = []
+        for r in range(1, ws.nrows):
+            row = ws.row_values(r)
+            if all(c is None or str(c).strip() == "" for c in row):
+                continue
+            data_rows.append(list(row))
+        if data_rows:
+            sheets.append((sheet_name, header_keys, data_rows))
+    wb.release_resources()
+    return sheets
+
+
 def _read_csv_rows(source: str | bytes) -> tuple[list[str], list[dict[str, str]]]:
     """从路径或字节流读取 csv，返回 (header_keys, row_dicts)。"""
     if isinstance(source, (bytes, bytearray)):
@@ -301,8 +332,11 @@ def parse_excel_or_csv(path: str) -> list[ApplicantRecord]:
     if ext == ".csv":
         header_keys, row_dicts = _read_csv_rows(path)
         return _rowdicts_to_records(row_dicts)
-    # xlsx：读取所有 sheet，主 sheet + 附加 sheet 合并
-    sheets = _read_xlsx_all_sheets(path)
+    if ext == ".xls":
+        sheets = _read_xls_all_sheets(path)
+    else:
+        # xlsx：读取所有 sheet
+        sheets = _read_xlsx_all_sheets(path)
     if not sheets:
         return []
     main_name, main_header, main_rows = sheets[0]
@@ -338,8 +372,11 @@ async def parse_bytes(content: bytes, filename: str) -> list[ApplicantRecord]:
         ai_mapping = await ai_detect_column_mapping(header_keys, sample_rows)
         return _rowdicts_to_records(row_dicts, ai_mapping or None)
 
-    # xlsx：读取所有 sheet（包括隐藏的、被分组折叠的）
-    sheets = _read_xlsx_all_sheets(content)
+    # xls 或 xlsx：读取所有 sheet（包括隐藏的、被分组折叠的）
+    if ext == ".xls":
+        sheets = _read_xls_all_sheets(content)
+    else:
+        sheets = _read_xlsx_all_sheets(content)
     if not sheets:
         return []
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -10,12 +10,15 @@ import {
   Loader2,
   Play,
   RefreshCw,
+  Sparkles,
   Trash2,
   Upload,
 } from "lucide-react";
 import { api } from "../api/client";
 import type { ApplicantRecord, BatchResult, BatchStatus, Overall } from "../types";
 import { OVERALL_LABELS } from "../types";
+
+const SKILL_DRAG_MIME = "application/x-cinside-skill-id";
 
 interface Props {
   records: ApplicantRecord[];
@@ -40,6 +43,8 @@ interface Props {
   docExtracting?: boolean;
   /** 记录为空时的自定义提示（如：等待框选 LOOP 行范围生成卡片） */
   emptyHint?: string;
+  /** SKILL 拖放到卡片：(skillId, recordId) => void */
+  onDropSkill?: (skillId: string, recordId: string) => void;
 }
 
 type UploadKind = "excel" | "passport" | "document" | null;
@@ -59,6 +64,7 @@ export default function LeftPanel({
   onPickDocument,
   docExtracting = false,
   emptyHint,
+  onDropSkill,
 }: Props) {
   const [uploading, setUploading] = useState<UploadKind>(null);
   const [excelDrag, setExcelDrag] = useState(false);
@@ -278,6 +284,7 @@ export default function LeftPanel({
                   onRun={onRunRecord ? () => onRunRecord(r.record_id) : undefined}
                   runDisabled={runDisabled}
                   running={runningRecordId === r.record_id}
+                  onDropSkill={onDropSkill ? (skillId) => onDropSkill(skillId, r.record_id) : undefined}
                 />
               ))}
             </ul>
@@ -303,9 +310,9 @@ function SourceCard(props: {
   uploading: boolean;
   disabled?: boolean;
   onPick: () => void;
-  onDragOver: (e: React.DragEvent) => void;
+  onDragOver: (e: DragEvent) => void;
   onDragLeave: () => void;
-  onDrop: (e: React.DragEvent) => void;
+  onDrop: (e: DragEvent) => void;
 }) {
   return (
     <button
@@ -349,6 +356,7 @@ function RecordItem({
   onRun,
   runDisabled = true,
   running = false,
+  onDropSkill,
 }: {
   record: ApplicantRecord;
   selected: boolean;
@@ -359,11 +367,13 @@ function RecordItem({
   onRun?: () => void;
   runDisabled?: boolean;
   running?: boolean;
+  /** 接收 SKILL 拖放：(skillId) => void */
+  onDropSkill?: (skillId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [skillDragOver, setSkillDragOver] = useState(false);
   const itemRef = useRef<HTMLLIElement>(null);
 
-  // LOOP 批量执行时当前卡片会被程序选中，自动滚动进视野让用户看清执行位置
   useEffect(() => {
     if (selected) {
       itemRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -381,18 +391,15 @@ function RecordItem({
   const hasPassport = record.has_passport;
   const avatar = record.avatar;
 
-  // 主字段集合：这些已经单独展示，附加信息区域跳过它们
   const PRIMARY_KEYS = new Set([
     "name", "fullname", "passport_no", "student_id", "student_no", "sid", "id",
     "email", "phone", "nationality", "birth_date",
     "university_url", "university_name",
   ]);
-  // 计算其他 sheet 合并进来的附加字段（包括带 sheet 前缀的）
   const extraFields = Object.entries(record.fields).filter(
     ([k, v]) => !PRIMARY_KEYS.has(k) && v && v.trim()
   );
 
-  // 根据核验结果决定背景色
   const resultBg =
     result === "pass"
       ? "bg-emerald-50/70"
@@ -413,23 +420,78 @@ function RecordItem({
       ? "ring-1 ring-brand-200"
       : "";
 
+  const handleDragOver = (e: DragEvent) => {
+    if (!onDropSkill) return;
+    if (e.dataTransfer.types.includes(SKILL_DRAG_MIME)) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      if (!skillDragOver) setSkillDragOver(true);
+    }
+  };
+
+  const handleDragLeave = (e: DragEvent) => {
+    if (!onDropSkill) return;
+    const rect = itemRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    if (
+      e.clientX < rect.left ||
+      e.clientX > rect.right ||
+      e.clientY < rect.top ||
+      e.clientY > rect.bottom
+    ) {
+      setSkillDragOver(false);
+    }
+  };
+
+  const handleDrop = (e: DragEvent) => {
+    if (!onDropSkill) return;
+    const skillId = e.dataTransfer.getData(SKILL_DRAG_MIME);
+    setSkillDragOver(false);
+    if (skillId) {
+      e.preventDefault();
+      onDropSkill(skillId);
+    }
+  };
+
+  const handleCardClick = () => {
+    onClick();
+    if (onRun && !runDisabled && !running) {
+      onRun();
+    }
+  };
+
   return (
-    <li ref={itemRef}>
+    <li
+      ref={itemRef}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <div
         className={[
           "w-full rounded-lg transition-all",
           resultBg,
-          result
+          skillDragOver
+            ? "ring-2 ring-indigo-400 bg-indigo-50/70 shadow-md"
+            : running
+            ? "ring-2 ring-indigo-400 bg-indigo-50/70 shadow-md animate-pulse"
+            : result
             ? resultRing
             : selected
             ? "bg-brand-50 ring-1 ring-brand-200"
+            : onRun && !runDisabled
+            ? "hover:bg-indigo-50/50 hover:ring-1 hover:ring-indigo-200 cursor-pointer"
             : "hover:bg-slate-50",
         ].join(" ")}
       >
-        {/* 主行：点击选中记录 */}
+        {/* 主行：点击=选中+单卡导航到该人页面（TAB 行为） */}
         <button
-          onClick={onClick}
-          className="w-full px-3 py-2 text-left"
+          onClick={handleCardClick}
+          className={[
+            "w-full px-3 py-2 text-left",
+            onRun && !runDisabled && !running ? "cursor-pointer" : "cursor-default",
+          ].join(" ")}
+          title={onRun && !runDisabled && !running ? "点击切换到该人页面（步骤2+3自动导航）" : undefined}
         >
           <div className="flex items-center gap-2.5">
             {/* 头像 */}
@@ -450,7 +512,13 @@ function RecordItem({
                   {name}
                 </span>
                 <div className="flex shrink-0 items-center gap-1">
-                  {result && (
+                  {skillDragOver && (
+                    <span className="flex items-center gap-0.5 rounded-full bg-indigo-500 px-1.5 py-0.5 text-[9px] font-medium text-white animate-pulse">
+                      <Sparkles className="h-2.5 w-2.5" />
+                      释放执行
+                    </span>
+                  )}
+                  {result && !skillDragOver && (
                     <span
                       className={[
                         "rounded-full px-1.5 py-0.5 text-[10px] font-medium",
@@ -464,17 +532,19 @@ function RecordItem({
                       {OVERALL_LABELS[result]}
                     </span>
                   )}
-                  {batchResult && (
+                  {batchResult && !skillDragOver && (
                     <BatchStatusBadge status={batchResult.status} />
                   )}
-                  {hasPassport && (
+                  {hasPassport && !skillDragOver && (
                     <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
                       护照
                     </span>
                   )}
-                  <span className="font-mono text-[10px] text-slate-400">
-                    {record.record_id}
-                  </span>
+                  {!skillDragOver && (
+                    <span className="font-mono text-[10px] text-slate-400">
+                      {record.record_id}
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="mt-0.5 truncate text-xs text-slate-500">
@@ -487,7 +557,7 @@ function RecordItem({
         {/* 底部行：展开详情切换 + 单卡 LOOP 运行按钮 */}
         <div className="flex w-full items-center justify-between border-t border-slate-200/50 px-3 py-1">
           <button
-            onClick={() => setExpanded((v) => !v)}
+            onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }}
             className="flex items-center gap-1 rounded text-[10px] text-slate-500 hover:text-slate-700"
           >
             {expanded ? (
@@ -531,7 +601,6 @@ function RecordItem({
             <DetailRow label="电话" value={record.fields.phone} />
             <DetailRow label="国籍" value={record.fields.nationality} />
             <DetailRow label="出生日期" value={formatDateOnly(record.fields.birth_date)} />
-            {/* 其他 sheet 合并进来的附加字段（可折叠） */}
             {extraFields.length > 0 && (
               <CollapsibleSection
                 title="附加信息（来自其他 Sheet）"
@@ -588,7 +657,6 @@ function DetailRow({
   );
 }
 
-/** 可折叠的小节：点击标题切换展开/收起 */
 function CollapsibleSection({
   title,
   count,
@@ -626,23 +694,19 @@ function CollapsibleSection({
   );
 }
 
-/** 把可能含时间的日期字符串截成只保留 YYYY-MM-DD 部分 */
 function formatDateOnly(raw?: string | null): string | null {
   if (!raw) return null;
   const s = String(raw).trim();
   if (!s) return null;
-  // 匹配 YYYY-MM-DD 或 YYYY/MM/DD（开头）
   const m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
   if (m) {
     const [, y, mo, d] = m;
     return `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`;
   }
-  // 其它情况：取第一个空格 / T 之前的部分
   const cut = s.split(/[\sT]/)[0];
   return cut || s;
 }
 
-// ============ 批量执行状态徽章 ============
 function BatchStatusBadge({ status }: { status: BatchStatus }) {
   const config: Record<BatchStatus, { label: string; cls: string }> = {
     pending: { label: "待执行", cls: "bg-slate-100 text-slate-500" },
@@ -664,5 +728,3 @@ function BatchStatusBadge({ status }: { status: BatchStatus }) {
     </span>
   );
 }
-
-

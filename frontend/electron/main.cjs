@@ -281,6 +281,13 @@ function attachViewMessageRelay(view, side) {
         window.__cinsidePostMessage = function (payload) {
           try { console.log('[cinside-relay]', JSON.stringify(payload)); } catch (e) {}
         };
+        // Ctrl+滚轮缩放
+        window.addEventListener('wheel', function (e) {
+          if (e.ctrlKey) {
+            e.preventDefault();
+            console.log('[cinside-relay]', JSON.stringify({ kind: 'ctrl-wheel', deltaY: e.deltaY }));
+          }
+        }, { passive: false });
       })();
     `).catch(() => {});
   });
@@ -308,6 +315,13 @@ function attachViewMessageRelay(view, side) {
   view.webContents.on("did-stop-loading", () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("view-message", { side, payload: { kind: "view-loading", loading: false } });
+      // 页面加载完成后强制重绘 BrowserView，解决内容更新不显示的问题
+      if (mainWindow.getBrowserViews().includes(view)) {
+        const b = view.getBounds();
+        setTimeout(() => {
+          try { if (!view.webContents.isDestroyed()) view.setBounds(b); } catch (_) {}
+        }, 50);
+      }
     }
   });
   view.webContents.on("did-fail-load", (_e, errorCode, _errorDescription, validatedURL) => {
@@ -327,6 +341,18 @@ function attachViewMessageRelay(view, side) {
     if (message.startsWith(tag)) {
       try {
         const payload = JSON.parse(message.slice(tag.length).trim());
+        // Ctrl+滚轮缩放：直接在主进程调整 zoom factor
+        if (payload.kind === "ctrl-wheel") {
+          const cur = view.webContents.getZoomFactor();
+          const next = Math.max(0.5, Math.min(3.0, Math.round((cur + (payload.deltaY < 0 ? 0.1 : -0.1)) * 100) / 100));
+          if (next !== cur) {
+            try { view.webContents.setZoomFactor(next); } catch (_) {}
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send("view-message", { side, payload: { kind: "zoom-changed", factor: next } });
+            }
+          }
+          return;
+        }
         debugLog(`[main] relay ${side}: kind=${payload.kind}, tag=${payload.tag || "n/a"}, selector=${payload.selector || "n/a"}`);
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send("view-message", { side, payload });
@@ -401,6 +427,13 @@ function createPopupView(parentSide, url, win) {
         window.__cinsidePostMessage = function (payload) {
           try { console.log('[cinside-relay]', JSON.stringify(payload)); } catch (e) {}
         };
+        // Ctrl+滚轮缩放
+        window.addEventListener('wheel', function (e) {
+          if (e.ctrlKey) {
+            e.preventDefault();
+            console.log('[cinside-relay]', JSON.stringify({ kind: 'ctrl-wheel', deltaY: e.deltaY }));
+          }
+        }, { passive: false });
       })();
     `).catch(() => {});
   });
@@ -525,8 +558,17 @@ function showView(side, bounds, _url) {
   if (!mainWindow.getBrowserViews().includes(view)) {
     mainWindow.addBrowserView(view);
   }
-  // 不要 setTopBrowserView：BrowserView 始终置顶会盖住设置弹窗/确认对话框等 HTML 层。
+  // 不要 setTopBrowserView：BrowserView 置顶会盖住设置弹窗/确认对话框等 HTML 层。
   // 弹窗打开时 App.tsx 会主动 viewHide，弹窗关闭后由 sync() 恢复。
+  // 强制重绘：通过 setBounds 再次触发 Chromium 合成器刷新，解决后台
+  // 加载/JS执行后 BrowserView 内容不更新直到重新切换tab才显示的问题
+  if (bounds) {
+    setTimeout(() => {
+      if (!view.webContents.isDestroyed()) {
+        try { view.setBounds(bounds); } catch (_) {}
+      }
+    }, 100);
+  }
   // 同步弹窗 view 的 bounds
   const popup = popupViews[side];
   if (popup && popup.win === mainWindow && bounds) {
@@ -1338,6 +1380,16 @@ ipcMain.handle("view-hide-all", () => {
   hideAllViews();
 });
 
+// 设置 BrowserView 缩放因子（0.5 ~ 3.0）
+ipcMain.handle("view-set-zoom", (_event, side, factor) => {
+  const view = side === "left" ? leftBrowserView : rightBrowserView;
+  if (!view || !view.webContents || view.webContents.isDestroyed()) return;
+  const clamped = Math.max(0.5, Math.min(3.0, Number(factor) || 1.0));
+  try {
+    view.webContents.setZoomFactor(clamped);
+  } catch (_) {}
+});
+
 // 在指定 view 中执行 JS（元素选择脚本等）
 ipcMain.handle("view-execute-js", (_event, side, script) => {
   return executeInView(side, script);
@@ -1440,6 +1492,13 @@ function createDetachedBrowserView(win, side) {
         window.__cinsidePostMessage = function (payload) {
           try { console.log('[cinside-relay]', JSON.stringify(payload)); } catch (e) {}
         };
+        // Ctrl+滚轮缩放
+        window.addEventListener('wheel', function (e) {
+          if (e.ctrlKey) {
+            e.preventDefault();
+            console.log('[cinside-relay]', JSON.stringify({ kind: 'ctrl-wheel', deltaY: e.deltaY }));
+          }
+        }, { passive: false });
       })();
     `).catch(() => {});
   });
@@ -1504,6 +1563,11 @@ view.webContents.on("console-message", (_e, level, message) => {
   });
 
   win.addBrowserView(view);
+  // 通知分离窗口的渲染进程：BrowserView 已就绪，可以重新触发 sync 和 loadURL
+  // 解决 view 创建晚于渲染进程首次 sync 的时序竞态（分离后不显示内容）
+  if (win && !win.isDestroyed()) {
+    win.webContents.send("detached-view-ready", side);
+  }
   return view;
 }
 
@@ -1580,6 +1644,14 @@ ipcMain.handle("detached-view-show", (_event, side, bounds, _url) => {
   view.setBounds(bounds);
   if (!win.getBrowserViews().includes(view)) {
     win.addBrowserView(view);
+  }
+  // 强制重绘：与 showView 一致，通过 setBounds 再次触发 Chromium 合成器刷新
+  if (bounds) {
+    setTimeout(() => {
+      if (!view.webContents.isDestroyed()) {
+        try { view.setBounds(bounds); } catch (_) {}
+      }
+    }, 100);
   }
   // 同步弹窗 view 的 bounds
   const actualSide = side === "browser-left" ? "left" : "right";

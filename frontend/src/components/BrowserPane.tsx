@@ -5,11 +5,12 @@ import {
   FileSpreadsheet,
   Globe,
   Loader2,
-  MousePointerClick,
+  Minus,
   Plus,
   RefreshCw,
   Search,
   SquareArrowOutUpRight,
+  Star,
   Upload,
   X,
 } from "lucide-react";
@@ -58,12 +59,20 @@ interface Props {
   excelFileName?: string;
   /** 请求添加Excel文件回调（点击+按钮时触发） */
   onRequestAddExcel?: () => void;
+  /** 关闭Excel数据回调（点击Excel Tab关闭按钮时触发） */
+  onCloseExcel?: () => void;
   /** Excel模式下的空状态内容（无数据时显示） */
   excelEmptyState?: React.ReactNode;
   /** Web模式下的空状态内容（无URL时显示） */
   webEmptyState?: React.ReactNode;
   /** 新标签页标题（如"CINSIDE SEARCH"），设置后在Web空状态显示居中搜索页 */
   newTabTitle?: string;
+  /** 常用网页收藏列表 */
+  favoriteSites?: { name: string; url: string }[];
+  /** 添加常用网页 */
+  onAddFavoriteSite?: (name: string, url: string) => void;
+  /** 删除常用网页 */
+  onRemoveFavoriteSite?: (url: string) => void;
 }
 
 interface BrowserTab {
@@ -126,9 +135,13 @@ export default function BrowserPane({
   hasExcelData = false,
   excelFileName,
   onRequestAddExcel,
+  onCloseExcel,
   excelEmptyState,
   webEmptyState,
   newTabTitle,
+  favoriteSites = [],
+  onAddFavoriteSite,
+  onRemoveFavoriteSite,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -137,7 +150,16 @@ export default function BrowserPane({
   const urlRef = useRef(url);
   const rafRef = useRef<number | null>(null);
   const [loading, setLoading] = useState(false);
+  const [zoomFactor, setZoomFactor] = useState(1.0);
+  const [searchTransition, setSearchTransition] = useState<"idle" | "showing" | "fading">("idle");
+  const searchTransitionRef = useRef<"idle" | "showing" | "fading">("idle");
+  searchTransitionRef.current = searchTransition;
   const [inputUrl, setInputUrl] = useState(url);
+  const [showFavorites, setShowFavorites] = useState(false);
+  const [addingFavorite, setAddingFavorite] = useState(false);
+  const [newFavName, setNewFavName] = useState("");
+  const [newFavUrl, setNewFavUrl] = useState("");
+  const [excelZoom, setExcelZoom] = useState(1.0);
   const lastBoundsRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
   const loadedUrlRef = useRef<string>("");
 
@@ -245,7 +267,7 @@ export default function BrowserPane({
     }
     const viewSide = detachedSide || side;
     const api = window.electronAPI;
-    if (w <= 0 || h <= 0 || !inViewRef.current || !urlRef.current) {
+    if (w <= 0 || h <= 0 || !inViewRef.current || !urlRef.current || searchTransitionRef.current === "showing") {
       if (lastBoundsRef.current !== null) {
         if (detachedSide) api.detachedViewHide(detachedSide);
         else api.viewHide(side);
@@ -312,7 +334,8 @@ export default function BrowserPane({
 
   useEffect(() => {
     sync();
-  }, [sync, inView, currentUrl, isWebMode, enableViewSwitch]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sync, inView, currentUrl, isWebMode, enableViewSwitch, searchTransition]);
 
   // 显式加载 URL：当 url 变化且非 tab 直接加载时调用 viewLoad
   // 用 loadedUrlRef 跟踪上次加载的 URL，避免重复加载
@@ -325,13 +348,42 @@ export default function BrowserPane({
     else window.electronAPI.viewLoad(side, currentUrl);
   }, [currentUrl, side, detachedSide]);
 
+  // 脱离模式：监听 BrowserView 就绪事件
+  // 分离窗口的 BrowserView 在 did-finish-load 后才创建（异步），可能晚于首次 sync()
+  // 收到 ready 事件后重新触发 sync 和 URL 加载，解决分离后不显示内容的问题
+  useEffect(() => {
+    if (!detachedSide || !window.electronAPI?.onDetachedViewReady) return;
+    const off = window.electronAPI.onDetachedViewReady((readySide: string) => {
+      if (readySide !== detachedSide) return;
+      // view 就绪后，重置 loadedUrlRef 强制重新加载 URL
+      if (urlRef.current) {
+        loadedUrlRef.current = "";
+        setLoading(true);
+        window.electronAPI?.detachedViewLoad(detachedSide, urlRef.current);
+      }
+      // 延迟触发 sync 让 view 显示
+      setTimeout(() => sync(), 50);
+    });
+    return off;
+  }, [detachedSide, sync]);
+
   // 监听 BrowserView 加载事件（did-start-loading / did-stop-loading）
   useEffect(() => {
     if (!window.electronAPI) return;
     const off = window.electronAPI.onViewMessage((msg: { side: string; payload?: { kind?: string; loading?: boolean } }) => {
       if (msg.side !== side) return;
       if (msg.payload?.kind === "view-loading") {
-        setLoading(!!msg.payload.loading);
+        const isLoading = !!msg.payload.loading;
+        setLoading(isLoading);
+        // 加载完成后，开始淡出过渡动画
+        if (!isLoading && searchTransitionRef.current === "showing") {
+          setSearchTransition("fading");
+          setTimeout(() => setSearchTransition("idle"), 500);
+        }
+      }
+      // Ctrl+滚轮缩放同步
+      if (msg.payload?.kind === "zoom-changed") {
+        setZoomFactor((msg.payload as { factor: number }).factor);
       }
     });
     return () => off?.();
@@ -395,12 +447,31 @@ export default function BrowserPane({
     return trimmed;
   };
 
+  const changeZoom = (delta: number) => {
+    if (!window.electronAPI) return;
+    const next = Math.max(0.5, Math.min(3.0, Math.round((zoomFactor + delta) * 100) / 100));
+    if (next === zoomFactor) return;
+    setZoomFactor(next);
+    window.electronAPI.viewSetZoom((detachedSide || side) as ViewSide, next);
+  };
+
+  const resetZoom = () => {
+    if (!window.electronAPI) return;
+    setZoomFactor(1.0);
+    window.electronAPI.viewSetZoom((detachedSide || side) as ViewSide, 1.0);
+  };
+
   const openPage = () => {
     if (!isWebMode) return;
     if (!window.electronAPI || !inputUrl) return;
     const targetUrl = normalizeUrl(inputUrl);
     if (!targetUrl) return;
     setInputUrl(targetUrl);
+    // 所有导航都显示过渡动画，避免旧页面闪现
+    setSearchTransition("showing");
+    // 导航前先隐藏 BrowserView，防止旧页面闪出
+    if (detachedSide) window.electronAPI.detachedViewHide(detachedSide);
+    else window.electronAPI.viewHide(side);
     if (enableTabs) {
       if (isAddingTab) {
         const newId = `tab-${tabIdCounter.current++}`;
@@ -460,6 +531,10 @@ export default function BrowserPane({
     setActiveTabId(tabId);
     const targetTab = tabs.find((t) => t.id === tabId);
     if (isWebMode && targetTab?.url && window.electronAPI) {
+      // 切换 tab 时显示过渡动画，避免旧页面闪现
+      setSearchTransition("showing");
+      if (detachedSide) window.electronAPI.detachedViewHide(detachedSide);
+      else window.electronAPI.viewHide(side);
       loadedUrlRef.current = targetTab.url;
       urlRef.current = targetTab.url;
       onUrlChange(targetTab.url);
@@ -502,11 +577,16 @@ export default function BrowserPane({
         setIsAddingTab(false);
         setInputUrl(newActive.url);
         if (window.electronAPI && newActive.url) {
+          // 切换到另一个 tab 时显示过渡动画
+          setSearchTransition("showing");
+          if (detachedSide) window.electronAPI.detachedViewHide(detachedSide);
+          else window.electronAPI.viewHide(side);
           loadedUrlRef.current = newActive.url;
           onUrlChange(newActive.url);
           setLoading(true);
           if (detachedSide) window.electronAPI.detachedViewLoad(detachedSide, newActive.url);
           else window.electronAPI.viewLoad(side, newActive.url);
+          sync();
         } else if (!newActive.url) {
           loadedUrlRef.current = "";
           onUrlChange("");
@@ -553,19 +633,15 @@ export default function BrowserPane({
   const status = STATUS_BAR[verifyStatus];
 
   return (
-    <div className={`relative flex h-full flex-col overflow-hidden rounded-lg bg-white/40 backdrop-blur-xl ring-1 ${STATUS_RING[verifyStatus]} transition-[box-shadow,background-color] duration-300`}>
+    <div
+      className={`relative flex h-full flex-col overflow-hidden rounded-lg bg-white/40 backdrop-blur-xl ring-1 ${STATUS_RING[verifyStatus]} ${picking ? "picking-breath" : ""} transition-[box-shadow,background-color] duration-300`}
+    >
       {/* 顶部：标题 + URL/Tab融合区域 + 操作（紧凑单行） */}
       <div className="glass-frame flex items-center gap-2 border-b border-white/40 px-2 py-1">
         <div className="flex shrink-0 items-center gap-1.5">
           <span className="truncate text-[11px] font-semibold text-slate-700">{title}</span>
           {!enableViewSwitch && headerExtra}
         </div>
-        {picking && (
-          <span className="ml-0.5 inline-flex shrink-0 items-center gap-0.5 rounded-full bg-brand-500/15 px-1.5 py-0.5 text-[9px] font-medium text-brand-700 animate-glow-pulse">
-            <MousePointerClick className="h-2.5 w-2.5" />
-            点击拾取
-          </span>
-        )}
         {popupActive && (
           <span className="ml-0.5 inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-medium text-amber-700">
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
@@ -733,20 +809,33 @@ export default function BrowserPane({
                 {loadedTabs.map((tab) => {
                   const isActive = tab.id === activeTabId;
                   return (
-                    <button
+                    <div
                       key={tab.id}
-                      onClick={() => switchTab(tab.id)}
                       className={[
-                        "flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all max-w-[160px]",
+                        "group flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all max-w-[160px]",
                         isActive
                           ? "bg-white/90 text-emerald-700 shadow-sm ring-1 ring-white/80"
                           : "bg-white/30 text-slate-500 hover:bg-white/50 hover:text-slate-600",
                       ].join(" ")}
-                      title={tab.title || tab.url || excelTabTitle}
                     >
-                      <FileSpreadsheet className={`h-2.5 w-2.5 shrink-0 ${isActive ? "text-emerald-500" : "text-slate-400"}`} />
-                      <span className="truncate">{tab.title || tab.url || excelTabTitle}</span>
-                    </button>
+                      <button
+                        onClick={() => switchTab(tab.id)}
+                        className="flex min-w-0 items-center gap-1"
+                        title={tab.title || tab.url || excelTabTitle}
+                      >
+                        <FileSpreadsheet className={`h-2.5 w-2.5 shrink-0 ${isActive ? "text-emerald-500" : "text-slate-400"}`} />
+                        <span className="truncate">{tab.title || tab.url || excelTabTitle}</span>
+                      </button>
+                      {hasExcelData && onCloseExcel && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onCloseExcel(); }}
+                          className="ml-0.5 shrink-0 rounded p-0.5 text-slate-400 opacity-0 transition-opacity hover:bg-rose-100 hover:text-rose-600 group-hover:opacity-100"
+                          title="关闭 Excel"
+                        >
+                          <X className="h-2.5 w-2.5" />
+                        </button>
+                      )}
+                    </div>
                   );
                 })}
                 {/* 始终显示+按钮用于添加Excel */}
@@ -779,6 +868,34 @@ export default function BrowserPane({
         )}
 
         <div className="flex shrink-0 items-center gap-0.5">
+          {isWebMode && currentUrl && window.electronAPI && (
+            <div className="flex shrink-0 items-center gap-0.5 rounded-md bg-white/40 px-0.5">
+              <button
+                onClick={() => changeZoom(-0.1)}
+                disabled={disabled || zoomFactor <= 0.5}
+                className="rounded p-0.5 text-slate-500 hover:bg-white/80 hover:text-slate-700 disabled:opacity-30"
+                title="缩小"
+              >
+                <Minus className="h-3 w-3" />
+              </button>
+              <button
+                onClick={resetZoom}
+                disabled={disabled || zoomFactor === 1.0}
+                className="min-w-[32px] rounded px-1 text-center text-[9px] font-medium text-slate-500 hover:bg-white/80 hover:text-slate-700 disabled:opacity-50"
+                title="重置缩放"
+              >
+                {Math.round(zoomFactor * 100)}%
+              </button>
+              <button
+                onClick={() => changeZoom(0.1)}
+                disabled={disabled || zoomFactor >= 3.0}
+                className="rounded p-0.5 text-slate-500 hover:bg-white/80 hover:text-slate-700 disabled:opacity-30"
+                title="放大"
+              >
+                <Plus className="h-3 w-3" />
+              </button>
+            </div>
+          )}
           <button
             onClick={reload}
             disabled={!currentUrl || disabled || isAddingTab || !!editingTabId || !isWebMode}
@@ -831,7 +948,7 @@ export default function BrowserPane({
                   {newTabTitle}
                 </h1>
                 <div className="w-full max-w-xl">
-                  <div className="group flex items-center gap-2 rounded-full border-2 border-slate-200 bg-white px-5 py-3 shadow-sm transition-all focus-within:border-brand-400 focus-within:shadow-md">
+                  <div className="group relative flex items-center gap-2 rounded-full border-2 border-slate-200 bg-white px-5 py-3 shadow-sm transition-all focus-within:border-brand-400 focus-within:shadow-md">
                     <Search className="h-5 w-5 shrink-0 text-slate-400 group-focus-within:text-brand-500" />
                     <input
                       type="text"
@@ -840,6 +957,7 @@ export default function BrowserPane({
                       onKeyDown={(e) => {
                         if (e.key === "Enter") openPage();
                       }}
+                      onFocus={() => setShowFavorites(true)}
                       placeholder="输入网址或搜索词，按回车访问"
                       className="flex-1 bg-transparent text-sm text-slate-700 outline-none placeholder:text-slate-400"
                       autoFocus
@@ -854,6 +972,13 @@ export default function BrowserPane({
                       </button>
                     )}
                     <button
+                      onClick={() => setShowFavorites(prev => !prev)}
+                      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-all ${showFavorites ? "bg-brand-100 text-brand-600" : "text-slate-300 hover:bg-slate-100 hover:text-slate-500"}`}
+                      title="常用网页"
+                    >
+                      <Star className="h-4 w-4" />
+                    </button>
+                    <button
                       onClick={openPage}
                       disabled={!inputUrl.trim()}
                       className={[
@@ -866,6 +991,109 @@ export default function BrowserPane({
                     >
                       <ArrowRight className="h-4 w-4" />
                     </button>
+
+                    {/* 收藏夹展开面板 */}
+                    {showFavorites && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => { setShowFavorites(false); setAddingFavorite(false); }} />
+                        <div className="absolute left-0 right-0 top-full z-50 mt-2 max-h-80 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-3 shadow-xl">
+                          {addingFavorite ? (
+                            <div className="space-y-2 p-1">
+                              <input
+                                type="text"
+                                value={newFavName}
+                                onChange={(e) => setNewFavName(e.target.value)}
+                                placeholder="名称（如：学校系统）"
+                                className="w-full rounded-lg border border-slate-200 px-3 py-1.5 text-sm outline-none focus:border-brand-400"
+                                autoFocus
+                              />
+                              <input
+                                type="text"
+                                value={newFavUrl}
+                                onChange={(e) => setNewFavUrl(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" && newFavName.trim() && newFavUrl.trim()) {
+                                    onAddFavoriteSite?.(newFavName.trim(), newFavUrl.trim());
+                                    setNewFavName(""); setNewFavUrl(""); setAddingFavorite(false);
+                                  }
+                                }}
+                                placeholder="网址（如：localhost:8000/demo-entry/）"
+                                className="w-full rounded-lg border border-slate-200 px-3 py-1.5 text-sm outline-none focus:border-brand-400"
+                              />
+                              <div className="flex justify-end gap-2">
+                                <button
+                                  onClick={() => { setAddingFavorite(false); setNewFavName(""); setNewFavUrl(""); }}
+                                  className="rounded-lg px-3 py-1 text-xs text-slate-500 hover:bg-slate-100"
+                                >
+                                  取消
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    if (newFavName.trim() && newFavUrl.trim()) {
+                                      onAddFavoriteSite?.(newFavName.trim(), newFavUrl.trim());
+                                      setNewFavName(""); setNewFavUrl(""); setAddingFavorite(false);
+                                    }
+                                  }}
+                                  disabled={!newFavName.trim() || !newFavUrl.trim()}
+                                  className="rounded-lg bg-brand-600 px-3 py-1 text-xs text-white hover:bg-brand-700 disabled:opacity-40"
+                                >
+                                  添加
+                                </button>
+                              </div>
+                            </div>
+                          ) : favoriteSites.length > 0 ? (
+                            <div className="space-y-0.5">
+                              <div className="mb-1 flex items-center justify-between px-1">
+                                <span className="text-[11px] font-medium text-slate-400">常用网页</span>
+                                <button
+                                  onClick={() => setAddingFavorite(true)}
+                                  className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[11px] text-brand-600 hover:bg-brand-50"
+                                >
+                                  <Plus className="h-3 w-3" /> 添加
+                                </button>
+                              </div>
+                              {favoriteSites.map((site) => (
+                                <div
+                                  key={site.url}
+                                  className="group flex items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-slate-50"
+                                >
+                                  <Globe className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                                  <button
+                                    onClick={() => {
+                                      setInputUrl(site.url);
+                                      setShowFavorites(false);
+                                      setTimeout(() => openPage(), 0);
+                                    }}
+                                    className="flex min-w-0 flex-1 items-baseline gap-2 text-left"
+                                  >
+                                    <span className="truncate text-sm font-medium text-slate-700">{site.name}</span>
+                                    <span className="truncate text-[11px] text-slate-400">{site.url}</span>
+                                  </button>
+                                  <button
+                                    onClick={() => onRemoveFavoriteSite?.(site.url)}
+                                    className="shrink-0 rounded p-0.5 text-slate-300 opacity-0 transition-opacity hover:bg-rose-50 hover:text-rose-500 group-hover:opacity-100"
+                                    title="删除"
+                                  >
+                                    <X className="h-3 w-3" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="flex flex-col items-center gap-2 py-4 text-center">
+                              <Star className="h-6 w-6 text-slate-300" />
+                              <p className="text-xs text-slate-400">还没有收藏的网页</p>
+                              <button
+                                onClick={() => setAddingFavorite(true)}
+                                className="flex items-center gap-0.5 rounded-lg bg-brand-50 px-3 py-1 text-xs text-brand-600 hover:bg-brand-100"
+                              >
+                                <Plus className="h-3 w-3" /> 添加常用网页
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
                   </div>
                   <p className="mt-2 text-center text-[11px] text-slate-400">
                     无需输入 https://，直接输入网址即可，例如 baidu.com
@@ -880,6 +1108,36 @@ export default function BrowserPane({
             ))
           )}
         </div>
+
+        {/* 搜索过渡动画覆盖层 */}
+        {searchTransition !== "idle" && (
+          <div
+            className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-white/95 backdrop-blur-sm transition-opacity duration-500"
+            style={{ opacity: searchTransition === "showing" ? 1 : 0 }}
+          >
+            <div className="flex flex-col items-center gap-4">
+              <div className="relative">
+                <div className="absolute inset-0 animate-ping rounded-full bg-brand-400/30" style={{ animationDuration: "1.5s" }} />
+                <div className="relative flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-brand-500 to-brand-700 shadow-lg">
+                  <Search className="h-6 w-6 text-white animate-pulse" />
+                </div>
+              </div>
+              <div className="flex flex-col items-center gap-1">
+                <p className="text-sm font-semibold text-slate-700">
+                  {newTabTitle || "正在加载"}
+                </p>
+                <div className="flex gap-1">
+                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-brand-500" style={{ animationDelay: "0ms" }} />
+                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-brand-500" style={{ animationDelay: "150ms" }} />
+                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-brand-500" style={{ animationDelay: "300ms" }} />
+                </div>
+              </div>
+              <p className="max-w-xs truncate text-xs text-slate-400">
+                {inputUrl}
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* 核验中的扫描线动画 */}
         {verifyStatus === "scanning" && (
@@ -903,13 +1161,27 @@ export default function BrowserPane({
 
       {/* Excel容器：始终挂载，通过hidden切换 */}
       {enableViewSwitch && (
-        <div className={`relative min-h-0 flex-1 overflow-hidden bg-white ${isWebMode ? "hidden" : ""}`}>
-          {hasExcelData ? children : (excelEmptyState || (
-            <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-xs text-slate-400">
-              <Upload className="h-10 w-10 text-slate-300" />
-              <p>点击上方 + 按钮上传 Excel/CSV 文件</p>
-            </div>
-          ))}
+        <div
+          className={`relative min-h-0 flex-1 overflow-auto bg-white ${isWebMode ? "hidden" : ""}`}
+          onWheel={(e) => {
+            if (e.ctrlKey) {
+              e.preventDefault();
+              setExcelZoom(prev => {
+                const next = Math.max(0.5, Math.min(3.0, Math.round((prev + (e.deltaY < 0 ? 0.1 : -0.1)) * 100) / 100));
+                return next;
+              });
+            }
+          }}
+          style={{ WebkitOverflowScrolling: "auto" }}
+        >
+          <div style={{ transform: `scale(${excelZoom})`, transformOrigin: "top left", width: `${100 / excelZoom}%` }}>
+            {hasExcelData ? children : (excelEmptyState || (
+              <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-xs text-slate-400">
+                <Upload className="h-10 w-10 text-slate-300" />
+                <p>点击上方 + 按钮上传 Excel/CSV 文件</p>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>

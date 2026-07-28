@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import {
+  Activity,
   CheckCircle2,
+  ChevronDown,
   CircleStop,
   Database,
   Eye,
@@ -12,8 +14,11 @@ import {
   ListOrdered,
   Loader2,
   MinusCircle,
+  MousePointerClick,
   MoveRight,
+  PauseCircle,
   Play,
+  PlayCircle,
   Plus,
   ScrollText,
   Settings2,
@@ -43,10 +48,11 @@ import {
   FIELD_LABELS,
   MATCH_LABELS,
   MATCH_STYLES,
+  OVERALL_LABELS,
   VERIFY_METHOD_LABELS,
 } from "../types";
 
-type Tab = "mappings" | "compare" | "report" | "log" | "vision" | "workflow" | "doc" | "queue";
+type Tab = "mappings" | "report" | "execution";
 
 interface Props {
   record: ApplicantRecord | null;
@@ -54,6 +60,7 @@ interface Props {
   comparisons: FieldComparison[];
   resultPresent: boolean;
   report: VerificationReport | null;
+  loopReports?: VerificationReport[];
   steps: VerificationStep[];
   shots: ScreenshotEvent[];
   running: boolean;
@@ -94,13 +101,8 @@ interface Props {
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: "mappings", label: "字段映射", icon: <Settings2 className="h-3.5 w-3.5" /> },
-  { id: "compare", label: "字段比对", icon: <Table2 className="h-3.5 w-3.5" /> },
-  { id: "doc", label: "文档对比", icon: <FileText className="h-3.5 w-3.5" /> },
   { id: "report", label: "验证报告", icon: <ShieldCheck className="h-3.5 w-3.5" /> },
-  { id: "log", label: "执行日志", icon: <ScrollText className="h-3.5 w-3.5" /> },
-  { id: "queue", label: "任务队列", icon: <Layers className="h-3.5 w-3.5" /> },
-  { id: "vision", label: "AI 视野", icon: <Eye className="h-3.5 w-3.5" /> },
-  { id: "workflow", label: "操作记录", icon: <ListOrdered className="h-3.5 w-3.5" /> },
+  { id: "execution", label: "执行面板", icon: <Layers className="h-3.5 w-3.5" /> },
 ];
 
 export default function ResultsPanel({
@@ -109,6 +111,7 @@ export default function ResultsPanel({
   comparisons,
   resultPresent,
   report,
+  loopReports = [],
   steps,
   shots,
   running,
@@ -142,35 +145,31 @@ export default function ResultsPanel({
 }: Props) {
   const [tab, setTab] = useState<Tab>("mappings");
 
-  // 当 switchToLogSignal 变化时，自动切换到执行日志tab
+  // 当 switchToLogSignal 变化时，自动切换到执行面板tab
   useEffect(() => {
     if (switchToLogSignal > 0) {
-      setTab("log");
+      setTab("execution");
     }
   }, [switchToLogSignal]);
 
-  // 文档提取完成/进行中时，自动切换到文档对比tab
+  // 文档提取完成/进行中时，自动切换到验证报告tab
   useEffect(() => {
     if (switchToDocSignal > 0) {
-      setTab("doc");
+      setTab("report");
     }
   }, [switchToDocSignal]);
 
-  // 切换到任务队列tab的触发值
+  // 切换到任务队列：自动切换到执行面板tab
   useEffect(() => {
     if (switchToQueueSignal > 0) {
-      setTab("queue");
+      setTab("execution");
     }
   }, [switchToQueueSignal]);
 
   const counts: Partial<Record<Tab, number>> = {
     mappings: mappings.length,
-    compare: comparisons.length,
-    doc: docExtract?.entries.length || (docExtract ? 1 : 0),
-    log: steps.length,
-    queue: taskQueue.length,
-    vision: shots.length,
-    workflow: pickedMarks.length,
+    report: (loopReports?.length || 0) + (report ? 1 : 0),
+    execution: steps.length,
   };
 
   return (
@@ -210,20 +209,38 @@ export default function ResultsPanel({
       </div>
 
       {/* Tab 内容 */}
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div className="min-h-0 flex-1 overflow-hidden">
         {tab === "mappings" && (
-          <MappingsTab mappings={mappings} onRemove={onRemoveMapping} />
+          <div className="h-full overflow-auto">
+            <MappingsTab mappings={mappings} onRemove={onRemoveMapping} />
+          </div>
         )}
-        {tab === "compare" && (
-          <CompareTab comparisons={comparisons} empty={!resultPresent} appMode={appMode} />
+        {tab === "report" && (
+          <div className="h-full overflow-auto">
+            <ReportTab
+              report={report}
+              reports={loopReports}
+              comparisons={comparisons}
+              resultPresent={resultPresent}
+              docExtract={docExtract}
+              docExtracting={docExtracting}
+              shots={shots}
+              running={running}
+              appMode={appMode}
+            />
+          </div>
         )}
-        {tab === "doc" && (
-          <DocCompareTab docExtract={docExtract} extracting={docExtracting} />
-        )}
-        {tab === "report" && <ReportTab report={report} appMode={appMode} />}
-        {tab === "log" && <LogTab steps={steps} logEndRef={logEndRef} />}
-        {tab === "queue" && (
-          <QueueTab
+        {tab === "execution" && (
+          <ExecutionTab
+            steps={steps}
+            logEndRef={logEndRef}
+            marks={pickedMarks}
+            onRemoveMark={onRemovePickedMark}
+            onClearMarks={onClearPickedMarks}
+            onReplay={onReplay}
+            replaying={replaying}
+            replayCursor={replayCursor}
+            onStopReplay={onStopReplay}
             taskQueue={taskQueue}
             queueRunning={queueRunning}
             queueCursor={queueCursor}
@@ -234,18 +251,6 @@ export default function ResultsPanel({
             onRunQueue={onRunQueue}
             onStopQueue={onStopQueue}
             canAddToQueue={canAddToQueue}
-          />
-        )}
-        {tab === "vision" && <VisionTab shots={shots} running={running} />}
-        {tab === "workflow" && (
-          <WorkflowTab
-            marks={pickedMarks}
-            onRemove={onRemovePickedMark}
-            onClear={onClearPickedMarks}
-            onReplay={onReplay}
-            replaying={replaying}
-            replayCursor={replayCursor}
-            onStopReplay={onStopReplay}
           />
         )}
       </div>
@@ -583,34 +588,429 @@ function DocCompareTab({
     </div>
   );
 }
-function ReportTab({ report, appMode }: { report: VerificationReport | null; appMode: AppMode }) {
-  if (!report) {
+function ReportTab({
+  report,
+  reports,
+  comparisons,
+  resultPresent,
+  docExtract,
+  docExtracting,
+  shots,
+  running,
+  appMode,
+}: {
+  report: VerificationReport | null;
+  reports: VerificationReport[];
+  comparisons: FieldComparison[];
+  resultPresent: boolean;
+  docExtract: DocExtractState | null;
+  docExtracting: boolean;
+  shots: ScreenshotEvent[];
+  running: boolean;
+  appMode: AppMode;
+}) {
+  const hasReports = reports && reports.length > 0;
+  const hasCompare = resultPresent && comparisons.length > 0;
+  const hasFieldData = hasReports || (report && report.entries.length > 0) || hasCompare;
+  const [showSample, setShowSample] = useState(false);
+  const [filter, setFilter] = useState<"all" | "pass" | "fail" | "review">("all");
+
+  // DEMO示例数据
+  const sampleReports: VerificationReport[] = [
+    {
+      task_id: "sample-1",
+      record_id: "sample-1",
+      record_name: "张三",
+      university_url: "https://example.com",
+      overall: "pass",
+      summary: "全部一致",
+      started_at: new Date().toISOString(),
+      entries: [
+        { left_field: "name", left_value: "张三", left_source: "excel", right_label: "姓名", right_value: "张三", right_selector: "#name", match: "match", timestamp: new Date().toISOString() },
+        { left_field: "passport", left_value: "E12345678", left_source: "excel", right_label: "护照号", right_value: "E12345678", right_selector: "#passport", match: "match", timestamp: new Date().toISOString() },
+        { left_field: "major", left_value: "计算机科学", left_source: "excel", right_label: "专业", right_value: "计算机科学", right_selector: "#major", match: "match", timestamp: new Date().toISOString() },
+      ],
+    },
+    {
+      task_id: "sample-2",
+      record_id: "sample-2",
+      record_name: "李四",
+      university_url: "https://example.com",
+      overall: "fail",
+      summary: "存在问题",
+      started_at: new Date().toISOString(),
+      entries: [
+        { left_field: "name", left_value: "李四", left_source: "excel", right_label: "姓名", right_value: "李四", right_selector: "#name", match: "match", timestamp: new Date().toISOString() },
+        { left_field: "passport", left_value: "E98765431", left_source: "excel", right_label: "护照号", right_value: "E98765432", right_selector: "#passport", match: "mismatch", timestamp: new Date().toISOString() },
+        { left_field: "enroll_year", left_value: "2023", left_source: "excel", right_label: "入学年份", right_value: "2024", right_selector: "#year", match: "mismatch", timestamp: new Date().toISOString() },
+      ],
+    },
+  ];
+
+  if (!hasFieldData && !docExtract && shots.length === 0 && !showSample) {
+    // 空状态也渲染三卡片布局，每个卡片内部显示空状态+示例按钮
+  }
+
+  // 精美的人员对比卡片
+  const PersonReportCard = ({ r }: { r: VerificationReport }) => {
+    const [expanded, setExpanded] = useState(false);
+    const isEntry = appMode === "entry";
+    const rows: SideCompareRow[] = r.entries.map((e, i) => ({
+      key: `${e.left_field || e.right_label || "field"}-${i}`,
+      leftLabel: FIELD_LABELS[e.left_field] || e.left_field || "左侧来源",
+      leftValue: e.left_value || "",
+      rightLabel: e.right_label || "右侧元素",
+      rightValue: e.right_value || "",
+      match: e.match,
+      note: e.reasoning,
+    }));
+    const mc = rows.filter((x) => x.match === "match").length;
+    const mmc = rows.filter((x) => x.match === "mismatch" || x.match === "error").length;
+    const isPass = r.overall === "pass";
+    const isReview = r.overall === "review";
+
+    // 状态色系
+    const accent = isPass
+      ? { headerBg: "bg-emerald-50/50", badge: "bg-emerald-500", badgeSoft: "bg-emerald-100 text-emerald-700", footer: "bg-slate-50 text-emerald-700" }
+      : isReview
+      ? { headerBg: "bg-amber-50/50", badge: "bg-amber-500", badgeSoft: "bg-amber-100 text-amber-700", footer: "bg-slate-50 text-amber-700" }
+      : { headerBg: "bg-rose-50/50", badge: "bg-rose-500", badgeSoft: "bg-rose-100 text-rose-700", footer: "bg-slate-50 text-rose-700" };
+
+    // 中间状态图标 —— 录入=箭头，审查=✓/✗/−
+    const StatusIcon = ({ match }: { match: FieldMatch }) => {
+      if (isEntry) {
+        return (
+          <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-100 ring-1 ring-indigo-200">
+            <MoveRight className="h-4 w-4 text-indigo-600" />
+          </div>
+        );
+      }
+      if (match === "match")
+        return <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-100 ring-1 ring-emerald-200"><CheckCircle2 className="h-5 w-5 text-emerald-600" /></div>;
+      if (match === "mismatch" || match === "error")
+        return <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-rose-100 ring-1 ring-rose-200"><XCircle className="h-5 w-5 text-rose-600" /></div>;
+      return <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-amber-100 ring-1 ring-amber-200"><MinusCircle className="h-5 w-5 text-amber-600" /></div>;
+    };
+
     return (
-      <Empty
-        icon={<ShieldCheck className="h-10 w-10 text-slate-200" />}
-        title="暂无报告"
-        desc="完成一次核验后，这里会显示结果并可下载 Excel。"
-      />
+      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm transition-shadow hover:shadow-md">
+        {/* 头部 */}
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${accent.headerBg} hover:brightness-[0.97]`}
+        >
+          <span className="text-sm font-semibold text-slate-800">{r.record_name || "人物卡片"}</span>
+          <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${accent.badgeSoft}`}>
+            {mc}/{rows.length}
+          </span>
+          <span className={`ml-auto inline-flex items-center rounded-full ${accent.badge} px-2.5 py-0.5 text-[11px] font-semibold text-white`}>
+            {OVERALL_LABELS[r.overall]}
+          </span>
+          <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
+        </button>
+
+        {/* 展开内容 */}
+        {expanded && (
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                {/* 表头 */}
+                <thead>
+                  <tr className="border-b border-slate-100">
+                    <th className="w-[42%] bg-slate-50/60 px-4 py-2 text-left text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                      {isEntry ? "EXCEL / 来源" : "左侧 / EXCEL"}
+                    </th>
+                    <th className="w-[16%] px-0 py-2"></th>
+                    <th className="w-[42%] bg-slate-50/60 px-4 py-2 text-left text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                      {isEntry ? "右侧网页（填入）" : "右侧网页"}
+                    </th>
+                  </tr>
+                </thead>
+                {/* 数据行 */}
+                <tbody>
+                  {rows.map((row) => {
+                    const isMismatch = row.match === "mismatch" || row.match === "error";
+                    return (
+                      <tr key={row.key} className={`border-b border-slate-50 last:border-0 ${isMismatch && !isEntry ? "bg-rose-50/20" : ""}`}>
+                        {/* 左侧值 */}
+                        <td className="px-4 py-2.5 align-top">
+                          <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-400">{row.leftLabel}</div>
+                          <div className={`mt-1 text-[13px] leading-relaxed ${isMismatch && !isEntry ? "font-semibold text-rose-600" : "text-slate-700"}`}>
+                            {row.leftValue || <span className="text-slate-300">—</span>}
+                          </div>
+                        </td>
+                        {/* 中间状态图标 */}
+                        <td className="px-0 py-2.5 text-center align-middle">
+                          <StatusIcon match={row.match} />
+                        </td>
+                        {/* 右侧值 */}
+                        <td className="px-4 py-2.5 align-top">
+                          <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-400">{row.rightLabel}</div>
+                          <div className={`mt-1 text-[13px] leading-relaxed ${isMismatch && !isEntry ? "font-semibold text-rose-600" : "text-slate-700"}`}>
+                            {row.rightValue || <span className="text-slate-300">—</span>}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* 底部统计条 */}
+            <div className={`border-t border-slate-100 px-4 py-2 text-xs font-medium ${accent.footer}`}>
+              {mc}/{rows.length} 项{isEntry ? "已填入" : "一致"}{mmc === 0 ? (isEntry ? " · 全部完成" : " · 全部一致") : (isEntry ? ` · ${mmc} 项待处理` : ` · ${mmc} 处不一致`)}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+
+  // 单人简洁对比表格
+  const SingleCompareTable = ({ rows }: { rows: SideCompareRow[] }) => {
+    const isEntry = appMode === "entry";
+    return (
+      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+        <table className="w-full">
+          <thead>
+            <tr className="border-b border-slate-100">
+              <th className="w-[42%] bg-slate-50/60 px-4 py-2 text-left text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                {isEntry ? "EXCEL / 来源" : "左侧 / EXCEL"}
+              </th>
+              <th className="w-[16%] px-0 py-2"></th>
+              <th className="w-[42%] bg-slate-50/60 px-4 py-2 text-left text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                {isEntry ? "右侧网页（填入）" : "右侧网页"}
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const isMismatch = row.match === "mismatch" || row.match === "error";
+              return (
+                <tr key={row.key} className={`border-b border-slate-50 last:border-0 ${isMismatch && !isEntry ? "bg-rose-50/20" : ""}`}>
+                  <td className="px-4 py-2.5 align-top">
+                    <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-400">{row.leftLabel}</div>
+                    <div className={`mt-1 text-[13px] leading-relaxed ${isMismatch && !isEntry ? "font-semibold text-rose-600" : "text-slate-700"}`}>
+                      {row.leftValue || <span className="text-slate-300">—</span>}
+                    </div>
+                  </td>
+                  <td className="px-0 py-2.5 text-center align-middle">
+                    {isEntry ? (
+                      <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-100 ring-1 ring-indigo-200">
+                        <MoveRight className="h-4 w-4 text-indigo-600" />
+                      </div>
+                    ) : row.match === "match" ? (
+                      <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-100 ring-1 ring-emerald-200"><CheckCircle2 className="h-5 w-5 text-emerald-600" /></div>
+                    ) : isMismatch ? (
+                      <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-rose-100 ring-1 ring-rose-200"><XCircle className="h-5 w-5 text-rose-600" /></div>
+                    ) : (
+                      <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-amber-100 ring-1 ring-amber-200"><MinusCircle className="h-5 w-5 text-amber-600" /></div>
+                    )}
+                  </td>
+                  <td className="px-4 py-2.5 align-top">
+                    <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-400">{row.rightLabel}</div>
+                    <div className={`mt-1 text-[13px] leading-relaxed ${isMismatch && !isEntry ? "font-semibold text-rose-600" : "text-slate-700"}`}>
+                      {row.rightValue || <span className="text-slate-300">—</span>}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
+  // 构建字段对比内容
+  let fieldContent: React.ReactNode;
+  let summaryBar: React.ReactNode = null;
+
+  if (hasReports) {
+    const passCount = reports.filter((r) => r.overall === "pass").length;
+    const failCount = reports.filter((r) => r.overall === "fail").length;
+    const reviewCount = reports.filter((r) => r.overall === "review").length;
+    const filtered = filter === "all" ? reports : reports.filter((r) => r.overall === filter);
+
+    const FilterChip = ({ target, label, activeBg, inactiveBg, activeText, inactiveText, activeRing }: { target: typeof filter; label: string; activeBg: string; inactiveBg: string; activeText: string; inactiveText: string; activeRing: string }) => (
+      <button onClick={() => setFilter(target)} className={["rounded-full px-2.5 py-1 text-[11px] font-medium transition-all", filter === target ? `${activeBg} ${activeText} ring-2 ${activeRing} shadow-sm` : `${inactiveBg} ${inactiveText} ring-1 ring-transparent hover:ring-slate-300`].join(" ")}>
+        {label}
+      </button>
+    );
+
+    summaryBar = (
+      <div className="mb-3 flex shrink-0 flex-wrap items-center gap-2">
+        <FilterChip target="all" label={`共 ${reports.length} 人`} activeBg="bg-slate-800" inactiveBg="bg-slate-200" activeText="text-white" inactiveText="text-slate-600" activeRing="ring-slate-500" />
+        {passCount > 0 && <FilterChip target="pass" label={`✓ 通过 ${passCount}`} activeBg="bg-emerald-500" inactiveBg="bg-emerald-100" activeText="text-white" inactiveText="text-emerald-700" activeRing="ring-emerald-300" />}
+        {failCount > 0 && <FilterChip target="fail" label={`✗ 问题 ${failCount}`} activeBg="bg-rose-500" inactiveBg="bg-rose-100" activeText="text-white" inactiveText="text-rose-700" activeRing="ring-rose-300" />}
+        {reviewCount > 0 && <FilterChip target="review" label={`⚠ 复核 ${reviewCount}`} activeBg="bg-amber-500" inactiveBg="bg-amber-100" activeText="text-white" inactiveText="text-amber-700" activeRing="ring-amber-300" />}
+      </div>
+    );
+    fieldContent = <div className="space-y-3">{filtered.map((r) => <PersonReportCard key={r.task_id || r.record_id} r={r} />)}</div>;
+  } else if (showSample) {
+    const passCount = sampleReports.filter((r) => r.overall === "pass").length;
+    const failCount = sampleReports.filter((r) => r.overall === "fail").length;
+    const filtered = filter === "all" ? sampleReports : sampleReports.filter((r) => r.overall === filter);
+
+    const FilterChip = ({ target, label, activeBg, inactiveBg, activeText, inactiveText, activeRing }: { target: typeof filter; label: string; activeBg: string; inactiveBg: string; activeText: string; inactiveText: string; activeRing: string }) => (
+      <button onClick={() => setFilter(target)} className={["rounded-full px-2.5 py-1 text-[11px] font-medium transition-all", filter === target ? `${activeBg} ${activeText} ring-2 ${activeRing} shadow-sm` : `${inactiveBg} ${inactiveText} ring-1 ring-transparent hover:ring-slate-300`].join(" ")}>
+        {label}
+      </button>
+    );
+
+    summaryBar = (
+      <div className="mb-3 flex shrink-0 flex-wrap items-center gap-2">
+        <FilterChip target="all" label={`共 ${sampleReports.length} 人`} activeBg="bg-slate-800" inactiveBg="bg-slate-200" activeText="text-white" inactiveText="text-slate-600" activeRing="ring-slate-500" />
+        <FilterChip target="pass" label={`✓ 通过 ${passCount}`} activeBg="bg-emerald-500" inactiveBg="bg-emerald-100" activeText="text-white" inactiveText="text-emerald-700" activeRing="ring-emerald-300" />
+        <FilterChip target="fail" label={`✗ 问题 ${failCount}`} activeBg="bg-rose-500" inactiveBg="bg-rose-100" activeText="text-white" inactiveText="text-rose-700" activeRing="ring-rose-300" />
+        <button
+          onClick={() => { setShowSample(false); setFilter("all"); }}
+          className="ml-auto rounded-md bg-slate-100 px-2 py-1 text-[10px] text-slate-600 hover:bg-slate-200"
+        >
+          关闭
+        </button>
+      </div>
+    );
+    fieldContent = <div className="space-y-3">{filtered.map((r) => <PersonReportCard key={r.task_id} r={r} />)}</div>;
+  } else if (report && report.entries.length > 0) {
+    const rows: SideCompareRow[] = report.entries.map((e, i) => ({
+      key: `${e.left_field || e.right_label || "field"}-${i}`,
+      leftLabel: FIELD_LABELS[e.left_field] || e.left_field || "左侧来源",
+      leftValue: e.left_value || "",
+      rightLabel: e.right_label || "右侧元素",
+      rightValue: e.right_value || "",
+      match: e.match,
+      note: e.reasoning,
+    }));
+    const mc = rows.filter((x) => x.match === "match").length;
+    summaryBar = (
+      <div className="mb-3 flex shrink-0 items-center gap-2">
+        <span className="rounded-full bg-slate-800 px-2 py-0.5 text-[10px] text-white">{report.summary || OVERALL_LABELS[report.overall || "review"]}</span>
+        <span className="text-xs text-slate-500">{mc}/{rows.length} 一致</span>
+      </div>
+    );
+    fieldContent = <SingleCompareTable rows={rows} />;
+  } else if (hasCompare) {
+    const rows: SideCompareRow[] = comparisons.map((c) => ({
+      key: c.field,
+      leftLabel: FIELD_LABELS[c.field] || c.field,
+      leftValue: c.excel_value || c.passport_value || "",
+      rightLabel: c.website_label || c.field,
+      rightValue: c.website_value || "",
+      match: c.match,
+      note: c.note,
+    }));
+    fieldContent = <SingleCompareTable rows={rows} />;
+  } else {
+    fieldContent = (
+      <div className="flex h-full min-h-[140px] flex-col items-center justify-center gap-2 text-[11px] text-slate-400">
+        <Table2 className="h-8 w-8 text-slate-300" />
+        <div>完成核验后显示字段对比</div>
+        <button
+          onClick={() => setShowSample(true)}
+          className="mt-1 flex items-center gap-1 rounded-lg bg-indigo-50 px-3 py-1.5 text-[11px] font-medium text-indigo-600 ring-1 ring-indigo-200 transition-colors hover:bg-indigo-100"
+        >
+          <Eye className="h-3.5 w-3.5" />
+          查看DEMO
+        </button>
+      </div>
     );
   }
-  const rows: SideCompareRow[] = report.entries.map((e, i) => ({
-    key: `${e.left_field || e.right_label || "field"}-${i}`,
-    leftLabel: FIELD_LABELS[e.left_field] || e.left_field || "左侧来源",
-    leftValue: e.left_value || "",
-    rightLabel: e.right_label || "右侧元素",
-    rightValue: e.right_value || "",
-    match: e.match,
-    note: e.reasoning,
-  }));
-  return (
-    <div className="p-3">
-      <div className="mb-2 flex items-center gap-2">
-        <span className="rounded-full bg-slate-800 px-2 py-0.5 text-[10px] text-white">
-          {report.summary || report.overall}
-        </span>
-        <span className="text-xs text-slate-500">{report.entries.length} 条</span>
+
+  // 文件对比内容（保持不变）
+  let fileContent: React.ReactNode;
+  if (docExtracting) {
+    fileContent = <div className="flex h-full min-h-[100px] items-center justify-center text-[11px] text-slate-400">提取中…</div>;
+  } else if (docExtract && docExtract.entries.length > 0) {
+    const allMatch = docExtract.entries.every((e) => e.match === "match");
+    fileContent = (
+      <div className="space-y-2">
+        <div className="mb-1">
+          <span className={["rounded-full px-1.5 py-0.5 text-[10px] font-medium", allMatch ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"].join(" ")}>
+            {allMatch ? "全部一致" : "存在差异"}
+          </span>
+          <span className="ml-1 text-[10px] text-slate-400">{docExtract.filename}</span>
+        </div>
+        {docExtract.entries.map((e, i) => (
+          <div key={i} className="rounded border border-slate-100 p-2 text-xs">
+            <div className="mb-1 flex items-center gap-1.5">
+              <span className={["rounded-full px-1.5 py-0.5 text-[10px] font-medium", e.match === "match" ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"].join(" ")}>
+                {MATCH_LABELS[e.match] || e.match}
+              </span>
+              <span className="font-medium text-slate-700">{e.label || e.field}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-[11px]">
+              <div>
+                <div className="text-[10px] text-slate-400">提取</div>
+                <div className="text-slate-700 break-all">{e.left_value || "—"}</div>
+              </div>
+              <div>
+                <div className="text-[10px] text-slate-400">期望</div>
+                <div className="text-slate-700 break-all">{e.right_value || "—"}</div>
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
-      <SideBySideCompare rows={rows} appMode={appMode} />
+    );
+  } else {
+    fileContent = <div className="flex h-full min-h-[100px] items-center justify-center text-[11px] text-slate-400">上传文档后显示对比</div>;
+  }
+
+  // AI视野内容
+  let shotContent: React.ReactNode;
+  if (shots.length > 0) {
+    shotContent = (
+      <div className="grid grid-cols-2 gap-1.5">
+        {shots.map((s, i) => (
+          <div key={`${s.step}-${i}`} className="overflow-hidden rounded-md border border-slate-200 bg-slate-900">
+            <div className="flex items-center justify-between bg-black/40 px-1.5 py-0.5 text-[9px] text-white">
+              <span>Step {s.step}</span>
+              {s.boxes && s.boxes.length > 0 && <span className="rounded bg-brand-600 px-1">{s.boxes.length}框</span>}
+            </div>
+            <img src={`data:image/png;base64,${s.screenshot}`} alt={`step ${s.step}`} className="h-24 w-full object-cover" />
+          </div>
+        ))}
+      </div>
+    );
+  } else if (running) {
+    shotContent = <div className="flex h-full min-h-[100px] items-center justify-center text-[11px] text-slate-400">等待截图…</div>;
+  } else {
+    shotContent = <div className="flex h-full min-h-[100px] items-center justify-center text-[11px] text-slate-400">核验中显示AI视野</div>;
+  }
+
+  return (
+    <div className="flex h-full flex-col p-3">
+      <div className="min-h-0 flex-1 grid grid-cols-1 gap-3 lg:grid-cols-3 lg:h-full">
+        {/* 字段对比卡片 */}
+        <div className="flex max-h-[55vh] flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm lg:max-h-full">
+          <div className="flex shrink-0 items-center gap-1.5 border-b border-slate-200 bg-slate-50/80 px-2.5 py-1.5 text-[11px] font-semibold text-slate-700">
+            <Table2 className="h-3.5 w-3.5 text-slate-500" />
+            字段对比
+          </div>
+          {summaryBar && <div className="shrink-0 px-2 pt-2">{summaryBar}</div>}
+          <div className="min-h-0 flex-1 overflow-auto p-2">{fieldContent}</div>
+        </div>
+
+        {/* 文件对比卡片 */}
+        <div className="flex max-h-[55vh] flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm lg:max-h-full">
+          <div className="flex shrink-0 items-center gap-1.5 border-b border-emerald-200 bg-emerald-50/60 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-800">
+            <FileText className="h-3.5 w-3.5 text-emerald-600" />
+            文件对比
+          </div>
+          <div className="flex-1 overflow-auto p-2">{fileContent}</div>
+        </div>
+
+        {/* AI视野卡片 */}
+        <div className="flex max-h-[55vh] flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm lg:max-h-full">
+          <div className="flex shrink-0 items-center gap-1.5 border-b border-amber-200 bg-amber-50/60 px-2.5 py-1.5 text-[11px] font-semibold text-amber-800">
+            <Eye className="h-3.5 w-3.5 text-amber-600" />
+            AI视野
+          </div>
+          <div className="flex-1 overflow-auto p-2">{shotContent}</div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1300,6 +1700,228 @@ function QueueTab({
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+// ============ 执行面板：任务队列 + 操作记录 + 简化日志 ============
+function ExecutionTab({
+  steps,
+  logEndRef,
+  marks,
+  onRemoveMark,
+  onClearMarks,
+  onReplay,
+  replaying,
+  replayCursor,
+  onStopReplay,
+  taskQueue,
+  queueRunning,
+  queueCursor,
+  onAddToQueue,
+  onRemoveFromQueue,
+  onRenameQueueTask,
+  onClearQueue,
+  onRunQueue,
+  onStopQueue,
+  canAddToQueue,
+}: {
+  steps: VerificationStep[];
+  logEndRef: React.RefObject<HTMLDivElement>;
+  marks: PickedMark[];
+  onRemoveMark?: (id: string) => void;
+  onClearMarks?: () => void;
+  onReplay?: () => void;
+  replaying?: boolean;
+  replayCursor?: number;
+  onStopReplay?: () => void;
+  taskQueue: QueuedTask[];
+  queueRunning?: boolean;
+  queueCursor?: number;
+  onAddToQueue?: () => void;
+  onRemoveFromQueue?: (id: string) => void;
+  onRenameQueueTask?: (id: string, name: string) => void;
+  onClearQueue?: () => void;
+  onRunQueue?: () => void;
+  onStopQueue?: () => void;
+  canAddToQueue?: boolean;
+}) {
+  return (
+    <div className="flex h-full flex-col">
+      {/* 上半区：任务队列 + 操作记录，左右并排 */}
+      <div className="flex shrink-0 flex-col gap-3 border-b border-slate-200/60 p-3 lg:h-[45%] lg:flex-row lg:min-h-[200px]">
+        {/* 任务队列 */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white/60">
+          <div className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-slate-50/80 px-3 py-1.5">
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-700">
+              <Layers className="h-3.5 w-3.5 text-indigo-600" />
+              任务队列
+              {taskQueue.length > 0 && (
+                <span className="rounded-full bg-indigo-100 px-1.5 py-0.5 text-[10px] text-indigo-700">{taskQueue.length}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-1">
+              {onAddToQueue && (
+                <button
+                  onClick={onAddToQueue}
+                  disabled={!canAddToQueue}
+                  className="rounded-md bg-indigo-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-indigo-700 disabled:opacity-40"
+                >
+                  + 添加
+                </button>
+              )}
+              {queueRunning && onStopQueue ? (
+                <button onClick={onStopQueue} className="rounded-md bg-rose-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-rose-700">停止</button>
+              ) : onRunQueue && taskQueue.length > 0 ? (
+                <button onClick={onRunQueue} className="rounded-md bg-emerald-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-emerald-700">执行全部</button>
+              ) : null}
+              {onClearQueue && taskQueue.length > 0 && !queueRunning && (
+                <button onClick={onClearQueue} className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600"><Trash2 className="h-3 w-3" /></button>
+              )}
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto p-2">
+            {taskQueue.length === 0 ? (
+              <div className="flex h-full min-h-[80px] flex-col items-center justify-center text-[11px] text-slate-400">
+                <Layers className="mb-1 h-6 w-6 text-slate-300" />
+                暂无排队任务
+              </div>
+            ) : (
+              <ul className="space-y-1.5">
+                {taskQueue.map((task, i) => {
+                  const isCurrent = queueRunning && i === queueCursor;
+                  const name = task.name && task.name !== "未命名任务" ? task.name : `任务 ${i + 1}`;
+                  const record = task.cardRecords.length;
+                  return (
+                    <li key={task.id} className={["flex items-center gap-2 rounded-lg border px-2.5 py-1.5", isCurrent ? "border-indigo-300 bg-indigo-50 shadow-sm" : "border-slate-200 bg-white hover:bg-slate-50"].join(" ")}>
+                      {isCurrent ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-indigo-600" /> : <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-slate-400" />}
+                      <span className="flex-1 truncate text-xs font-medium text-slate-700">{name}</span>
+                      <span className="text-[10px] text-slate-400">{record}人</span>
+                      {!queueRunning && (
+                        <button onClick={() => onRemoveFromQueue?.(task.id)} className="rounded p-0.5 text-slate-300 hover:bg-rose-50 hover:text-rose-500"><X className="h-3 w-3" /></button>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        {/* 操作记录 */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white/60">
+          <div className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-slate-50/80 px-3 py-1.5">
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-700">
+              <ListOrdered className="h-3.5 w-3.5 text-violet-600" />
+              操作记录
+              {marks.length > 0 && (
+                <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] text-violet-700">{marks.length}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-1">
+              {onReplay && marks.length >= 3 && !replaying && (
+                <button onClick={onReplay} className="flex items-center gap-0.5 rounded-md bg-violet-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-violet-700">
+                  <PlayCircle className="h-3 w-3" /> 回放
+                </button>
+              )}
+              {replaying && onStopReplay && (
+                <button onClick={onStopReplay} className="flex items-center gap-0.5 rounded-md bg-rose-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-rose-700">
+                  <PauseCircle className="h-3 w-3" /> 暂停
+                </button>
+              )}
+              {onClearMarks && marks.length > 0 && !replaying && (
+                <button onClick={onClearMarks} className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600"><Trash2 className="h-3 w-3" /></button>
+              )}
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto p-2">
+            {marks.length === 0 ? (
+              <div className="flex h-full min-h-[80px] flex-col items-center justify-center text-[11px] text-slate-400">
+                <MousePointerClick className="mb-1 h-6 w-6 text-slate-300" />
+                选择模式下点击页面元素
+              </div>
+            ) : (
+              <ul className="space-y-1">
+                {marks.map((m, idx) => {
+                  const isPlaying = replaying && idx === replayCursor;
+                  const wfLabel = m.workflow === "data-source" ? "数据源" : m.workflow === "review" ? "审查" : "录入";
+                  return (
+                    <li key={m.id} className={["flex items-center gap-2 rounded-lg border px-2 py-1.5 text-xs", isPlaying ? "border-violet-300 bg-violet-50 shadow-sm ring-1 ring-violet-200" : "border-slate-200 bg-white/70 hover:bg-white"].join(" ")}>
+                      <span className={["flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-bold", isPlaying ? "bg-violet-600 text-white" : "bg-slate-200 text-slate-600"].join(" ")}>{m.order}</span>
+                      <span className="shrink-0 text-[10px] text-slate-400">{wfLabel}</span>
+                      <span className="flex-1 truncate text-slate-700" title={m.selector}>{m.label || m.selector}</span>
+                      <span className={["rounded px-1.5 py-0.5 text-[9px] font-medium", m.side === "right" ? "bg-emerald-100 text-emerald-700" : "bg-sky-100 text-sky-700"].join(" ")}>{m.side === "right" ? "右" : "左"}</span>
+                      {onRemoveMark && !replaying && (
+                        <button onClick={() => onRemoveMark(m.id)} className="rounded p-0.5 text-slate-300 hover:bg-rose-50 hover:text-rose-500"><X className="h-3 w-3" /></button>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* 下半区：简化执行日志 */}
+      <div className="min-h-0 flex-1 flex flex-col overflow-hidden">
+        <div className="flex shrink-0 items-center gap-1.5 border-b border-slate-200/60 bg-slate-50/40 px-3 py-1.5 text-[11px] font-semibold text-slate-600">
+          <Activity className="h-3.5 w-3.5 text-slate-500" />
+          执行进度
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto p-3">
+          {steps.length === 0 ? (
+            <div className="flex h-full flex-col items-center justify-center text-[11px] text-slate-400">
+              <Activity className="mb-1 h-8 w-8 text-slate-300" />
+              执行时显示进度
+            </div>
+          ) : (
+            <ul className="space-y-1.5">
+              {steps.map((s) => {
+                // 任务大标题
+                if (s.isTaskStart) {
+                  return (
+                    <li key={`task-${s.step}`} className="-mx-2 my-2 first:mt-0">
+                      <div className="flex items-center gap-2 rounded-lg border-2 border-indigo-300 bg-gradient-to-r from-indigo-600 to-violet-600 px-3 py-2 shadow-md">
+                        <Layers className="h-4 w-4 shrink-0 text-white" />
+                        <span className="text-[12px] font-bold text-white">{s.taskName || "任务"}</span>
+                        <span className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] font-semibold text-white">{s.taskIndex}/{s.taskTotal}</span>
+                        <span className="ml-auto text-[10px] text-indigo-200">{s.taskRecordCount}张卡片</span>
+                      </div>
+                    </li>
+                  );
+                }
+                // 人物分隔
+                if (s.isRecordStart) {
+                  return (
+                    <li key={`record-${s.step}`} className="-mx-1 my-1.5">
+                      <div className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50/80 px-3 py-1.5 shadow-sm">
+                        <UserCircle className="h-4 w-4 shrink-0 text-indigo-600" />
+                        <span className="text-[11px] font-bold text-indigo-900">{s.recordName || "人物卡片"}</span>
+                        <span className="rounded-full bg-indigo-600 px-2 py-0.5 text-[10px] font-semibold text-white">{s.recordIndex}/{s.recordTotal}</span>
+                      </div>
+                    </li>
+                  );
+                }
+                // 普通步骤：人类可读简化版
+                const icon = s.success
+                  ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                  : <XCircle className="h-3.5 w-3.5 shrink-0 text-rose-500" />;
+                return (
+                  <li key={s.step} className="flex items-start gap-2 rounded px-2 py-1 animate-fade-in hover:bg-slate-50/60">
+                    {icon}
+                    <span className="text-[11px] text-slate-600 leading-5">
+                      {s.description}
+                      {s.detail && <span className="ml-1 text-slate-400">— {s.detail}</span>}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          <div ref={logEndRef} />
+        </div>
+      </div>
     </div>
   );
 }

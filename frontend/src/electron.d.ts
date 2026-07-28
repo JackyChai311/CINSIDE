@@ -80,6 +80,7 @@ export interface ElectronAPI {
   viewShow: (side: ViewSide, bounds?: Bounds, url?: string | null) => Promise<void>;
   viewHide: (side: ViewSide) => Promise<void>;
   viewHideAll: () => Promise<void>;
+  viewSetZoom: (side: ViewSide, factor: number) => Promise<void>;
 
   viewExecuteJS: (side: ViewSide, script: string) => Promise<unknown>;
   viewInsertCSS: (side: ViewSide, css: string) => Promise<unknown>;
@@ -106,6 +107,7 @@ export interface ElectronAPI {
   onPanelState: (callback: (state: unknown) => void) => () => void;
   onPanelAction: (callback: (action: string, payload?: unknown) => void) => () => void;
   onPanelReattached: (callback: (side: string) => void) => () => void;
+  onDetachedViewReady: (callback: (side: string) => void) => () => void;
 
   // === 脱离的浏览器面板视图控制 ===
   detachedViewShow: (side: string, bounds: Bounds, url?: string | null) => Promise<void>;

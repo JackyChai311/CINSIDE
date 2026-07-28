@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   viewShow: (side, bounds, url) => ipcRenderer.invoke("view-show", side, bounds, url),
   viewHide: (side) => ipcRenderer.invoke("view-hide", side),
   viewHideAll: () => ipcRenderer.invoke("view-hide-all"),
+  viewSetZoom: (side, factor) => ipcRenderer.invoke("view-set-zoom", side, factor),
 
   // 在指定 view 中执行 JS
   viewExecuteJS: (side, script) => ipcRenderer.invoke("view-execute-js", side, script),
@@ -98,6 +99,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const handler = (_e, side) => callback(side);
     ipcRenderer.on("panel-reattached", handler);
     return () => ipcRenderer.removeListener("panel-reattached", handler);
+  },
+  onDetachedViewReady: (callback) => {
+    const handler = (_e, side) => callback(side);
+    ipcRenderer.on("detached-view-ready", handler);
+    return () => ipcRenderer.removeListener("detached-view-ready", handler);
   },
 
   // === 脱离的浏览器面板视图控制 ===
