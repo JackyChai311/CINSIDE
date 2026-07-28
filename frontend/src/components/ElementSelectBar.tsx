@@ -222,6 +222,10 @@ onRequestSaveSkillAndRun,
         // 来自 Excel 视图的单元格拾取
         source = "excel";
         leftField = leftPicked.selector; // 字段名
+      } else if (leftPicked.tag === "doc-extract") {
+        // 来自「提取元素」面板的文档提取值 → 护照来源，left_field = 字段名
+        source = "passport";
+        leftField = leftPicked.selector; // 字段名（name / passport_no / birth_date …）
       } else {
         // 用左侧网页拾取的元素
         source = "database";
@@ -471,7 +475,7 @@ onRequestSaveSkillAndRun,
               {/* 左侧来源 + 字段 */}
               {leftPicked ? (
                 <span className="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 ring-1 ring-blue-200">
-                  {leftPicked.tag === "excel-cell" ? "Excel" : "左网页"}: {leftPicked.label || leftPicked.selector}
+                  {leftPicked.tag === "excel-cell" ? "Excel" : leftPicked.tag === "doc-extract" ? "护照提取" : "左网页"}: {leftPicked.label || leftPicked.selector}
                 </span>
               ) : (
                 <>
