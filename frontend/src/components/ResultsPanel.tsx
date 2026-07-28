@@ -85,6 +85,12 @@ interface Props {
   docExtracting?: boolean;
   /** 切换到文档tab的触发值 */
   switchToDocSignal?: number;
+  /** 当前拾取目标侧（审查/录入模式下的光标） */
+  pickTarget?: "left" | "right" | null;
+  /** 当前步骤模式：审查/录入 */
+  addingStepMode?: "review" | "entry" | null;
+  /** 点击「提取元素」字段卡片时回调（注入为合成拾取值） */
+  onPickExtractedField?: (side: "left" | "right", field: string, value: string) => void;
   // ============ 任务队列 ============
   taskQueue?: QueuedTask[];
   queueRunning?: boolean;
@@ -130,6 +136,9 @@ export default function ResultsPanel({
   docExtract = null,
   docExtracting = false,
   switchToDocSignal = 0,
+  pickTarget = null,
+  addingStepMode = null,
+  onPickExtractedField,
   // 任务队列
   taskQueue = [],
   queueRunning = false,
@@ -227,6 +236,8 @@ export default function ResultsPanel({
               shots={shots}
               running={running}
               appMode={appMode}
+              addingStepMode={addingStepMode}
+              onPickExtractedField={onPickExtractedField}
             />
           </div>
         )}
@@ -598,6 +609,8 @@ function ReportTab({
   shots,
   running,
   appMode,
+  addingStepMode,
+  onPickExtractedField,
 }: {
   report: VerificationReport | null;
   reports: VerificationReport[];
@@ -608,11 +621,14 @@ function ReportTab({
   shots: ScreenshotEvent[];
   running: boolean;
   appMode: AppMode;
+  addingStepMode?: "review" | "entry" | null;
+  onPickExtractedField?: (side: "left" | "right", field: string, value: string) => void;
 }) {
   const hasReports = reports && reports.length > 0;
   const hasCompare = resultPresent && comparisons.length > 0;
   const hasFieldData = hasReports || (report && report.entries.length > 0) || hasCompare;
   const [showSample, setShowSample] = useState(false);
+  const [showDocSample, setShowDocSample] = useState(false);
   const [filter, setFilter] = useState<"all" | "pass" | "fail" | "review">("all");
 
   // DEMO示例数据
@@ -918,66 +934,374 @@ function ReportTab({
     );
   }
 
-  // 文件对比内容（保持不变）
-  let fileContent: React.ReactNode;
+  // 文件处理内容：放置从网页下载的 PDF / JPG / JPEG 文件
+  // 点击「+文件提取」→ 点击网页下载按钮 → 文件下载到此处 → 自动旋转到正面 + 裁剪白边 → OCR 提取
+  let fileProcessContent: React.ReactNode;
   if (docExtracting) {
-    fileContent = <div className="flex h-full min-h-[100px] items-center justify-center text-[11px] text-slate-400">提取中…</div>;
-  } else if (docExtract && docExtract.entries.length > 0) {
-    const allMatch = docExtract.entries.every((e) => e.match === "match");
-    fileContent = (
-      <div className="space-y-2">
-        <div className="mb-1">
-          <span className={["rounded-full px-1.5 py-0.5 text-[10px] font-medium", allMatch ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"].join(" ")}>
-            {allMatch ? "全部一致" : "存在差异"}
+    fileProcessContent = (
+      <div className="flex h-full min-h-[100px] flex-col items-center justify-center gap-2 text-[11px] text-slate-400">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-brand-200 border-t-brand-600" />
+        <div>正在下载并处理文件…</div>
+        <div className="text-[10px] text-slate-400">自动旋转到正面 · 裁剪白边 · OCR 识别</div>
+      </div>
+    );
+  } else if (showDocSample) {
+    // DEMO 示例：模拟一张护照 JPG 图片被下载、预处理、OCR 识别后的文件处理面板
+    const sampleCompare = [
+      { field: "name", label: "姓名", left_value: "张三", right_value: "张三", match: "match" as FieldMatch },
+      { field: "passport_no", label: "护照号", left_value: "E12345678", right_value: "E12345678", match: "match" as FieldMatch },
+      { field: "birth_date", label: "出生日期", left_value: "1995-03-15", right_value: "1995-03-15", match: "match" as FieldMatch },
+      { field: "passport_expiry", label: "护照有效期", left_value: "2030-08-20", right_value: "2030-08-22", match: "mismatch" as FieldMatch },
+    ];
+    fileProcessContent = (
+      <div className="flex h-full flex-col">
+        {/* 文件信息条 */}
+        <div className="mb-2 flex flex-wrap items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50/60 px-2 py-1.5">
+          <FileText className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+          <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-slate-700">passport_zhangsan.jpg</span>
+          <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-medium text-violet-700">Vision OCR</span>
+        </div>
+        {/* 预处理后的图片占位（DEMO 用彩色块示意） */}
+        <div className="mb-2">
+          <div className="mb-1 flex items-center gap-1 text-[9px] font-medium text-emerald-600">
+            <CheckCircle2 className="h-3 w-3" />
+            已处理：自动旋转到正面 + 裁剪白边
+          </div>
+          <div className="overflow-hidden rounded-md border border-slate-200 bg-gradient-to-br from-slate-100 via-sky-50 to-indigo-50">
+            <div className="flex h-32 flex-col items-center justify-center gap-1 text-center">
+              <div className="rounded-md bg-white/80 px-3 py-1.5 shadow-sm ring-1 ring-slate-200">
+                <div className="text-[10px] font-bold text-slate-700">护照 · 张三</div>
+                <div className="text-[9px] text-slate-400">E12345678 · 1995-03-15</div>
+              </div>
+              <div className="text-[9px] text-slate-400">DEMO 图片预览</div>
+            </div>
+          </div>
+        </div>
+        {/* 对比条目 */}
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-1.5">
+            <span className="rounded-full bg-rose-100 px-1.5 py-0.5 text-[10px] font-medium text-rose-700">存在差异</span>
+            <span className="text-[10px] text-slate-400">4 项对比</span>
+          </div>
+          {sampleCompare.map((e, i) => (
+            <div key={i} className="rounded border border-slate-100 p-1.5 text-xs">
+              <div className="mb-1 flex items-center gap-1.5">
+                <span className={[
+                  "rounded-full px-1.5 py-0.5 text-[9px] font-medium",
+                  e.match === "match" ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700",
+                ].join(" ")}>
+                  {MATCH_LABELS[e.match] || e.match}
+                </span>
+                <span className="font-medium text-slate-700">{e.label}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+                <div>
+                  <div className="text-slate-400">提取</div>
+                  <div className="text-slate-700 break-all">{e.right_value}</div>
+                </div>
+                <div>
+                  <div className="text-slate-400">期望</div>
+                  <div className="text-slate-700 break-all">{e.left_value}</div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        {/* 关闭 DEMO 按钮 */}
+        <button
+          onClick={() => setShowDocSample(false)}
+          className="mt-2 self-end rounded-md bg-slate-100 px-2 py-1 text-[10px] text-slate-600 hover:bg-slate-200"
+        >
+          关闭 DEMO
+        </button>
+      </div>
+    );
+  } else {
+    // 判断文件类型
+    const fileUrl = docExtract?.file_url || docExtract?.source || "";
+    const isImageFile = /\.(png|jpe?g|webp|gif|bmp|tiff?)(\?|#|$)/i.test(fileUrl) || docExtract?.method === "vision_ocr";
+    const isPdfFile = /\.pdf(\?|#|$)/i.test(fileUrl) || (!isImageFile && docExtract?.method === "markitdown");
+
+    // 文件预览区：优先显示预处理后的图片（base64），其次显示原始图片 URL，PDF 显示图标占位
+    let filePreview: React.ReactNode = null;
+    if (docExtract) {
+      if (docExtract.processed_image) {
+        // 预处理后的图片（已自动旋转 + 裁剪白边）
+        filePreview = (
+          <div className="mb-2">
+            <div className="mb-1 flex items-center gap-1 text-[9px] font-medium text-emerald-600">
+              <CheckCircle2 className="h-3 w-3" />
+              已处理：自动旋转到正面 + 裁剪白边
+            </div>
+            <div className="overflow-hidden rounded-md border border-slate-200 bg-slate-50">
+              <img
+                src={`data:image/jpeg;base64,${docExtract.processed_image}`}
+                alt={docExtract.filename}
+                className="max-h-48 w-full object-contain"
+              />
+            </div>
+          </div>
+        );
+      } else if (isImageFile && fileUrl) {
+        // 原始图片 URL（未预处理或预处理失败）
+        filePreview = (
+          <div className="mb-2">
+            <div className="overflow-hidden rounded-md border border-slate-200 bg-slate-50">
+              <img
+                src={fileUrl}
+                alt={docExtract.filename}
+                className="max-h-48 w-full object-contain"
+                onError={(e) => {
+                  (e.target as HTMLImageElement).style.display = "none";
+                }}
+              />
+            </div>
+          </div>
+        );
+      } else if (isPdfFile) {
+        // PDF 文件：显示 PDF 图标 + 文件名 + 可点击链接
+        filePreview = (
+          <div className="mb-2">
+            <a
+              href={fileUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 rounded-md border border-slate-200 bg-rose-50/50 px-2.5 py-2 text-xs transition-colors hover:bg-rose-50"
+            >
+              <FileText className="h-8 w-8 shrink-0 text-rose-500" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium text-slate-700">{docExtract.filename}</div>
+                <div className="text-[10px] text-slate-400">PDF 文档 · 点击打开</div>
+              </div>
+              <ExternalLink className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+            </a>
+          </div>
+        );
+      }
+    }
+
+    // 顶部文件信息条
+    const fileInfo = docExtract ? (
+      <div className="mb-2 flex flex-wrap items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50/60 px-2 py-1.5">
+        <FileText className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+        <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-slate-700" title={docExtract.source}>
+          {docExtract.filename}
+        </span>
+        <span className={[
+          "rounded-full px-1.5 py-0.5 text-[9px] font-medium",
+          docExtract.method === "vision_ocr"
+            ? "bg-violet-100 text-violet-700"
+            : "bg-sky-100 text-sky-700",
+        ].join(" ")}>
+          {docExtract.method === "vision_ocr" ? "Vision OCR" : "MarkItDown"}
+        </span>
+      </div>
+    ) : null;
+
+    // 文件对比条目（如有）
+    const compareBlock = docExtract && docExtract.entries.length > 0 ? (
+      <div className="mb-2 space-y-1.5">
+        <div className="flex items-center gap-1.5">
+          <span className={[
+            "rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+            docExtract.entries.every((e) => e.match === "match")
+              ? "bg-emerald-100 text-emerald-700"
+              : "bg-rose-100 text-rose-700",
+          ].join(" ")}>
+            {docExtract.entries.every((e) => e.match === "match") ? "全部一致" : "存在差异"}
           </span>
-          <span className="ml-1 text-[10px] text-slate-400">{docExtract.filename}</span>
+          <span className="text-[10px] text-slate-400">{docExtract.entries.length} 项对比</span>
         </div>
         {docExtract.entries.map((e, i) => (
-          <div key={i} className="rounded border border-slate-100 p-2 text-xs">
+          <div key={i} className="rounded border border-slate-100 p-1.5 text-xs">
             <div className="mb-1 flex items-center gap-1.5">
-              <span className={["rounded-full px-1.5 py-0.5 text-[10px] font-medium", e.match === "match" ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"].join(" ")}>
+              <span className={[
+                "rounded-full px-1.5 py-0.5 text-[9px] font-medium",
+                e.match === "match" ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700",
+              ].join(" ")}>
                 {MATCH_LABELS[e.match] || e.match}
               </span>
               <span className="font-medium text-slate-700">{e.label || e.field}</span>
             </div>
-            <div className="grid grid-cols-2 gap-2 text-[11px]">
+            <div className="grid grid-cols-2 gap-1.5 text-[10px]">
               <div>
-                <div className="text-[10px] text-slate-400">提取</div>
+                <div className="text-slate-400">提取</div>
                 <div className="text-slate-700 break-all">{e.left_value || "—"}</div>
               </div>
               <div>
-                <div className="text-[10px] text-slate-400">期望</div>
+                <div className="text-slate-400">期望</div>
                 <div className="text-slate-700 break-all">{e.right_value || "—"}</div>
               </div>
             </div>
           </div>
         ))}
       </div>
-    );
-  } else {
-    fileContent = <div className="flex h-full min-h-[100px] items-center justify-center text-[11px] text-slate-400">上传文档后显示对比</div>;
-  }
+    ) : null;
 
-  // AI视野内容
-  let shotContent: React.ReactNode;
-  if (shots.length > 0) {
-    shotContent = (
-      <div className="grid grid-cols-2 gap-1.5">
-        {shots.map((s, i) => (
-          <div key={`${s.step}-${i}`} className="overflow-hidden rounded-md border border-slate-200 bg-slate-900">
-            <div className="flex items-center justify-between bg-black/40 px-1.5 py-0.5 text-[9px] text-white">
-              <span>Step {s.step}</span>
-              {s.boxes && s.boxes.length > 0 && <span className="rounded bg-brand-600 px-1">{s.boxes.length}框</span>}
+    // AI视野截图网格
+    const shotsBlock = shots.length > 0 ? (
+      <div>
+        <div className="mb-1.5 flex items-center gap-1 text-[10px] font-medium text-slate-500">
+          <Eye className="h-3 w-3" />
+          AI 视野（{shots.length}）
+        </div>
+        <div className="grid grid-cols-2 gap-1.5">
+          {shots.map((s, i) => (
+            <div key={`${s.step}-${i}`} className="overflow-hidden rounded-md border border-slate-200 bg-slate-900">
+              <div className="flex items-center justify-between bg-black/40 px-1.5 py-0.5 text-[9px] text-white">
+                <span>Step {s.step}</span>
+                {s.boxes && s.boxes.length > 0 && <span className="rounded bg-brand-600 px-1">{s.boxes.length}框</span>}
+              </div>
+              <img src={`data:image/png;base64,${s.screenshot}`} alt={`step ${s.step}`} className="h-20 w-full object-cover" />
             </div>
-            <img src={`data:image/png;base64,${s.screenshot}`} alt={`step ${s.step}`} className="h-24 w-full object-cover" />
+          ))}
+        </div>
+      </div>
+    ) : running ? (
+      <div className="flex h-full min-h-[60px] items-center justify-center text-[11px] text-slate-400">等待 AI 截图…</div>
+    ) : null;
+
+    fileProcessContent = (
+      <div className="flex h-full flex-col">
+        {fileInfo}
+        {filePreview}
+        {compareBlock}
+        {shotsBlock}
+        {!fileInfo && !compareBlock && !shotsBlock && (
+          <div className="flex h-full min-h-[140px] flex-col items-center justify-center gap-2 text-center text-[11px] text-slate-400">
+            <FileText className="h-8 w-8 text-slate-200" />
+            <div>点击「+文件提取」后下载的</div>
+            <div className="text-[10px] text-slate-400">PDF / JPG / JPEG 文件会放到这里</div>
+            <button
+              onClick={() => setShowDocSample(true)}
+              className="mt-1 flex items-center gap-1 rounded-lg bg-emerald-50 px-3 py-1.5 text-[11px] font-medium text-emerald-600 ring-1 ring-emerald-200 transition-colors hover:bg-emerald-100"
+            >
+              <Eye className="h-3.5 w-3.5" />
+              查看 DEMO
+            </button>
           </div>
-        ))}
+        )}
       </div>
     );
-  } else if (running) {
-    shotContent = <div className="flex h-full min-h-[100px] items-center justify-center text-[11px] text-slate-400">等待截图…</div>;
+  }
+
+  // 提取元素内容（原 AI视野 位置 → 改为显示从文件/图片中识别出的元素）
+  // 审查/录入模式下，点击字段卡片可注入为合成拾取值（作为左侧来源）
+  const canPickExtract = !!addingStepMode && !!onPickExtractedField;
+  // 拾取提示条：审查/录入模式下提示用户可点击字段卡片作为来源值
+  const pickHint = canPickExtract ? (
+    <div className="mb-1.5 flex items-center gap-1 rounded-md bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-700 ring-1 ring-amber-200">
+      <MousePointerClick className="h-3 w-3" />
+      点击字段卡片作为来源值（{addingStepMode === "review" ? "审查" : "录入"}）
+    </div>
+  ) : null;
+  // 渲染单个字段卡片（DEMO 和真实数据共用）
+  const renderFieldCard = (field: string, value: string) => {
+    const label = FIELD_LABELS[field] || field;
+    const isKeyField = ["name", "passport_no", "birth_date", "passport_issue", "passport_expiry"].includes(field);
+    return (
+      <div
+        key={field}
+        onClick={canPickExtract ? () => onPickExtractedField!("left", field, value) : undefined}
+        className={[
+          "rounded-md border px-2 py-1.5 transition-colors",
+          isKeyField
+            ? "border-indigo-200 bg-indigo-50/40"
+            : "border-slate-200 bg-white",
+          canPickExtract ? "cursor-pointer hover:border-brand-300 hover:bg-brand-50/60 hover:shadow-sm" : "",
+        ].join(" ")}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span className="select-none text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+            {label}
+          </span>
+          {isKeyField && (
+            <span className="select-none rounded bg-indigo-100 px-1 py-0.5 text-[8px] font-medium text-indigo-600">
+              关键
+            </span>
+          )}
+        </div>
+        <div className="mt-0.5 select-text break-all font-mono text-[12px] font-medium text-slate-800">
+          {value || "—"}
+        </div>
+      </div>
+    );
+  };
+  let extractedContent: React.ReactNode;
+  if (docExtracting) {
+    extractedContent = (
+      <div className="flex h-full min-h-[100px] items-center justify-center gap-2 text-[11px] text-slate-400">
+        <div className="h-4 w-4 animate-spin rounded-full border-2 border-brand-200 border-t-brand-600" />
+        提取中…
+      </div>
+    );
+  } else if (showDocSample) {
+    // DEMO 示例：模拟从护照图片中提取出的元素
+    const sampleFields: Record<string, string> = {
+      surname: "ZHANG",
+      given_name: "SAN",
+      name: "ZHANG SAN",
+      passport_no: "E12345678",
+      nationality: "CHINESE",
+      birth_date: "1995-03-15",
+      gender: "M",
+      passport_issue: "2020-08-20",
+      passport_expiry: "2030-08-22",
+      issue_place: "BEIJING",
+    };
+    const fieldOrder = ["name", "surname", "given_name", "passport_no", "nationality", "birth_date", "gender", "passport_issue", "passport_expiry", "issue_place", "email", "phone"];
+    const fieldEntries = Object.entries(sampleFields)
+      .filter(([, v]) => v && String(v).trim())
+      .sort((a, b) => {
+        const ia = fieldOrder.indexOf(a[0]);
+        const ib = fieldOrder.indexOf(b[0]);
+        return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+      });
+    extractedContent = (
+      <div className="space-y-1.5">
+        {pickHint}
+        <div className="mb-1 flex items-center gap-1 text-[10px] text-slate-500">
+          <Database className="h-3 w-3" />
+          共提取 {fieldEntries.length} 项元素
+        </div>
+        {fieldEntries.map(([field, value]) => renderFieldCard(field, String(value)))}
+      </div>
+    );
+  } else if (docExtract && docExtract.fields && Object.keys(docExtract.fields).length > 0) {
+    // 按字段顺序展示提取出的元素（姓名、护照号、日期等）
+    const fieldOrder = ["name", "passport_no", "nationality", "birth_date", "gender", "passport_issue", "passport_expiry", "email", "phone"];
+    const fieldEntries = Object.entries(docExtract.fields)
+      .filter(([, v]) => v && String(v).trim())
+      .sort((a, b) => {
+        const ia = fieldOrder.indexOf(a[0]);
+        const ib = fieldOrder.indexOf(b[0]);
+        return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+      });
+    extractedContent = (
+      <div className="space-y-1.5">
+        {pickHint}
+        <div className="mb-1 flex items-center gap-1 text-[10px] text-slate-500">
+          <Database className="h-3 w-3" />
+          共提取 {fieldEntries.length} 项元素
+        </div>
+        {fieldEntries.map(([field, value]) => renderFieldCard(field, String(value)))}
+      </div>
+    );
   } else {
-    shotContent = <div className="flex h-full min-h-[100px] items-center justify-center text-[11px] text-slate-400">核验中显示AI视野</div>;
+    extractedContent = (
+      <div className="flex h-full min-h-[140px] flex-col items-center justify-center gap-2 text-center text-[11px] text-slate-400">
+        <Database className="h-8 w-8 text-slate-200" />
+        <div>识别文件后显示提取的</div>
+        <div className="text-[10px] text-slate-400">姓名 / 护照号 / 日期 等元素</div>
+        <button
+          onClick={() => setShowDocSample(true)}
+          className="mt-1 flex items-center gap-1 rounded-lg bg-violet-50 px-3 py-1.5 text-[11px] font-medium text-violet-600 ring-1 ring-violet-200 transition-colors hover:bg-violet-100"
+        >
+          <Eye className="h-3.5 w-3.5" />
+          查看 DEMO
+        </button>
+      </div>
+    );
   }
 
   return (
@@ -993,22 +1317,23 @@ function ReportTab({
           <div className="min-h-0 flex-1 overflow-auto p-2">{fieldContent}</div>
         </div>
 
-        {/* 文件对比卡片 */}
+        {/* 文件处理卡片（合并：文件对比 + AI视野） */}
         <div className="flex max-h-[55vh] flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm lg:max-h-full">
           <div className="flex shrink-0 items-center gap-1.5 border-b border-emerald-200 bg-emerald-50/60 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-800">
             <FileText className="h-3.5 w-3.5 text-emerald-600" />
-            文件对比
+            文件处理
+            <span className="ml-auto text-[9px] font-normal text-emerald-600/70">PDF / JPG / JPEG</span>
           </div>
-          <div className="flex-1 overflow-auto p-2">{fileContent}</div>
+          <div className="min-h-0 flex-1 overflow-auto p-2">{fileProcessContent}</div>
         </div>
 
-        {/* AI视野卡片 */}
+        {/* 提取元素卡片（原 AI视野 位置） */}
         <div className="flex max-h-[55vh] flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm lg:max-h-full">
-          <div className="flex shrink-0 items-center gap-1.5 border-b border-amber-200 bg-amber-50/60 px-2.5 py-1.5 text-[11px] font-semibold text-amber-800">
-            <Eye className="h-3.5 w-3.5 text-amber-600" />
-            AI视野
+          <div className="flex shrink-0 items-center gap-1.5 border-b border-violet-200 bg-violet-50/60 px-2.5 py-1.5 text-[11px] font-semibold text-violet-800">
+            <Database className="h-3.5 w-3.5 text-violet-600" />
+            提取元素
           </div>
-          <div className="flex-1 overflow-auto p-2">{shotContent}</div>
+          <div className="min-h-0 flex-1 overflow-auto p-2">{extractedContent}</div>
         </div>
       </div>
     </div>
@@ -1103,47 +1428,6 @@ function LogTab({
         })}
       </ul>
       <div ref={logEndRef} />
-    </div>
-  );
-}
-
-// ============ AI 视野 ============
-function VisionTab({
-  shots,
-  running,
-}: {
-  shots: ScreenshotEvent[];
-  running: boolean;
-}) {
-  if (shots.length === 0) {
-    return (
-      <Empty
-        icon={<Eye className="h-10 w-10 text-slate-200" />}
-        title={running ? "等待 AI 截图…" : "暂无截图"}
-        desc="核验过程中 AI 的截图会显示在这里。"
-      />
-    );
-  }
-  return (
-    <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-3">
-      {shots.map((s, i) => (
-        <div
-          key={`${s.step}-${i}`}
-          className="overflow-hidden rounded-lg border border-slate-200 bg-slate-900"
-        >
-          <div className="flex items-center justify-between bg-black/40 px-2 py-0.5 text-[10px] text-white">
-            <span>Step {s.step}</span>
-            {s.boxes && s.boxes.length > 0 && (
-              <span className="rounded bg-brand-600 px-1">{s.boxes.length} 框</span>
-            )}
-          </div>
-          <img
-            src={`data:image/png;base64,${s.screenshot}`}
-            alt={`step ${s.step}`}
-            className="h-32 w-full object-cover"
-          />
-        </div>
-      ))}
     </div>
   );
 }
