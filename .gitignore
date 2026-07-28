@@ -11,6 +11,9 @@ backend/dist/
 backend/build/
 frontend/dist/
 
+# TypeScript build cache
+*.tsbuildinfo
+
 # Environment
 .env
 .env.local
@@ -27,3 +30,45 @@ Thumbs.db
 # Logs
 *.log
 cinside-debug.log
+
+# Temporary scripts / patches
+tmp_*.js
+tmp_*.cjs
+fix_*.js
+find_*.js
+patch*.js
+p1.js
+p2.js
+add-update-ui.js
+patch-tmp/
+
+# Test files
+_test_*.py
+_test_*.json
+_check_report.py
+
+# Generated reports
+report_task-*.xlsx
+response.txt
+
+# Vite generated config (keep .ts only)
+frontend/vite.config.d.ts
+frontend/vite.config.js
+
+# Patch scripts (one-time use)
+frontend/_patch_main.cjs
+frontend/_update_preload.js
+frontend/patch-main.js
+
+# User data / samples (local only)
+右侧-待验证/
+左侧-数据/
+
+# Backend test scripts
+backend/test_browser_use.py
+backend/test_screenshot_stream.py
+backend/svg_to_ico.py
+
+# Frontend icon generation scripts (one-time use)
+frontend/make-ico.cjs
+frontend/make-icons.cjs
