@@ -163,7 +163,7 @@ export interface PickedMark {
   /** 拾取的位置：左侧数据源 / 右侧学校系统 */
   side: "left" | "right";
   /** 来源：网页元素 / Excel 单元格 / 头像 */
-  source: "web" | "excel" | "avatar";
+  source: "web" | "excel" | "avatar" | "passport";
   /** CSS selector（网页）或字段名（Excel） */
   selector: string;
   /** 显示标签 */
@@ -323,6 +323,8 @@ export interface DocumentExtractResult {
   text: string;
   /** 结构化字段（请求了 fields 时返回） */
   fields: Record<string, string>;
+  /** 预处理后的图片预览（base64，仅图片文件有值）— 自动旋转到正面 + 裁剪白边后 */
+  processed_image?: string | null;
 }
 
 /** 文档对比条目：左侧记录值 vs 文档提取值 */
@@ -343,6 +345,10 @@ export interface DocExtractState {
   entries: DocCompareEntry[];
   /** 数据来源描述：网页 URL / 本地文件 */
   source: string;
+  /** 原始文件 URL（图片/PDF 的下载地址，用于在文件处理面板预览） */
+  file_url?: string;
+  /** 预处理后的图片预览（base64）— 自动旋转到正面 + 裁剪白边后 */
+  processed_image?: string | null;
 }
 
 // 字段中文名映射，UI 用
