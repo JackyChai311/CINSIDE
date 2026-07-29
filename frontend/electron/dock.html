@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: https:" />
+<title>CINSIDE 外挂</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }
+  html, body { height: 100%; overflow: hidden; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: transparent; }
+  body { border-radius: 20px; overflow: hidden; }
+
+  .drag { -webkit-app-region: drag; }
+  .nodrag { -webkit-app-region: no-drag; }
+
+  /* ===== 主面板 ===== */
+  #strip {
+    display: flex; flex-direction: column; height: 100%; width: 100%;
+    border-radius: 20px; overflow: hidden;
+    background: rgba(255,255,255,0.92);
+    backdrop-filter: blur(30px) saturate(1.5);
+    -webkit-backdrop-filter: blur(30px) saturate(1.5);
+    border: 1px solid rgba(0,0,0,0.06);
+    box-shadow: 0 10px 36px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.04);
+  }
+
+  /* 顶部标题栏 */
+  .header {
+    flex: none; display: flex; align-items: center; gap: 10px;
+    padding: 14px 16px 12px;
+    border-bottom: 1px solid rgba(0,0,0,0.05);
+  }
+  .header .logo {
+    width: 32px; height: 32px; border-radius: 10px;
+    background: linear-gradient(135deg, #ef4444, #dc2626);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; flex: none;
+    box-shadow: 0 2px 6px rgba(220,38,38,0.3);
+    transition: transform 0.2s;
+  }
+  .header .logo:hover { transform: scale(1.08); }
+  .header .logo svg { width: 16px; height: 16px; }
+  .header .title { flex: 1; min-width: 0; }
+  .header .title h1 { font-size: 13px; font-weight: 700; color: #1e293b; line-height: 1.2; }
+  .header .title p { font-size: 10px; color: #94a3b8; line-height: 1.2; margin-top: 2px; }
+  .header .close-btn {
+    width: 24px; height: 24px; border-radius: 7px; border: none;
+    background: transparent; color: #cbd5e1; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; flex: none;
+    transition: all 0.2s;
+  }
+  .header .close-btn:hover { background: #fef2f2; color: #ef4444; }
+  .header .close-btn svg { width: 12px; height: 12px; }
+
+  /* 步骤引导 */
+  .step-bar {
+    flex: none; display: flex; align-items: center; gap: 0;
+    padding: 10px 16px; background: rgba(248,250,252,0.6);
+    border-bottom: 1px solid rgba(0,0,0,0.04);
+  }
+  .step-bar .s {
+    display: flex; align-items: center; gap: 6px; font-size: 10px; color: #94a3b8;
+    transition: color 0.3s;
+  }
+  .step-bar .s.done { color: #22c55e; }
+  .step-bar .s.active { color: #ef4444; font-weight: 600; }
+  .step-bar .s .num {
+    width: 16px; height: 16px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; font-weight: 700;
+    background: #e2e8f0; color: #94a3b8;
+    transition: all 0.3s;
+  }
+  .step-bar .s.done .num { background: #22c55e; color: #fff; }
+  .step-bar .s.active .num { background: #ef4444; color: #fff; }
+  .step-bar .sep { flex: 1; height: 1px; background: #e2e8f0; margin: 0 6px; }
+
+  /* 内容区 */
+  .body { flex: 1; overflow-y: auto; padding: 12px; }
+  .body::-webkit-scrollbar { width: 4px; }
+  .body::-webkit-scrollbar-thumb { background: rgba(148,163,184,.30); border-radius: 4px; }
+  .body::-webkit-scrollbar-thumb:hover { background: rgba(99,102,241,.45); }
+
+  /* ===== 选择卡片（提取源 & 操作页 统一样式） ===== */
+  .pick-card {
+    border: 1.5px solid #e2e8f0; border-radius: 14px; overflow: hidden;
+    transition: all 0.2s; background: #fff;
+  }
+  .pick-card.set { border-color: #fca5a5; box-shadow: 0 2px 8px rgba(239,68,68,0.06); }
+  .pick-card .pc-header {
+    display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    border-bottom: 1px solid rgba(0,0,0,0.04);
+  }
+  .pick-card .pc-icon {
+    width: 28px; height: 28px; border-radius: 8px; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    background: #f1f5f9; color: #64748b; transition: all 0.2s;
+  }
+  .pick-card.set .pc-icon { background: linear-gradient(135deg, #ef4444, #dc2626); color: #fff; }
+  .pick-card .pc-icon svg { width: 14px; height: 14px; }
+  .pick-card .pc-title { flex: 1; }
+  .pick-card .pc-title .t { font-size: 12px; font-weight: 700; color: #334155; line-height: 1.2; }
+  .pick-card .pc-title .d { font-size: 9px; color: #94a3b8; line-height: 1.2; margin-top: 2px; }
+  .pick-card .pc-count {
+    font-size: 10px; font-weight: 700; color: #94a3b8;
+    background: #f1f5f9; border-radius: 6px; padding: 2px 7px;
+  }
+  .pick-card.set .pc-count { color: #fff; background: #ef4444; }
+
+  /* 已选标签列表 */
+  .pc-list { padding: 6px 8px; }
+  .pc-list .empty { font-size: 10px; color: #cbd5e1; text-align: center; padding: 8px 0; }
+  .pc-item {
+    display: flex; align-items: center; gap: 7px; padding: 5px 8px; border-radius: 7px;
+    background: rgba(248,250,252,0.8); margin-bottom: 3px;
+  }
+  .pc-item .fav { width: 16px; height: 16px; border-radius: 4px; overflow: hidden; flex: none; background: #f1f5f9; display: flex; align-items: center; justify-content: center; }
+  .pc-item .fav img { width: 14px; height: 14px; object-fit: contain; }
+  .pc-item .fav .fb { font-size: 8px; color: #94a3b8; font-weight: 700; }
+  .pc-item .name { flex: 1; font-size: 10px; color: #475569; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pc-item .rm { width: 16px; height: 16px; border-radius: 50%; border: none; background: transparent; color: #cbd5e1; cursor: pointer; display: flex; align-items: center; justify-content: center; flex: none; }
+  .pc-item .rm:hover { background: #fef2f2; color: #ef4444; }
+  .pc-item .rm svg { width: 10px; height: 10px; }
+
+  /* 卡片底部按钮 */
+  .pc-footer { padding: 0 8px 8px; }
+  .pc-btn {
+    width: 100%; height: 30px; border-radius: 8px; border: 1px dashed #cbd5e1;
+    background: transparent; color: #64748b; font-size: 11px; font-weight: 500;
+    cursor: pointer; transition: all 0.2s;
+    display: flex; align-items: center; justify-content: center; gap: 4px;
+  }
+  .pc-btn:hover { border-color: #ef4444; color: #ef4444; background: #fef2f2; }
+  .pc-btn svg { width: 12px; height: 12px; }
+
+  /* 数据流箭头 */
+  .flow {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 8px 0;
+  }
+  .flow .arrow { width: 1px; height: 12px; background: linear-gradient(180deg, #fca5a5, #cbd5e1); }
+  .flow .label { font-size: 9px; color: #94a3b8; font-weight: 500; }
+  .flow .icon { color: #cbd5e1; }
+  .flow .icon svg { width: 14px; height: 14px; }
+
+  /* ===== 运行按钮 ===== */
+  .run-section { flex: none; padding: 12px 16px; border-top: 1px solid rgba(0,0,0,0.05); }
+  .run-btn {
+    width: 100%; height: 40px; border-radius: 12px; border: none;
+    font-size: 13px; font-weight: 700; cursor: pointer; transition: all 0.25s;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    background: linear-gradient(135deg, #e2e8f0, #f1f5f9); color: #94a3b8;
+  }
+  .run-btn.ready { background: linear-gradient(135deg, #ef4444, #dc2626); color: #fff; box-shadow: 0 4px 12px rgba(220,38,38,0.3); }
+  .run-btn.ready:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(220,38,38,0.4); }
+  .run-btn.running { background: linear-gradient(135deg, #475569, #334155); color: #fff; }
+  .run-btn:disabled { opacity: 0.5; cursor: default; transform: none !important; }
+  .run-btn svg { width: 14px; height: 14px; }
+
+  /* 状态栏 */
+  .status-bar {
+    flex: none; display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 0 16px 10px;
+  }
+  .status-bar .dot { width: 6px; height: 6px; border-radius: 50%; background: #cbd5e1; transition: all 0.3s; }
+  .status-bar .dot.on { background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,0.5); animation: breathe 2s ease-in-out infinite; }
+  .status-bar .dot.err { background: #ef4444; }
+  @keyframes breathe { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .status-bar .txt { font-size: 10px; color: #94a3b8; }
+  .status-bar .txt.err { color: #ef4444; }
+
+  /* ===== Chrome 连接引导 ===== */
+  .chrome-guide {
+    margin: 8px 0; padding: 14px; border-radius: 14px;
+    background: linear-gradient(135deg, #fff7ed, #fffbeb);
+    border: 1.5px solid #fed7aa; text-align: center;
+  }
+  .chrome-guide h3 { font-size: 12px; font-weight: 700; color: #9a3412; margin-bottom: 4px; }
+  .chrome-guide p { font-size: 10px; color: #c2410c; line-height: 1.5; margin-bottom: 10px; }
+  .chrome-guide button {
+    width: 100%; height: 32px; border: none; border-radius: 9px;
+    background: linear-gradient(135deg, #f97316, #ea580c); color: #fff;
+    font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    box-shadow: 0 2px 8px rgba(234,88,12,0.25);
+  }
+  .chrome-guide button:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(234,88,12,0.35); }
+  .chrome-guide button svg { width: 14px; height: 14px; }
+
+  /* ===== Toast ===== */
+  #toast {
+    display: none; position: absolute; bottom: 8px; left: 8px; right: 8px;
+    background: rgba(254,242,242,0.98); border: 1px solid #fca5a5; border-radius: 10px;
+    padding: 10px 12px; font-size: 11px; color: #991b1b; line-height: 1.5;
+    z-index: 100; user-select: text; -webkit-user-select: text;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+  }
+  #toast.show { display: block; animation: toastIn 0.25s ease; }
+  @keyframes toastIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  #toastClose { float: right; cursor: pointer; font-size: 12px; color: #dc2626; margin-left: 6px; }
+
+  /* ===== 选择面板 ===== */
+  #picker { display: none; flex-direction: column; height: 100%; width: 100%; border-radius: 20px; overflow: hidden;
+    background: rgba(255,255,255,0.96); backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+    border: 1px solid rgba(0,0,0,0.06);
+    box-shadow: 0 10px 36px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.04);
+  }
+  #pickerHeader {
+    flex: none; display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 16px 10px; border-bottom: 1px solid rgba(0,0,0,0.05);
+  }
+  #pickerHeader .back { width: 28px; height: 28px; border-radius: 8px; border: none; background: #f1f5f9; color: #64748b; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+  #pickerHeader .back:hover { background: #fef2f2; color: #ef4444; }
+  #pickerHeader .back svg { width: 14px; height: 14px; }
+  #pickerTitle { font-size: 13px; font-weight: 700; color: #1e293b; }
+  .hbtn {
+    border: none; background: #f1f5f9; color: #64748b;
+    font-size: 11px; padding: 6px 10px; border-radius: 7px; cursor: pointer;
+    transition: all 0.2s; display: flex; align-items: center; gap: 4px;
+  }
+  .hbtn:hover { background: #e2e8f0; color: #334155; }
+  .hbtn svg { width: 12px; height: 12px; }
+
+  #pickerHint { flex: none; font-size: 10px; color: #94a3b8; padding: 8px 16px; line-height: 1.4; }
+
+  #searchBox { flex: none; padding: 0 12px 8px; }
+  #searchBox input {
+    width: 100%; height: 32px; border: 1px solid #e2e8f0; border-radius: 9px;
+    padding: 0 10px 0 32px; font-size: 12px; color: #334155; outline: none;
+    background: #f8fafc url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.35-4.35'/%3E%3C/svg%3E") no-repeat 10px center;
+    transition: border-color 0.2s;
+  }
+  #searchBox input::placeholder { color: #cbd5e1; }
+  #searchBox input:focus { border-color: #fca5a5; background-color: #fff; }
+
+  #tabList { flex: 1; overflow-y: auto; padding: 4px 8px; }
+  #tabList::-webkit-scrollbar { width: 4px; }
+  #tabList::-webkit-scrollbar-thumb { background: rgba(148,163,184,.30); border-radius: 4px; }
+  #tabList::-webkit-scrollbar-thumb:hover { background: rgba(99,102,241,.45); }
+
+  .tab-item {
+    display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px;
+    cursor: pointer; border: 1.5px solid transparent; margin-bottom: 4px; transition: all 0.15s;
+  }
+  .tab-item:hover { background: #f8fafc; border-color: #e2e8f0; }
+  .tab-item.checked { background: #fef2f2; border-color: #fca5a5; }
+  .tab-item .cb {
+    flex: none; width: 16px; height: 16px; border: 1.5px solid #cbd5e1; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center; background: #fff; transition: all 0.15s;
+  }
+  .tab-item.checked .cb { background: #ef4444; border-color: #ef4444; }
+  .tab-item.radio .cb { border-radius: 50%; }
+  .tab-item.radio.checked .cb::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #fff; }
+  .tab-item.checked:not(.radio) .cb::after { content: "✓"; font-size: 10px; font-weight: 700; color: #fff; }
+  .tab-item .fav { flex: none; width: 20px; height: 20px; border-radius: 5px; overflow: hidden; background: #f1f5f9; display: flex; align-items: center; justify-content: center; }
+  .tab-item .fav img { width: 16px; height: 16px; object-fit: contain; }
+  .tab-item .fav .fb { font-size: 9px; color: #94a3b8; font-weight: 700; }
+  .tab-item .meta { min-width: 0; flex: 1; }
+  .tab-item .tt { font-size: 12px; color: #334155; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tab-item .uu { font-size: 10px; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+  .tab-item.checked .tt { color: #991b1b; }
+
+  #pickerError { display: none; flex: 1; padding: 24px 16px; text-align: center; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
+  #pickerError .ei { width: 36px; height: 36px; color: #cbd5e1; }
+  #pickerError p { font-size: 11px; color: #64748b; line-height: 1.6; user-select: text; -webkit-user-select: text; max-width: 260px; }
+  #launchChrome {
+    border: none; background: linear-gradient(135deg, #f97316, #ea580c); color: #fff;
+    font-size: 12px; font-weight: 600; padding: 9px 20px; border-radius: 9px; cursor: pointer;
+    transition: all 0.2s; display: flex; align-items: center; gap: 6px;
+    box-shadow: 0 2px 8px rgba(234,88,12,0.25);
+  }
+  #launchChrome:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(234,88,12,0.35); }
+  #launchChrome svg { width: 14px; height: 14px; }
+
+  #pickerFooter { flex: none; display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid rgba(0,0,0,0.05); }
+  #pickerFooter button { flex: 1; height: 34px; border-radius: 9px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+  #confirmBtn { border: none; background: linear-gradient(135deg, #ef4444, #dc2626); color: #fff; box-shadow: 0 2px 6px rgba(220,38,38,0.2); }
+  #confirmBtn:hover { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(220,38,38,0.3); }
+  #confirmBtn:disabled { opacity: 0.35; transform: none; box-shadow: none; cursor: default; }
+  #cancelBtn { border: 1px solid #e2e8f0; background: #fff; color: #64748b; }
+  #cancelBtn:hover { background: #f8fafc; border-color: #cbd5e1; }
+
+  body.picker-mode #strip { display: none; }
+  body.picker-mode #picker { display: flex; }
+  body.collapsed-mode #strip { display: none; }
+  body.collapsed-mode #picker { display: none; }
+  body.collapsed-mode #collapsed { display: flex; }
+
+  /* ===== 收起状态 ===== */
+  #collapsed {
+    display: none; width: 100%; height: 100%; align-items: center; justify-content: center;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.92);
+    backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+    border: 1px solid rgba(0,0,0,0.06);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+    cursor: pointer; transition: transform 0.2s;
+  }
+  #collapsed:hover { transform: scale(1.08); }
+  #collapsed:active { transform: scale(0.95); }
+  #collapsed .c-logo {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: linear-gradient(135deg, #ef4444, #dc2626);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 2px 8px rgba(220,38,38,0.4);
+    position: relative;
+  }
+  #collapsed .c-logo svg { width: 18px; height: 18px; }
+  #collapsed .c-dot {
+    position: absolute; bottom: -1px; right: -1px;
+    width: 10px; height: 10px; border-radius: 50%;
+    border: 2px solid #fff;
+  }
+  #collapsed .c-dot.on { background: #22c55e; }
+  #collapsed .c-dot.err { background: #ef4444; }
+  #collapsed .c-dot.idle { background: #cbd5e1; }
+
+  .spinner { width: 20px; height: 20px; border: 2px solid #fecaca; border-top-color: #ef4444; border-radius: 50%; animation: spin 0.7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="toast"><span id="toastClose">✕</span><span id="toastText"></span></div>
+
+<!-- ===== 主面板 ===== -->
+<div id="strip">
+  <div class="header drag">
+    <div class="logo nodrag" id="logoBtn" title="唤回主窗口">
+      <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+    </div>
+    <div class="title nodrag">
+      <h1>外挂助手</h1>
+      <p>AI 自主体外循环</p>
+    </div>
+    <button class="close-btn nodrag" id="collapseBtn" title="收起"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+    <button class="close-btn nodrag" id="closeBtn" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+  </div>
+
+  <!-- 步骤引导 -->
+  <div class="step-bar drag">
+    <div class="s nodrag" id="step1"><span class="num">1</span><span>选源</span></div>
+    <div class="sep"></div>
+    <div class="s nodrag" id="step2"><span class="num">2</span><span>选目标</span></div>
+    <div class="sep"></div>
+    <div class="s nodrag" id="step3"><span class="num">3</span><span>开始</span></div>
+  </div>
+
+  <div class="body drag">
+    <!-- Chrome 连接引导（未连接时显示） -->
+    <div class="chrome-guide nodrag" id="chromeGuide" style="display:none">
+      <h3>先连接 Chrome</h3>
+      <p>点击下方按钮启动受控 Chrome，在外挂专用 Chrome 窗口里打开你要操作的网页</p>
+      <button id="launchChromeMain">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="21.17" y1="8" x2="12" y2="8"/><line x1="3.95" y1="6.06" x2="8.54" y2="14"/><line x1="10.88" y1="21.94" x2="15.46" y2="14"/></svg>
+        启动受控 Chrome
+      </button>
+    </div>
+
+    <!-- 提取源卡片 -->
+    <div class="pick-card nodrag" id="sourceCard">
+      <div class="pc-header">
+        <div class="pc-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></div>
+        <div class="pc-title"><div class="t">提取源</div><div class="d">AI 从这里读取数据</div></div>
+        <div class="pc-count" id="sourceCount">0</div>
+      </div>
+      <div class="pc-list" id="sourceList"></div>
+      <div class="pc-footer">
+        <button class="pc-btn" id="sourceBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          添加提取源
+        </button>
+      </div>
+    </div>
+
+    <!-- 数据流箭头 -->
+    <div class="flow nodrag">
+      <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg></div>
+      <div class="label">AI 自动填写</div>
+    </div>
+
+    <!-- 操作页卡片 -->
+    <div class="pick-card nodrag" id="targetCard">
+      <div class="pc-header">
+        <div class="pc-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg></div>
+        <div class="pc-title"><div class="t">操作页</div><div class="d">AI 把数据填到这里</div></div>
+        <div class="pc-count" id="targetCount">—</div>
+      </div>
+      <div class="pc-list" id="targetList"></div>
+      <div class="pc-footer">
+        <button class="pc-btn" id="targetBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          选择操作页
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 运行按钮 -->
+  <div class="run-section drag">
+    <button class="run-btn nodrag" id="runBtn" disabled>
+      <span id="runIcon"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"/></svg></span>
+      <span id="runText">请先完成设置</span>
+    </button>
+  </div>
+
+  <!-- 状态栏 -->
+  <div class="status-bar drag">
+    <div class="dot nodrag" id="statusDot"></div>
+    <div class="txt nodrag" id="statusText">待机 · 0 条记录</div>
+  </div>
+</div>
+
+<!-- ===== 选择面板 ===== -->
+<div id="picker">
+  <div id="pickerHeader">
+    <button class="back" id="cancelBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+    </button>
+    <span id="pickerTitle">选择提取源</span>
+    <button class="hbtn" id="refreshBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      刷新
+    </button>
+  </div>
+  <div id="pickerHint"></div>
+  <div id="searchBox"><input type="text" id="searchInput" placeholder="搜索标签页…" /></div>
+  <div id="tabList"></div>
+  <div id="pickerError">
+    <svg class="ei" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <p id="pickerErrorText"></p>
+    <button id="launchChrome">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="21.17" y1="8" x2="12" y2="8"/><line x1="3.95" y1="6.06" x2="8.54" y2="14"/><line x1="10.88" y1="21.94" x2="15.46" y2="14"/></svg>
+      启动受控 Chrome
+    </button>
+  </div>
+  <div id="pickerFooter">
+    <button id="confirmBtn">确认</button>
+  </div>
+</div>
+
+<!-- ===== 收起状态 ===== -->
+<div id="collapsed">
+  <div class="c-logo" title="点击展开">
+    <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+    <div class="c-dot idle" id="cDot"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var api = window.dockAPI;
+  var pickerMode = null;
+  var tabs = [];
+  var selected = {};
+  var status = { running: false, sources: [], target: null, records_count: 0, last_error: null };
+  var chromeConnected = false;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var pollTimer = null;
+
+  function setMode(m) {
+    document.body.classList.toggle("picker-mode", m === "picker");
+    document.body.classList.toggle("collapsed-mode", m === "collapsed");
+    api.setMode(m);
+  }
+
+  function collapse() { setMode("collapsed"); }
+  function expand() { setMode("strip"); }
+  function showToast(msg) { $("toastText").textContent = msg; $("toast").classList.add("show"); }
+  function hideToast() { $("toast").classList.remove("show"); }
+
+  function getFavicon(url) { try { return new URL(url).origin + "/favicon.ico"; } catch (e) { return ""; } }
+  function getDomain(url) { try { return new URL(url).hostname.replace(/^www\./, "").slice(0, 1).toUpperCase(); } catch (e) { return "?"; } }
+  function shortT(t, n) { if (!t) return ""; return t.length > n ? t.slice(0, n) + "…" : t; }
+
+  function renderStrip() {
+    var sc = status.sources || [];
+    var hasSrc = sc.length > 0, hasTgt = !!status.target;
+    chromeConnected = hasSrc || hasTgt || chromeConnected;
+
+    // Chrome 引导
+    $("chromeGuide").style.display = chromeConnected ? "none" : "block";
+
+    // 提取源卡片
+    $("sourceCard").classList.toggle("set", hasSrc);
+    $("sourceCount").textContent = sc.length;
+    $("sourceCount").style.display = hasSrc ? "" : "none";
+    var sl = $("sourceList");
+    sl.innerHTML = "";
+    if (hasSrc) {
+      sc.forEach(function (s) {
+        var d = document.createElement("div"); d.className = "pc-item";
+        var fav = document.createElement("div"); fav.className = "fav";
+        var fu = getFavicon(s.url);
+        if (fu) { var img = document.createElement("img"); img.src = fu; img.onerror = function(){ img.style.display="none"; var fb=document.createElement("span"); fb.className="fb"; fb.textContent=getDomain(s.url); fav.appendChild(fb); }; fav.appendChild(img); }
+        else { var fb = document.createElement("span"); fb.className = "fb"; fb.textContent = getDomain(s.url); fav.appendChild(fb); }
+        var name = document.createElement("div"); name.className = "name"; name.textContent = s.title || s.url;
+        var rm = document.createElement("button"); rm.className = "rm"; rm.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+        rm.onclick = function () {
+          var newSrcs = sc.filter(function (x) { return x.url !== s.url; });
+          api.pluginApi("/api/plugin/config", "POST", { sources: newSrcs }).then(function () { pollStatus(); });
+        };
+        d.appendChild(fav); d.appendChild(name); d.appendChild(rm);
+        sl.appendChild(d);
+      });
+    }
+
+    // 操作页卡片
+    $("targetCard").classList.toggle("set", hasTgt);
+    $("targetCount").style.display = hasTgt ? "" : "none";
+    var tl = $("targetList"); tl.innerHTML = "";
+    if (hasTgt) {
+      $("targetCount").textContent = "✓";
+      var d = document.createElement("div"); d.className = "pc-item";
+      var fav = document.createElement("div"); fav.className = "fav";
+      var fu = getFavicon(status.target.url);
+      if (fu) { var img = document.createElement("img"); img.src = fu; img.onerror = function(){ img.style.display="none"; var fb=document.createElement("span"); fb.className="fb"; fb.textContent=getDomain(status.target.url); fav.appendChild(fb); }; fav.appendChild(img); }
+      else { var fb = document.createElement("span"); fb.className = "fb"; fb.textContent = getDomain(status.target.url); fav.appendChild(fb); }
+      var name = document.createElement("div"); name.className = "name"; name.textContent = status.target.title || status.target.url;
+      var rm = document.createElement("button"); rm.className = "rm"; rm.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+      rm.onclick = function () { api.pluginApi("/api/plugin/config", "POST", { target: null }).then(function () { pollStatus(); }); };
+      d.appendChild(fav); d.appendChild(name); d.appendChild(rm);
+      tl.appendChild(d);
+    }
+
+    // 步骤引导
+    $("step1").className = "s nodrag" + (hasSrc ? " done" : " active");
+    $("step2").className = "s nodrag" + (hasTgt ? " done" : (hasSrc ? " active" : ""));
+    $("step3").className = "s nodrag" + (status.running ? " done active" : (hasSrc && hasTgt ? " active" : ""));
+
+    // 运行按钮
+    var rb = $("runBtn");
+    var canRun = hasSrc && hasTgt;
+    rb.disabled = !canRun && !status.running;
+    if (status.running) {
+      rb.className = "run-btn nodrag running";
+      $("runIcon").innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>';
+      $("runText").textContent = "停止循环";
+    } else if (canRun) {
+      rb.className = "run-btn nodrag ready";
+      $("runIcon").innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"/></svg>';
+      $("runText").textContent = "开始体外循环";
+    } else {
+      rb.className = "run-btn nodrag";
+      $("runIcon").innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"/></svg>';
+      $("runText").textContent = "请先完成设置";
+    }
+
+    // 状态栏
+    $("statusDot").className = "dot nodrag" + (status.last_error ? " err" : (status.running ? " on" : ""));
+    var st = $("statusText");
+    if (status.last_error) { st.textContent = status.last_error; st.className = "txt nodrag err"; }
+    else { st.textContent = (status.running ? "运行中" : "待机") + " · " + (status.records_count || 0) + " 条记录"; st.className = "txt nodrag"; }
+
+    // 收起状态指示灯
+    var cDot = $("cDot");
+    if (cDot) {
+      cDot.className = "c-dot " + (status.last_error ? "err" : (status.running ? "on" : "idle"));
+    }
+
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    pollTimer = setInterval(pollStatus, status.running ? 1500 : 4000);
+  }
+
+  function pollStatus() {
+    api.pluginApi("/api/plugin/status", "GET").then(function (r) {
+      if (r && r.ok && r.data) {
+        var prevErr = status.last_error;
+        status = r.data;
+        renderStrip();
+        if (status.last_error && status.last_error !== prevErr) showToast(status.last_error);
+      }
+    }).catch(function () {});
+  }
+
+  function openPicker(mode) {
+    pickerMode = mode;
+    $("pickerTitle").textContent = mode === "source" ? "选择提取源（可多选）" : "选择操作页（单选）";
+    $("pickerHint").textContent = mode === "source"
+      ? "勾选你要作为数据来源的标签页，AI 会持续监测这些页面的内容变化"
+      : "选择 AI 自动填写的目标标签页（只能选一个）";
+    selected = {};
+    if (mode === "source") (status.sources || []).forEach(function (s) { selected[s.url] = true; });
+    else if (status.target) selected[status.target.url] = true;
+    $("searchInput").value = "";
+    lastTabSig = ""; // 重置签名，强制重新渲染
+    isFirstLoad = true; // 重新打开时显示 spinner
+    setMode("picker");
+    loadTabs();
+    if (window._pr) clearInterval(window._pr);
+    window._pr = setInterval(function () {
+      if (document.body.classList.contains("picker-mode")) loadTabs();
+      else if (window._pr) { clearInterval(window._pr); window._pr = null; }
+    }, 3000);
+  }
+
+  var lastTabSig = ""; // 标签页签名，用于 diff 判断是否需要重新渲染
+  var isFirstLoad = true;
+
+  function loadTabs() {
+    // 首次加载显示 spinner，后续静默刷新不闪
+    if (isFirstLoad) {
+      $("tabList").style.display = ""; $("pickerError").style.display = "none";
+      $("tabList").innerHTML = '<div style="display:flex;align-items:center;justify-content:center;padding:32px;"><div class="spinner"></div></div>';
+    }
+    api.pluginApi("/api/plugin/tabs", "GET").then(function (r) {
+      if (r && r.ok && r.data && r.data.ok) {
+        tabs = r.data.tabs || [];
+        chromeConnected = true;
+        isFirstLoad = false;
+        renderTabs();
+      } else {
+        chromeConnected = false;
+        isFirstLoad = false;
+        $("tabList").style.display = "none"; $("pickerError").style.display = "flex";
+        $("pickerErrorText").textContent = (r && r.data && r.data.error) || "无法连接外部 Chrome，请先启动受控 Chrome";
+      }
+    }).catch(function (e) {
+      isFirstLoad = false;
+      $("tabList").style.display = "none"; $("pickerError").style.display = "flex";
+      $("pickerErrorText").textContent = "后端未就绪: " + e;
+    });
+  }
+
+  function renderTabs() {
+    var list = $("tabList");
+    var kw = ($("searchInput").value || "").trim().toLowerCase();
+    var filtered = kw ? tabs.filter(function (t) { return (t.title||"").toLowerCase().indexOf(kw)>=0||(t.url||"").toLowerCase().indexOf(kw)>=0; }) : tabs;
+
+    // 计算签名：标签列表 + 选中状态 + 搜索关键词
+    var sig = kw + "|" + filtered.map(function(t){ return t.url + (selected[t.url]?"1":"0"); }).join(",") + "|" + pickerMode;
+
+    if (!filtered.length) {
+      var emptyMsg = kw ? "没有匹配的标签页" : "没有可用的标签页，请在受控 Chrome 里打开网页";
+      if (list.getAttribute("data-sig") !== "empty|" + emptyMsg) {
+        list.innerHTML = '<div style="padding:28px;text-align:center;font-size:12px;color:#94a3b8;">' + emptyMsg + "</div>";
+        list.setAttribute("data-sig", "empty|" + emptyMsg);
+      }
+      updateConfirm();
+      return;
+    }
+
+    // 签名没变就不重新渲染，避免闪烁
+    if (sig === lastTabSig && list.children.length === filtered.length) {
+      updateConfirm();
+      return;
+    }
+    lastTabSig = sig;
+
+    list.style.display = "";
+    list.innerHTML = "";
+    filtered.forEach(function (t) {
+      var div = document.createElement("div");
+      div.className = "tab-item" + (pickerMode==="target"?" radio":"") + (selected[t.url]?" checked":"");
+      var cb = document.createElement("div"); cb.className = "cb";
+      var fav = document.createElement("div"); fav.className = "fav";
+      var fu = getFavicon(t.url);
+      if (fu) { var img = document.createElement("img"); img.src = fu; img.onerror = function(){ img.style.display="none"; var fb=document.createElement("span"); fb.className="fb"; fb.textContent=getDomain(t.url); fav.appendChild(fb); }; fav.appendChild(img); }
+      else { var fb=document.createElement("span"); fb.className="fb"; fb.textContent=getDomain(t.url); fav.appendChild(fb); }
+      var meta = document.createElement("div"); meta.className = "meta";
+      var tt = document.createElement("div"); tt.className = "tt"; tt.textContent = t.title||t.url;
+      var uu = document.createElement("div"); uu.className = "uu"; uu.textContent = t.url;
+      meta.appendChild(tt); meta.appendChild(uu);
+      div.appendChild(cb); div.appendChild(fav); div.appendChild(meta);
+      div.onclick = function () {
+        if (pickerMode==="target") { selected = {}; selected[t.url] = true; }
+        else if (selected[t.url]) delete selected[t.url];
+        else selected[t.url] = true;
+        renderTabs(); updateConfirm();
+      };
+      list.appendChild(div);
+    });
+    list.setAttribute("data-sig", sig);
+    updateConfirm();
+  }
+
+  function updateConfirm() {
+    var n = Object.keys(selected).length;
+    $("confirmBtn").disabled = n === 0;
+    $("confirmBtn").textContent = n ? "确认选择（" + n + "）" : "请选择";
+  }
+
+  function confirmPicker() {
+    var picked = tabs.filter(function (t) { return selected[t.url]; });
+    var body = pickerMode==="source" ? { sources: picked } : { target: picked[0]||null };
+    api.pluginApi("/api/plugin/config", "POST", body).then(function () {
+      setMode("strip");
+      if (window._pr) { clearInterval(window._pr); window._pr = null; }
+      pollStatus();
+    });
+  }
+
+  function toggleRun() {
+    var path = status.running ? "/api/plugin/stop" : "/api/plugin/start";
+    $("runBtn").disabled = true; hideToast();
+    api.pluginApi(path, "POST", {}).then(function (r) {
+      if (r && !r.ok && r.data && r.data.error) { showToast(r.data.error); status.last_error = r.data.error; }
+      else if (r && r.data && r.data.error && !status.running) { showToast(r.data.error); status.last_error = r.data.error; }
+      pollStatus();
+    }).catch(function (e) { showToast("请求失败: "+e); pollStatus(); })
+      .finally(function () { $("runBtn").disabled = false; });
+  }
+
+  function launchChrome() {
+    api.launchChrome().then(function () {
+      chromeConnected = true;
+      setTimeout(function () { if (document.body.classList.contains("picker-mode")) loadTabs(); else pollStatus(); }, 2500);
+    });
+  }
+
+  $("sourceBtn").onclick = function () { openPicker("source"); };
+  $("targetBtn").onclick = function () { openPicker("target"); };
+  $("runBtn").onclick = toggleRun;
+  $("logoBtn").onclick = function () { api.showMain(); };
+  $("logoBtn").ondblclick = function () { collapse(); };
+  $("collapseBtn").onclick = function () { collapse(); };
+  $("closeBtn").onclick = function () { api.closeDock(); };
+  $("collapsed").onclick = function () { expand(); };
+  $("refreshBtn").onclick = loadTabs;
+  $("confirmBtn").onclick = confirmPicker;
+  $("cancelBtn").onclick = function () { setMode("strip"); if (window._pr) { clearInterval(window._pr); window._pr = null; } };
+  $("launchChrome").onclick = launchChrome;
+  $("launchChromeMain").onclick = launchChrome;
+  $("toastClose").onclick = hideToast;
+  $("searchInput").oninput = renderTabs;
+
+  pollStatus();
+})();
+</script>
+</body>
+</html>
