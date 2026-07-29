@@ -32,7 +32,7 @@ export default function SaveSkillDialog({ open, defaultName, onClose, onSave, on
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-          <span className="text-sm font-semibold text-slate-800">保存为 SKILL</span>
+          <span className="text-sm font-semibold text-slate-800">保存为 LOOP</span>
           <button onClick={onClose} className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
             <X className="h-4 w-4" />
           </button>
@@ -61,7 +61,7 @@ export default function SaveSkillDialog({ open, defaultName, onClose, onSave, on
               value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) onSave(name.trim(), icon); if (e.key === "Escape") onClose(); }}
-              placeholder="给这个 SKILL 起个名字，例如：XX大学学信网核验"
+              placeholder="给这个 LOOP 起个名字，例如：XX大学学信网核验"
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-200"
             />
           </div>
@@ -95,7 +95,7 @@ export default function SaveSkillDialog({ open, defaultName, onClose, onSave, on
             ].join(" ")}
           >
             <Check className="h-3 w-3" />
-            保存 SKILL
+            保存 LOOP
           </button>
         </div>
       </div>
