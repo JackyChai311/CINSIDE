@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Database,
   FileSpreadsheet,
+  FileText,
   Globe,
   ListChecks,
   MousePointerClick,
@@ -13,6 +14,9 @@ import {
   Plus,
   Repeat2,
   RotateCcw,
+  Save,
+  Trash2,
+  Upload,
   Users,
   X,
 } from "lucide-react";
@@ -84,6 +88,10 @@ interface Props {
   onExitAddingStepMode?: () => void;
   /** 当前添加步骤模式 */
   addingStepMode?: "review" | "entry" | null;
+  /** 当前配置的步骤类型（用于映射配置面板切换） */
+  currentStepType?: "review" | "entry";
+  /** 切换步骤类型（审查/录入） */
+  onSwitchStepType?: (type: "review" | "entry") => void;
   /** 是否处于添加点击按钮模式 */
   addingClickMode?: boolean;
   /** 已添加的点击按钮数量（确认人物之后） */
@@ -100,21 +108,45 @@ interface Props {
   canUndo?: boolean;
   /** 文件提取模式：审查步骤子步骤，点击右侧网页图片/PDF → OCR 提取 */
   addingDocExtractMode?: boolean;
+  /** 文件提取来源选择阶段 */
+  docExtractSource?: null | "choose" | "web" | "local";
   /** 已添加的文件提取步骤数 */
   docExtractStepCount?: number;
   /** 开始添加文件提取步骤（审查：右侧网页拾取） */
   onStartAddDocExtract?: () => void;
   /** 退出文件提取模式 */
   onExitAddDocExtractMode?: () => void;
+  /** 选择网页提取来源 */
+  onChooseDocExtractWeb?: () => void;
+  /** 选择本地文件提取来源 */
+  onChooseDocExtractLocal?: () => void;
+  /** 触发本地文件选择对话框 */
+  onTriggerLocalFilePick?: () => void;
+  /** 本地文件选择变化处理 */
+  onLocalFilesSelected?: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  /** 本地文件 ref（用于绑定隐藏 input） */
+  localFileInputRef?: React.RefObject<HTMLInputElement>;
+  /** 已上传的本地文件列表 */
+  docLocalFiles?: Array<{ name: string; size?: number }>;
+  /** 删除一个本地文件 */
+  onRemoveLocalFile?: (name: string) => void;
+  /** 绑定的文件名匹配字段 */
+  docFileBindField?: string | null;
+  /** 设置绑定字段 */
+  onSetDocFileBindField?: (field: string) => void;
+  /** 确认本地文件提取配置 */
+  onConfirmDocLocalExtract?: () => void;
   /** 录入步骤子步骤：本地文件提取（上传图片 → 勾选字段 → 填入右侧网页） */
   onDocFileExtract?: () => void;
   /** 人物卡片是否已生成 */
   cardsGenerated?: boolean;
   /** LOOP 行范围框选（0-based 闭区间） */
   rowRange?: { start: number; end: number } | null;
-  /** 打开保存 SKILL 弹窗 */
+  /** 快速保存 Loop（不弹窗，自动命名） */
+  onRequestQuickSave?: () => void;
+  /** 打开保存 LOOP 弹窗（命名保存） */
   onRequestSaveSkill?: () => void;
-  /** 打开保存 SKILL 弹窗并立即执行 */
+  /** 打开保存 LOOP 弹窗并立即执行 */
   onRequestSaveSkillAndRun?: () => void;
 }
 
@@ -123,7 +155,7 @@ export default function ElementSelectBar({
   pickTarget,
   rightPicked,
   leftPicked,
-  excelFields,
+  excelFields = [],
   mappingCount,
   onCancel,
   onPickLeftFromWeb,
@@ -151,6 +183,8 @@ onStartAddReviewSteps,
 onStartAddEntrySteps,
 onExitAddingStepMode,
 addingStepMode,
+currentStepType = "review",
+onSwitchStepType,
 addingClickMode = false,
 clickStepCount = 0,
 onStartAddClickStep,
@@ -159,12 +193,24 @@ onSwapSide,
 onUndo,
 canUndo = false,
 addingDocExtractMode = false,
+docExtractSource = null,
 docExtractStepCount = 0,
 onStartAddDocExtract,
 onExitAddDocExtractMode,
+onChooseDocExtractWeb,
+onChooseDocExtractLocal,
+onTriggerLocalFilePick,
+onLocalFilesSelected,
+localFileInputRef,
+docLocalFiles = [],
+onRemoveLocalFile,
+docFileBindField = null,
+onSetDocFileBindField,
+onConfirmDocLocalExtract,
 onDocFileExtract,
 cardsGenerated = false,
 rowRange = null,
+onRequestQuickSave,
 onRequestSaveSkill,
 onRequestSaveSkillAndRun,
 }: Props) {
@@ -201,7 +247,7 @@ onRequestSaveSkillAndRun,
   if (!active) return null;
 
   // 步骤判定（审查模式：先右侧元素 → 后左侧来源；录入模式：先左侧来源 → 后右侧输入框，顺序相反）
-  const isEntryMode = addingStepMode === "entry";
+  const isEntryMode = currentStepType === "entry";
   const leftDone = !!leftPicked || (leftSource === "excel" && !!excelField) || leftSource === "manual";
   const step = isEntryMode
     ? (leftDone ? (rightPicked ? 3 : 2) : 1)
@@ -290,7 +336,7 @@ onRequestSaveSkillAndRun,
             className={[
               "flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-all",
               webSourceActive
-                ? "border-brand-400 bg-brand-50 text-brand-700 ring-1 ring-brand-300 animate-glow-pulse"
+                ? "border-amber-400 bg-amber-50 text-amber-700 ring-1 ring-amber-300"
                 : "border-slate-200 bg-white text-slate-600 hover:border-brand-300 hover:bg-brand-50/50",
             ].join(" ")}
           >
@@ -335,7 +381,25 @@ onRequestSaveSkillAndRun,
           <span className="rounded-full bg-brand-100 px-2 py-0.5 text-[10px] font-medium text-brand-700">
             已配 {mappingCount} 项
           </span>
-          {/* 完成按钮组：保存为 SKILL / 保存并执行 */}
+          {/* 完成按钮组：保存Loop / 适配LOOP / 执行 */}
+          {onRequestQuickSave && teachingPhase !== "idle" && (
+            <button
+              onClick={onRequestQuickSave}
+              disabled={
+                (teachingPhase === "data-source" ? dataSourceCount : teachingPhase === "entry" ? entryCount : reviewCount) === 0
+              }
+              className={[
+                "flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
+                (teachingPhase === "data-source" ? dataSourceCount : teachingPhase === "entry" ? entryCount : reviewCount) === 0
+                  ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                  : "bg-slate-600 text-white hover:bg-slate-700",
+              ].join(" ")}
+              title="快速保存 Loop（自动命名）"
+            >
+              <Save className="h-3 w-3" />
+              保存Loop
+            </button>
+          )}
           {onRequestSaveSkill && teachingPhase !== "idle" && (
             <button
               onClick={onRequestSaveSkill}
@@ -348,9 +412,10 @@ onRequestSaveSkillAndRun,
                   ? "cursor-not-allowed bg-slate-200 text-slate-400"
                   : "bg-emerald-600 text-white hover:bg-emerald-700",
               ].join(" ")}
+              title="命名保存为 LOOP 模板"
             >
               <CheckCircle2 className="h-3 w-3" />
-              保存为 SKILL
+              适配LOOP
             </button>
           )}
           {onRequestSaveSkillAndRun && appMode !== "review" && teachingPhase !== "idle" && (
@@ -365,7 +430,7 @@ onRequestSaveSkillAndRun,
               ].join(" ")}
             >
               <Play className="h-3 w-3" />
-              保存并执行
+              执行
             </button>
           )}
         </div>
@@ -381,7 +446,7 @@ onRequestSaveSkillAndRun,
                     n < step
                       ? "bg-emerald-500 text-white"
                       : n === step
-                      ? "bg-indigo-600 text-white animate-glow-pulse"
+                      ? "bg-amber-500 text-white ring-2 ring-amber-300"
                       : "bg-slate-200 text-slate-500",
                   ].join(" ")}
                 >
@@ -424,17 +489,61 @@ onRequestSaveSkillAndRun,
 
       {/* 步骤内容：addingStepMode时显示为子面板（LOOP步骤4展开的映射配置） */}
       <div className={[
-        "flex-1 overflow-y-auto pr-1",
+        "flex-1 overflow-y-auto pr-1 transition-all",
         addingStepMode ? "mt-1.5 space-y-1.5 rounded-xl border-2 border-indigo-200 bg-gradient-to-br from-indigo-50/70 to-violet-50/40 px-2.5 py-2 shadow-sm" : "space-y-2.5",
         teachingPhase !== "idle" && !addingStepMode ? "mt-1.5 space-y-1.5 rounded-xl border-2 border-indigo-200 bg-gradient-to-br from-indigo-50/70 to-violet-50/40 px-2.5 py-2 shadow-sm" : "",
-        "order-2",
+        addingStepMode ? "order-1" : "order-2",
       ].join(" ")}>
         {/* LOOP流程中，在子面板顶部显示步骤指示器（与 LOOP 向导同款紧凑风格） */}
         {teachingPhase !== "idle" && (
           <div className="mb-1 flex items-center gap-1.5 border-b border-indigo-100 pb-1.5">
             <Repeat2 className="h-3 w-3 text-indigo-600" />
             <span className="text-[10px] font-bold text-indigo-800">映射配置</span>
-            <div className="ml-auto flex items-center gap-1">
+            {/* 审查/录入模式切换按钮（带滑动滑块动画） */}
+            {onSwitchStepType && (
+              <div className="relative ml-1 flex items-stretch rounded-lg bg-slate-200/60 p-0.5">
+                {/* 滑动滑块 */}
+                <div
+                  className={[
+                    "absolute top-0.5 bottom-0.5 w-[calc(50%-2px)] rounded-md shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]",
+                    currentStepType === "review"
+                      ? "left-0.5 bg-sky-500"
+                      : "left-[calc(50%+1.5px)] bg-violet-500",
+                  ].join(" ")}
+                />
+                <button
+                  onClick={() => onSwitchStepType("review")}
+                  className={[
+                    "relative z-10 flex w-14 items-center justify-center gap-0.5 rounded-md py-0.5 text-[9px] font-semibold transition-colors duration-200",
+                    currentStepType === "review" ? "text-white" : "text-slate-500 hover:text-slate-700",
+                  ].join(" ")}
+                >
+                  <ListChecks className="h-2.5 w-2.5" />
+                  审查
+                </button>
+                <button
+                  onClick={() => onSwitchStepType("entry")}
+                  className={[
+                    "relative z-10 flex w-14 items-center justify-center gap-0.5 rounded-md py-0.5 text-[9px] font-semibold transition-colors duration-200",
+                    currentStepType === "entry" ? "text-white" : "text-slate-500 hover:text-slate-700",
+                  ].join(" ")}
+                >
+                  <MousePointerClick className="h-2.5 w-2.5" />
+                  录入
+                </button>
+              </div>
+            )}
+            <div className="ml-auto flex items-center gap-1.5">
+              {/* 添加步骤模式下显示完成按钮 */}
+              {addingStepMode && onExitAddingStepMode && (
+                <button
+                  onClick={onExitAddingStepMode}
+                  className="flex items-center gap-1 rounded-md bg-emerald-500 px-2 py-0.5 text-[9px] font-semibold text-white shadow-sm transition-all hover:bg-emerald-600 active:scale-95"
+                >
+                  <CheckCircle2 className="h-2.5 w-2.5" />
+                  完成
+                </button>
+              )}
               {[1, 2, 3].map((n) => (
                 <span
                   key={n}
@@ -443,7 +552,7 @@ onRequestSaveSkillAndRun,
                     n < step
                       ? "bg-emerald-500 text-white"
                       : n === step
-                      ? "bg-indigo-600 text-white animate-glow-pulse"
+                      ? "bg-amber-500 text-white ring-2 ring-amber-300"
                       : "bg-slate-200 text-slate-500",
                   ].join(" ")}
                 >
@@ -534,9 +643,12 @@ onRequestSaveSkillAndRun,
         </StepRow>
       </div>
 
-      {/* LOOP 步骤配置向导（主流程面板，固定在上方） */}
+      {/* LOOP 步骤配置向导（主流程面板，固定在上方；添加步骤时让映射配置在上） */}
       {teachingPhase !== "idle" && (
-        <div className="shrink-0 order-1 mb-1 rounded-xl border-2 border-indigo-200 bg-gradient-to-br from-indigo-50/70 to-violet-50/40 px-3 py-2 shadow-sm">
+        <div className={[
+          "shrink-0 mb-1 rounded-xl border-2 border-indigo-200 bg-gradient-to-br from-indigo-50/70 to-violet-50/40 px-3 py-2 shadow-sm transition-all",
+          addingStepMode ? "order-2" : "order-1",
+        ].join(" ")}>
           <div className="mb-1.5 flex items-center gap-1.5">
             <Repeat2 className="h-3.5 w-3.5 text-indigo-600" />
             <span className="text-[11px] font-bold text-indigo-800">
@@ -560,11 +672,11 @@ onRequestSaveSkillAndRun,
               <div className="flex items-center gap-2 text-[11px]">
                 <span className={[
                   "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white",
-                  selectedExcelColumn ? "bg-emerald-500" : "bg-slate-300",
+                  selectedExcelColumn ? "bg-emerald-500" : "bg-amber-500",
                 ].join(" ")}>
                   {selectedExcelColumn ? <Check className="h-2.5 w-2.5" /> : 1}
                 </span>
-                <div className={`flex flex-1 flex-wrap items-center gap-1.5 rounded-md ${selectedExcelColumn ? "picking-breath" : ""}`}>
+                <div className="flex flex-1 flex-wrap items-center gap-1">
                   {selectedExcelColumn ? (
                     <>
                       <span className="text-emerald-700 font-medium">
@@ -576,13 +688,16 @@ onRequestSaveSkillAndRun,
                           已生成 {rowRange ? rowRange.end - rowRange.start + 1 : 0} 张卡片
                         </span>
                       ) : (
-                        <span className="text-indigo-700 font-medium animate-glow-pulse">
-                          → 到 Excel 视图点行号框选范围，再点「一键生成卡片」
-                        </span>
+                        <>
+                          <ArrowRight className="h-3 w-3 text-amber-500 shrink-0" />
+                          <span className="step-highlight" key={selectedExcelColumn || "step1b"}>
+                            在 LOOP 列内选中具体卡片，然后点击「一键生成卡片」
+                          </span>
+                        </>
                       )}
                     </>
                   ) : (
-                    <span className="text-brand-700 font-medium animate-glow-pulse">
+                    <span className="step-highlight" key="step1a">
                       在 Excel 视图点击一列表头选中 LOOP 列
                     </span>
                   )}
@@ -593,16 +708,16 @@ onRequestSaveSkillAndRun,
               <div className="flex items-center gap-2 text-[11px]">
                 <span className={[
                   "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white",
-                  bindInputSide ? "bg-brand-600 animate-glow-pulse" : hasBoundInputs ? "bg-emerald-500" : "bg-slate-300",
+                  bindInputSide ? "bg-amber-500" : hasBoundInputs ? "bg-emerald-500" : cardsGenerated ? "bg-amber-500" : "bg-slate-300",
                 ].join(" ")}>
                   {hasBoundInputs && !bindInputSide ? <Check className="h-2.5 w-2.5" /> : 2}
                 </span>
-                <div className="flex flex-1 flex-wrap items-center gap-1.5">
+                <div className="flex flex-1 flex-wrap items-center gap-1">
                   <span className="rounded bg-slate-100 px-1 py-0.5 text-[9px] font-medium text-slate-500">可选</span>
                   {bindInputSide ? (
                     <>
-                      <span className="text-brand-700 font-medium animate-glow-pulse">
-                        教学拾取中 — 点任意侧输入框=绑定「{selectedExcelColumn}」并填入第一行；点按钮/链接=真实点击（已 {bindStepCount} 步）
+                      <span className="step-highlight" key="step2-active">
+                        教学拾取中 — 点任意侧输入框绑定「{selectedExcelColumn}」，点按钮/链接=真实点击（已 {bindStepCount} 步）
                       </span>
                       {onExitBindInputs && (
                         <button
@@ -616,7 +731,7 @@ onRequestSaveSkillAndRun,
                   ) : hasBoundInputs ? (
                     <>
                       <span className="text-emerald-700 font-medium">✓ 已绑定输入框/点击 <span className="text-slate-400 font-normal">（点击已选元素可回收重选）</span></span>
-                      {onStartBindInputs && (
+                      {onStartBindInputs && !addingStepMode && (
                         <button
                           onClick={onStartBindInputs}
                           disabled={!selectedExcelColumn || pendingAction === "click"}
@@ -632,8 +747,12 @@ onRequestSaveSkillAndRun,
                         </button>
                       )}
                     </>
-                  ) : (
+                  ) : cardsGenerated ? (
                     <>
+                      <ArrowRight className="h-3 w-3 text-amber-500 shrink-0" />
+                      <span className="step-highlight" key="step2-idle">
+                        如需搜索定位人物，点击「搜索输入」
+                      </span>
                       <button
                         onClick={onStartBindInputs}
                         disabled={!selectedExcelColumn || pendingAction === "click"}
@@ -646,7 +765,10 @@ onRequestSaveSkillAndRun,
                       >
                         搜索输入
                       </button>
+                      <span className="text-slate-400 text-[10px]">（可跳过）</span>
                     </>
+                  ) : (
+                    <span className="text-slate-400">搜索输入（可选，生成卡片后可配置）</span>
                   )}
                 </div>
               </div>
@@ -655,15 +777,16 @@ onRequestSaveSkillAndRun,
               <div className="flex items-center gap-2 text-[11px]">
                 <span className={[
                   "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white",
-                  pendingAction === "click" && addingClickMode ? "bg-orange-500 animate-glow-pulse" :
-                  clickStepCount > 0 ? "bg-emerald-500" : "bg-slate-300",
+                  pendingAction === "click" && addingClickMode ? "bg-amber-500" :
+                  clickStepCount > 0 ? "bg-emerald-500" :
+                  (reviewCount + entryCount === 0 && !addingStepMode && cardsGenerated && !bindInputSide) ? "bg-amber-500" : "bg-slate-300",
                 ].join(" ")}>
                   {clickStepCount > 0 && !(pendingAction === "click" && addingClickMode) ? <Check className="h-2.5 w-2.5" /> : 3}
                 </span>
-                <div className="flex flex-1 flex-wrap items-center gap-1.5">
+                <div className="flex flex-1 flex-wrap items-center gap-1">
                   {pendingAction === "click" && addingClickMode ? (
                     <>
-                      <span className="text-orange-700 font-medium animate-glow-pulse">
+                      <span className="step-highlight" key="step3-active">
                         正在添加点击任务 — 点击任意侧网页上的元素（已添加 {clickStepCount} 个）
                       </span>
                       {onExitAddClickMode && (
@@ -694,9 +817,12 @@ onRequestSaveSkillAndRun,
                         </button>
                       )}
                     </>
-                  ) : (
+                  ) : (reviewCount + entryCount === 0 && !addingStepMode && cardsGenerated && !bindInputSide) ? (
                     <>
-                      <span className="text-slate-500">点击任意侧网页元素（可添加多个）</span>
+                      <ArrowRight className="h-3 w-3 text-amber-500 shrink-0" />
+                      <span className="step-highlight" key="step3-idle">
+                        点击任意侧网页元素（如按钮、链接）可添加前置点击
+                      </span>
                       <button
                         onClick={onStartAddClickStep}
                         disabled={!!bindInputSide}
@@ -704,12 +830,17 @@ onRequestSaveSkillAndRun,
                           "rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
                           bindInputSide
                             ? "cursor-not-allowed bg-slate-200 text-slate-400"
-                            : "bg-brand-600 text-white hover:bg-brand-700",
+                            : "bg-orange-500 text-white hover:bg-orange-600",
                         ].join(" ")}
                       >
                         点击任务
                       </button>
+                      <span className="text-slate-400 text-[10px]">（可跳过，直接点下方「审查步骤/录入步骤」）</span>
                     </>
+                  ) : reviewCount + entryCount > 0 || addingStepMode ? (
+                    <span className="text-slate-400">（已跳过前置点击）</span>
+                  ) : (
+                    <span className="text-slate-400">点击任务（可添加前置点击，可跳过）</span>
                   )}
                 </div>
               </div>
@@ -718,53 +849,168 @@ onRequestSaveSkillAndRun,
               <div className="flex items-start gap-2 text-[11px]">
                 <span className={[
                   "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white",
-                  addingStepMode ? "bg-brand-600 animate-glow-pulse" : reviewCount + entryCount > 0 ? "bg-emerald-500" : "bg-slate-300",
+                  addingStepMode ? "bg-amber-500" : 
+                  (reviewCount + entryCount > 0) ? "bg-emerald-500" :
+                  ((clickStepCount > 0 || reviewCount + entryCount > 0 || addingStepMode) && cardsGenerated && !bindInputSide && !(pendingAction === "click" && addingClickMode)) ? "bg-amber-500" : "bg-slate-300",
                 ].join(" ")}>
-                  {reviewCount + entryCount > 0 && !addingStepMode ? <Check className="h-2.5 w-2.5" /> : 4}
+                  {(reviewCount + entryCount > 0) && !addingStepMode ? <Check className="h-2.5 w-2.5" /> : 4}
                 </span>
-                <div className="flex flex-1 flex-wrap items-center gap-1.5">
+                <div className="flex flex-1 flex-wrap items-center gap-1">
                   {/* 活跃模式：正在添加审查/录入步骤 */}
                   {addingStepMode ? (
                     <>
-                      <span className="text-brand-700 font-medium animate-glow-pulse">
-                        正在添加{addingStepMode === "review" ? "审查" : "录入"}步骤 — {addingStepMode === "review" ? "在下方配置映射：选择右侧元素 → 左侧来源 → 保存" : "在下方配置映射：选择左侧来源 → 右侧输入框 → 保存"}
+                      <span className="step-highlight" key="step4-active">
+                        正在添加{addingStepMode === "review" ? "审查" : "录入"}步骤 — {addingStepMode === "review" ? "选右侧元素 → 左侧来源 → 保存" : "选左侧来源 → 右侧输入框 → 保存"}
                       </span>
-                      {/* 文件提取子步骤：审查=点击右侧网页下载按钮/图片；录入=上传本地图片勾选字段 */}
-                      {addingStepMode === "review" && onStartAddDocExtract && !addingDocExtractMode && (
+                      {/* 文件提取子步骤 */}
+                      {addingStepMode && onStartAddDocExtract && !addingDocExtractMode && (
                         <button
                           onClick={onStartAddDocExtract}
                           className="flex items-center gap-0.5 rounded-md bg-teal-600 px-2 py-0.5 text-[10px] font-medium text-white transition-all hover:bg-teal-700"
-                          title="点击右侧网页上的下载按钮/图片/PDF 进行文字提取"
+                          title="添加文件提取步骤：支持本地上传按文件名匹配，或点击网页图片/PDF 自动下载提取"
                         >
                           <Plus className="h-2.5 w-2.5" />
                           文件提取{docExtractStepCount > 0 ? ` (${docExtractStepCount})` : ""}
                         </button>
                       )}
-                      {addingStepMode === "entry" && onDocFileExtract && (
-                        <button
-                          onClick={onDocFileExtract}
-                          className="flex items-center gap-0.5 rounded-md bg-teal-600 px-2 py-0.5 text-[10px] font-medium text-white transition-all hover:bg-teal-700"
-                          title="上传本地图片/PDF，勾选提取的字段后填入右侧网页"
-                        >
-                          <Plus className="h-2.5 w-2.5" />
-                          文件提取
-                        </button>
+                      {addingDocExtractMode && docExtractSource === "choose" && (
+                        <div className="mt-1 w-full rounded-lg border-2 border-teal-200 bg-teal-50/60 p-2">
+                          <div className="mb-1.5 flex items-center gap-1.5">
+                            <FileText className="h-3 w-3 text-teal-700" />
+                            <span className="text-[10px] font-bold text-teal-800">选择文件提取来源</span>
+                            {onExitAddDocExtractMode && (
+                              <button
+                                onClick={onExitAddDocExtractMode}
+                                className="ml-auto rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-600"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            )}
+                          </div>
+                          <div className="grid grid-cols-2 gap-1.5">
+                            <button
+                              onClick={onChooseDocExtractWeb}
+                              className="flex flex-col items-center gap-1 rounded-md border border-teal-200 bg-white px-2 py-2 text-center transition-all hover:border-teal-400 hover:bg-teal-50"
+                            >
+                              <Globe className="h-5 w-5 text-teal-600" />
+                              <span className="text-[10px] font-semibold text-slate-700">网页提取</span>
+                              <span className="text-[9px] text-slate-500">点击网页图片/PDF<br/>LOOP 自动下载提取</span>
+                            </button>
+                            <button
+                              onClick={onChooseDocExtractLocal}
+                              className="flex flex-col items-center gap-1 rounded-md border border-teal-200 bg-white px-2 py-2 text-center transition-all hover:border-teal-400 hover:bg-teal-50"
+                            >
+                              <Upload className="h-5 w-5 text-teal-600" />
+                              <span className="text-[10px] font-semibold text-slate-700">本地文件</span>
+                              <span className="text-[9px] text-slate-500">上传文件按字段匹配<br/>如学号.jpg/pdf/png</span>
+                            </button>
+                          </div>
+                        </div>
                       )}
-                      {addingDocExtractMode && (
+                      {addingDocExtractMode && docExtractSource === "web" && (
                         <>
-                          <span className="text-teal-700 font-medium animate-glow-pulse">
-                            文件提取中 — 请点击右侧网页的下载按钮 / 图片 / PDF
-                            {docExtractStepCount > 0 ? `（已 ${docExtractStepCount} 个）` : ""}
+                          <span className="step-highlight" key="step4-docweb">
+                            网页提取中 — 依次点击元素导航到下载按钮，下载会自动捕获
+                            {docExtractStepCount > 0 ? `（已记录 ${docExtractStepCount} 步点击）` : ""}
                           </span>
                           {onExitAddDocExtractMode && (
                             <button
                               onClick={onExitAddDocExtractMode}
                               className="rounded-md bg-slate-200 px-2 py-0.5 text-[10px] font-medium text-slate-700 hover:bg-slate-300"
                             >
-                              退出提取
+                              完成提取
                             </button>
                           )}
                         </>
+                      )}
+                      {addingDocExtractMode && docExtractSource === "local" && (
+                        <div className="mt-1 w-full rounded-lg border-2 border-teal-200 bg-teal-50/60 p-2">
+                          <div className="mb-1.5 flex items-center gap-1.5">
+                            <Upload className="h-3 w-3 text-teal-700" />
+                            <span className="text-[10px] font-bold text-teal-800">本地文件提取配置</span>
+                            {onExitAddDocExtractMode && (
+                              <button
+                                onClick={onExitAddDocExtractMode}
+                                className="ml-auto rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-600"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            )}
+                          </div>
+                          {/* 隐藏的文件 input */}
+                          <input
+                            ref={localFileInputRef as any}
+                            type="file"
+                            multiple
+                            accept=".jpg,.jpeg,.png,.pdf"
+                            onChange={onLocalFilesSelected}
+                            className="hidden"
+                          />
+                          {/* 文件名绑定字段 */}
+                          <div className="mb-1.5">
+                            <label className="mb-0.5 block text-[9px] font-medium text-slate-600">
+                              文件名字段（LOOP 执行时按此字段值匹配文件）
+                            </label>
+                            <select
+                              value={docFileBindField || ""}
+                              onChange={(e) => onSetDocFileBindField?.(e.target.value)}
+                              className="w-full rounded border border-slate-200 bg-white px-1.5 py-1 text-[10px] outline-none focus:border-teal-400"
+                            >
+                              <option value="">-- 选择字段 --</option>
+                              {selectedExcelColumn && (
+                                <option value={selectedExcelColumn}>{selectedExcelColumn}（LOOP 列）</option>
+                              )}
+                              {excelFields.filter((f) => f !== selectedExcelColumn).map((f) => (
+                                <option key={f} value={f}>{f}</option>
+                              ))}
+                            </select>
+                          </div>
+                          {/* 上传按钮 */}
+                          <button
+                            onClick={onTriggerLocalFilePick}
+                            className="mb-1.5 flex w-full items-center justify-center gap-1 rounded-md border-2 border-dashed border-teal-300 bg-white py-2 text-[10px] font-medium text-teal-700 transition-all hover:border-teal-500 hover:bg-teal-50"
+                          >
+                            <Upload className="h-3.5 w-3.5" />
+                            点击上传文件（JPG / PNG / PDF）
+                          </button>
+                          {/* 文件列表 */}
+                          {docLocalFiles.length > 0 && (
+                            <div className="mb-1.5 max-h-24 space-y-0.5 overflow-y-auto rounded border border-slate-200 bg-white p-1">
+                              {docLocalFiles.map((f) => (
+                                <div key={f.name} className="flex items-center gap-1 rounded px-1 py-0.5 hover:bg-slate-50">
+                                  <FileText className="h-3 w-3 shrink-0 text-slate-400" />
+                                  <span className="min-w-0 flex-1 truncate text-[10px] text-slate-700">{f.name}</span>
+                                  <button
+                                    onClick={() => onRemoveLocalFile?.(f.name)}
+                                    className="rounded p-0.5 text-slate-300 hover:bg-rose-50 hover:text-rose-500"
+                                  >
+                                    <Trash2 className="h-2.5 w-2.5" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {/* 确认按钮 */}
+                          <div className="flex items-center justify-end gap-1">
+                            <span className="text-[9px] text-slate-400">
+                              {docLocalFiles.length > 0 && docFileBindField
+                                ? `已选 ${docLocalFiles.length} 个文件，按「${docFileBindField}」匹配`
+                                : docLocalFiles.length === 0 ? "请上传文件" : "请选择绑定字段"}
+                            </span>
+                            <button
+                              onClick={onConfirmDocLocalExtract}
+                              disabled={docLocalFiles.length === 0 || !docFileBindField}
+                              className={[
+                                "rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
+                                docLocalFiles.length > 0 && docFileBindField
+                                  ? "bg-teal-600 text-white hover:bg-teal-700"
+                                  : "cursor-not-allowed bg-slate-200 text-slate-400",
+                              ].join(" ")}
+                            >
+                              确认添加
+                            </button>
+                          </div>
+                        </div>
                       )}
                       {onExitAddingStepMode && (
                         <button
@@ -789,9 +1035,17 @@ onRequestSaveSkillAndRun,
                           {entryCount > 0 && <span className="ml-1 rounded bg-violet-100 px-1 text-violet-700">录入 {entryCount}</span>}
                         </span>
                       ) : (
-                        <span className="text-slate-500">
-                          LOOP 循环体内添加步骤：
-                        </span>
+                        // Step 3已处理（有点击 或 用户直接开始加循环步骤视为跳过）才高亮Step 4
+                        (clickStepCount > 0 || addingStepMode) && cardsGenerated && !bindInputSide && !(pendingAction === "click" && addingClickMode) ? (
+                          <>
+                            <ArrowRight className="h-3 w-3 text-amber-500 shrink-0" />
+                            <span className="step-highlight" key="step4-idle">
+                              LOOP 循环体内添加步骤：
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-slate-400">LOOP 循环体内添加步骤：</span>
+                        )
                       )}
                       {onStartAddReviewSteps && (
                         <button
@@ -833,15 +1087,16 @@ onRequestSaveSkillAndRun,
                 <div className="flex items-start gap-2 text-[11px]">
                   <span className={[
                     "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white",
-                    addingClickMode ? "bg-orange-500 animate-glow-pulse" : clickStepCount > 0 ? "bg-emerald-500" : "bg-slate-300",
+                    addingClickMode ? "bg-amber-500" : clickStepCount > 0 ? "bg-emerald-500" :
+                    reviewCount + entryCount > 0 && !addingStepMode && !bindInputSide ? "bg-amber-500" : "bg-slate-300",
                   ].join(" ")}>
                     {clickStepCount > 0 && !addingClickMode ? <Check className="h-2.5 w-2.5" /> : 5}
                   </span>
-                  <div className="flex flex-1 flex-wrap items-center gap-1.5">
+                  <div className="flex flex-1 flex-wrap items-center gap-1">
                     {addingClickMode ? (
                       <>
-                        <span className="text-orange-700 font-medium animate-glow-pulse">
-                          正在添加点击任务 — 点击任意侧网页上的按钮/链接（保存、提交、返回等，已 {clickStepCount} 个）
+                        <span className="step-highlight" key="step5-active">
+                          正在添加收尾点击 — 点击保存/提交/返回等按钮（已 {clickStepCount} 个）
                         </span>
                         {onExitAddClickMode && (
                           <button
@@ -857,7 +1112,16 @@ onRequestSaveSkillAndRun,
                         {clickStepCount > 0 ? (
                           <span className="text-emerald-700 font-medium">✓ 已加 {clickStepCount} 个收尾点击</span>
                         ) : (
-                          <span className="text-slate-500">末尾添加点击任务（保存/提交/返回等）：</span>
+                          reviewCount + entryCount > 0 && !addingStepMode && !bindInputSide ? (
+                            <>
+                              <ArrowRight className="h-3 w-3 text-amber-500 shrink-0" />
+                              <span className="step-highlight" key="step5-idle">
+                                末尾可添加保存/提交/返回等点击：
+                              </span>
+                            </>
+                          ) : (
+                            <span className="text-slate-400">末尾添加点击任务（保存/提交/返回等）：</span>
+                          )
                         )}
                         {onStartAddClickStep && !addingStepMode && (
                           <button
