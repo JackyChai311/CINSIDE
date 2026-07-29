@@ -157,6 +157,7 @@ def _read_xlsx_all_sheets(source: str | bytes) -> list[tuple[str, list[str], lis
 
     - 不跳过被分组折叠（outline level）或隐藏的行/列：这些"折叠"的数据会被完整读出
     - 跳过完全空白的 sheet
+    - 如果首行全部为空，自动生成列名（列1, 列2, ...），并将首行作为数据行
     """
     try:
         from openpyxl import load_workbook
@@ -177,6 +178,13 @@ def _read_xlsx_all_sheets(source: str | bytes) -> list[tuple[str, list[str], lis
             continue
         header_keys = [str(h).strip() if h is not None else "" for h in header]
         data_rows: list[list] = []
+        # 如果首行全部为空，说明没有表头：自动生成列名，首行作为数据
+        if all(h == "" for h in header_keys):
+            ncols = len(header_keys)
+            header_keys = [f"列{i+1}" for i in range(ncols)]
+            # 首行本身也作为数据行
+            if not all(c is None or str(c).strip() == "" for c in header):
+                data_rows.append(list(header))
         for row in rows_iter:
             if row is None or all(c is None or str(c).strip() == "" for c in row):
                 continue
@@ -207,6 +215,12 @@ def _read_xls_all_sheets(source: str | bytes) -> list[tuple[str, list[str], list
         header = ws.row_values(0)
         header_keys = [str(h).strip() if h is not None else "" for h in header]
         data_rows: list[list] = []
+        # 如果首行全部为空，自动生成列名，首行作为数据
+        if all(h == "" for h in header_keys):
+            ncols = len(header_keys)
+            header_keys = [f"列{i+1}" for i in range(ncols)]
+            if not all(c is None or str(c).strip() == "" for c in header):
+                data_rows.append(list(header))
         for r in range(1, ws.nrows):
             row = ws.row_values(r)
             if all(c is None or str(c).strip() == "" for c in row):
@@ -219,7 +233,10 @@ def _read_xls_all_sheets(source: str | bytes) -> list[tuple[str, list[str], list
 
 
 def _read_csv_rows(source: str | bytes) -> tuple[list[str], list[dict[str, str]]]:
-    """从路径或字节流读取 csv，返回 (header_keys, row_dicts)。"""
+    """从路径或字节流读取 csv，返回 (header_keys, row_dicts)。
+
+    如果首行全部为空，自动生成列名（列1, 列2, ...）。
+    """
     if isinstance(source, (bytes, bytearray)):
         text = source.decode("utf-8-sig", errors="ignore")
         reader = csv.DictReader(io.StringIO(text))
@@ -228,6 +245,14 @@ def _read_csv_rows(source: str | bytes) -> tuple[list[str], list[dict[str, str]]
             reader = csv.DictReader(f)
     rows = list(reader)
     header_keys = list(rows[0].keys()) if rows else []
+    # 如果所有列名为空，自动生成列名
+    if header_keys and all(k is None or str(k).strip() == "" for k in header_keys):
+        ncols = len(header_keys)
+        new_keys = [f"列{i+1}" for i in range(ncols)]
+        for row in rows:
+            for old_k, new_k in zip(header_keys, new_keys):
+                row[new_k] = row.pop(old_k, "")
+        header_keys = new_keys
     return header_keys, rows
 
 
