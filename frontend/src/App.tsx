@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowLeft,
   ArrowLeftRight,
+  Bot,
   CheckCircle2,
   ClipboardCheck,
   ClipboardEdit,
@@ -80,6 +81,17 @@ const rlog = (...args: unknown[]) => {
 // 这些类只在拾取时存在于 DOM 上，执行时已被移除，含它们的选择器会匹配失败
 const sanitizeSelector = (sel: string): string =>
   (sel || "").replace(/\.cinside-[a-z0-9_-]+/gi, "");
+
+/** 将 data URL 转换为 File 对象（用于下载文件 OCR 提取） */
+function dataUrlToFile(dataUrl: string, filename: string): File {
+  const arr = dataUrl.split(",");
+  const mime = arr[0].match(/:(.*?);/)?.[1] || "application/octet-stream";
+  const bstr = atob(arr[1]);
+  let n = bstr.length;
+  const u8arr = new Uint8Array(n);
+  while (n--) u8arr[n] = bstr.charCodeAt(n);
+  return new File([u8arr], filename, { type: mime });
+}
 
 // 深度查询辅助函数（注入页面执行）：支持 ' >>> ' 分段穿透 shadowRoot / iframe contentDocument
 // 用法：在注入脚本开头拼接 ${DEEP_QUERY_HELPER}，然后用 __cinsideDeepQuery(sel) 替代 document.querySelector(sel)
@@ -405,6 +417,7 @@ function DetachedBottomPanel() {
               hasConfirmClick={hasConfirmClick}
               onAdvanceTeaching={() => window.electronAPI?.panelSendAction("teaching-advance", undefined)}
               onAbortTeaching={() => window.electronAPI?.panelSendAction("teaching-abort", undefined)}
+              onRequestQuickSave={() => window.electronAPI?.panelSendAction("quick-save-loop", undefined)}
               onRequestSaveSkill={() => window.electronAPI?.panelSendAction("save-skill", undefined)}
               onRequestSaveSkillAndRun={() => window.electronAPI?.panelSendAction("save-skill-and-run", undefined)}
               selectedExcelColumn={selectedExcelColumn}
@@ -757,6 +770,10 @@ const [addingStepMode, setAddingStepMode] = useState<"review" | "entry" | null>(
 // ref 始终持有最新 addingStepMode，供 onLeftPicked/onRightPicked 读取，避免闭包陷阱
 const addingStepModeRef = useRef(addingStepMode);
 addingStepModeRef.current = addingStepMode;
+// 当前配置的循环步骤类型（审查/录入），支持混合模式交替添加
+const [currentLoopStepType, setCurrentLoopStepType] = useState<"review" | "entry">("review");
+const currentLoopStepTypeRef = useRef(currentLoopStepType);
+currentLoopStepTypeRef.current = currentLoopStepType;
 // 步骤3之后：正在添加点击按钮的模式（连续添加多个点击动作）
 const [addingClickMode, setAddingClickMode] = useState(false);
 const addingClickModeRef = useRef(addingClickMode);
@@ -765,6 +782,16 @@ addingClickModeRef.current = addingClickMode;
 const [addingDocExtractMode, setAddingDocExtractMode] = useState(false);
 const addingDocExtractModeRef = useRef(addingDocExtractMode);
 addingDocExtractModeRef.current = addingDocExtractMode;
+// 文件提取来源选择：null=未选择，"choose"=选择来源类型，"web"=网页提取中，"local"=本地文件配置中
+const [docExtractSource, setDocExtractSource] = useState<null | "choose" | "web" | "local">(null);
+const docExtractSourceRef = useRef(docExtractSource);
+docExtractSourceRef.current = docExtractSource;
+// 本地文件提取：已上传的文件列表
+const [docLocalFiles, setDocLocalFiles] = useState<File[]>([]);
+// 本地文件提取：用于匹配文件名的字段（绑定的 Excel 字段）
+const [docFileBindField, setDocFileBindField] = useState<string | null>(null);
+// 本地文件选择 input ref
+const docLocalFileInputRef = useRef<HTMLInputElement>(null);
 // 文件提取审查面板数据（原图 + 提取字段框 + 同名图片对比）
 const [docExtractPanel, setDocExtractPanel] = useState<{
   imageUrl: string;
@@ -891,15 +918,34 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   const [saveSkillRunAfter, setSaveSkillRunAfter] = useState(false); // 保存后是否立即执行
   const [skillVersion, setSkillVersion] = useState(0); // 递增触发刷新
 
+  // ============ 外挂插件：屏幕边缘悬浮条（AI 体外循环） ============
+  const [dockOpen, setDockOpen] = useState(false);
+  useEffect(() => {
+    window.electronAPI?.dockIsOpen?.().then(setDockOpen).catch(() => {});
+    return window.electronAPI?.onDockState?.((d) => setDockOpen(!!d.open));
+  }, []);
+  const toggleDock = useCallback(async () => {
+    try {
+      const r = await window.electronAPI?.dockToggle?.();
+      if (r) setDockOpen(!!r.open);
+    } catch {
+      /* 非 Electron 环境忽略 */
+    }
+  }, []);
+
   // ============ 功能1：网页文档提取（PDF/图片 → MarkItDown/OCR → 左右对比） ============
   const [docPickMode, setDocPickMode] = useState(false); // 文档拾取模式：点击右侧网页的 PDF 链接/图片
   const docPickModeRef = useRef(docPickMode);
   docPickModeRef.current = docPickMode;
-  const [docExtract, setDocExtract] = useState<DocExtractState | null>(null);
+  // 按人物卡片(recordId)组织的多文件提取状态：每张卡片可有多份文件，TAB切换
+  const [docExtractsByRecord, setDocExtractsByRecord] = useState<Record<string, DocExtractState[]>>({});
+  const [activeDocIndex, setActiveDocIndex] = useState(0); // 当前选中查看的文件索引
+  const docExtractsByRecordRef = useRef(docExtractsByRecord);
+  docExtractsByRecordRef.current = docExtractsByRecord;
   const [docExtracting, setDocExtracting] = useState(false);
   const [docSignal, setDocSignal] = useState(0); // 递增触发 ResultsPanel 切换到文档对比tab
+  // 当前卡片的提取文件列表 + 激活文件（selected 在下方定义，需延迟计算）
   const docExtractRef = useRef<DocExtractState | null>(null);
-  docExtractRef.current = docExtract;
 
   // ============ 功能2：本地文件提取 → 人工审核 → 填入右侧网页 ============
   const [docFillData, setDocFillData] = useState<{
@@ -1346,6 +1392,22 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
 
   const selected = records.find((r) => r.record_id === selectedId) || null;
 
+  // 当前卡片的提取文件列表 + 激活文件（依赖 selected，需在 selected 定义后计算）
+  const currentRecordId = selected?.record_id || "_default";
+  const currentDocExtracts = docExtractsByRecord[currentRecordId] || [];
+  const safeDocIndex = currentDocExtracts.length > 0 ? Math.min(activeDocIndex, currentDocExtracts.length - 1) : 0;
+  const currentDocExtract = currentDocExtracts[safeDocIndex] || null;
+  // 切换卡片时重置到第一个文件
+  useEffect(() => { setActiveDocIndex(0); }, [currentRecordId]);
+  docExtractRef.current = currentDocExtract;
+  // 按记录ID合并所有文件的字段（用于比对/变量解析）
+  const getRecordDocFields = useCallback((recordId: string): Record<string, string> => {
+    const extracts = docExtractsByRecordRef.current[recordId] || [];
+    const merged: Record<string, string> = {};
+    for (const ext of extracts) Object.assign(merged, ext.fields);
+    return merged;
+  }, []);
+
   // ============ 完成 S 输入：把待填入的值真正写入网页框 ============
   // 用户规定流程：S → 点网页框 → 点 Excel → 按 Enter/Esc 完成填入
   // Enter 和 Esc 在此处等价，都执行填入并回到"搭建节点"状态（保持 selectMode）
@@ -1570,14 +1632,18 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     setBrowserExcelUploading(true);
     try {
       const r = await api.uploadExcel(file);
-      await refreshRecords();
-      // 上传后进入框选状态：人物卡片需框选 LOOP 行范围后一键生成
-      setRowRange(null);
-      setCardsGenerated(false);
-      setLeftViewMode("excel");
-      console.log(`[BrowserExcel] 已导入 ${r.count} 条记录`);
+      if (r.count === 0) {
+        alert("Excel 文件为空或没有有效数据行，请检查文件内容。");
+      } else {
+        await refreshRecords();
+        setRowRange(null);
+        setCardsGenerated(false);
+        setLeftViewMode("excel");
+        console.log(`[BrowserExcel] 已导入 ${r.count} 条记录`);
+      }
     } catch (e: any) {
       console.warn("Excel upload failed", e);
+      alert(`Excel 解析失败：${e?.message || e}`);
     } finally {
       setBrowserExcelUploading(false);
     }
@@ -1587,11 +1653,16 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     setRightExcelUploading(true);
     try {
       const r = await api.uploadExcelRight(file);
-      setRightRecords(r.records);
-      setRightViewMode("excel");
-      console.log(`[RightExcel] 已导入 ${r.count} 条参考记录`);
+      if (r.records.length === 0) {
+        alert("Excel 文件为空或没有有效数据行，请检查文件内容。");
+      } else {
+        setRightRecords(r.records);
+        setRightViewMode("excel");
+        console.log(`[RightExcel] 已导入 ${r.count} 条参考记录`);
+      }
     } catch (e: any) {
       console.warn("Right Excel upload failed", e);
+      alert(`Excel 解析失败：${e?.message || e}`);
     } finally {
       setRightExcelUploading(false);
     }
@@ -1731,6 +1802,91 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       }
     }
   }, [pickedMarks, browserLeftDetached, browserRightDetached, popupSide]);
+
+  // ============ 下载捕获事件监听（教学模式：文件提取网页下载） ============
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    const removeCaptured = window.electronAPI.onDownloadCaptured((data) => {
+      // 仅在文件提取教学模式中处理
+      if (!addingDocExtractModeRef.current) return;
+      rlog(`[download-captured] side=${data.side}, filename=${data.filename}, size=${data.size}`);
+
+      // 将最后一个 docExtractClick 标记升级为下载触发步骤
+      setPickedMarks((prev) => {
+        const marks = [...prev];
+        for (let i = marks.length - 1; i >= 0; i--) {
+          if (marks[i].docExtractClick) {
+            marks[i] = {
+              ...marks[i],
+              docExtract: true,
+              docSource: "web-download",
+              label: `文件下载提取 · ${data.filename}`,
+            };
+            break;
+          }
+        }
+        return marks;
+      });
+
+      // OCR 提取下载的文件
+      const file = dataUrlToFile(data.dataUrl, data.filename);
+      const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
+      const targetFields = mappedFields.length > 0
+        ? mappedFields
+        : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender"];
+      api.extractDocumentFile(file, targetFields)
+        .then((result) => {
+          // 更新文件提取面板
+          const newExtract: DocExtractState = {
+            filename: result.filename,
+            method: result.method,
+            text: result.text,
+            fields: result.fields,
+            entries: [],
+            source: data.dataUrl,
+            file_url: data.dataUrl,
+            processed_image: result.processed_image,
+          };
+          const rid = selected?.record_id || "_default";
+          setDocExtractsByRecord((prev) => {
+            const arr = prev[rid] || [];
+            const filtered = arr.filter((e) => e.file_url !== newExtract.file_url);
+            return { ...prev, [rid]: [...filtered, newExtract] };
+          });
+          setActiveDocIndex(999);
+          setDocSignal((s) => s + 1);
+          setDocExtractPanel({
+            imageUrl: data.dataUrl,
+            filename: result.filename,
+            method: result.method,
+            text: result.text,
+            fields: result.fields,
+            side: data.side as "left" | "right",
+            workflow: data.side === "left" ? "entry" : "review",
+          });
+          setSuccessToast(`下载文件提取完成：${result.filename} (${data.size} bytes)`);
+        })
+        .catch((e) => {
+          setError(`下载文件提取失败: ${e instanceof Error ? e.message : String(e)}`);
+        });
+
+      // 重新激活下载捕获（允许用户继续添加更多提取序列）
+      window.electronAPI?.setDownloadCapture(data.side as "left" | "right", true).catch(() => {});
+    });
+
+    const removeFailed = window.electronAPI.onDownloadFailed((data) => {
+      if (!addingDocExtractModeRef.current) return;
+      rlog(`[download-failed] side=${data.side}, filename=${data.filename}`);
+      setError(`下载捕获失败: ${data.error || data.state || "未知错误"}`);
+      // 重新激活下载捕获
+      window.electronAPI?.setDownloadCapture(data.side as "left" | "right", true).catch(() => {});
+    });
+
+    return () => {
+      removeCaptured?.();
+      removeFailed?.();
+    };
+  }, [mappings, selected, setSuccessToast, setError]);
 
   // 日志自动滚到底
   useEffect(() => {
@@ -1952,6 +2108,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   // 审查映射流程（先右后左）：右侧选核对元素 → 左侧选来源（网页/Excel）→ 保存映射
   const startAddingReviewSteps = useCallback(() => {
     rlog("[startAddingReviewSteps] 进入审查步骤添加模式（先右后左）");
+    setCurrentLoopStepType("review");
     setTeachingPhase("review");
     setAddingStepMode("review");
     setBindInputSide(null);
@@ -1973,6 +2130,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   // 录入映射流程（先左后右）：左侧选来源（网页/Excel）→ 右侧选输入框 → 保存映射
   const startAddingEntrySteps = useCallback(() => {
     rlog("[startAddingEntrySteps] 进入录入步骤添加模式（先左后右）");
+    setCurrentLoopStepType("entry");
     setTeachingPhase("entry");
     setAddingStepMode("entry");
     setBindInputSide(null);
@@ -1989,6 +2147,34 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       window.electronAPI?.viewStartPicking("left");
     }, 300);
   }, [setError, selectMode]);
+
+  // 切换当前步骤类型（审查/录入），用于混合模式复杂任务
+  const switchLoopStepType = useCallback((type: "review" | "entry") => {
+    if (currentLoopStepTypeRef.current === type) return;
+    rlog(`[switchLoopStepType] 切换步骤类型: ${currentLoopStepTypeRef.current} → ${type}`);
+    setCurrentLoopStepType(type);
+    // 如果当前正在添加步骤模式，重置拾取状态并切换拾取侧
+    if (addingStepModeRef.current) {
+      setAddingStepMode(type);
+      setTeachingPhase(type);
+      setRightPicked(null);
+      setLeftPicked(null);
+      setBindInputSide(null);
+      setPendingAction("none");
+      setError(null);
+      const targetSide = type === "entry" ? "left" : "right";
+      setPickTarget(targetSide as PickTarget);
+      setTimeout(() => {
+        if (type === "entry") {
+          window.electronAPI?.viewStopPicking("right").catch(() => {});
+          window.electronAPI?.viewStartPicking("left");
+        } else {
+          window.electronAPI?.viewStopPicking("left").catch(() => {});
+          window.electronAPI?.viewStartPicking("right");
+        }
+      }, 200);
+    }
+  }, []);
 
   // 退出添加步骤模式
   const exitAddingStepMode = useCallback(() => {
@@ -2012,7 +2198,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   const resetMappingRound = useCallback(() => {
     setRightPicked(null);
     setLeftPicked(null);
-    const isEntry = addingStepModeRef.current === "entry";
+    const isEntry = currentLoopStepTypeRef.current === "entry";
     const target = isEntry ? "left" : "right";
     setPickTarget(target as PickTarget);
     setTimeout(() => {
@@ -2045,33 +2231,188 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     }, 100);
   }, []);
 
-  // 撤销最后一步（删除最后一个 pickedMark）
+  // 撤销最后一步（删除最后一个 pickedMark，或退出当前子模式）
   const undoLastStep = useCallback(() => {
+    // 1. 如果当前处于文件提取配置子面板，先退出文件提取配置
+    if (addingDocExtractMode) {
+      setAddingDocExtractMode(false);
+      setDocExtractSource(null);
+      setDocLocalFiles([]);
+      setDocFileBindField(null);
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+      window.electronAPI?.viewClearHighlight("left").catch(() => {});
+      window.electronAPI?.viewClearHighlight("right").catch(() => {});
+      window.electronAPI?.setDownloadCapture("left", false).catch(() => {});
+      window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
+      return;
+    }
+    // 2. 如果处于添加点击任务子模式，退出点击模式
+    if (addingClickMode) {
+      setAddingClickMode(false);
+      setPendingAction("none");
+      setNextClickLabel(null);
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+      return;
+    }
+    // 3. 如果处于绑定输入框子模式，退出绑定模式
+    if (bindInputSide) {
+      setBindInputSide(null);
+      setPendingAction("none");
+      setInputTarget(null);
+      setRightPicked(null);
+      setLeftPicked(null);
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+      window.electronAPI?.viewClearHighlight("left").catch(() => {});
+      window.electronAPI?.viewClearHighlight("right").catch(() => {});
+      return;
+    }
+    // 4. 否则删除最后一个 pickedMark
     const last = pickedMarks[pickedMarks.length - 1];
     if (last) removePickedMark(last.id);
-  }, [pickedMarks, removePickedMark]);
+  }, [pickedMarks, removePickedMark, addingDocExtractMode, addingClickMode, bindInputSide]);
 
-  // ============ 文件提取模式（审查步骤子步骤）：点击右侧网页下载按钮/图片/PDF → OCR 提取 ============
+  // ============ 文件提取模式（审查步骤子步骤）：选择来源 → 网页提取/本地文件提取 → OCR ============
   const startAddDocExtract = useCallback(() => {
-    rlog("[startAddDocExtract] 激活文件提取模式（右侧网页）");
+    rlog("[startAddDocExtract] 打开文件提取来源选择");
     setAddingDocExtractMode(true);
+    setDocExtractSource("choose");
+    setDocLocalFiles([]);
+    setDocFileBindField(selectedExcelColumn || null);
     setPendingAction("none");
     setPickTarget(null);
     setBindInputSide(null);
     setNextClickLabel(null);
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+  }, [selectedExcelColumn]);
+
+  // 选择网页提取来源 → 多步点击 + 下载捕获模式
+  const chooseDocExtractWeb = useCallback(() => {
+    rlog("[docExtract] 选择网页提取来源（多步点击 + 下载捕获）");
+    setDocExtractSource("web");
+    // 开启双侧下载捕获：用户点击多个元素后，任一侧触发下载都会被捕获
+    window.electronAPI?.setDownloadCapture("left", true).catch(() => {});
+    window.electronAPI?.setDownloadCapture("right", true).catch(() => {});
+    // 开启双侧拾取：允许用户点击网页元素记录导航步骤
     setTimeout(() => {
-      if (addingDocExtractModeRef.current) {
+      if (addingDocExtractModeRef.current && docExtractSourceRef.current === "web") {
         window.electronAPI?.viewStartPicking("right");
+        window.electronAPI?.viewStartPicking("left");
       }
     }, 300);
-    setSuccessToast("文件提取模式：请点击右侧网页的下载按钮 / 图片 / PDF");
+    setSuccessToast("网页提取模式：请依次点击网页元素导航到下载按钮，下载会自动捕获");
   }, [setSuccessToast]);
 
-  const exitAddDocExtractMode = useCallback(() => {
-    setAddingDocExtractMode(false);
+  // 选择本地文件提取来源
+  const chooseDocExtractLocal = useCallback(() => {
+    rlog("[docExtract] 选择本地文件提取来源");
+    setDocExtractSource("local");
     window.electronAPI?.viewStopPicking("left").catch(() => {});
     window.electronAPI?.viewStopPicking("right").catch(() => {});
   }, []);
+
+  // 触发本地文件选择对话框
+  const triggerDocLocalFilePick = useCallback(() => {
+    docLocalFileInputRef.current?.click();
+  }, []);
+
+  // 处理本地文件选择
+  const handleDocLocalFilesSelected = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    setDocLocalFiles((prev) => {
+      // 过滤重名文件
+      const existingNames = new Set(prev.map((f) => f.name));
+      const newFiles = files.filter((f) => !existingNames.has(f.name));
+      return [...prev, ...newFiles];
+    });
+    // 重置 input 以便可以重复选择相同文件
+    e.target.value = "";
+  }, []);
+
+  // 删除一个已上传的本地文件
+  const removeDocLocalFile = useCallback((name: string) => {
+    setDocLocalFiles((prev) => prev.filter((f) => f.name !== name));
+  }, []);
+
+  // 确认本地文件提取配置：保存为一个 mark
+  const confirmDocLocalExtract = useCallback(() => {
+    if (docLocalFiles.length === 0) {
+      setError("请先上传文件");
+      return;
+    }
+    if (!docFileBindField) {
+      setError("请选择用于匹配文件名的字段");
+      return;
+    }
+    const side: "left" | "right" = addingStepMode === "entry" ? "left" : "right";
+    const workflow: "entry" | "review" = addingStepMode === "entry" ? "entry" : "review";
+    // 文件列表只存名称（实际文件数据太大，不能存到 localStorage；执行时从匹配的文件中读取）
+    const fileNames = docLocalFiles.map((f) => f.name);
+    addPickedMark({
+      side,
+      source: "web",
+      selector: `local-doc-extract:${docFileBindField}`,
+      label: `本地文件提取 · 按「${docFileBindField}」匹配（${docLocalFiles.length} 个文件）`,
+      workflow,
+      action: "click",
+      recordId: selected?.record_id,
+      docExtract: true,
+      docSource: "local",
+      docFileField: docFileBindField,
+      docLocalFiles: fileNames.map((n) => ({ name: n })),
+    });
+    setSuccessToast(`已添加本地文件提取步骤：按「${docFileBindField}」字段匹配 ${docLocalFiles.length} 个文件`);
+    // 退出文件提取模式
+    setAddingDocExtractMode(false);
+    setDocExtractSource(null);
+    setDocLocalFiles([]);
+    setDocFileBindField(null);
+  }, [docLocalFiles, docFileBindField, addingStepMode, selected, addPickedMark, setError, setSuccessToast]);
+
+  const exitAddDocExtractMode = useCallback(() => {
+    setAddingDocExtractMode(false);
+    setDocExtractSource(null);
+    setDocLocalFiles([]);
+    setDocFileBindField(null);
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+    // 关闭下载捕获
+    window.electronAPI?.setDownloadCapture("left", false).catch(() => {});
+    window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
+  }, []);
+
+  /** 网页提取点击处理：记录导航点击步骤，重新激活下载捕获，继续拾取 */
+  const handleDocExtractClick = useCallback((side: "left" | "right", info: PickedElementInfo) => {
+    rlog(`[docExtractClick] side=${side}, tag=${info.tag}, selector=${info.selector}`);
+    const workflow: "entry" | "review" = side === "left" ? "entry" : "review";
+    addPickedMark({
+      side,
+      source: "web",
+      selector: info.selector,
+      label: `文件提取点击 · ${info.label || info.tag || "元素"}`,
+      workflow,
+      action: "click",
+      recordId: selected?.record_id,
+      rect: info.rect,
+      tag: info.tag,
+      type: info.type,
+      docExtractClick: true,
+    });
+    // 真实点击该元素（让网页导航/响应）
+    performRealClick(side, info.selector);
+    // 重新激活下载捕获（上一次点击可能未触发下载，保持捕获状态）
+    window.electronAPI?.setDownloadCapture(side, true).catch(() => {});
+    // 继续拾取，允许用户点击下一个元素
+    setTimeout(() => {
+      if (addingDocExtractModeRef.current && docExtractSourceRef.current === "web") {
+        window.electronAPI?.viewStartPicking(side);
+      }
+    }, 500);
+  }, [selected, addPickedMark, performRealClick]);
 
   /** 文件提取拾取处理：拿到图片/PDF URL → 记录步骤 → 调后端 OCR → 弹审查面板 */
   const handleDocExtractPick = useCallback(async (side: "left" | "right", info: PickedElementInfo) => {
@@ -2101,6 +2442,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       tag: info.tag,
       type: info.type,
       docExtract: true,
+      docSource: "web",
       docUrl: url,
     });
     // 目标字段：优先 mappings 的 left_field，否则用默认证件字段
@@ -2132,7 +2474,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
           };
         });
         // 同步更新文件处理面板（验证报告 > 文件处理 + 提取元素）
-        setDocExtract({
+        // 追加到当前卡片的文件列表（支持多文件 TAB 切换）
+        const newExtract: DocExtractState = {
           filename: result.filename,
           method: result.method,
           text: result.text,
@@ -2141,7 +2484,15 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
           source: url,
           file_url: url,
           processed_image: result.processed_image,
+        };
+        const rid = selected?.record_id || "_default";
+        setDocExtractsByRecord((prev) => {
+          const arr = prev[rid] || [];
+          // 同名同URL的文件不重复添加
+          const filtered = arr.filter((e) => e.file_url !== newExtract.file_url || e.filename !== newExtract.filename);
+          return { ...prev, [rid]: [...filtered, newExtract] };
         });
+        setActiveDocIndex(999); // 切到最新（会被 safeDocIndex 钳制到最后一项）
         setDocSignal((s) => s + 1);
         setDocExtractPanel({
           imageUrl: url,
@@ -2358,6 +2709,14 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     setSaveSkillRunAfter(false);
   }, [buildTemplateFromMarks, selectMode, avatarMode, exitSelectMode, exitAvatarMode, saveSkillRunAfter]);
 
+  /** 快速保存 Loop：自动命名，不弹窗 */
+  const handleQuickSaveLoop = useCallback(() => {
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const autoName = `Loop_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+    handleSaveSkill(autoName, "🔄");
+  }, [handleSaveSkill]);
+
   const handleRunSkill = useCallback((tpl: WorkflowTemplate) => {
     setWorkflowTemplate(tpl);
     setTeachingPhase("done");
@@ -2387,19 +2746,32 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   // entry 模式：entry → idle(abort)
   // 回退时清空当前阶段添加的 pickedMarks，保留之前阶段的
   const goBackTeachingPhase = useCallback(() => {
+    // 先立即清除网页高亮，避免蓝框残留
+    window.electronAPI?.viewClearHighlight("left").catch(() => {});
+    window.electronAPI?.viewClearHighlight("right").catch(() => {});
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+    // 关闭下载捕获
+    window.electronAPI?.setDownloadCapture("left", false).catch(() => {});
+    window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
+    // 清除文件提取配置状态
+    setAddingDocExtractMode(false);
+    setDocExtractSource(null);
+    setDocLocalFiles([]);
+    setDocFileBindField(null);
+    // 清空当前阶段的拾取状态和动作模式
+    setPendingAction("none");
+    setInputTarget(null);
+    setBindInputSide(null);
+    setNextClickLabel(null);
+    setAddingStepMode(null);
+    setAddingClickMode(false);
+    setRightPicked(null);
+    setLeftPicked(null);
+    setPickTarget(null);
+
     setTeachingPhase((cur) => {
       if (cur === "idle" || cur === "done") return cur;
-      // 清空当前阶段的拾取状态和动作模式
-      setPendingAction("none");
-      setInputTarget(null);
-      setBindInputSide(null);
-      setNextClickLabel(null);
-      setAddingStepMode(null);
-      setAddingClickMode(false);
-      setRightPicked(null);
-      setLeftPicked(null);
-      window.electronAPI?.viewStopPicking("left").catch(() => {});
-      window.electronAPI?.viewStopPicking("right").catch(() => {});
 
       if (appMode === "entry") {
         // entry 模式：entry → idle（等同 abort，但保留已配置的 marks 以便重新进入）
@@ -2416,20 +2788,11 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       if (cur === "entry") {
         // 回退到 review：清空 entry 阶段的 marks
         setPickedMarks((prev) => prev.filter((m) => m.workflow !== "entry"));
-        // 重新进入 review 阶段的拾取模式
-        setPickTarget("right");
-        setTimeout(() => {
-          window.electronAPI?.viewStartPicking("right");
-        }, 200);
         return "review";
       }
       if (cur === "review") {
         // 回退到 data-source：清空 review 阶段的 marks
         setPickedMarks((prev) => prev.filter((m) => m.workflow !== "review"));
-        setPickTarget("right");
-        setTimeout(() => {
-          window.electronAPI?.viewStartPicking("right");
-        }, 200);
         return "data-source";
       }
       if (cur === "data-source") {
@@ -2518,6 +2881,40 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     [selected]
   );
 
+  /** 等待下载完成（LOOP 执行时用）：开启捕获 → 等待 download-captured 事件 → 返回文件数据 */
+  const waitForDownload = useCallback(async (side: "left" | "right", timeoutMs = 30000): Promise<{ filename: string; dataUrl: string; size: number; mime: string }> => {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        removeCaptured?.();
+        removeFailed?.();
+      };
+      const onCaptured = (data: { side: string; filename: string; dataUrl: string; size: number; mime: string }) => {
+        if (settled || data.side !== side) return;
+        settled = true;
+        cleanup();
+        resolve(data);
+      };
+      const onFailed = (data: { side: string; filename: string; error?: string; state?: string }) => {
+        if (settled || data.side !== side) return;
+        settled = true;
+        cleanup();
+        reject(new Error(`下载失败: ${data.error || data.state || "unknown"}`));
+      };
+      const removeCaptured = window.electronAPI?.onDownloadCaptured(onCaptured);
+      const removeFailed = window.electronAPI?.onDownloadFailed(onFailed);
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error("下载超时（30s内未检测到下载）"));
+      }, timeoutMs);
+      // 确保下载捕获已开启
+      window.electronAPI?.setDownloadCapture(side, true).catch(() => {});
+    });
+  }, []);
+
   // ============ 在单个 view 上执行一个 mark（带变量替换） ============
   const executeMark = useCallback(async (
     mark: PickedMark,
@@ -2532,7 +2929,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     // 计算变量替换后的值
     let resolvedValue = mark.value || "";
     if (mark.variableField) {
-      const v = record.fields[mark.variableField] ?? record.passport_fields?.[mark.variableField] ?? docExtractRef.current?.fields?.[mark.variableField] ?? "";
+      const docFields = getRecordDocFields(record.record_id);
+      const v = record.fields[mark.variableField] ?? record.passport_fields?.[mark.variableField] ?? docFields[mark.variableField] ?? "";
       resolvedValue = String(v ?? "").trim();
       rlog(`[executeMark] Excel取值: field=${mark.variableField}, raw=${JSON.stringify(record.fields[mark.variableField])}, resolved="${resolvedValue}"`);
     }
@@ -2613,8 +3011,47 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
 
     // click 动作：真实点击
     if (mark.action === "click") {
-      // 文件提取步骤：不真实点击，而是按 selector 重新读取图片/PDF URL → OCR 提取 → 弹审查面板
+      // 文件提取步骤
       if (mark.docExtract) {
+        // === web-download 模式：多步点击触发下载 → 捕获文件 → OCR ===
+        if (mark.docSource === "web-download") {
+          console.log(`[executeMark] DOC-DOWNLOAD side=${side}, selector=${mark.selector}`);
+          // 1. 开启下载捕获
+          await window.electronAPI.setDownloadCapture(side, true);
+          // 2. 真实点击触发下载
+          let clickResult = await performRealClick(side, mark.selector);
+          if (clickResult && typeof clickResult === "object" && "ok" in clickResult && clickResult.ok === false) {
+            await waitElementAppear(side, mark.selector, 6000);
+            clickResult = await performRealClick(side, mark.selector);
+          }
+          // 3. 等待下载完成
+          try {
+            const downloadData = await waitForDownload(side, 30000);
+            rlog(`[executeMark] 下载完成: ${downloadData.filename} (${downloadData.size} bytes)`);
+            // 4. OCR 提取
+            const file = dataUrlToFile(downloadData.dataUrl, downloadData.filename);
+            const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
+            const targetFields = mappedFields.length > 0
+              ? mappedFields
+              : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender"];
+            const result = await api.extractDocumentFile(file, targetFields);
+            setDocExtractPanel({
+              imageUrl: downloadData.dataUrl,
+              filename: result.filename,
+              method: result.method,
+              text: result.text,
+              fields: result.fields,
+              side,
+              workflow: side === "left" ? "entry" : "review",
+            });
+          } catch (e) {
+            rlog(`[executeMark] 下载提取失败: ${e instanceof Error ? e.message : String(e)}`);
+            // 关闭下载捕获
+            window.electronAPI?.setDownloadCapture(side, false).catch(() => {});
+          }
+          return;
+        }
+        // === web 模式（原有）：按 selector 重新读取图片/PDF URL → OCR 提取 ===
         console.log(`[executeMark] DOC-EXTRACT side=${side}, selector=${mark.selector}`);
         const readScript = `
           ${DEEP_QUERY_HELPER}
@@ -2698,7 +3135,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       })();
     `;
     await window.electronAPI.viewExecuteJS(side, script);
-  }, [performInputValue, performRealClick, mappings, waitElementAppear]);
+  }, [performInputValue, performRealClick, mappings, waitElementAppear, getRecordDocFields, waitForDownload]);
 
   // ============ 前端字段比对：执行完workflow后，直接从右侧BrowserView读取字段值与期望比对 ============
   // 不调用后端 startConfigurableVerify（它会通过Playwright重新导航页面，破坏LOOP当前状态）
@@ -2743,7 +3180,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       let leftFound = true;
 
       if (mp.left_source === "passport") {
-        leftValue = record.passport_fields?.[mp.left_field] || docExtractRef.current?.fields?.[mp.left_field] || "";
+        const docFields = getRecordDocFields(record.record_id);
+        leftValue = record.passport_fields?.[mp.left_field] || docFields[mp.left_field] || "";
       } else if (mp.left_source === "database") {
         // database 来源：left_field 是左侧网页的CSS选择器，直接从左网页读取值
         try {
@@ -2844,7 +3282,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     ]);
 
     return { comparisons, overall: allMatch ? "match" : "mismatch" };
-  }, [mappings]);
+  }, [mappings, getRecordDocFields]);
 
   // ============ 对单张卡片执行整个模板 ============
   // 执行流程：先按顺序执行所有 marks（填入搜索词→点搜索→点人物→点附加按钮），
@@ -3598,7 +4036,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         );
         const result = await api.extractDocumentUrl(url, targetFields);
         const entries = buildDocEntries(result.fields, targetFields);
-        setDocExtract({
+        // 追加到当前卡片的文件列表（支持多文件 TAB 切换）
+        const newExtract: DocExtractState = {
           filename: result.filename,
           method: result.method,
           text: result.text,
@@ -3607,18 +4046,24 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
           source: url,
           file_url: url,
           processed_image: result.processed_image,
+        };
+        const rid = selected?.record_id || "_default";
+        setDocExtractsByRecord((prev) => {
+          const arr = prev[rid] || [];
+          const filtered = arr.filter((e) => e.file_url !== newExtract.file_url || e.filename !== newExtract.filename);
+          return { ...prev, [rid]: [...filtered, newExtract] };
         });
+        setActiveDocIndex(999);
         rlog(`[doc] 提取完成: ${result.filename} (${result.method})，${result.text.length} 字符`);
         setSuccessToast(`文档提取完成：${result.filename}`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         setError(`文档提取失败: ${msg}`);
-        setDocExtract(null);
       } finally {
         setDocExtracting(false);
       }
     },
-    [mappings, buildDocEntries, setError, setSuccessToast]
+    [mappings, buildDocEntries, setError, setSuccessToast, selected]
   );
 
   /** 切换文档拾取模式：开启后点击右侧网页的 PDF 链接/图片即触发提取 */
@@ -3961,20 +4406,27 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   const kbStateRef = useRef({
     pickedMarks, avatarMode, selectMode, pendingAction,
     showSettings, replaying, addingClickMode, nextClickLabel: null as string | null,
+    addingDocExtractMode: false, bindInputSide: null as null | "left" | "right" | "both",
     removePickedMark, enterSelectMode, exitAvatarMode, exitSelectMode,
     setError, setInputTarget, setPendingAction, setPickTarget,
     setPendingInputValue, setPendingInputField,
     setBindInputSide, setNextClickLabel, setAddingClickMode,
-    commitInput,
+    setAddingDocExtractMode: (_v: boolean) => {}, setDocExtractSource: (_v: any) => {},
+    setDocLocalFiles: (_v: any) => {}, setDocFileBindField: (_v: any) => {},
+    setRightPicked: (_v: any) => {}, setLeftPicked: (_v: any) => {},
+    commitInput, undoLastStep: () => {},
   });
   kbStateRef.current = {
     pickedMarks, avatarMode, selectMode, pendingAction,
     showSettings, replaying, addingClickMode, nextClickLabel,
+    addingDocExtractMode, bindInputSide,
     removePickedMark, enterSelectMode, exitAvatarMode, exitSelectMode,
     setError, setInputTarget, setPendingAction, setPickTarget,
     setPendingInputValue, setPendingInputField,
     setBindInputSide, setNextClickLabel, setAddingClickMode,
-    commitInput,
+    setAddingDocExtractMode, setDocExtractSource, setDocLocalFiles, setDocFileBindField,
+    setRightPicked, setLeftPicked,
+    commitInput, undoLastStep,
   };
 
   useEffect(() => {
@@ -4026,16 +4478,39 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         s.setPendingAction("click");
       } else if (key === "r" || key === "R") {
         e.preventDefault();
-        const last = s.pickedMarks[s.pickedMarks.length - 1];
-        if (last) {
-          s.removePickedMark(last.id);
-        }
+        s.undoLastStep();
       } else if (key === "Escape") {
         // 两级退出（与 Enter 等价）：
-        // 1. S 输入模式 → 完成填入并回到"搭建节点"状态（保持 selectMode）
-        // 2. 教学"搜索"阶段 → 跳过搜索进入确认人物
-        // 3. 点击模式 → 退出点击模式
-        // 4. selectMode/avatarMode → 完全退出
+        // 1. 文件提取配置模式 → 退出文件提取配置
+        // 2. S 输入模式 → 完成填入并回到"搭建节点"状态（保持 selectMode）
+        // 3. 教学"搜索"阶段 → 跳过搜索进入确认人物
+        // 4. 点击模式 → 退出点击模式
+        // 5. 绑定输入框子模式 → 退出绑定模式
+        // 6. selectMode/avatarMode → 完全退出
+        if (s.addingDocExtractMode) {
+          s.setAddingDocExtractMode(false);
+          s.setDocExtractSource(null);
+          s.setDocLocalFiles([]);
+          s.setDocFileBindField(null);
+          window.electronAPI?.viewStopPicking("left").catch(() => {});
+          window.electronAPI?.viewStopPicking("right").catch(() => {});
+          window.electronAPI?.viewClearHighlight("left").catch(() => {});
+          window.electronAPI?.viewClearHighlight("right").catch(() => {});
+          window.electronAPI?.setDownloadCapture("left", false).catch(() => {});
+          window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
+          return;
+        }
+        if (s.bindInputSide) {
+          s.setBindInputSide(null);
+          s.setPendingAction("none");
+          s.setRightPicked(null);
+          s.setLeftPicked(null);
+          window.electronAPI?.viewStopPicking("left").catch(() => {});
+          window.electronAPI?.viewStopPicking("right").catch(() => {});
+          window.electronAPI?.viewClearHighlight("left").catch(() => {});
+          window.electronAPI?.viewClearHighlight("right").catch(() => {});
+          return;
+        }
         if (s.pendingAction === "input") {
           s.commitInput();
           return;
@@ -4060,11 +4535,25 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         }
       } else if (key === "Enter") {
         // 两级退出（与 Esc 等价）：
-        // 1. S 输入模式 → 完成填入并回到"搭建节点"状态（保持 selectMode）
-        // 2. 教学"搜索"阶段 → 跳过搜索进入确认人物
-        // 3. 点击模式 → 退出点击模式
-        // 4. selectMode/avatarMode → 完全退出
+        // 1. 文件提取配置模式 → 退出文件提取配置
+        // 2. S 输入模式 → 完成填入并回到"搭建节点"状态（保持 selectMode）
+        // 3. 教学"搜索"阶段 → 跳过搜索进入确认人物
+        // 4. 点击模式 → 退出点击模式
+        // 5. selectMode/avatarMode → 完全退出
         e.preventDefault();
+        if (s.addingDocExtractMode) {
+          s.setAddingDocExtractMode(false);
+          s.setDocExtractSource(null);
+          s.setDocLocalFiles([]);
+          s.setDocFileBindField(null);
+          window.electronAPI?.viewStopPicking("left").catch(() => {});
+          window.electronAPI?.viewStopPicking("right").catch(() => {});
+          window.electronAPI?.viewClearHighlight("left").catch(() => {});
+          window.electronAPI?.viewClearHighlight("right").catch(() => {});
+          window.electronAPI?.setDownloadCapture("left", false).catch(() => {});
+          window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
+          return;
+        }
         if (s.pendingAction === "input") {
           s.commitInput();
           return;
@@ -4122,9 +4611,14 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     const currentBindInputSide = bindInputSideRef.current;
     const currentExcelCol = selectedExcelColumnRef.current;
     rlog("[onRightPicked]", { tag: info.tag, selector: info.selector, bindSide: currentBindInputSide, excelCol: currentExcelCol, pendingAction: currentPendingAction });
-    // 文件提取模式（步骤4）：优先于一切分支，点击右侧元素 = 审查提取
+    // 文件提取模式（步骤4）：优先于一切分支
     if (addingDocExtractModeRef.current) {
-      handleDocExtractPick("right", info);
+      if (docExtractSourceRef.current === "web") {
+        // 网页提取 = 多步点击 + 下载捕获：记录点击步骤，等待下载触发
+        handleDocExtractClick("right", info);
+      } else {
+        handleDocExtractPick("right", info);
+      }
       return;
     }
     // 功能1：文档提取模式 —— 点击 PDF 链接/图片 → 下载提取 → 文档对比（优先于其他所有分支）
@@ -4373,7 +4867,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     // 普通映射流程：记录右侧拾取标记
     setRightPicked(info);
     // 审查模式（先右后左）：右侧拾取完成后切到左侧拾取来源；录入模式（先左后右）：两侧已完成，等待保存
-    setPickTarget(addingStepModeRef.current === "review" ? "left" : null);
+    setPickTarget(currentLoopStepTypeRef.current === "review" ? "left" : null);
     // addingStepMode 下不添加 pick mark，保存映射时才添加 input mark
     if (!addingStepModeRef.current) {
       addPickedMark({
@@ -4400,9 +4894,13 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     const currentBindInputSide = bindInputSideRef.current;
     const currentExcelCol = selectedExcelColumnRef.current;
     rlog("[onLeftPicked]", { tag: info.tag, selector: info.selector, bindSide: currentBindInputSide, excelCol: currentExcelCol, pendingAction: currentPendingAction });
-    // 文件提取模式：优先于一切分支，点击左侧元素 = 录入提取
+    // 文件提取模式：优先于一切分支
     if (addingDocExtractModeRef.current) {
-      handleDocExtractPick("left", info);
+      if (docExtractSourceRef.current === "web") {
+        handleDocExtractClick("left", info);
+      } else {
+        handleDocExtractPick("left", info);
+      }
       return;
     }
     // 回收节点：再次点击已放置的相同元素时删除对应 mark
@@ -4618,7 +5116,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
 // 普通映射流程：记录左侧拾取标记
 setLeftPicked(info);
 // 审查模式（先右后左）：两侧已完成，等待保存；录入模式（先左后右）：左源拾取完成后继续拾取右侧元素
-setPickTarget(addingStepModeRef.current === "entry" ? "right" : null);
+setPickTarget(currentLoopStepTypeRef.current === "entry" ? "right" : null);
 // addingStepMode 下不添加 pick mark，保存映射时才添加 input mark
 if (!addingStepModeRef.current) {
 addPickedMark({
@@ -4671,8 +5169,9 @@ type: info.type,
       m,
     ]);
     // 如果正在添加审查/录入步骤，把映射转化为 pickedMark
+    const stepType = currentLoopStepTypeRef.current;
     if (addingStepMode) {
-      const isEntry = addingStepMode === "entry";
+      const isEntry = stepType === "entry";
       const isExcelSource = m.left_source === "excel";
       const isManualSource = m.left_source === "manual";
       const isPassportSource = m.left_source === "passport";
@@ -4684,9 +5183,9 @@ type: info.type,
         side: "right",
         source: isExcelSource ? "excel" : isPassportSource ? "passport" : "web",
         selector: m.right_selector,
-        label: `${addingStepMode === "review" ? "审查" : "录入"} · ${m.right_label || m.right_selector} ← ${sourceLabel}「${isManualSource ? (selected?.fields?.[m.left_field] || m.left_field) : m.left_field}」`,
+        label: `${stepType === "review" ? "审查" : "录入"} · ${m.right_label || m.right_selector} ← ${sourceLabel}「${isManualSource ? (selected?.fields?.[m.left_field] || m.left_field) : m.left_field}」`,
         value: isManualSource ? m.left_field : "",
-        workflow: addingStepMode,
+        workflow: stepType,
         action: isEntry ? "input" : "pick",
         recordId: selected?.record_id,
         rect: undefined,
@@ -4699,12 +5198,12 @@ type: info.type,
         excelField: isExcelSource ? m.left_field : undefined,
         sourceSelector: isEntry ? leftWebSelector : undefined,
       });
-      rlog(`[saveMapping] 添加${addingStepMode}步骤: ${m.right_selector} ← ${sourceLabel}(${m.left_field}), isEntry=${isEntry}, variableField=${isEntry && isExcelSource ? m.left_field : "none"}`);
+      rlog(`[saveMapping] 添加${stepType}步骤: ${m.right_selector} ← ${sourceLabel}(${m.left_field}), isEntry=${isEntry}, variableField=${isEntry && isExcelSource ? m.left_field : "none"}`);
     }
     // 重置一轮，继续拾取下一个（审查模式回到右侧核对元素，录入模式回到左侧来源）
     setRightPicked(null);
     setLeftPicked(null);
-    const nextTarget = addingStepModeRef.current === "entry" ? "left" : "right";
+    const nextTarget = currentLoopStepTypeRef.current === "entry" ? "left" : "right";
     setPickTarget(nextTarget as PickTarget);
     setTimeout(() => {
       if (nextTarget === "left") {
@@ -4867,6 +5366,9 @@ type: info.type,
           setSaveSkillRunAfter(true);
           setShowSaveSkill(true);
           break;
+        case "quick-save-loop":
+          handleQuickSaveLoop();
+          break;
         case "teaching-back":
           goBackTeachingPhase();
           break;
@@ -4983,7 +5485,7 @@ type: info.type,
       }
     });
     return off;
-  }, [refreshRecords, clearRecords, removeMapping, removePickedMark, clearPickedMarks, replayAll, stopReplay, advanceToReviewPhase, abortTeaching, goBackTeachingPhase, browserLeftDetached, browserRightDetached, bottomDetached, leftUrl, rightUrl, selectMode, pickTarget, avatarMode, pendingAction, teachingPhase, selected, mappings, result, report, loopReports, steps, shots, running, pickedMarks, replaying, replayCursor, rightPicked, leftPicked, selectedExcelColumn, bindInputSide, nextClickLabel, addingStepMode, addingClickMode, addingDocExtractMode, cardsGenerated, rowRange, pickLeftFromWeb, pickLeftFromExcel, resetMappingRound, saveMapping, startBindBothInputs, exitBindInputs, startConfirmPerson, startAddingReviewSteps, startAddingEntrySteps, exitAddingStepMode, startAddClickStep, exitAddClickMode, undoLastStep, startAddDocExtract, exitAddDocExtractMode, requestDocFileExtract, exitSelectMode, setShowSaveSkill, setSaveSkillRunAfter]);
+  }, [refreshRecords, clearRecords, removeMapping, removePickedMark, clearPickedMarks, replayAll, stopReplay, advanceToReviewPhase, abortTeaching, goBackTeachingPhase, browserLeftDetached, browserRightDetached, bottomDetached, leftUrl, rightUrl, selectMode, pickTarget, avatarMode, pendingAction, teachingPhase, selected, mappings, result, report, loopReports, steps, shots, running, pickedMarks, replaying, replayCursor, rightPicked, leftPicked, selectedExcelColumn, bindInputSide, nextClickLabel, addingStepMode, addingClickMode, addingDocExtractMode, cardsGenerated, rowRange, pickLeftFromWeb, pickLeftFromExcel, resetMappingRound, saveMapping, startBindBothInputs, exitBindInputs, startConfirmPerson, startAddingReviewSteps, startAddingEntrySteps, exitAddingStepMode, startAddClickStep, exitAddClickMode, undoLastStep, startAddDocExtract, exitAddDocExtractMode, requestDocFileExtract, exitSelectMode, setShowSaveSkill, setSaveSkillRunAfter, handleQuickSaveLoop]);
 
   // Excel 拾取：把字段包装成 PickedElementInfo，并打 tag 区分来源
   const onExcelPicked = (info: ExcelPickedField) => {
@@ -5105,7 +5607,7 @@ type: info.type,
   // 模态弹窗打开时隐藏主窗口 BrowserView，避免原生视图覆盖 HTML 弹窗
   useEffect(() => {
     if (!window.electronAPI) return;
-    const anyModalOpen = showSettings || !!docFillData;
+    const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel;
     if (anyModalOpen) {
       if (!browserLeftDetached && leftViewMode === "web") window.electronAPI.viewHide("left");
       if (!browserRightDetached) window.electronAPI.viewHide("right");
@@ -5116,7 +5618,7 @@ type: info.type,
       const timer = setTimeout(() => window.dispatchEvent(new Event("resize")), 50);
       return () => clearTimeout(timer);
     }
-  }, [showSettings, docFillData, browserLeftDetached, browserRightDetached, leftViewMode]);
+  }, [showSettings, docFillData, showSaveSkill, showSkillPanel, browserLeftDetached, browserRightDetached, leftViewMode]);
 
   // ============ 核验 ============
   const start = async () => {
@@ -5382,6 +5884,31 @@ type: info.type,
 
       {/* ============ 顶部工具栏 ============ */}
       <header className="glass-frame z-20 flex shrink-0 items-center gap-2 border-b border-white/40 px-3 py-1">
+        {/* SKILL 管理按钮 */}
+        <button
+          onClick={() => setShowSkillPanel(true)}
+          className="flex shrink-0 items-center gap-1 rounded-md bg-white/70 px-2 py-0.5 text-[11px] font-medium text-indigo-600 ring-1 ring-indigo-200 transition-all hover:bg-indigo-50 hover:text-indigo-700"
+          title="查看已保存的 Loop 模板并执行"
+        >
+          <Sparkles className="h-3 w-3" />
+          查看保存Loop
+        </button>
+
+        {/* 外挂插件开关 */}
+        <button
+          onClick={toggleDock}
+          className={[
+            "flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium ring-1 transition-all",
+            dockOpen
+              ? "bg-emerald-600 text-white ring-emerald-500 hover:bg-emerald-700"
+              : "bg-white/70 text-emerald-700 ring-emerald-200 hover:bg-emerald-50",
+          ].join(" ")}
+          title="站外循环：在屏幕边缘挂一个悬浮条，设置「提取源」和「操作页」后 AI 自主循环填写；数据痕迹见下方「站外循环记录」"
+        >
+          <Bot className="h-3 w-3" />
+          {dockOpen ? "站外循环已开" : "站外循环"}
+        </button>
+
         <div className="flex-1" />
 
         {/* pendingAction 状态指示器（S 输入 / 空格点击） */}
@@ -5636,11 +6163,11 @@ type: info.type,
               title={
                 stepCount === 0
                   ? appMode === "entry" ? "请先配置至少一个录入步骤" : "请先配置至少一个审查步骤"
-                  : `保存为 SKILL 并立即批量${appMode === "loop" ? " LOOP" : appMode === "entry" ? "录入" : "审查"}（${stepCount} 步）`
+                  : `立即批量${appMode === "loop" ? " LOOP" : appMode === "entry" ? "录入" : "审查"}（${stepCount} 步）`
               }
             >
-              <Sparkles className="h-3 w-3" />
-              保存并执行
+              <Play className="h-3 w-3" />
+              执行
             </button>
           );
         })() : (
@@ -5675,16 +6202,6 @@ type: info.type,
             <Play className="h-3 w-3" /> 已登录，继续
           </button>
         )}
-
-        {/* SKILL 管理按钮 */}
-        <button
-          onClick={() => setShowSkillPanel(true)}
-          className="flex items-center gap-1 rounded-md bg-white/70 px-2 py-0.5 text-[11px] font-medium text-indigo-600 ring-1 ring-indigo-200 transition-all hover:bg-indigo-50 hover:text-indigo-700"
-          title="SKILL 管理：查看和执行已保存的技能模板"
-        >
-          <Sparkles className="h-3 w-3" />
-          SKILL
-        </button>
 
         <button
           onClick={() => setShowSettings(true)}
@@ -5832,6 +6349,7 @@ type: info.type,
                   onRemoveFavoriteSite={handleRemoveFavoriteSite("left")}
                   hasExcelData={records.length > 0}
                   onRequestAddExcel={() => browserExcelInputRef.current?.click()}
+                  onExcelDrop={handleBrowserExcelUpload}
                   onCloseExcel={handleCloseLeftExcel}
                   picking={(selectMode && pickTarget === "left") || avatarMode || (pendingAction === "click" && (pickTarget === "left" || (teachingPhase !== "idle" && !!nextClickLabel) || addingClickMode)) || (pendingAction === "input" && pickTarget === "left") || !!bindInputSide || (teachingPhase !== "idle" && !!nextClickLabel && pickTarget === "left")}
                   onPickedElement={avatarMode ? onAvatarPicked : onLeftPicked}
@@ -5945,6 +6463,7 @@ type: info.type,
                   excelTabTitle="参考Excel"
                   hasExcelData={rightRecords.length > 0}
                   onRequestAddExcel={() => rightExcelInputRef.current?.click()}
+                  onExcelDrop={handleRightExcelUpload}
                   onCloseExcel={handleCloseRightExcel}
                   newTabTitle="CINSIDE SEARCH"
                   favoriteSites={rightFavoriteSites}
@@ -6128,6 +6647,7 @@ type: info.type,
                     hasConfirmClick={pickedMarks.some((m) => m.action === "click" && m.label.startsWith("确认人物"))}
                     onAdvanceTeaching={advanceToReviewPhase}
                     onAbortTeaching={abortTeaching}
+                    onRequestQuickSave={handleQuickSaveLoop}
                     onRequestSaveSkill={() => { setSaveSkillRunAfter(false); setShowSaveSkill(true); }}
                     onRequestSaveSkillAndRun={() => { setSaveSkillRunAfter(true); setShowSaveSkill(true); }}
                     selectedExcelColumn={selectedExcelColumn}
@@ -6141,6 +6661,8 @@ type: info.type,
                     onStartAddEntrySteps={startAddingEntrySteps}
                     onExitAddingStepMode={exitAddingStepMode}
                     addingStepMode={addingStepMode}
+                    currentStepType={currentLoopStepType}
+                    onSwitchStepType={switchLoopStepType}
                     addingClickMode={addingClickMode}
                     clickStepCount={pickedMarks.filter((m) => m.action === "click" && m.label.startsWith("点击按钮")).length}
                     onStartAddClickStep={() => startAddClickStep()}
@@ -6149,9 +6671,20 @@ type: info.type,
                     onUndo={undoLastStep}
                     canUndo={pickedMarks.length > 0}
                     addingDocExtractMode={addingDocExtractMode}
+                    docExtractSource={docExtractSource}
                     docExtractStepCount={pickedMarks.filter((m) => m.docExtract).length}
                     onStartAddDocExtract={startAddDocExtract}
                     onExitAddDocExtractMode={exitAddDocExtractMode}
+                    onChooseDocExtractWeb={chooseDocExtractWeb}
+                    onChooseDocExtractLocal={chooseDocExtractLocal}
+                    onTriggerLocalFilePick={triggerDocLocalFilePick}
+                    onLocalFilesSelected={handleDocLocalFilesSelected}
+                    localFileInputRef={docLocalFileInputRef}
+                    docLocalFiles={docLocalFiles.map((f) => ({ name: f.name, size: f.size }))}
+                    onRemoveLocalFile={removeDocLocalFile}
+                    docFileBindField={docFileBindField}
+                    onSetDocFileBindField={setDocFileBindField}
+                    onConfirmDocLocalExtract={confirmDocLocalExtract}
                     onDocFileExtract={requestDocFileExtract}
                     cardsGenerated={cardsGenerated}
                     rowRange={rowRange}
@@ -6205,7 +6738,9 @@ type: info.type,
                   replayCursor={replayCursor}
                   onStopReplay={stopReplay}
                   switchToLogSignal={logSignal}
-                  docExtract={docExtract}
+                  docExtracts={currentDocExtracts}
+                  activeDocIndex={safeDocIndex}
+                  onSelectDocIndex={setActiveDocIndex}
                   docExtracting={docExtracting}
                   switchToDocSignal={docSignal}
                   pickTarget={pickTarget}
@@ -6270,6 +6805,7 @@ type: info.type,
                     hasConfirmClick={pickedMarks.some((m) => m.action === "click" && m.label.startsWith("确认人物"))}
                     onAdvanceTeaching={advanceToReviewPhase}
                     onAbortTeaching={abortTeaching}
+                    onRequestQuickSave={handleQuickSaveLoop}
                     onRequestSaveSkill={() => { setSaveSkillRunAfter(false); setShowSaveSkill(true); }}
                     onRequestSaveSkillAndRun={() => { setSaveSkillRunAfter(true); setShowSaveSkill(true); }}
                     selectedExcelColumn={selectedExcelColumn}
@@ -6283,6 +6819,8 @@ type: info.type,
                     onStartAddEntrySteps={startAddingEntrySteps}
                     onExitAddingStepMode={exitAddingStepMode}
                     addingStepMode={addingStepMode}
+                    currentStepType={currentLoopStepType}
+                    onSwitchStepType={switchLoopStepType}
                     addingClickMode={addingClickMode}
                     clickStepCount={pickedMarks.filter((m) => m.action === "click" && m.label.startsWith("点击按钮")).length}
                     onStartAddClickStep={() => startAddClickStep()}
@@ -6291,9 +6829,20 @@ type: info.type,
                     onUndo={undoLastStep}
                     canUndo={pickedMarks.length > 0}
                     addingDocExtractMode={addingDocExtractMode}
+                    docExtractSource={docExtractSource}
                     docExtractStepCount={pickedMarks.filter((m) => m.docExtract).length}
                     onStartAddDocExtract={startAddDocExtract}
                     onExitAddDocExtractMode={exitAddDocExtractMode}
+                    onChooseDocExtractWeb={chooseDocExtractWeb}
+                    onChooseDocExtractLocal={chooseDocExtractLocal}
+                    onTriggerLocalFilePick={triggerDocLocalFilePick}
+                    onLocalFilesSelected={handleDocLocalFilesSelected}
+                    localFileInputRef={docLocalFileInputRef}
+                    docLocalFiles={docLocalFiles.map((f) => ({ name: f.name, size: f.size }))}
+                    onRemoveLocalFile={removeDocLocalFile}
+                    docFileBindField={docFileBindField}
+                    onSetDocFileBindField={setDocFileBindField}
+                    onConfirmDocLocalExtract={confirmDocLocalExtract}
                     onDocFileExtract={requestDocFileExtract}
                     cardsGenerated={cardsGenerated}
                     rowRange={rowRange}
@@ -6328,6 +6877,7 @@ type: info.type,
                 hasConfirmClick={pickedMarks.some((m) => m.action === "click" && m.label.startsWith("确认人物"))}
                 onAdvanceTeaching={advanceToReviewPhase}
                 onAbortTeaching={abortTeaching}
+                onRequestQuickSave={handleQuickSaveLoop}
                 onRequestSaveSkill={() => { setSaveSkillRunAfter(false); setShowSaveSkill(true); }}
                 onRequestSaveSkillAndRun={() => { setSaveSkillRunAfter(true); setShowSaveSkill(true); }}
                 selectedExcelColumn={selectedExcelColumn}
@@ -6341,6 +6891,8 @@ type: info.type,
                 onStartAddEntrySteps={startAddingEntrySteps}
                 onExitAddingStepMode={exitAddingStepMode}
                 addingStepMode={addingStepMode}
+                currentStepType={currentLoopStepType}
+                onSwitchStepType={switchLoopStepType}
                 addingClickMode={addingClickMode}
                 clickStepCount={pickedMarks.filter((m) => m.action === "click" && m.label.startsWith("点击按钮")).length}
                 onStartAddClickStep={() => startAddClickStep()}
@@ -6395,6 +6947,15 @@ type: info.type,
           if (f) handleDocFilePick(f);
           e.target.value = "";
         }}
+      />
+      {/* 文件提取步骤配置：本地文件上传（多文件） */}
+      <input
+        ref={docLocalFileInputRef}
+        type="file"
+        multiple
+        accept=".jpg,.jpeg,.png,.pdf"
+        className="hidden"
+        onChange={handleDocLocalFilesSelected}
       />
       {docFillData && (
         <DocFillDialog
