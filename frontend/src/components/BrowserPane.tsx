@@ -59,6 +59,8 @@ interface Props {
   excelFileName?: string;
   /** 请求添加Excel文件回调（点击+按钮时触发） */
   onRequestAddExcel?: () => void;
+  /** 拖拽Excel文件回调（Web模式下拖拽文件时触发） */
+  onExcelDrop?: (file: File) => void;
   /** 关闭Excel数据回调（点击Excel Tab关闭按钮时触发） */
   onCloseExcel?: () => void;
   /** Excel模式下的空状态内容（无数据时显示） */
@@ -135,6 +137,7 @@ export default function BrowserPane({
   hasExcelData = false,
   excelFileName,
   onRequestAddExcel,
+  onExcelDrop,
   onCloseExcel,
   excelEmptyState,
   webEmptyState,
@@ -914,6 +917,16 @@ export default function BrowserPane({
               <ExternalLink className="h-3 w-3" />
             </button>
           )}
+          {enableViewSwitch && isWebMode && onRequestAddExcel && (
+            <button
+              onClick={onRequestAddExcel}
+              disabled={disabled}
+              className="rounded p-0.5 text-slate-400 hover:bg-white/60 hover:text-emerald-600 disabled:opacity-40"
+              title="导入 Excel/CSV"
+            >
+              <FileSpreadsheet className="h-3 w-3" />
+            </button>
+          )}
           {onDetach && (
             <button
               onClick={onDetach}
@@ -928,7 +941,16 @@ export default function BrowserPane({
 
       {/* 内容区：Web容器和Excel容器始终挂载，通过hidden切换可见性。
           这样ResizeObserver不会失效，切换到Excel时BrowserView会因container尺寸为0而自动隐藏。 */}
-      <div ref={scrollRef} className={`relative min-h-0 flex-1 overflow-hidden ${isWebMode || !enableViewSwitch ? "" : "hidden"}`}>
+      <div
+        ref={scrollRef}
+        className={`relative min-h-0 flex-1 overflow-hidden ${isWebMode || !enableViewSwitch ? "" : "hidden"}`}
+        onDragOver={enableViewSwitch && isWebMode && onExcelDrop ? (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } : undefined}
+        onDrop={enableViewSwitch && isWebMode && onExcelDrop ? (e) => {
+          e.preventDefault();
+          const f = e.dataTransfer.files?.[0];
+          if (f && /\.(xlsx|xls|csv)$/i.test(f.name)) onExcelDrop(f);
+        } : undefined}
+      >
         <div ref={containerRef} className="absolute inset-0 bg-white">
           {!window.electronAPI && (
             <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-xs text-slate-400">
