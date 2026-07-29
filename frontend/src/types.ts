@@ -198,6 +198,14 @@ export interface PickedMark {
   docExtract?: boolean;
   /** 文件提取目标的 URL（图片/PDF 链接） */
   docUrl?: string;
+  /** 文件提取来源：web=网页点击提取，local=本地文件按文件名匹配，web-download=多步点击触发下载 */
+  docSource?: "web" | "local" | "web-download";
+  /** 本地文件提取时：用于匹配文件名的字段名（如 student_id） */
+  docFileField?: string;
+  /** 本地文件提取时：用户上传的文件列表（仅配置阶段使用，执行时按字段值匹配） */
+  docLocalFiles?: Array<{ name: string; data?: string }>;
+  /** 文件提取序列中的导航点击步骤标记（配置阶段记录的多步点击） */
+  docExtractClick?: boolean;
 }
 
 /** 教学模式状态：人类教 AI 自动化流程的阶段 */
@@ -349,6 +357,41 @@ export interface DocExtractState {
   file_url?: string;
   /** 预处理后的图片预览（base64）— 自动旋转到正面 + 裁剪白边后 */
   processed_image?: string | null;
+}
+
+// ============ 外挂插件（体外循环） ============
+
+/** 外部 Chrome 标签页（提取源或操作页） */
+export interface PluginTabInfo {
+  id: string;
+  title: string;
+  url: string;
+}
+
+/** 插件运行状态（GET /api/plugin/status） */
+export interface PluginStatus {
+  running: boolean;
+  cdp_url: string;
+  sources: PluginTabInfo[];
+  target: PluginTabInfo | null;
+  interval: number;
+  records_count: number;
+  last_error: string | null;
+  llm_configured: boolean;
+  current_action: string;
+}
+
+/** 一条外挂循环记录 */
+export interface PluginRecord {
+  id: string;
+  time: string;
+  source: { title: string; url: string };
+  fields: Record<string, string>;
+  filled: Record<string, string>;
+  missing: string[];
+  status: "success" | "partial" | "failed";
+  log: string[];
+  error: string | null;
 }
 
 // 字段中文名映射，UI 用
