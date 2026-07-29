@@ -1,6 +1,6 @@
 "use strict";
 
-const { app, BrowserWindow, BrowserView, ipcMain, shell, Tray, Menu, nativeImage } = require("electron");
+const { app, BrowserWindow, BrowserView, ipcMain, shell, Tray, Menu, nativeImage, session } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
@@ -143,6 +143,7 @@ function createWindow() {
 
   mainWindow.on("closed", () => {
     mainWindow = null;
+    destroyDockWindow();
   });
 
   // === 防误关拦截：开启时点关闭改为最小化到托盘 ===
@@ -231,7 +232,7 @@ function createTray() {
 
 // ============ 左右两个 BrowserView 的统一工厂 ============
 function makeBrowserView() {
-  return new BrowserView({
+  const view = new BrowserView({
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -239,6 +240,13 @@ function makeBrowserView() {
       allowRunningInsecureContent: true,
     },
   });
+  // 禁用默认的 Ctrl+滚轮缩放（改为主进程通过 setZoomFactor 控制），
+  // 这样注入的 wheel 监听器可以使用 passive: true，避免阻塞页面正常滚动
+  try {
+    view.webContents.setLayoutZoomResizingEnabled(false);
+    view.webContents.setVisualZoomResizingEnabled(false);
+  } catch (_) {}
+  return view;
 }
 
 function createBrowserViews() {
@@ -259,10 +267,10 @@ function attachViewMessageRelay(view, side) {
   // 页面加载完成后注入细滚动条样式 + 拾取模式光标 CSS
   view.webContents.on("did-finish-load", () => {
     view.webContents.insertCSS(`
-      ::-webkit-scrollbar { width: 5px; height: 5px; }
+      ::-webkit-scrollbar { width: 4px; height: 4px; }
       ::-webkit-scrollbar-track { background: transparent; }
-      ::-webkit-scrollbar-thumb { background: rgba(99,102,241,.18); border-radius: 10px; }
-      ::-webkit-scrollbar-thumb:hover { background: rgba(99,102,241,.35); }
+      ::-webkit-scrollbar-thumb { background: rgba(148,163,184,.30); border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: rgba(99,102,241,.45); }
       ::-webkit-scrollbar-corner { background: transparent; }
       .cinside-picking, .cinside-picking * { cursor: crosshair !important; }
       .cinside-picking *:hover { outline: 2px dashed #6366f1 !important; outline-offset: 1px !important; box-shadow: 0 0 0 4px rgba(99,102,241,.15) !important; }
@@ -281,13 +289,13 @@ function attachViewMessageRelay(view, side) {
         window.__cinsidePostMessage = function (payload) {
           try { console.log('[cinside-relay]', JSON.stringify(payload)); } catch (e) {}
         };
-        // Ctrl+滚轮缩放
+        // Ctrl+滚轮缩放：passive:true 不阻塞页面正常滚动
+        // 默认缩放已在主进程通过 setLayoutZoomResizingEnabled(false) 禁用
         window.addEventListener('wheel', function (e) {
           if (e.ctrlKey) {
-            e.preventDefault();
             console.log('[cinside-relay]', JSON.stringify({ kind: 'ctrl-wheel', deltaY: e.deltaY }));
           }
-        }, { passive: false });
+        }, { passive: true });
       })();
     `).catch(() => {});
   });
@@ -400,14 +408,19 @@ function createPopupView(parentSide, url, win) {
       allowRunningInsecureContent: true,
     },
   });
+  // 禁用默认 Ctrl+滚轮缩放（与主 view 一致）
+  try {
+    view.webContents.setLayoutZoomResizingEnabled(false);
+    view.webContents.setVisualZoomResizingEnabled(false);
+  } catch (_) {}
 
   // 附加消息中继（与主 view 完全一致）
   view.webContents.on("did-finish-load", () => {
     view.webContents.insertCSS(`
-      ::-webkit-scrollbar { width: 5px; height: 5px; }
+      ::-webkit-scrollbar { width: 4px; height: 4px; }
       ::-webkit-scrollbar-track { background: transparent; }
-      ::-webkit-scrollbar-thumb { background: rgba(99,102,241,.18); border-radius: 10px; }
-      ::-webkit-scrollbar-thumb:hover { background: rgba(99,102,241,.35); }
+      ::-webkit-scrollbar-thumb { background: rgba(148,163,184,.30); border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: rgba(99,102,241,.45); }
       ::-webkit-scrollbar-corner { background: transparent; }
       .cinside-picking, .cinside-picking * { cursor: crosshair !important; }
       .cinside-picking *:hover { outline: 2px dashed #6366f1 !important; outline-offset: 1px !important; box-shadow: 0 0 0 4px rgba(99,102,241,.15) !important; }
@@ -427,13 +440,12 @@ function createPopupView(parentSide, url, win) {
         window.__cinsidePostMessage = function (payload) {
           try { console.log('[cinside-relay]', JSON.stringify(payload)); } catch (e) {}
         };
-        // Ctrl+滚轮缩放
+        // Ctrl+滚轮缩放：passive:true 不阻塞页面正常滚动
         window.addEventListener('wheel', function (e) {
           if (e.ctrlKey) {
-            e.preventDefault();
             console.log('[cinside-relay]', JSON.stringify({ kind: 'ctrl-wheel', deltaY: e.deltaY }));
           }
-        }, { passive: false });
+        }, { passive: true });
       })();
     `).catch(() => {});
   });
@@ -558,8 +570,10 @@ function showView(side, bounds, _url) {
   if (!mainWindow.getBrowserViews().includes(view)) {
     mainWindow.addBrowserView(view);
   }
-  // 不要 setTopBrowserView：BrowserView 置顶会盖住设置弹窗/确认对话框等 HTML 层。
-  // 弹窗打开时 App.tsx 会主动 viewHide，弹窗关闭后由 sync() 恢复。
+  // 确保 BrowserView 在最上层（HTML 层之上），否则 HTML 层可能拦截鼠标滚轮事件。
+  // 弹窗（popup BrowserView）打开时 addBrowserView 会在主 view 之上，无需额外处理。
+  // 注意：HTML 弹窗（设置对话框等）打开时 App.tsx 会主动 viewHide，所以不会被覆盖。
+  try { mainWindow.setTopBrowserView(view); } catch (_) {}
   // 强制重绘：通过 setBounds 再次触发 Chromium 合成器刷新，解决后台
   // 加载/JS执行后 BrowserView 内容不更新直到重新切换tab才显示的问题
   if (bounds) {
@@ -576,6 +590,8 @@ function showView(side, bounds, _url) {
     if (!mainWindow.getBrowserViews().includes(popup.view)) {
       mainWindow.addBrowserView(popup.view);
     }
+    // 弹窗必须在主 view 之上
+    try { mainWindow.setTopBrowserView(popup.view); } catch (_) {}
   }
 }
 
@@ -1229,6 +1245,77 @@ app.whenReady().then(() => {
   createWindow();
   createBrowserViews();
 
+  // ============ 下载拦截：文件提取模式下捕获网页下载的文件 ============
+  // downloadCapture[side] = true 时，该 side 的 BrowserView 触发的下载会被拦截
+  const downloadCapture = { left: false, right: false };
+
+  session.defaultSession.on("will-download", (event, item, webContents) => {
+    // 判断下载来自哪个 BrowserView
+    let side = null;
+    if (rightBrowserView && webContents === rightBrowserView.webContents) side = "right";
+    else if (leftBrowserView && webContents === leftBrowserView.webContents) side = "left";
+
+    if (!side || !downloadCapture[side]) {
+      // 不在捕获模式，阻止默认下载行为
+      event.preventDefault();
+      return;
+    }
+
+    // 创建下载目录
+    const dlDir = path.join(app.getPath("temp"), "cinside-downloads");
+    try { fs.mkdirSync(dlDir, { recursive: true }); } catch (e) {}
+
+    const filename = item.getFilename() || `download-${Date.now()}.bin`;
+    const savePath = path.join(dlDir, filename);
+    item.setSavePath(savePath);
+
+    // 一次性捕获：下载开始后立即关闭标志，避免重复捕获
+    downloadCapture[side] = false;
+    debugLog(`[download] 捕获下载: ${filename} → ${savePath} (side=${side})`);
+
+    item.once("done", (e, state) => {
+      if (state === "completed") {
+        try {
+          const buffer = fs.readFileSync(savePath);
+          const ext = path.extname(filename).toLowerCase();
+          const mimeMap = {
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".png": "image/png", ".pdf": "application/pdf",
+            ".gif": "image/gif", ".bmp": "image/bmp",
+            ".webp": "image/webp",
+          };
+          const mime = mimeMap[ext] || "application/octet-stream";
+          const dataUrl = `data:${mime};base64,${buffer.toString("base64")}`;
+
+          debugLog(`[download] 下载完成: ${filename} (${buffer.length} bytes, ${mime})`);
+
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("download-captured", {
+              side, filename, dataUrl, size: buffer.length, mime, path: savePath,
+            });
+          }
+        } catch (err) {
+          debugLog(`[download] 读取下载文件失败: ${err.message}`);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("download-failed", { side, filename, error: err.message });
+          }
+        }
+      } else {
+        debugLog(`[download] 下载失败: state=${state}`);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("download-failed", { side, filename, state });
+        }
+      }
+    });
+  });
+
+  // IPC: 开启/关闭某 side 的下载捕获
+  ipcMain.handle("set-download-capture", (_event, side, enabled) => {
+    downloadCapture[side] = !!enabled;
+    debugLog(`[download] set-download-capture side=${side}, enabled=${enabled}`);
+    return { ok: true };
+  });
+
   // === ??????????????? ===
   if (!isDev) {
     autoUpdater.autoDownload = false;
@@ -1464,15 +1551,20 @@ function createDetachedBrowserView(win, side) {
       allowRunningInsecureContent: true,
     },
   });
+  // 禁用默认 Ctrl+滚轮缩放（与主 view 一致）
+  try {
+    view.webContents.setLayoutZoomResizingEnabled(false);
+    view.webContents.setVisualZoomResizingEnabled(false);
+  } catch (_) {}
   view.webContents.loadURL("about:blank");
 
   // 页面加载完成后注入滚动条样式 + 拾取模式光标 CSS
   view.webContents.on("did-finish-load", () => {
     view.webContents.insertCSS(`
-      ::-webkit-scrollbar { width: 5px; height: 5px; }
+      ::-webkit-scrollbar { width: 4px; height: 4px; }
       ::-webkit-scrollbar-track { background: transparent; }
-      ::-webkit-scrollbar-thumb { background: rgba(99,102,241,.18); border-radius: 10px; }
-      ::-webkit-scrollbar-thumb:hover { background: rgba(99,102,241,.35); }
+      ::-webkit-scrollbar-thumb { background: rgba(148,163,184,.30); border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: rgba(99,102,241,.45); }
       ::-webkit-scrollbar-corner { background: transparent; }
       .cinside-picking, .cinside-picking * { cursor: crosshair !important; }
       .cinside-picking *:hover { outline: 2px dashed #6366f1 !important; outline-offset: 1px !important; box-shadow: 0 0 0 4px rgba(99,102,241,.15) !important; }
@@ -1492,13 +1584,12 @@ function createDetachedBrowserView(win, side) {
         window.__cinsidePostMessage = function (payload) {
           try { console.log('[cinside-relay]', JSON.stringify(payload)); } catch (e) {}
         };
-        // Ctrl+滚轮缩放
+        // Ctrl+滚轮缩放：passive:true 不阻塞页面正常滚动
         window.addEventListener('wheel', function (e) {
           if (e.ctrlKey) {
-            e.preventDefault();
             console.log('[cinside-relay]', JSON.stringify({ kind: 'ctrl-wheel', deltaY: e.deltaY }));
           }
-        }, { passive: false });
+        }, { passive: true });
       })();
     `).catch(() => {});
   });
@@ -1645,6 +1736,7 @@ ipcMain.handle("detached-view-show", (_event, side, bounds, _url) => {
   if (!win.getBrowserViews().includes(view)) {
     win.addBrowserView(view);
   }
+  try { win.setTopBrowserView(view); } catch (_) {}
   // 强制重绘：与 showView 一致，通过 setBounds 再次触发 Chromium 合成器刷新
   if (bounds) {
     setTimeout(() => {
@@ -1661,6 +1753,7 @@ ipcMain.handle("detached-view-show", (_event, side, bounds, _url) => {
     if (!win.getBrowserViews().includes(popup.view)) {
       win.addBrowserView(popup.view);
     }
+    try { win.setTopBrowserView(popup.view); } catch (_) {}
   }
 });
 
@@ -1814,5 +1907,175 @@ ipcMain.on("panel-state-broadcast", (_event, side, state) => {
 ipcMain.on("panel-action", (_event, action, payload) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("panel-action", { action, payload });
+  }
+});
+
+// ============ 外挂插件：屏幕边缘悬浮条（dock） ============
+// 独立于主窗口的小条，挂到屏幕边缘；两个按钮「提取源」「操作页」，
+// AI 通过后端体外循环从提取源抓数据并自动填写操作页。
+
+let dockWindow = null;
+let dockMode = "strip"; // 'strip' | 'picker' | 'collapsed'
+let dockEdge = "right"; // 'left' | 'right'
+const DOCK_STRIP = { w: 240, h: 520 };
+const DOCK_PICKER = { w: 360, h: 520 };
+const DOCK_COLLAPSED = { w: 48, h: 48 };
+
+function dockBoundsForMode(mode, edge, keepPos) {
+  const { screen } = require("electron");
+  let x, y;
+  const size = mode === "picker" ? DOCK_PICKER : (mode === "collapsed" ? DOCK_COLLAPSED : DOCK_STRIP);
+  if (keepPos && dockWindow && !dockWindow.isDestroyed()) {
+    // 形态切换时保持靠边的内侧边缘不动
+    const b = dockWindow.getBounds();
+    const disp = screen.getDisplayMatching(b).workArea;
+    x = edge === "right" ? disp.x + disp.width - size.w : disp.x;
+    y = Math.min(Math.max(b.y, disp.y), disp.y + disp.height - size.h);
+  } else {
+    const disp = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+    x = edge === "right" ? disp.x + disp.width - size.w : disp.x;
+    y = disp.y + Math.round((disp.height - size.h) / 2);
+  }
+  return { x, y, width: size.w, height: size.h };
+}
+
+function createDockWindow() {
+  if (dockWindow && !dockWindow.isDestroyed()) {
+    dockWindow.show();
+    dockWindow.focus();
+    return dockWindow;
+  }
+  dockMode = "strip";
+  dockWindow = new BrowserWindow({
+    ...dockBoundsForMode("strip", dockEdge, false),
+    frame: false,
+    resizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    title: "CINSIDE 外挂",
+    icon: path.join(__dirname, "../../assets/app-icon.ico"),
+    webPreferences: {
+      preload: path.join(__dirname, "dock-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  dockWindow.setAlwaysOnTop(true, "screen-saver");
+  dockWindow.loadFile(path.join(__dirname, "dock.html"));
+  dockWindow.setMenu(null);
+
+  // 拖动结束后吸附到最近的左右边缘
+  dockWindow.on("moved", () => {
+    if (!dockWindow || dockWindow.isDestroyed()) return;
+    const { screen } = require("electron");
+    const b = dockWindow.getBounds();
+    const disp = screen.getDisplayMatching(b).workArea;
+    const centerX = b.x + b.width / 2;
+    dockEdge = centerX < disp.x + disp.width / 2 ? "left" : "right";
+    const x = dockEdge === "right" ? disp.x + disp.width - b.width : disp.x;
+    const y = Math.min(Math.max(b.y, disp.y), disp.y + disp.height - b.height);
+    dockWindow.setBounds({ x, y, width: b.width, height: b.height });
+  });
+
+  dockWindow.on("closed", () => {
+    dockWindow = null;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("dock-state", { open: false });
+    }
+  });
+  dockWindow.webContents.on("did-finish-load", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("dock-state", { open: true });
+    }
+  });
+  return dockWindow;
+}
+
+function destroyDockWindow() {
+  if (dockWindow && !dockWindow.isDestroyed()) {
+    dockWindow.destroy();
+  }
+  dockWindow = null;
+}
+
+ipcMain.handle("dock-toggle", () => {
+  if (dockWindow && !dockWindow.isDestroyed()) {
+    destroyDockWindow();
+    return { open: false };
+  }
+  createDockWindow();
+  return { open: true };
+});
+
+ipcMain.handle("dock-is-open", () => !!(dockWindow && !dockWindow.isDestroyed()));
+
+ipcMain.on("dock-show-main", () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
+
+ipcMain.on("dock-close", () => {
+  destroyDockWindow();
+});
+
+ipcMain.on("dock-set-mode", (_event, mode) => {
+  dockMode = mode === "picker" ? "picker" : (mode === "collapsed" ? "collapsed" : "strip");
+  if (dockWindow && !dockWindow.isDestroyed()) {
+    dockWindow.setBounds(dockBoundsForMode(dockMode, dockEdge, true));
+  }
+});
+
+// 悬浮条 / 主窗口访问后端插件 API 的代理（避免 CORS 与端口耦合）
+ipcMain.handle("plugin-api", async (_event, req) => {
+  const { path: apiPath, method = "GET", body } = req || {};
+  try {
+    const resp = await fetch(`http://127.0.0.1:${BACKEND_PORT}${apiPath}`, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    let data = {};
+    try { data = await resp.json(); } catch (e) {}
+    return { ok: resp.ok, status: resp.status, data };
+  } catch (e) {
+    return { ok: false, status: 0, data: { error: `后端未连接: ${e && e.message ? e.message : e}` } };
+  }
+});
+
+// 启动带 CDP 调试端口的受控 Chrome（独立 profile，端口 9223，避开 Electron 自用的 9222）
+ipcMain.handle("dock-launch-chrome", async () => {
+  const candidates = [
+    path.join(process.env["PROGRAMFILES"] || "C:\\Program Files", "Google\\Chrome\\Application\\chrome.exe"),
+    path.join(process.env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)", "Google\\Chrome\\Application\\chrome.exe"),
+    path.join(process.env["LOCALAPPDATA"] || "", "Google\\Chrome\\Application\\chrome.exe"),
+    path.join(process.env["PROGRAMFILES"] || "C:\\Program Files", "Microsoft\\Edge\\Application\\msedge.exe"),
+    path.join(process.env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)", "Microsoft\\Edge\\Application\\msedge.exe"),
+  ];
+  const exe = candidates.find((p) => p && fs.existsSync(p));
+  if (!exe) {
+    return { ok: false, error: "未找到 Chrome / Edge 浏览器，请手动安装" };
+  }
+  const profileDir = path.join(app.getPath("userData"), "plugin-chrome-profile");
+  try { fs.mkdirSync(profileDir, { recursive: true }); } catch (e) {}
+  try {
+    const child = spawn(exe, [
+      "--remote-debugging-port=9223",
+      `--user-data-dir=${profileDir}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+    ], { detached: true, stdio: "ignore" });
+    child.unref();
+    debugLog(`[dock] launched controlled browser: ${exe}`);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e) };
   }
 });
