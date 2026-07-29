@@ -164,13 +164,16 @@ export default function ExcelView({
                 {rowRange
                   ? `已选 第${rowRange.start + 1}–${rowRange.end + 1}行 (${rowRange.end - rowRange.start + 1}行)`
                   : rangeAnchor != null
-                  ? "再点一行定结束行"
-                  : "点行号框选 LOOP 行范围"}
+                  ? "再点一行（行号或LOOP列）定结束行"
+                  : "点行号或LOOP列框选范围"}
               </span>
               {rowRange && onGenerateCards && (
                 <button
                   onClick={onGenerateCards}
-                  className="flex items-center gap-0.5 rounded-md bg-indigo-600 px-1.5 py-0.5 text-[9px] font-medium text-white hover:bg-indigo-700"
+                  className={[
+                    "flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-medium text-white transition-all",
+                    !cardsGenerated ? "btn-flash-attention" : "bg-emerald-600 hover:bg-emerald-700",
+                  ].join(" ")}
                   title="按框选的行范围生成左侧人物卡片"
                 >
                   <Users className="h-2.5 w-2.5" />
@@ -267,10 +270,16 @@ export default function ExcelView({
                       );
                       const justPicked = !!mark && Date.now() - mark.createdAt < 2500;
                       const colSelected = selectedColumn === c;
+                      // 框选模式下，点击 LOOP 列单元格也能选择范围
+                      const isLoopCol = rangeSelecting && c === selectedColumn;
                       return (
                         <td
                           key={c}
                           onClick={() => {
+                            if (isLoopCol) {
+                              handleRowNumClick(realIdx);
+                              return;
+                            }
                             if (onPickedField) {
                               console.log("[ExcelView] 单元格点击", { field: c, value: v, recordId: r.record_id, picking });
                               onPickedField({ field: c, value: v, record_id: r.record_id });
@@ -278,16 +287,20 @@ export default function ExcelView({
                           }}
                           className={[
                             "group relative border-b border-slate-100/60 px-2 py-1 align-top transition-all",
-                            (picking || onPickedField)
+                            isLoopCol
+                              ? "cursor-pointer hover:bg-indigo-100 hover:ring-1 hover:ring-indigo-300"
+                              : (picking || onPickedField)
                               ? "cursor-pointer hover:bg-brand-100/70 hover:ring-1 hover:ring-brand-300"
                               : "",
                             mark
                               ? "bg-blue-100/80 outline outline-2 outline-blue-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(59,130,246,0.25),0_0_14px_rgba(59,130,246,0.55)]"
                               : "",
-                            colSelected && !mark ? "bg-brand-50/60" : "",
+                            colSelected && !mark && !isLoopCol ? "bg-brand-50/60" : "",
+                            isLoopCol && inRange ? "bg-indigo-50/70" : "",
+                            isLoopCol && isAnchor ? "bg-indigo-200" : "",
                             justPicked ? "animate-glow-pulse" : "",
                           ].join(" ")}
-                          title={picking ? `点击拾取字段「${c}」` : (mark ? `第 ${mark.order} 个拾取 · ${mark.label}` : display)}
+                          title={isLoopCol ? (rangeAnchor == null ? "点击设为 LOOP 起始行" : "点击设为 LOOP 结束行") : (picking ? `点击拾取字段「${c}」` : (mark ? `第 ${mark.order} 个拾取 · ${mark.label}` : display))}
                         >
                           <span className={["block max-w-[200px] truncate", v ? "text-slate-700" : "text-slate-300"].join(" ")}>
                             {display}
