@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   Activity,
+  Bot,
   CheckCircle2,
   ChevronDown,
   CircleStop,
@@ -52,7 +53,9 @@ import {
   VERIFY_METHOD_LABELS,
 } from "../types";
 
-type Tab = "mappings" | "report" | "execution";
+import PluginPanel from "./PluginPanel";
+
+type Tab = "mappings" | "report" | "execution" | "plugin";
 
 interface Props {
   record: ApplicantRecord | null;
@@ -79,8 +82,12 @@ interface Props {
   onStopReplay?: () => void;
   // 切换到日志tab的触发值（每次变化时切到log）
   switchToLogSignal?: number;
-  /** 文档提取结果（功能1：网页 PDF/图片 → MarkItDown/OCR → 左右对比） */
-  docExtract?: DocExtractState | null;
+  /** 文档提取结果列表（当前卡片的多份文件，TAB切换） */
+  docExtracts?: DocExtractState[];
+  /** 当前激活的文件索引 */
+  activeDocIndex?: number;
+  /** 切换激活文件 */
+  onSelectDocIndex?: (i: number) => void;
   /** 文档提取进行中 */
   docExtracting?: boolean;
   /** 切换到文档tab的触发值 */
@@ -109,6 +116,7 @@ const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: "mappings", label: "字段映射", icon: <Settings2 className="h-3.5 w-3.5" /> },
   { id: "report", label: "验证报告", icon: <ShieldCheck className="h-3.5 w-3.5" /> },
   { id: "execution", label: "执行面板", icon: <Layers className="h-3.5 w-3.5" /> },
+  { id: "plugin", label: "站外循环记录", icon: <Bot className="h-3.5 w-3.5" /> },
 ];
 
 export default function ResultsPanel({
@@ -133,7 +141,9 @@ export default function ResultsPanel({
   replayCursor = 0,
   onStopReplay,
   switchToLogSignal = 0,
-  docExtract = null,
+  docExtracts = [],
+  activeDocIndex = 0,
+  onSelectDocIndex,
   docExtracting = false,
   switchToDocSignal = 0,
   pickTarget = null,
@@ -231,7 +241,9 @@ export default function ResultsPanel({
               reports={loopReports}
               comparisons={comparisons}
               resultPresent={resultPresent}
-              docExtract={docExtract}
+              docExtracts={docExtracts}
+              activeDocIndex={activeDocIndex}
+              onSelectDocIndex={onSelectDocIndex}
               docExtracting={docExtracting}
               shots={shots}
               running={running}
@@ -263,6 +275,11 @@ export default function ResultsPanel({
             onStopQueue={onStopQueue}
             canAddToQueue={canAddToQueue}
           />
+        )}
+        {tab === "plugin" && (
+          <div className="h-full overflow-hidden">
+            <PluginPanel />
+          </div>
         )}
       </div>
     </div>
@@ -604,7 +621,9 @@ function ReportTab({
   reports,
   comparisons,
   resultPresent,
-  docExtract,
+  docExtracts,
+  activeDocIndex,
+  onSelectDocIndex,
   docExtracting,
   shots,
   running,
@@ -616,7 +635,9 @@ function ReportTab({
   reports: VerificationReport[];
   comparisons: FieldComparison[];
   resultPresent: boolean;
-  docExtract: DocExtractState | null;
+  docExtracts: DocExtractState[];
+  activeDocIndex: number;
+  onSelectDocIndex?: (i: number) => void;
   docExtracting: boolean;
   shots: ScreenshotEvent[];
   running: boolean;
@@ -663,7 +684,7 @@ function ReportTab({
     },
   ];
 
-  if (!hasFieldData && !docExtract && shots.length === 0 && !showSample) {
+  if (!hasFieldData && docExtracts.length === 0 && shots.length === 0 && !showSample) {
     // 空状态也渲染三卡片布局，每个卡片内部显示空状态+示例按钮
   }
 
@@ -933,6 +954,10 @@ function ReportTab({
       </div>
     );
   }
+
+  // 当前激活的提取文件（支持多文件 TAB 切换）
+  const safeDocIdx = docExtracts.length > 0 ? Math.min(activeDocIndex, docExtracts.length - 1) : 0;
+  const docExtract = docExtracts[safeDocIdx] || null;
 
   // 文件处理内容：放置从网页下载的 PDF / JPG / JPEG 文件
   // 点击「+文件提取」→ 点击网页下载按钮 → 文件下载到此处 → 自动旋转到正面 + 裁剪白边 → OCR 提取
@@ -1322,8 +1347,34 @@ function ReportTab({
           <div className="flex shrink-0 items-center gap-1.5 border-b border-emerald-200 bg-emerald-50/60 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-800">
             <FileText className="h-3.5 w-3.5 text-emerald-600" />
             文件处理
+            {docExtracts.length > 0 && (
+              <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700">
+                {docExtracts.length} 个文件
+              </span>
+            )}
             <span className="ml-auto text-[9px] font-normal text-emerald-600/70">PDF / JPG / JPEG</span>
           </div>
+          {/* 多文件 TAB 切换栏 */}
+          {docExtracts.length > 1 && onSelectDocIndex && (
+            <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-slate-100 bg-slate-50/50 px-1.5 py-1">
+              {docExtracts.map((ext, i) => (
+                <button
+                  key={i}
+                  onClick={() => onSelectDocIndex(i)}
+                  className={[
+                    "flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium transition-all",
+                    i === safeDocIdx
+                      ? "bg-emerald-600 text-white shadow-sm"
+                      : "bg-white text-slate-500 ring-1 ring-slate-200 hover:bg-emerald-50 hover:text-emerald-700",
+                  ].join(" ")}
+                  title={ext.filename}
+                >
+                  {ext.method === "vision_ocr" ? <Eye className="h-2.5 w-2.5" /> : <FileText className="h-2.5 w-2.5" />}
+                  <span className="max-w-[80px] truncate">{ext.filename}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <div className="min-h-0 flex-1 overflow-auto p-2">{fileProcessContent}</div>
         </div>
 
@@ -1332,6 +1383,11 @@ function ReportTab({
           <div className="flex shrink-0 items-center gap-1.5 border-b border-violet-200 bg-violet-50/60 px-2.5 py-1.5 text-[11px] font-semibold text-violet-800">
             <Database className="h-3.5 w-3.5 text-violet-600" />
             提取元素
+            {docExtract && (
+              <span className="max-w-[120px] truncate rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-normal text-violet-600" title={docExtract.filename}>
+                {docExtract.filename}
+              </span>
+            )}
           </div>
           <div className="min-h-0 flex-1 overflow-auto p-2">{extractedContent}</div>
         </div>
