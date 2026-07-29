@@ -3,6 +3,8 @@ import type {
   AppSettings,
   ApplicantRecord,
   DocumentExtractResult,
+  PluginRecord,
+  PluginStatus,
   ScreenshotEvent,
   VerificationReport,
   VerificationResult,
@@ -159,6 +161,21 @@ export const api = {
         fields: fields && fields.length > 0 ? fields.join(",") : null,
       }),
     }),
+
+  // ========== 外挂插件（体外循环） ==========
+
+  pluginStatus: () => jsonFetch<PluginStatus>(`${BASE}/plugin/status`),
+
+  pluginRecords: () => jsonFetch<{ records: PluginRecord[] }>(`${BASE}/plugin/records`),
+
+  pluginClearRecords: () =>
+    jsonFetch<{ ok: boolean }>(`${BASE}/plugin/records`, { method: "DELETE" }),
+
+  pluginStart: () =>
+    jsonFetch<PluginStatus>(`${BASE}/plugin/start`, { method: "POST" }),
+
+  pluginStop: () =>
+    jsonFetch<PluginStatus>(`${BASE}/plugin/stop`, { method: "POST" }),
 };
 
 export type VerifyEvent =
