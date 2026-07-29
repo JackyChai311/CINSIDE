@@ -72,6 +72,19 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // 截图指定 view 中的元素区域（用于头像提取）
   viewCaptureElement: (side, rect) => ipcRenderer.invoke("view-capture-element", side, rect),
 
+  // === 下载捕获（文件提取模式） ===
+  setDownloadCapture: (side, enabled) => ipcRenderer.invoke("set-download-capture", side, enabled),
+  onDownloadCaptured: (callback) => {
+    const handler = (_e, data) => callback(data);
+    ipcRenderer.on("download-captured", handler);
+    return () => ipcRenderer.removeListener("download-captured", handler);
+  },
+  onDownloadFailed: (callback) => {
+    const handler = (_e, data) => callback(data);
+    ipcRenderer.on("download-failed", handler);
+    return () => ipcRenderer.removeListener("download-failed", handler);
+  },
+
   // 接收来自 BrowserView 内部的消息（元素选择等）
   onViewMessage: (callback) => {
     const handler = (_event, data) => callback(data);
@@ -141,6 +154,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const handler = (_e, data) => callback(data);
     ipcRenderer.on("popup-closed", handler);
     return () => ipcRenderer.removeListener("popup-closed", handler);
+  },
+
+  // === 外挂插件：屏幕边缘悬浮条 ===
+  dockToggle: () => ipcRenderer.invoke("dock-toggle"),
+  dockIsOpen: () => ipcRenderer.invoke("dock-is-open"),
+  pluginApi: (path, method, body) => ipcRenderer.invoke("plugin-api", { path, method, body }),
+  onDockState: (callback) => {
+    const handler = (_e, data) => callback(data);
+    ipcRenderer.on("dock-state", handler);
+    return () => ipcRenderer.removeListener("dock-state", handler);
   },
 
   // === 兼容旧 API（向后兼容） ===
