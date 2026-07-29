@@ -96,6 +96,11 @@ export interface ElectronAPI {
   // 截图指定 view 中的元素区域（用于头像提取）
   viewCaptureElement: (side: ViewSide, rect: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
 
+  // === 下载捕获（文件提取模式） ===
+  setDownloadCapture: (side: ViewSide, enabled: boolean) => Promise<{ ok: boolean }>;
+  onDownloadCaptured: (callback: (data: { side: string; filename: string; dataUrl: string; size: number; mime: string; path: string }) => void) => () => void;
+  onDownloadFailed: (callback: (data: { side: string; filename: string; error?: string; state?: string }) => void) => () => void;
+
   // 接收 BrowserView 内部消息
   onViewMessage: (callback: (msg: ViewMessage) => void) => () => void;
 
@@ -135,6 +140,12 @@ export interface ElectronAPI {
   popupExecuteJS: (side: ViewSide, script: string) => Promise<unknown>;
   onPopupCreated: (callback: (data: { parentSide: ViewSide; url: string }) => void) => () => void;
   onPopupClosed: (callback: (data: { parentSide: ViewSide }) => void) => () => void;
+
+  // === 外挂插件：屏幕边缘悬浮条 ===
+  dockToggle: () => Promise<{ open: boolean }>;
+  dockIsOpen: () => Promise<boolean>;
+  pluginApi: (path: string, method?: string, body?: unknown) => Promise<{ ok: boolean; status: number; data: unknown }>;
+  onDockState: (callback: (data: { open: boolean }) => void) => () => void;
 }
 
 declare global {
