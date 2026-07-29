@@ -19,17 +19,17 @@ body {
   font-feature-settings: "cv11", "ss01";
 }
 
-/* 自定义滚动条：细、半透明、美观 —— 全局统一 */
-::-webkit-scrollbar { width: 6px; height: 6px; }
+/* 自定义滚动条：统一小巧 —— 4px 宽、半透明、圆角 */
+::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, .25);
-  border-radius: 10px;
-  border: 1px solid transparent;
+  background: rgba(148, 163, 184, .30);
+  border-radius: 4px;
+  border: none;
   background-clip: padding-box;
 }
-::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, .40); background-clip: padding-box; }
-::-webkit-scrollbar-thumb:active { background: rgba(99, 102, 241, .55); background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, .45); background-clip: padding-box; }
+::-webkit-scrollbar-thumb:active { background: rgba(99, 102, 241, .60); background-clip: padding-box; }
 ::-webkit-scrollbar-corner { background: transparent; }
 /* Firefox */
 * {
@@ -99,6 +99,59 @@ button { -webkit-tap-highlight-color: transparent; }
   }
 }
 .picking-breath { animation: picking-breath 2.4s ease-in-out infinite; }
+
+/* ============ 黄色高光笔划过动画（教学步骤引导） ============ */
+@keyframes highlight-pen {
+  0% {
+    background-size: 0% 100%;
+    background-position: left bottom;
+  }
+  100% {
+    background-size: 100% 100%;
+    background-position: left bottom;
+  }
+}
+@keyframes highlight-breathe {
+  0%, 100% { 
+    box-shadow: 0 0 0 0 rgba(251, 191, 36, 0);
+  }
+  50% { 
+    box-shadow: 0 0 6px 2px rgba(251, 191, 36, 0.25);
+  }
+}
+.step-highlight {
+  display: inline;
+  padding: 2px 6px 3px;
+  border-radius: 4px;
+  font-weight: 600;
+  color: #78350f;
+  background-image: linear-gradient(180deg, rgba(253,224,71,0.35) 0%, rgba(250,204,21,0.55) 50%, rgba(253,224,71,0.35) 100%);
+  background-repeat: no-repeat;
+  background-size: 0% 100%;
+  background-position: left bottom;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  animation: highlight-pen 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.1s forwards, highlight-breathe 2.5s ease-in-out 0.9s infinite;
+}
+
+/* ============ 橙蓝交替闪烁按钮（一键生成卡片提醒） ============ */
+@keyframes btn-flash-orange-blue {
+  0%, 100% {
+    background-color: rgb(249, 115, 22);
+    box-shadow: 0 0 0 0 rgba(249, 115, 22, 0.5);
+  }
+  50% {
+    background-color: rgb(79, 70, 229);
+    box-shadow: 0 0 8px 3px rgba(79, 70, 229, 0.4);
+  }
+}
+.btn-flash-attention {
+  animation: btn-flash-orange-blue 1.2s ease-in-out infinite;
+}
+.btn-flash-attention:hover {
+  animation: none;
+  background-color: rgb(234, 88, 12) !important;
+}
 
 @keyframes scan-line {
   0% { transform: translateY(-100%); }
