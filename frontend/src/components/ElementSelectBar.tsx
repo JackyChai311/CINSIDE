@@ -94,10 +94,16 @@ interface Props {
   onSwitchStepType?: (type: "review" | "entry") => void;
   /** 是否处于添加点击按钮模式 */
   addingClickMode?: boolean;
-  /** 已添加的点击按钮数量（确认人物之后） */
-  clickStepCount?: number;
-  /** 开始添加点击按钮 */
-  onStartAddClickStep?: () => void;
+  /** 当前添加的点击阶段：pre=前置(搜索/进入)，post=收尾(保存/返回) */
+  addingClickPhase?: "pre" | "post" | null;
+  /** 已添加的前置点击数量（步骤3：搜索/进入） */
+  preClickCount?: number;
+  /** 已添加的收尾点击数量（步骤5：保存/返回） */
+  postClickCount?: number;
+  /** 开始添加前置点击（步骤3） */
+  onStartAddPreClick?: () => void;
+  /** 开始添加收尾点击（步骤5） */
+  onStartAddPostClick?: () => void;
   /** 退出添加点击按钮模式 */
   onExitAddClickMode?: () => void;
   /** 交换教学面板与浏览器区域的左右位置 */
@@ -146,8 +152,8 @@ interface Props {
   onRequestQuickSave?: () => void;
   /** 打开保存 LOOP 弹窗（命名保存） */
   onRequestSaveSkill?: () => void;
-  /** 打开保存 LOOP 弹窗并立即执行 */
-  onRequestSaveSkillAndRun?: () => void;
+  /** 直接执行当前配置（不保存弹窗，临时运行） */
+  onDirectRun?: () => void;
 }
 
 export default function ElementSelectBar({
@@ -186,8 +192,11 @@ addingStepMode,
 currentStepType = "review",
 onSwitchStepType,
 addingClickMode = false,
-clickStepCount = 0,
-onStartAddClickStep,
+addingClickPhase = null,
+preClickCount = 0,
+postClickCount = 0,
+onStartAddPreClick,
+onStartAddPostClick,
 onExitAddClickMode,
 onSwapSide,
 onUndo,
@@ -212,7 +221,7 @@ cardsGenerated = false,
 rowRange = null,
 onRequestQuickSave,
 onRequestSaveSkill,
-onRequestSaveSkillAndRun,
+onDirectRun,
 }: Props) {
   const [leftSource, setLeftSource] = useState<LeftSource>("database");
   const [excelField, setExcelField] = useState<string>("");
@@ -382,15 +391,14 @@ onRequestSaveSkillAndRun,
             已配 {mappingCount} 项
           </span>
           {/* 完成按钮组：保存Loop / 适配LOOP / 执行 */}
-          {onRequestQuickSave && teachingPhase !== "idle" && (
+          {/* 当卡片已生成且有任何步骤（审查/录入/点击）时显示按钮，允许空LOOP测试卡片定位 */}
+          {onRequestQuickSave && (teachingPhase !== "idle" || (cardsGenerated && (reviewCount + entryCount + preClickCount + postClickCount > 0))) && (
             <button
               onClick={onRequestQuickSave}
-              disabled={
-                (teachingPhase === "data-source" ? dataSourceCount : teachingPhase === "entry" ? entryCount : reviewCount) === 0
-              }
+              disabled={reviewCount + entryCount + preClickCount + postClickCount === 0}
               className={[
                 "flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
-                (teachingPhase === "data-source" ? dataSourceCount : teachingPhase === "entry" ? entryCount : reviewCount) === 0
+                reviewCount + entryCount + preClickCount + postClickCount === 0
                   ? "cursor-not-allowed bg-slate-200 text-slate-400"
                   : "bg-slate-600 text-white hover:bg-slate-700",
               ].join(" ")}
@@ -400,15 +408,13 @@ onRequestSaveSkillAndRun,
               保存Loop
             </button>
           )}
-          {onRequestSaveSkill && teachingPhase !== "idle" && (
+          {onRequestSaveSkill && (teachingPhase !== "idle" || (cardsGenerated && (reviewCount + entryCount + preClickCount + postClickCount > 0))) && (
             <button
               onClick={onRequestSaveSkill}
-              disabled={
-                (teachingPhase === "data-source" ? dataSourceCount : teachingPhase === "entry" ? entryCount : reviewCount) === 0
-              }
+              disabled={reviewCount + entryCount + preClickCount + postClickCount === 0}
               className={[
                 "flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
-                (teachingPhase === "data-source" ? dataSourceCount : teachingPhase === "entry" ? entryCount : reviewCount) === 0
+                reviewCount + entryCount + preClickCount + postClickCount === 0
                   ? "cursor-not-allowed bg-slate-200 text-slate-400"
                   : "bg-emerald-600 text-white hover:bg-emerald-700",
               ].join(" ")}
@@ -418,13 +424,13 @@ onRequestSaveSkillAndRun,
               适配LOOP
             </button>
           )}
-          {onRequestSaveSkillAndRun && appMode !== "review" && teachingPhase !== "idle" && (
+          {onDirectRun && appMode !== "review" && (teachingPhase !== "idle" || (cardsGenerated && (reviewCount + entryCount + preClickCount + postClickCount > 0))) && (
             <button
-              onClick={onRequestSaveSkillAndRun}
-              disabled={(appMode === "entry" ? entryCount : dataSourceCount + reviewCount) === 0}
+              onClick={onDirectRun}
+              disabled={reviewCount + entryCount + preClickCount + postClickCount === 0}
               className={[
                 "flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
-                (appMode === "entry" ? entryCount : dataSourceCount + reviewCount) === 0
+                reviewCount + entryCount + preClickCount + postClickCount === 0
                   ? "cursor-not-allowed bg-slate-200 text-slate-400"
                   : "bg-brand-600 text-white hover:bg-brand-700",
               ].join(" ")}
@@ -773,21 +779,21 @@ onRequestSaveSkillAndRun,
                 </div>
               </div>
 
-              {/* Step 3 — 点击任务（支持单侧网页点击，可添加多个） */}
+              {/* Step 3 — 前置点击任务（搜索/进入卡片页面，支持多个） */}
               <div className="flex items-center gap-2 text-[11px]">
                 <span className={[
                   "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white",
-                  pendingAction === "click" && addingClickMode ? "bg-amber-500" :
-                  clickStepCount > 0 ? "bg-emerald-500" :
-                  (reviewCount + entryCount === 0 && !addingStepMode && cardsGenerated && !bindInputSide) ? "bg-amber-500" : "bg-slate-300",
+                  pendingAction === "click" && addingClickMode && addingClickPhase === "pre" ? "bg-amber-500" :
+                  preClickCount > 0 ? "bg-emerald-500" :
+                  (reviewCount + entryCount + postClickCount === 0 && !addingStepMode && cardsGenerated && !bindInputSide && !(pendingAction === "click" && addingClickMode && addingClickPhase === "post")) ? "bg-amber-500" : "bg-slate-300",
                 ].join(" ")}>
-                  {clickStepCount > 0 && !(pendingAction === "click" && addingClickMode) ? <Check className="h-2.5 w-2.5" /> : 3}
+                  {preClickCount > 0 && !(pendingAction === "click" && addingClickMode && addingClickPhase === "pre") ? <Check className="h-2.5 w-2.5" /> : 3}
                 </span>
                 <div className="flex flex-1 flex-wrap items-center gap-1">
-                  {pendingAction === "click" && addingClickMode ? (
+                  {pendingAction === "click" && addingClickMode && addingClickPhase === "pre" ? (
                     <>
                       <span className="step-highlight" key="step3-active">
-                        正在添加点击任务 — 点击任意侧网页上的元素（已添加 {clickStepCount} 个）
+                        正在添加前置点击（搜索/进入）— 点击任意侧网页上的元素（已添加 {preClickCount} 个）
                       </span>
                       {onExitAddClickMode && (
                         <button
@@ -798,12 +804,12 @@ onRequestSaveSkillAndRun,
                         </button>
                       )}
                     </>
-                  ) : clickStepCount > 0 ? (
+                  ) : preClickCount > 0 ? (
                     <>
-                      <span className="text-emerald-700 font-medium">✓ 已添加 {clickStepCount} 个点击任务</span>
-                      {onStartAddClickStep && !addingStepMode && (
+                      <span className="text-emerald-700 font-medium">✓ 已添加 {preClickCount} 个前置点击</span>
+                      {onStartAddPreClick && !addingStepMode && !(pendingAction === "click" && addingClickMode && addingClickPhase === "post") && (
                         <button
-                          onClick={onStartAddClickStep}
+                          onClick={onStartAddPreClick}
                           disabled={!!bindInputSide}
                           className={[
                             "flex items-center gap-0.5 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
@@ -817,43 +823,64 @@ onRequestSaveSkillAndRun,
                         </button>
                       )}
                     </>
-                  ) : (reviewCount + entryCount === 0 && !addingStepMode && cardsGenerated && !bindInputSide) ? (
+                  ) : (reviewCount + entryCount + postClickCount === 0 && !addingStepMode && cardsGenerated && !bindInputSide) ? (
                     <>
                       <ArrowRight className="h-3 w-3 text-amber-500 shrink-0" />
                       <span className="step-highlight" key="step3-idle">
-                        点击任意侧网页元素（如按钮、链接）可添加前置点击
+                        前置点击（搜索/进入卡片页面，如搜索按钮等）：
                       </span>
-                      <button
-                        onClick={onStartAddClickStep}
-                        disabled={!!bindInputSide}
-                        className={[
-                          "rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
-                          bindInputSide
-                            ? "cursor-not-allowed bg-slate-200 text-slate-400"
-                            : "bg-orange-500 text-white hover:bg-orange-600",
-                        ].join(" ")}
-                      >
-                        点击任务
-                      </button>
-                      <span className="text-slate-400 text-[10px]">（可跳过，直接点下方「审查步骤/录入步骤」）</span>
+                      {onStartAddPreClick && (
+                        <button
+                          onClick={onStartAddPreClick}
+                          disabled={!!bindInputSide}
+                          className={[
+                            "rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
+                            bindInputSide
+                              ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                              : "bg-orange-500 text-white hover:bg-orange-600",
+                          ].join(" ")}
+                        >
+                          <Plus className="inline h-2.5 w-2.5 mr-0.5" />
+                          添加前置点击
+                        </button>
+                      )}
+                      <span className="text-slate-400 text-[10px]">（可选，可直接加审查/录入/收尾点击）</span>
                     </>
-                  ) : reviewCount + entryCount > 0 || addingStepMode ? (
-                    <span className="text-slate-400">（已跳过前置点击）</span>
                   ) : (
-                    <span className="text-slate-400">点击任务（可添加前置点击，可跳过）</span>
+                    <>
+                      {onStartAddPreClick && !addingStepMode && !(pendingAction === "click" && addingClickMode && addingClickPhase === "post") && (
+                        <button
+                          onClick={onStartAddPreClick}
+                          disabled={!!bindInputSide}
+                          className={[
+                            "rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
+                            bindInputSide
+                              ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                              : "bg-slate-100 text-slate-600 hover:bg-slate-200",
+                          ].join(" ")}
+                        >
+                          <Plus className="inline h-2.5 w-2.5 mr-0.5" />
+                          添加前置点击
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
 
-              {/* Step 4 — 添加循环体内容 */}
+              {/* Step 4 — 添加循环体内容（可选，可直接跳过加末尾点击用于测试） */}
               <div className="flex items-start gap-2 text-[11px]">
                 <span className={[
                   "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white",
                   addingStepMode ? "bg-amber-500" : 
                   (reviewCount + entryCount > 0) ? "bg-emerald-500" :
-                  ((clickStepCount > 0 || reviewCount + entryCount > 0 || addingStepMode) && cardsGenerated && !bindInputSide && !(pendingAction === "click" && addingClickMode)) ? "bg-amber-500" : "bg-slate-300",
+                  (postClickCount > 0 && !addingStepMode && !(pendingAction === "click" && addingClickMode && addingClickPhase === "post")) ? "bg-emerald-500" :
+                  (cardsGenerated && !bindInputSide && !addingStepMode && 
+                    !(pendingAction === "click" && addingClickMode && addingClickPhase === "pre") &&
+                    (preClickCount > 0 || hasBoundInputs) && 
+                    reviewCount + entryCount === 0 && postClickCount === 0) ? "bg-amber-500" : "bg-slate-300",
                 ].join(" ")}>
-                  {(reviewCount + entryCount > 0) && !addingStepMode ? <Check className="h-2.5 w-2.5" /> : 4}
+                  {(reviewCount + entryCount > 0 || (postClickCount > 0 && !addingStepMode && !(pendingAction === "click" && addingClickMode && addingClickPhase === "post"))) ? <Check className="h-2.5 w-2.5" /> : 4}
                 </span>
                 <div className="flex flex-1 flex-wrap items-center gap-1">
                   {/* 活跃模式：正在添加审查/录入步骤 */}
@@ -1029,22 +1056,37 @@ onRequestSaveSkillAndRun,
                   ) : (
                     <>
                       {reviewCount + entryCount > 0 ? (
-                        <span className="text-emerald-700 font-medium">
-                          ✓ LOOP 内已配置 {reviewCount + entryCount} 个步骤
-                          {reviewCount > 0 && <span className="ml-1 rounded bg-sky-100 px-1 text-sky-700">审查 {reviewCount}</span>}
-                          {entryCount > 0 && <span className="ml-1 rounded bg-violet-100 px-1 text-violet-700">录入 {entryCount}</span>}
-                        </span>
+                        <>
+                          <span className="rounded bg-slate-100 px-1 text-[9px] font-medium text-slate-400">可选</span>
+                          <span className="text-emerald-700 font-medium">
+                            ✓ LOOP 内已配置 {reviewCount + entryCount} 个步骤
+                            {reviewCount > 0 && <span className="ml-1 rounded bg-sky-100 px-1 text-sky-700">审查 {reviewCount}</span>}
+                            {entryCount > 0 && <span className="ml-1 rounded bg-violet-100 px-1 text-violet-700">录入 {entryCount}</span>}
+                          </span>
+                        </>
+                      ) : postClickCount > 0 ? (
+                        // 用户直接加了收尾点击，Step 4 自动视为跳过
+                        <>
+                          <span className="rounded bg-slate-100 px-1 text-[9px] font-medium text-slate-400">可选</span>
+                          <span className="text-slate-400">
+                            （已跳过循环体步骤）
+                          </span>
+                        </>
                       ) : (
-                        // Step 3已处理（有点击 或 用户直接开始加循环步骤视为跳过）才高亮Step 4
-                        (clickStepCount > 0 || addingStepMode) && cardsGenerated && !bindInputSide && !(pendingAction === "click" && addingClickMode) ? (
+                        // Step 3已处理（有前置点击或刚生成卡片）才高亮Step 4
+                        cardsGenerated && !bindInputSide && !(pendingAction === "click" && addingClickMode && addingClickPhase === "post") ? (
                           <>
+                            <span className="rounded bg-amber-100 px-1 text-[9px] font-medium text-amber-600">可选</span>
                             <ArrowRight className="h-3 w-3 text-amber-500 shrink-0" />
                             <span className="step-highlight" key="step4-idle">
                               LOOP 循环体内添加步骤：
                             </span>
                           </>
                         ) : (
-                          <span className="text-slate-400">LOOP 循环体内添加步骤：</span>
+                          <>
+                            <span className="rounded bg-slate-100 px-1 text-[9px] font-medium text-slate-400">可选</span>
+                            <span className="text-slate-400">LOOP 循环体内添加步骤：</span>
+                          </>
                         )
                       )}
                       {onStartAddReviewSteps && (
@@ -1082,21 +1124,22 @@ onRequestSaveSkillAndRun,
                 </div>
               </div>
 
-              {/* Step 5 — 末尾点击任务（收尾：保存/提交/返回等） */}
-              {(reviewCount > 0 || entryCount > 0) && (
+              {/* Step 5 — 收尾点击任务（保存/提交/返回，收尾本次 Loop） */}
+              {cardsGenerated && (
                 <div className="flex items-start gap-2 text-[11px]">
                   <span className={[
                     "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white",
-                    addingClickMode ? "bg-amber-500" : clickStepCount > 0 ? "bg-emerald-500" :
-                    reviewCount + entryCount > 0 && !addingStepMode && !bindInputSide ? "bg-amber-500" : "bg-slate-300",
+                    addingClickMode && addingClickPhase === "post" ? "bg-amber-500" : postClickCount > 0 ? "bg-emerald-500" :
+                    // Step 4已完成（有步骤）或已跳过（无步骤但用户可直接加末尾点击）时激活
+                    !addingStepMode && !bindInputSide && !(pendingAction === "click" && addingClickMode && addingClickPhase === "pre") ? "bg-amber-500" : "bg-slate-300",
                   ].join(" ")}>
-                    {clickStepCount > 0 && !addingClickMode ? <Check className="h-2.5 w-2.5" /> : 5}
+                    {postClickCount > 0 && !(addingClickMode && addingClickPhase === "post") ? <Check className="h-2.5 w-2.5" /> : 5}
                   </span>
                   <div className="flex flex-1 flex-wrap items-center gap-1">
-                    {addingClickMode ? (
+                    {addingClickMode && addingClickPhase === "post" ? (
                       <>
                         <span className="step-highlight" key="step5-active">
-                          正在添加收尾点击 — 点击保存/提交/返回等按钮（已 {clickStepCount} 个）
+                          正在添加收尾点击（保存/返回）— 点击保存/提交/返回等按钮（已 {postClickCount} 个）
                         </span>
                         {onExitAddClickMode && (
                           <button
@@ -1109,33 +1152,33 @@ onRequestSaveSkillAndRun,
                       </>
                     ) : (
                       <>
-                        {clickStepCount > 0 ? (
-                          <span className="text-emerald-700 font-medium">✓ 已加 {clickStepCount} 个收尾点击</span>
+                        {postClickCount > 0 ? (
+                          <span className="text-emerald-700 font-medium">✓ 已加 {postClickCount} 个收尾点击</span>
                         ) : (
-                          reviewCount + entryCount > 0 && !addingStepMode && !bindInputSide ? (
+                          !addingStepMode && !bindInputSide ? (
                             <>
                               <ArrowRight className="h-3 w-3 text-amber-500 shrink-0" />
                               <span className="step-highlight" key="step5-idle">
-                                末尾可添加保存/提交/返回等点击：
+                                {reviewCount + entryCount > 0 ? "末尾可添加保存/提交/返回等收尾点击：" : "可选：末尾可添加保存/提交/返回等点击（用于测试卡片定位）："}
                               </span>
                             </>
                           ) : (
-                            <span className="text-slate-400">末尾添加点击任务（保存/提交/返回等）：</span>
+                            <span className="text-slate-400">末尾添加收尾点击（保存/提交/返回等）：</span>
                           )
                         )}
-                        {onStartAddClickStep && !addingStepMode && (
+                        {onStartAddPostClick && !addingStepMode && !(addingClickMode && addingClickPhase === "pre") && (
                           <button
-                            onClick={onStartAddClickStep}
+                            onClick={onStartAddPostClick}
                             disabled={!!bindInputSide}
                             className={[
                               "flex items-center gap-0.5 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
                               bindInputSide
                                 ? "cursor-not-allowed bg-slate-200 text-slate-400"
-                                : "bg-orange-500 text-white hover:bg-orange-600",
+                                : "bg-rose-500 text-white hover:bg-rose-600",
                             ].join(" ")}
                           >
                             <Plus className="h-2.5 w-2.5" />
-                            {clickStepCount > 0 ? "继续添加" : "添加点击任务"}
+                            {postClickCount > 0 ? "继续添加" : "添加收尾点击"}
                           </button>
                         )}
                       </>
