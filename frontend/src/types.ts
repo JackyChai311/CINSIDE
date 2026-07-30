@@ -206,6 +206,8 @@ export interface PickedMark {
   docLocalFiles?: Array<{ name: string; data?: string }>;
   /** 文件提取序列中的导航点击步骤标记（配置阶段记录的多步点击） */
   docExtractClick?: boolean;
+  /** 点击阶段：pre=前置点击（搜索/进入，步骤3），post=收尾点击（保存/返回，步骤5） */
+  clickPhase?: "pre" | "post";
 }
 
 /** 教学模式状态：人类教 AI 自动化流程的阶段 */
