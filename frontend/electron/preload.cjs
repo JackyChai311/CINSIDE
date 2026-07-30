@@ -65,6 +65,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   viewStartPicking: (side) => ipcRenderer.invoke("view-start-picking", side),
   viewStopPicking: (side) => ipcRenderer.invoke("view-stop-picking", side),
 
+  // 元素屏蔽规则
+  viewSetBlockRules: (side, selectors) => ipcRenderer.invoke("view-set-block-rules", side, selectors),
+
   // 高亮元素（用于核对时绿色/红色框）
   viewHighlightBoxes: (side, boxes) => ipcRenderer.invoke("view-highlight-boxes", side, boxes),
   viewClearHighlight: (side) => ipcRenderer.invoke("view-clear-highlight", side),
@@ -171,4 +174,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
   showBrowserView: (bounds, url) => ipcRenderer.invoke("view-show", "right", bounds, url),
   hideBrowserView: () => ipcRenderer.invoke("view-hide", "right"),
   resizeBrowserView: (bounds) => ipcRenderer.invoke("view-show", "right", bounds, null),
+
+  // === 账号密码两段式粘贴 ===
+  startTwoStepPaste: (side, username, password) => ipcRenderer.invoke("two-step-paste-start", side, username, password),
+  cancelTwoStepPaste: () => ipcRenderer.invoke("two-step-paste-cancel"),
+  getTwoStepPasteState: () => ipcRenderer.invoke("two-step-paste-state"),
+  onTwoStepPasteProgress: (callback) => {
+    const handler = (_e, data) => callback(data);
+    ipcRenderer.on("two-step-paste-progress", handler);
+    return () => ipcRenderer.removeListener("two-step-paste-progress", handler);
+  },
 });
