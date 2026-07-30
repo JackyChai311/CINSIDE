@@ -254,11 +254,13 @@ function createBrowserViews() {
     leftBrowserView = makeBrowserView();
     leftBrowserView.webContents.loadURL("about:blank");
     attachViewMessageRelay(leftBrowserView, "left");
+    setupTwoStepPasteInterceptor(leftBrowserView, "left");
   }
   if (!rightBrowserView) {
     rightBrowserView = makeBrowserView();
     rightBrowserView.webContents.loadURL("about:blank");
     attachViewMessageRelay(rightBrowserView, "right");
+    setupTwoStepPasteInterceptor(rightBrowserView, "right");
   }
 }
 
@@ -274,6 +276,8 @@ function attachViewMessageRelay(view, side) {
       ::-webkit-scrollbar-corner { background: transparent; }
       .cinside-picking, .cinside-picking * { cursor: crosshair !important; }
       .cinside-picking *:hover { outline: 2px dashed #6366f1 !important; outline-offset: 1px !important; box-shadow: 0 0 0 4px rgba(99,102,241,.15) !important; }
+      @keyframes cinside-pick-flash { 0% { outline: 3px solid #6366f1; outline-offset: 1px; box-shadow: 0 0 0 6px rgba(99,102,241,0.30); } 70% { outline: 3px solid rgba(99,102,241,0.4); outline-offset: 1px; box-shadow: 0 0 0 6px rgba(99,102,241,0.10); } 100% { outline: 3px solid rgba(99,102,241,0); outline-offset: 1px; box-shadow: 0 0 0 6px rgba(99,102,241,0); } }
+      .cinside-pick-flash { animation: cinside-pick-flash 0.28s ease-out forwards; }
     `).catch(() => {});
     // 页面重载后若拾取模式仍激活，重新注入拾取脚本
     if (pickingActive[side]) {
@@ -282,6 +286,8 @@ function attachViewMessageRelay(view, side) {
   });
 
   view.webContents.on("dom-ready", () => {
+    // 在 DOM 就绪时立即注入屏蔽规则（比 did-finish-load 早很多，减少导航闪烁）
+    applyBlockRules(side);
     view.webContents.executeJavaScript(`
       (function () {
         if (window.__cinsideRelayInstalled) return;
@@ -307,11 +313,15 @@ function attachViewMessageRelay(view, side) {
     if (pickingActive[side]) {
       view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).catch(() => {});
     }
+    // 导航后立即注入屏蔽规则（dom-ready 也会注入，这里作为兜底）
+    applyBlockRules(side);
   });
   view.webContents.on("did-navigate-in-page", () => {
     if (pickingActive[side]) {
       view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).catch(() => {});
     }
+    // SPA 路由变化后重新注入屏蔽规则（SPA 可能重新渲染了被屏蔽元素）
+    applyBlockRules(side);
   });
 
   // 加载状态变化：通知前端 loading 开始/结束
@@ -424,6 +434,8 @@ function createPopupView(parentSide, url, win) {
       ::-webkit-scrollbar-corner { background: transparent; }
       .cinside-picking, .cinside-picking * { cursor: crosshair !important; }
       .cinside-picking *:hover { outline: 2px dashed #6366f1 !important; outline-offset: 1px !important; box-shadow: 0 0 0 4px rgba(99,102,241,.15) !important; }
+      @keyframes cinside-pick-flash { 0% { outline: 3px solid #6366f1; outline-offset: 1px; box-shadow: 0 0 0 6px rgba(99,102,241,0.30); } 70% { outline: 3px solid rgba(99,102,241,0.4); outline-offset: 1px; box-shadow: 0 0 0 6px rgba(99,102,241,0.10); } 100% { outline: 3px solid rgba(99,102,241,0); outline-offset: 1px; box-shadow: 0 0 0 6px rgba(99,102,241,0); } }
+      .cinside-pick-flash { animation: cinside-pick-flash 0.28s ease-out forwards; }
     `).catch(() => {});
     // 页面加载后若拾取模式激活，注入拾取脚本
     const picking = isDetached ? detachedPickingActive[detachedSide] : pickingActive[parentSide];
@@ -552,6 +564,272 @@ function closeAllPopupViews() {
 // ============ 通用 view 操作 ============
 // 跟踪每个 side 的拾取模式状态：导航/重载后需重注入拾取脚本
 const pickingActive = { left: false, right: false };
+// 跟踪每个 side 的元素屏蔽规则（含 mode），导航/重载后自动重注入
+const blockRulesBySide = { left: [], right: [] };
+// insertCSS 返回的 key，用于移除旧规则
+let blockCssKey = { left: null, right: null };
+// 折叠规则的 JS key，用于移除旧脚本
+let blockJsKey = { left: null, right: null };
+
+function applyBlockRules(side) {
+  const view = side === "left" ? leftBrowserView : rightBrowserView;
+  if (!view) return;
+  var oldCssKey = blockCssKey[side];
+  blockCssKey[side] = null;
+  const rules = blockRulesBySide[side];
+  if (!rules || rules.length === 0) {
+    // 无规则：移除旧CSS，并注入清理JS恢复被折叠的元素
+    if (oldCssKey) view.webContents.removeInsertedCSS(oldCssKey).catch(() => {});
+    var cleanupJs = "(function() {\n" +
+      "  document.querySelectorAll('.cinside-sidebar-hidden, .cinside-collapsed').forEach(function(el) {\n" +
+      "    el.classList.remove('cinside-sidebar-hidden', 'cinside-sidebar-left', 'cinside-sidebar-right', 'cinside-collapsed', 'cinside-expanded');\n" +
+      "    el.style.removeProperty('width');\n" +
+      "    el.style.removeProperty('min-width');\n" +
+      "    el.style.removeProperty('max-width');\n" +
+      "    el.style.removeProperty('overflow');\n" +
+      "    el.style.removeProperty('transform');\n" +
+      "    el.style.removeProperty('opacity');\n" +
+      "    el.style.removeProperty('pointer-events');\n" +
+      "    el.style.removeProperty('padding');\n" +
+      "    el.style.removeProperty('margin');\n" +
+      "    el.style.removeProperty('border');\n" +
+      "    el.style.removeProperty('flex');\n" +
+      "    delete el.dataset.cinsideAutoMarked;\n" +
+      "    delete el.dataset.cinsideCollapsed;\n" +
+      "    delete el.dataset.cinsideForceCollapsed;\n" +
+      "    delete el.dataset.cinsideCollapse;\n" +
+      "    delete el.dataset.cinsideBtnAttached;\n" +
+      "  });\n" +
+      "  document.querySelectorAll('.cinside-expand-btn').forEach(function(b) { b.remove(); });\n" +
+      "})();";
+    view.webContents.executeJavaScript(cleanupJs).catch(() => {});
+    return;
+  }
+
+  var hideSelectors = [];
+  var collapseSelectors = [];
+  var autoSidebarDetect = false;
+  rules.forEach(function (r) {
+    if (r.mode === "collapse") {
+      collapseSelectors.push(r.selector);
+      // 自动侧边栏折叠选择器特征：包含 [class*= 或 aside 标签
+      if (r.selector.indexOf("[class*=") >= 0 || r.selector === "aside" || r.selector.indexOf("[id*=") >= 0) {
+        autoSidebarDetect = true;
+      }
+    } else {
+      hideSelectors.push(r.selector);
+    }
+  });
+
+  // 合并所有 CSS（hide + collapse）一次注入
+  var cssParts = [];
+  if (hideSelectors.length > 0) {
+    cssParts.push(hideSelectors.join(",\n") + " { display: none !important; }");
+  }
+  // 手动折叠规则的 CSS（选择器精确匹配）：width:0 + transform 双保险
+  var manualCollapseSels = collapseSelectors.filter(function(s) {
+    return s.indexOf("[class*=") < 0 && s !== "aside" && s.indexOf("[id*=") < 0;
+  });
+  if (manualCollapseSels.length > 0) {
+    cssParts.push(manualCollapseSels.map(function (s) {
+      return s + " { width: 0 !important; min-width: 0 !important; max-width: 0 !important; overflow: hidden !important; padding: 0 !important; margin: 0 !important; border: 0 !important; flex: 0 0 0 !important; transform: translateX(-100%) !important; transition: transform 0.25s ease-out, width 0.25s ease-out; }";
+    }).join("\n"));
+  }
+  // 自动检测到的侧边栏折叠类
+  cssParts.push(".cinside-sidebar-hidden { width: 0 !important; min-width: 0 !important; max-width: 0 !important; overflow: hidden !important; padding: 0 !important; margin: 0 !important; border: 0 !important; flex: 0 0 0 !important; opacity: 0 !important; pointer-events: none !important; transition: width 0.25s ease-out, opacity 0.2s ease-out; }");
+  cssParts.push(".cinside-sidebar-hidden.cinside-sidebar-left { transform: translateX(-105%) !important; }");
+  cssParts.push(".cinside-sidebar-hidden.cinside-sidebar-right { transform: translateX(105%) !important; }");
+  cssParts.push(".cinside-expanded { width: revert !important; min-width: revert !important; max-width: revert !important; overflow: revert !important; padding: revert !important; margin: revert !important; border: revert !important; flex: revert !important; transform: none !important; opacity: 1 !important; pointer-events: auto !important; }");
+
+  if (cssParts.length > 0) {
+    view.webContents.insertCSS(cssParts.join("\n")).then(function (key) {
+      blockCssKey[side] = key;
+      if (oldCssKey) {
+        view.webContents.removeInsertedCSS(oldCssKey).catch(() => {});
+      }
+    }).catch(() => {});
+  } else if (oldCssKey) {
+    view.webContents.removeInsertedCSS(oldCssKey).catch(() => {});
+  }
+
+  // 折叠 JS：手动选择器折叠 + 可选的自动几何检测
+  if (collapseSelectors.length > 0) {
+    var collapseJs = "(function() {\n" +
+      "  var manualSels = " + JSON.stringify(manualCollapseSels) + ";\n" +
+      "  var autoDetect = " + (autoSidebarDetect ? "true" : "false") + ";\n" +
+      "  var scanTimer = null;\n" +
+      "  function scheduleScan() { if (!scanTimer) scanTimer = setTimeout(doScan, 200); }\n" +
+      "  // 强制折叠手动选择的元素\n" +
+      "  function forceCollapseManual(el) {\n" +
+      "    if (el.dataset.cinsideCollapsed === '1') return;\n" +
+      "    el.dataset.cinsideCollapsed = '1';\n" +
+      "    el.classList.add('cinside-collapsed');\n" +
+      "    el.style.setProperty('width', '0px', 'important');\n" +
+      "    el.style.setProperty('min-width', '0px', 'important');\n" +
+      "    el.style.setProperty('max-width', '0px', 'important');\n" +
+      "    el.style.setProperty('overflow', 'hidden', 'important');\n" +
+      "    el.style.setProperty('transform', 'translateX(-100%)', 'important');\n" +
+      "    var obs = new MutationObserver(function() {\n" +
+      "      if (el.classList.contains('cinside-expanded')) return;\n" +
+      "      el.style.setProperty('width', '0px', 'important');\n" +
+      "      el.style.setProperty('min-width', '0px', 'important');\n" +
+      "      el.style.setProperty('max-width', '0px', 'important');\n" +
+      "      el.style.setProperty('overflow', 'hidden', 'important');\n" +
+      "      el.style.setProperty('transform', 'translateX(-100%)', 'important');\n" +
+      "    });\n" +
+      "    obs.observe(el, { attributes: true, attributeFilter: ['style', 'class'] });\n" +
+      "  }\n" +
+      "  // 自动检测侧边栏：通过几何特征\n" +
+      "  function autoDetectSidebars() {\n" +
+      "    var vw = window.innerWidth;\n" +
+      "    var vh = window.innerHeight;\n" +
+      "    var found = [];\n" +
+      "    // 候选选择器：aside/nav + 各种常见侧边栏类名/id + body 前4层后代\n" +
+      "    var candidateSels = 'aside, nav, [role=\"navigation\"], [class*=\"sidebar\" i], [class*=\"sider\" i], [class*=\"side-bar\" i], [class*=\"sidenav\" i], [class*=\"side-nav\" i], [class*=\"side-menu\" i], [class*=\"left-menu\" i], [class*=\"left-panel\" i], [class*=\"left-nav\" i], [class*=\"left-sidebar\" i], [class*=\"right-panel\" i], [class*=\"right-sidebar\" i], [class*=\"drawer\" i], [class*=\"nav-menu\" i], [class*=\"layout-sider\" i], [class*=\"ant-layout-sider\" i], [class*=\"el-aside\" i], [class*=\"app-sidebar\" i], [class*=\"main-sidebar\" i], [class*=\"menu-panel\" i], [class*=\"nav-panel\" i], [class*=\"sidebar-content\" i], [class*=\"side-content\" i], [id*=\"sidebar\" i], [id*=\"sidenav\" i], [id*=\"side-bar\" i]';\n" +
+      "    var candidates = document.querySelectorAll(candidateSels);\n" +
+      "    // 额外递归扫描 body 前 4 层，捕获无特征类名的侧边栏\n" +
+      "    var extraEls = [];\n" +
+      "    function collectLayer(root, depth) {\n" +
+      "      if (depth > 4 || !root || !root.children) return;\n" +
+      "      for (var i = 0; i < root.children.length; i++) {\n" +
+      "        var child = root.children[i];\n" +
+      "        try {\n" +
+      "          var r = child.getBoundingClientRect();\n" +
+      "          // 直接符合侧边栏特征的，加入候选\n" +
+      "          if (r.width >= 80 && r.width <= 500 && r.height >= vh * 0.4 && (r.left <= 10 || r.right >= vw - 10)) {\n" +
+      "            extraEls.push(child);\n" +
+      "          }\n" +
+      "          // 只有当元素足够大（>=60% 视口宽、>=40% 视口高）时才继续递归（容器元素）\n" +
+      "          if (r.width >= vw * 0.5 && r.height >= vh * 0.4) {\n" +
+      "            collectLayer(child, depth + 1);\n" +
+      "          }\n" +
+      "        } catch(e) {}\n" +
+      "      }\n" +
+      "    }\n" +
+      "    collectLayer(document.body, 0);\n" +
+      "    var candidatesArr = [].slice.call(candidates);\n" +
+      "    for (var ei = 0; ei < extraEls.length; ei++) candidatesArr.push(extraEls[ei]);\n" +
+      "    var seen = new Set();\n" +
+      "    candidatesArr.forEach(function(el) {\n" +
+      "      if (seen.has(el) || el.dataset.cinsideAutoMarked === '1' || el.classList.contains('cinside-expanded')) return;\n" +
+      "      seen.add(el);\n" +
+      "      try {\n" +
+      "        var rect = el.getBoundingClientRect();\n" +
+      "        if (rect.width < 80 || rect.width > 500) return;\n" +
+      "        if (rect.height < vh * 0.4) return;\n" +
+      "        var onLeft = rect.left <= 10;\n" +
+      "        var onRight = rect.right >= vw - 10;\n" +
+      "        if (!onLeft && !onRight) return;\n" +
+      "        // 排除已被折叠的祖先的子元素\n" +
+      "        var p = el.parentElement;\n" +
+      "        while (p && p !== document.body) {\n" +
+      "          if (p.classList.contains('cinside-sidebar-hidden')) return;\n" +
+      "          p = p.parentElement;\n" +
+      "        }\n" +
+      "        // 检查元素是否真正可见\n" +
+      "        var cs = getComputedStyle(el);\n" +
+      "        if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return;\n" +
+      "        found.push({ el: el, side: onLeft ? 'left' : 'right', area: rect.width * rect.height });\n" +
+      "      } catch(e) {}\n" +
+      "    });\n" +
+      "    // 在同一侧取面积最大的（通常是最外层容器）\n" +
+      "    var best = { left: null, right: null };\n" +
+      "    found.forEach(function(f) {\n" +
+      "      if (!best[f.side] || f.area > best[f.side].area) best[f.side] = f;\n" +
+      "    });\n" +
+      "    ['left', 'right'].forEach(function(sd) {\n" +
+      "      if (best[sd] && !best[sd].el.classList.contains('cinside-expanded')) {\n" +
+      "        collapseAutoSidebar(best[sd].el, sd);\n" +
+      "      }\n" +
+      "    });\n" +
+      "  }\n" +
+      "  function collapseAutoSidebar(el, sd) {\n" +
+      "    if (el.dataset.cinsideAutoMarked === '1') return;\n" +
+      "    el.dataset.cinsideAutoMarked = '1';\n" +
+      "    el.classList.add('cinside-sidebar-hidden', sd === 'left' ? 'cinside-sidebar-left' : 'cinside-sidebar-right');\n" +
+      "    // 创建展开按钮\n" +
+      "    var btn = document.createElement('div');\n" +
+      "    btn.className = 'cinside-expand-btn';\n" +
+      "    var btnPos = sd === 'left' ? 'left:0;' : 'right:0;';\n" +
+      "    var btnArrow = sd === 'left' ? '\\u25B6' : '\\u25C0';\n" +
+      "    btn.style.cssText = 'position:fixed;' + btnPos + 'top:50%;transform:translateY(-50%);width:14px;height:48px;background:rgba(99,102,241,0.85);color:#fff;cursor:pointer;z-index:2147483646;display:flex;align-items:center;justify-content:center;font-size:9px;border-radius:' + (sd === 'left' ? '0 3px 3px 0' : '3px 0 0 3px') + ';opacity:0;transition:opacity 0.2s;pointer-events:auto;';\n" +
+      "    btn.textContent = btnArrow;\n" +
+      "    btn.title = '\\u70B9\\u51FB\\u5C55\\u5F00\\u4FA7\\u8FB9\\u680F';\n" +
+      "    btn.addEventListener('mouseenter', function() { btn.style.opacity = '1'; });\n" +
+      "    btn.addEventListener('mouseleave', function() { btn.style.opacity = sd === 'left' ? (window.mouseX < 30 ? '0.3' : '0') : (window.mouseX > window.innerWidth - 30 ? '0.3' : '0'); });\n" +
+      "    btn.addEventListener('click', function(e) {\n" +
+      "      e.stopPropagation();\n" +
+      "      e.preventDefault();\n" +
+      "      el.classList.add('cinside-expanded');\n" +
+      "      el.classList.remove('cinside-sidebar-hidden', 'cinside-sidebar-left', 'cinside-sidebar-right');\n" +
+      "      btn.remove();\n" +
+      "    });\n" +
+      "    document.body.appendChild(btn);\n" +
+      "    btn.style.opacity = '0.3';\n" +
+      "    el._cinsideExpandBtn = btn;\n" +
+      "    // 鼠标移到边缘显示按钮\n" +
+      "    document.addEventListener('mousemove', function(ev) {\n" +
+      "      window.mouseX = ev.clientX;\n" +
+      "      if ((sd === 'left' && ev.clientX < 8) || (sd === 'right' && ev.clientX > window.innerWidth - 8)) {\n" +
+      "        btn.style.opacity = '1';\n" +
+      "      } else if ((sd === 'left' && ev.clientX > 30) || (sd === 'right' && ev.clientX < window.innerWidth - 30)) {\n" +
+      "        btn.style.opacity = '0';\n" +
+      "      }\n" +
+      "    });\n" +
+      "    // 监控被 SPA 恢复\n" +
+      "    var obs = new MutationObserver(function() {\n" +
+      "      if (el.classList.contains('cinside-expanded')) return;\n" +
+      "      if (!el.classList.contains('cinside-sidebar-hidden')) {\n" +
+      "        el.classList.add('cinside-sidebar-hidden', sd === 'left' ? 'cinside-sidebar-left' : 'cinside-sidebar-right');\n" +
+      "      }\n" +
+      "    });\n" +
+      "    obs.observe(el, { attributes: true, attributeFilter: ['style', 'class'] });\n" +
+      "  }\n" +
+      "  function doScan() {\n" +
+      "    scanTimer = null;\n" +
+      "    // 手动选择器\n" +
+      "    manualSels.forEach(function(sel) {\n" +
+      "      document.querySelectorAll(sel).forEach(function(el) {\n" +
+      "        forceCollapseManual(el);\n" +
+      "        // 手动折叠也创建展开按钮\n" +
+      "        if (el.dataset.cinsideBtnAttached) return;\n" +
+      "        el.dataset.cinsideBtnAttached = '1';\n" +
+      "        var btn = document.createElement('div');\n" +
+      "        btn.style.cssText = 'position:fixed;left:0;top:50%;transform:translateY(-50%);width:14px;height:48px;background:rgba(99,102,241,0.85);color:#fff;cursor:pointer;z-index:2147483646;display:flex;align-items:center;justify-content:center;font-size:9px;border-radius:0 3px 3px 0;opacity:0;transition:opacity 0.2s;pointer-events:auto;';\n" +
+      "        btn.textContent = '\\u25B6';\n" +
+      "        btn.title = '\\u70B9\\u51FB\\u5C55\\u5F00\\u4FA7\\u8FB9\\u680F';\n" +
+      "        btn.addEventListener('mouseenter', function() { btn.style.opacity = '1'; });\n" +
+      "        btn.addEventListener('mouseleave', function() { btn.style.opacity = '0'; });\n" +
+      "        btn.addEventListener('click', function(e) {\n" +
+      "          e.stopPropagation();\n" +
+      "          e.preventDefault();\n" +
+      "          el.classList.add('cinside-expanded');\n" +
+      "          el.style.setProperty('width', '', 'important');\n" +
+      "          el.style.setProperty('min-width', '', 'important');\n" +
+      "          el.style.setProperty('max-width', '', 'important');\n" +
+      "          el.style.setProperty('overflow', '', 'important');\n" +
+      "          el.style.setProperty('transform', '', 'important');\n" +
+      "          btn.remove();\n" +
+      "        });\n" +
+      "        document.body.appendChild(btn);\n" +
+      "        document.addEventListener('mousemove', function(ev) {\n" +
+      "          if (ev.clientX < 8) btn.style.opacity = '1';\n" +
+      "          else if (ev.clientX > 30) btn.style.opacity = '0';\n" +
+      "        });\n" +
+      "      });\n" +
+      "    });\n" +
+      "    // 自动检测\n" +
+      "    if (autoDetect) autoDetectSidebars();\n" +
+      "  }\n" +
+      "  doScan();\n" +
+      "  var mo = new MutationObserver(function() { scheduleScan(); });\n" +
+      "  mo.observe(document.body, { childList: true, subtree: true });\n" +
+      "  window.addEventListener('resize', function() { scheduleScan(); });\n" +
+      "  window.addEventListener('beforeunload', function() { mo.disconnect(); if (scanTimer) clearTimeout(scanTimer); });\n" +
+      "})();";
+    view.webContents.executeJavaScript(collapseJs).catch(() => {});
+  }
+}
 
 function loadView(side, url) {
   const view = side === "left" ? leftBrowserView : rightBrowserView;
@@ -758,9 +1036,21 @@ const ELEMENT_PICKER_SCRIPT = `
   }
 
   function highlight(el, color) {
-    el.style.outline = '3px solid ' + color;
-    el.style.outlineOffset = '1px';
-    el.style.boxShadow = '0 0 0 6px ' + color + '33';
+    try {
+      // 用 data 属性标记当前闪光颜色，CSS keyframe 通过该属性选择颜色
+      el.setAttribute('data-cinside-flash', '1');
+      el.classList.remove('cinside-pick-flash');
+      void el.offsetWidth;
+      el.classList.add('cinside-pick-flash');
+      var onEnd = function() {
+        el.classList.remove('cinside-pick-flash');
+        el.removeAttribute('data-cinside-flash');
+        el.removeEventListener('animationend', onEnd);
+      };
+      el.addEventListener('animationend', onEnd);
+      // 兜底：animationend 可能不触发（页面隐藏等情况）
+      setTimeout(onEnd, 500);
+    } catch(e) {}
   }
 
   var lastPickTime = 0;
@@ -883,6 +1173,10 @@ const ELEMENT_PICKER_SCRIPT = `
       'rawTarget=', rawTarget.nodeName, rawRect ? ('rect=(' + Math.round(rawRect.left) + ',' + Math.round(rawRect.top) + ',' + Math.round(rawRect.width) + 'x' + Math.round(rawRect.height) + ')') : '',
       '→ el=', el.nodeName, elRect ? ('rect=(' + Math.round(elRect.left) + ',' + Math.round(elRect.top) + ',' + Math.round(elRect.width) + 'x' + Math.round(elRect.height) + ')') : '',
       'isInput=', /^(input|textarea|select)$/i.test(el.nodeName), 'selector=', buildSelector(el));
+    // 先取消picking模式（移除:hover !important outline），避免和闪光动画冲突
+    window.__cinsidePickerActive = false;
+    document.body.classList.remove('cinside-picking');
+    removeFrameArms();
     highlight(el, '#6366f1');
     // 文档提取：收集元素的链接/图片地址（PDF、图片等）
     var linkEl = (el.closest && el.closest('a')) || (el.tagName === 'A' ? el : null);
@@ -902,10 +1196,6 @@ const ELEMENT_PICKER_SCRIPT = `
     };
     console.log('[onPick] payload=', JSON.stringify({ tag: payload.tag, selector: payload.selector, isContentEditable: payload.isContentEditable, value: payload.value }));
     window.__cinsidePostMessage(payload);
-    // 自动取消激活，单次拾取
-    window.__cinsidePickerActive = false;
-    document.body.classList.remove('cinside-picking');
-    removeFrameArms();
   }
 
   // 拾取模式下阻止 Enter 触发表单提交/页面跳转，并把 Enter 回传给主窗口执行 commitInput
@@ -1124,35 +1414,52 @@ function buildHighlightScript(boxes) {
       info.el.style.height = r.height + 'px';
     });
   }
-  // 给被高亮的元素本身加 outline，更醒目
+  // 保存被高亮元素原始 outline/boxShadow/transition，cleanup 时恢复
+  var outlinedElements = [];
   function applyOutline() {
     boxInfos.forEach(function (info) {
       try {
         var el = deepQuery(info.sel);
         if (el) {
+          outlinedElements.push({
+            el: el,
+            outline: el.style.outline,
+            offset: el.style.outlineOffset,
+            shadow: el.style.boxShadow,
+            trans: el.style.transition,
+          });
+          el.style.transition = 'outline 0.15s ease-out, box-shadow 0.15s ease-out';
           el.style.outline = '2px solid ' + info.color;
           el.style.outlineOffset = '1px';
+          el.style.boxShadow = '0 0 0 4px ' + info.color + '33';
         }
       } catch (e) {}
     });
   }
+  function restoreOutline() {
+    outlinedElements.forEach(function (o) {
+      try {
+        o.el.style.outline = o.outline || '';
+        o.el.style.outlineOffset = o.offset || '';
+        o.el.style.boxShadow = o.shadow || '';
+        o.el.style.transition = o.trans || '';
+      } catch (e) {}
+    });
+    outlinedElements = [];
+  }
   reposition();
   applyOutline();
-  // 滚动/resize 时通过 rAF 重新定位（capture=true 捕获所有滚动容器）
+  // 持续 rAF 追踪：每帧重新计算位置，保证 smooth scroll / 动画 / DOM 变化时不脱节
   var rafId = null;
-  var scheduleReposition = function () {
-    if (rafId != null) return;
-    rafId = requestAnimationFrame(function () {
-      rafId = null;
-      reposition();
-    });
-  };
-  document.addEventListener('scroll', scheduleReposition, true);
-  window.addEventListener('resize', scheduleReposition);
+  function trackLoop() {
+    reposition();
+    rafId = requestAnimationFrame(trackLoop);
+  }
+  trackLoop();
   window.__cinsideHighlightCleanup = function () {
-    document.removeEventListener('scroll', scheduleReposition, true);
-    window.removeEventListener('resize', scheduleReposition);
     if (rafId != null) cancelAnimationFrame(rafId);
+    rafId = null;
+    restoreOutline();
   };
 })();
 `;
@@ -1501,6 +1808,118 @@ ipcMain.handle("view-stop-picking", (_event, side) => {
   return executeInView(side, ELEMENT_PICKER_DEACTIVATE_SCRIPT);
 });
 
+// 设置元素屏蔽规则（side, rules[{selector, mode}]）—— 立即注入 CSS/JS，导航后自动重注入
+ipcMain.handle("view-set-block-rules", (_event, side, rules) => {
+  blockRulesBySide[side] = Array.isArray(rules) ? rules : [];
+  applyBlockRules(side);
+  return { ok: true };
+});
+
+// ============ 账号密码两段式粘贴 ============
+// 状态：{ active, side, username, password, step }
+// step: 0 = 待粘贴用户名，1 = 待粘贴密码
+// 拦截 BrowserView 的 Ctrl+V：第一次填入 username，第二次填入 password，第二次后自动结束
+const twoStepPaste = { active: false, side: null, username: "", password: "", step: 0 };
+
+function notifyPasteProgress(done) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("two-step-paste-progress", {
+      side: twoStepPaste.side,
+      step: twoStepPaste.step,
+      done: !!done,
+    });
+  }
+}
+
+// 在 BrowserView 中找当前 focus 的输入元素并设置值（不污染剪贴板）
+function pasteIntoFocusedElement(view, value) {
+  if (!view || view.webContents.isDestroyed()) return Promise.resolve(false);
+  return view.webContents.executeJavaScript(`
+    (function() {
+      var el = document.activeElement;
+      if (!el) return false;
+      var tag = el.tagName.toLowerCase();
+      if (tag === 'input' || tag === 'textarea') {
+        var type = (el.type || '').toLowerCase();
+        if (type === 'checkbox' || type === 'radio' || type === 'submit' || type === 'button' || type === 'file' || type === 'image' || type === 'reset') return false;
+        // 用原生 setter 触发 React/Vue 等框架响应
+        var proto = tag === 'input' ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+        var setter = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (setter && setter.set) setter.set.call(el, ${JSON.stringify(value)});
+        else el.value = ${JSON.stringify(value)};
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }
+      if (el.isContentEditable) {
+        el.textContent = ${JSON.stringify(value)};
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: ${JSON.stringify(value)} }));
+        return true;
+      }
+      return false;
+    })()
+  `).catch(() => false);
+}
+
+function setupTwoStepPasteInterceptor(view, side) {
+  if (!view) return;
+  view.webContents.on("before-input-event", (event, input) => {
+    if (!twoStepPaste.active || twoStepPaste.side !== side) return;
+    // 只拦截 Ctrl+V（或 Cmd+V on mac）
+    const isPaste = (input.control || input.meta) && input.key.toLowerCase() === "v";
+    if (!isPaste) return;
+    event.preventDefault();
+    const currentStep = twoStepPaste.step;
+    const value = currentStep === 0 ? twoStepPaste.username : twoStepPaste.password;
+    pasteIntoFocusedElement(view, value).then((ok) => {
+      if (!ok) {
+        debugLog("[two-step-paste] 目标元素不可写入，side=" + side + " step=" + currentStep);
+      }
+      if (currentStep === 0) {
+        twoStepPaste.step = 1;
+        notifyPasteProgress(false);
+      } else {
+        // 完成第二次粘贴，自动结束
+        const finishedSide = twoStepPaste.side;
+        twoStepPaste.active = false;
+        twoStepPaste.side = null;
+        twoStepPaste.username = "";
+        twoStepPaste.password = "";
+        twoStepPaste.step = 0;
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("two-step-paste-progress", { side: finishedSide, step: 1, done: true });
+        }
+      }
+    });
+  });
+}
+
+ipcMain.handle("two-step-paste-start", (_event, side, username, password) => {
+  twoStepPaste.active = true;
+  twoStepPaste.side = side;
+  twoStepPaste.username = String(username || "");
+  twoStepPaste.password = String(password || "");
+  twoStepPaste.step = 0;
+  return { ok: true };
+});
+
+ipcMain.handle("two-step-paste-cancel", () => {
+  twoStepPaste.active = false;
+  twoStepPaste.side = null;
+  twoStepPaste.username = "";
+  twoStepPaste.password = "";
+  twoStepPaste.step = 0;
+  return { ok: true };
+});
+
+ipcMain.handle("two-step-paste-state", () => {
+  return {
+    active: twoStepPaste.active,
+    step: twoStepPaste.step,
+    side: twoStepPaste.side,
+  };
+});
+
 // 高亮指定 view 中的若干元素（boxes: [{selector, status, label}]）
 ipcMain.handle("view-highlight-boxes", (_event, side, boxes) => {
   return executeInView(side, buildHighlightScript(boxes || []));
@@ -1568,6 +1987,8 @@ function createDetachedBrowserView(win, side) {
       ::-webkit-scrollbar-corner { background: transparent; }
       .cinside-picking, .cinside-picking * { cursor: crosshair !important; }
       .cinside-picking *:hover { outline: 2px dashed #6366f1 !important; outline-offset: 1px !important; box-shadow: 0 0 0 4px rgba(99,102,241,.15) !important; }
+      @keyframes cinside-pick-flash { 0% { outline: 3px solid #6366f1; outline-offset: 1px; box-shadow: 0 0 0 6px rgba(99,102,241,0.30); } 70% { outline: 3px solid rgba(99,102,241,0.4); outline-offset: 1px; box-shadow: 0 0 0 6px rgba(99,102,241,0.10); } 100% { outline: 3px solid rgba(99,102,241,0); outline-offset: 1px; box-shadow: 0 0 0 6px rgba(99,102,241,0); } }
+      .cinside-pick-flash { animation: cinside-pick-flash 0.28s ease-out forwards; }
     `).catch(() => {});
     // 页面重载后若拾取模式仍激活，重新注入拾取脚本
     if (detachedPickingActive[side]) {
