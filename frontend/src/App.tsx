@@ -8,22 +8,27 @@ import {
   ClipboardCheck,
   ClipboardEdit,
   Clock,
+  EyeOff,
   FileSpreadsheet,
   Globe,
   GraduationCap,
+  KeyRound,
   ListChecks,
   Loader2,
   Minus,
   MousePointerClick,
   PanelBottom,
   PanelLeft,
+  PanelLeftClose,
   Play,
+  Plus,
   Repeat2,
   Settings2,
   ShieldCheck,
   SkipForward,
   Sparkles,
   Square,
+  Trash2,
   UserCircle,
   X,
   XCircle,
@@ -67,7 +72,10 @@ import SettingsModal from "./components/SettingsModal";
 import DocFillDialog from "./components/DocFillDialog";
 import SkillPanel from "./components/SkillPanel";
 import SaveSkillDialog from "./components/SaveSkillDialog";
+import CredentialsPanel from "./components/CredentialsPanel";
 import { saveSkill, getSkillById } from "./lib/skills";
+import { getBlockRules, addBlockRule, removeBlockRule, getHost, type BlockRule, SIDEBAR_AUTO_SELECTORS, getSidebarAutoCollapse, setSidebarAutoCollapse } from "./lib/blockRules";
+import { getAllCredentials, addCredential, removeCredential, type Credential } from "./lib/credentials";
 import type { ViewSide } from "./electron";
 
 // 统一日志：同时输出到 console 和主进程日志文件
@@ -245,9 +253,11 @@ function DetachedBottomPanel() {
   const [nextClickLabel, setNextClickLabel] = useState<string | null>(null);
   const [addingStepMode, setAddingStepMode] = useState<"review" | "entry" | null>(null);
   const [addingClickMode, setAddingClickMode] = useState(false);
+  const [addingClickPhase, setAddingClickPhaseState] = useState<"pre" | "post" | null>(null);
   const [addingDocExtractMode, setAddingDocExtractMode] = useState(false);
   const [bindStepCount, setBindStepCount] = useState(0);
-  const [clickStepCount, setClickStepCount] = useState(0);
+  const [preClickCount, setPreClickCount] = useState(0);
+  const [postClickCount, setPostClickCount] = useState(0);
   const [docExtractStepCount, setDocExtractStepCount] = useState(0);
   const [hasBoundInputs, setHasBoundInputs] = useState(false);
   const [hasConfirmClick, setHasConfirmClick] = useState(false);
@@ -293,9 +303,11 @@ function DetachedBottomPanel() {
         nextClickLabel?: string | null;
         addingStepMode?: "review" | "entry" | null;
         addingClickMode?: boolean;
+        addingClickPhase?: "pre" | "post" | null;
         addingDocExtractMode?: boolean;
         bindStepCount?: number;
-        clickStepCount?: number;
+        preClickCount?: number;
+        postClickCount?: number;
         docExtractStepCount?: number;
         hasBoundInputs?: boolean;
         hasConfirmClick?: boolean;
@@ -334,9 +346,11 @@ function DetachedBottomPanel() {
       if ("nextClickLabel" in s) setNextClickLabel(s.nextClickLabel ?? null);
       if ("addingStepMode" in s) setAddingStepMode(s.addingStepMode ?? null);
       if ("addingClickMode" in s) setAddingClickMode(Boolean(s.addingClickMode));
+      if ("addingClickPhase" in s) setAddingClickPhaseState(s.addingClickPhase ?? null);
       if ("addingDocExtractMode" in s) setAddingDocExtractMode(Boolean(s.addingDocExtractMode));
       if ("bindStepCount" in s) setBindStepCount(Number(s.bindStepCount ?? 0));
-      if ("clickStepCount" in s) setClickStepCount(Number(s.clickStepCount ?? 0));
+      if ("preClickCount" in s) setPreClickCount(Number(s.preClickCount ?? 0));
+      if ("postClickCount" in s) setPostClickCount(Number(s.postClickCount ?? 0));
       if ("docExtractStepCount" in s) setDocExtractStepCount(Number(s.docExtractStepCount ?? 0));
       if ("hasBoundInputs" in s) setHasBoundInputs(Boolean(s.hasBoundInputs));
       if ("hasConfirmClick" in s) setHasConfirmClick(Boolean(s.hasConfirmClick));
@@ -419,7 +433,7 @@ function DetachedBottomPanel() {
               onAbortTeaching={() => window.electronAPI?.panelSendAction("teaching-abort", undefined)}
               onRequestQuickSave={() => window.electronAPI?.panelSendAction("quick-save-loop", undefined)}
               onRequestSaveSkill={() => window.electronAPI?.panelSendAction("save-skill", undefined)}
-              onRequestSaveSkillAndRun={() => window.electronAPI?.panelSendAction("save-skill-and-run", undefined)}
+              onDirectRun={() => window.electronAPI?.panelSendAction("direct-run", undefined)}
               selectedExcelColumn={selectedExcelColumn}
               bindInputSide={bindInputSide}
               nextClickLabel={nextClickLabel}
@@ -432,8 +446,11 @@ function DetachedBottomPanel() {
               onExitAddingStepMode={() => window.electronAPI?.panelSendAction("exit-adding-step-mode", undefined)}
               addingStepMode={addingStepMode}
               addingClickMode={addingClickMode}
-              clickStepCount={clickStepCount}
-              onStartAddClickStep={() => window.electronAPI?.panelSendAction("start-add-click-step", undefined)}
+              addingClickPhase={addingClickPhase}
+              preClickCount={preClickCount}
+              postClickCount={postClickCount}
+              onStartAddPreClick={() => window.electronAPI?.panelSendAction("start-add-pre-click", undefined)}
+              onStartAddPostClick={() => window.electronAPI?.panelSendAction("start-add-post-click", undefined)}
               onExitAddClickMode={() => window.electronAPI?.panelSendAction("exit-add-click-mode", undefined)}
               onSwapSide={() => window.electronAPI?.panelSendAction("swap-side", undefined)}
               onUndo={() => window.electronAPI?.panelSendAction("undo", undefined)}
@@ -450,8 +467,6 @@ function DetachedBottomPanel() {
         ) : (
           <div className="relative min-h-0 flex-1">
             <ResultsPanel
-              record={record}
-              mappings={mappings}
               comparisons={comparisons}
               resultPresent={resultPresent}
               report={report}
@@ -461,14 +476,7 @@ function DetachedBottomPanel() {
               running={running}
               appMode={appMode}
               logEndRef={logEndRef}
-              onRemoveMapping={handleRemoveMapping}
-              pickedMarks={pickedMarks}
-              onRemovePickedMark={(id) => window.electronAPI?.panelSendAction("remove-picked-mark", id)}
-              onClearPickedMarks={() => window.electronAPI?.panelSendAction("clear-picked-marks", undefined)}
-              onReplay={() => window.electronAPI?.panelSendAction("replay-picked-marks", undefined)}
-              replaying={replaying}
-              replayCursor={replayCursor}
-              onStopReplay={() => window.electronAPI?.panelSendAction("stop-replay-picked-marks", undefined)}
+              addingStepMode={addingStepMode}
             />
             {/* 步骤设置面板：下面板分离后，TeachingGuide 在此渲染（而非主窗口） */}
             {teachingPhase !== "idle" && !selectMode && (
@@ -714,6 +722,20 @@ selectedExcelColumnRef.current = selectedExcelColumn;
   const [leftUrl, setLeftUrl] = useState<string>("");
   const [rightUrl, setRightUrl] = useState<string>("");
 
+  // 元素屏蔽功能
+  const [blockPickingSide, setBlockPickingSide] = useState<ViewSide | null>(null);
+  // 自动侧边栏折叠：按 `${side}:${host}` 存储勾选状态
+  const [sidebarAutoCollapse, setSidebarAutoCollapseState] = useState<Record<string, boolean>>({});
+  const [blockRulesState, setBlockRulesState] = useState<Record<string, BlockRule[]>>({});
+  const [showBlockPanel, setShowBlockPanel] = useState<ViewSide | null>(null);
+
+  // 账号密码凭证
+  const [credentials, setCredentials] = useState<Credential[]>(() => getAllCredentials());
+  const [showCredentialsPanel, setShowCredentialsPanel] = useState<ViewSide | null>(null);
+  // 两段式粘贴状态：当前激活的凭证 id 和步骤
+  const [activePasteId, setActivePasteId] = useState<string | null>(null);
+  const [pasteStep, setPasteStep] = useState<0 | 1>(0);
+
   // 元素选择模式
   const [selectMode, setSelectMode] = useState(false);
   const [pickTarget, setPickTarget] = useState<PickTarget>("right");
@@ -778,6 +800,10 @@ currentLoopStepTypeRef.current = currentLoopStepType;
 const [addingClickMode, setAddingClickMode] = useState(false);
 const addingClickModeRef = useRef(addingClickMode);
 addingClickModeRef.current = addingClickMode;
+// 当前添加的点击阶段：pre=前置点击(搜索/进入，步骤3)，post=收尾点击(保存/返回，步骤5)
+const [addingClickPhase, setAddingClickPhase] = useState<"pre" | "post" | null>(null);
+const addingClickPhaseRef = useRef(addingClickPhase);
+addingClickPhaseRef.current = addingClickPhase;
 // 文件提取模式：点击网页图片/PDF → OCR 提取（点左侧元素=录入提取，点右侧=审查提取）
 const [addingDocExtractMode, setAddingDocExtractMode] = useState(false);
 const addingDocExtractModeRef = useRef(addingDocExtractMode);
@@ -817,6 +843,10 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   // ref 始终持有最新 pickedMarks，供 recyclePickedMark 等回调读取，避免闭包陷阱
   const pickedMarksRef = useRef(pickedMarks);
   pickedMarksRef.current = pickedMarks;
+  // 前置点击数量（步骤3：搜索/进入）
+  const preClickCount = useMemo(() => pickedMarks.filter((m) => m.action === "click" && m.clickPhase === "pre").length, [pickedMarks]);
+  // 收尾点击数量（步骤5：保存/返回）
+  const postClickCount = useMemo(() => pickedMarks.filter((m) => m.action === "click" && m.clickPhase === "post").length, [pickedMarks]);
   const addPickedMark = useCallback(
     (mark: Omit<PickedMark, "id" | "order" | "createdAt">) => {
       setPickedMarks((prev) => {
@@ -877,7 +907,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       (m) => m.action === "click" && !m.label.startsWith("确认人物")
     );
     if (hadNormalClick && addingClickModeRef.current) {
-      setNextClickLabel("点击按钮");
+      const currentPhase = addingClickPhaseRef.current;
+      setNextClickLabel(currentPhase === "post" ? "收尾点击" : "前置点击");
       setPendingAction("click");
       setPickTarget(side);
       setTimeout(() => {
@@ -894,6 +925,12 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   const [teachingPhase, setTeachingPhase] = useState<TeachingPhase>("idle");
   // 已保存的流程模板（教学完成后生成）
   const [workflowTemplate, setWorkflowTemplate] = useState<WorkflowTemplate | null>(null);
+  // ref 始终持有最新的 workflowTemplate，避免 setState 异步导致的读取旧值
+  const workflowTemplateRef = useRef<WorkflowTemplate | null>(null);
+  workflowTemplateRef.current = workflowTemplate;
+  // 持久化模板 ref：保存最近一次成功构建/执行的模板，
+  // 不会因切换记录、状态重置等原因被清空，供"查看"按钮做最终兜底
+  const lastTemplateRef = useRef<WorkflowTemplate | null>(null);
   // 批量执行状态
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchCursor, setBatchCursor] = useState(-1); // 当前执行的卡片索引（-1 = 未开始）
@@ -1022,12 +1059,18 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
           try { el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' }); } catch(e) {}
           var orig = el.style.outline;
           var origOffset = el.style.outlineOffset;
+          var origShadow = el.style.boxShadow;
+          var origTrans = el.style.transition;
+          el.style.transition = 'outline 0.15s ease-out, box-shadow 0.15s ease-out';
           el.style.outline = '3px solid #10b981';
           el.style.outlineOffset = '2px';
+          el.style.boxShadow = '0 0 0 6px rgba(16,185,129,0.2)';
           setTimeout(function() {
             el.style.outline = orig || '';
-            el.style.outlineOffset = '';
-          }, 1000);
+            el.style.outlineOffset = origOffset || '';
+            el.style.boxShadow = origShadow || '';
+            el.style.transition = origTrans || '';
+          }, 800);
           el.click();
           return { ok: true, tag: el.tagName };
         })();
@@ -1118,22 +1161,20 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
 
           setOk = el.value === text || el.textContent === text;
 
-          // 视觉确认：绿色粗 outline + 临时 floating badge 显示填入值
+          // 视觉确认：绿色粗 outline（直接设在元素上，滚动时自动跟随）
           var orig = el.style.outline;
           var origOffset = el.style.outlineOffset;
+          var origShadow = el.style.boxShadow;
+          var origTrans = el.style.transition;
+          el.style.transition = 'outline 0.15s ease-out, box-shadow 0.15s ease-out';
           el.style.outline = '4px solid #22c55e';
           el.style.outlineOffset = '2px';
-          var badge = document.createElement('div');
-          badge.textContent = '已填入：' + text.slice(0, 20);
-          badge.style.cssText = 'position:fixed;z-index:2147483647;background:#22c55e;color:#fff;padding:2px 8px;font-size:12px;border-radius:4px;pointer-events:none;white-space:nowrap;';
-          var r = el.getBoundingClientRect();
-          badge.style.left = (r.left) + 'px';
-          badge.style.top = (r.top - 26) + 'px';
-          document.body.appendChild(badge);
+          el.style.boxShadow = '0 0 0 6px rgba(34,197,94,0.2)';
           setTimeout(function() {
             el.style.outline = orig || '';
             el.style.outlineOffset = origOffset || '';
-            if (badge.parentNode) badge.parentNode.removeChild(badge);
+            el.style.boxShadow = origShadow || '';
+            el.style.transition = origTrans || '';
           }, 2500);
           return { ok: true, reason: 'ok', tag: el.tagName, currentValue: el.value || el.textContent || '', setOk: setOk };
         })();
@@ -1280,11 +1321,18 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
                 if (!el) return { ok: false };
                 el.scrollIntoView({ behavior: 'smooth', block: 'center' });
                 var orig = el.style.outline;
+                var origOffset = el.style.outlineOffset;
+                var origShadow = el.style.boxShadow;
+                var origTrans = el.style.transition;
+                el.style.transition = 'outline 0.15s ease-out, box-shadow 0.15s ease-out';
                 el.style.outline = '3px solid #10b981';
                 el.style.outlineOffset = '2px';
+                el.style.boxShadow = '0 0 0 6px rgba(16,185,129,0.2)';
                 setTimeout(function() {
                   el.style.outline = orig || '';
-                  el.style.outlineOffset = '';
+                  el.style.outlineOffset = origOffset || '';
+                  el.style.boxShadow = origShadow || '';
+                  el.style.transition = origTrans || '';
                   el.click();
                 }, 400);
                 return { ok: true };
@@ -1313,13 +1361,20 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
                 try { el = __cinsideDeepQuery(${JSON.stringify(sel)}); } catch(e) { el = null; }
                 if (!el) return { ok: false, reason: 'not_found' };
                 el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
-                // 短暂闪烁
+                // 短暂闪烁（橙色outline直接设在元素上，滚动时自动跟随）
                 var orig = el.style.outline;
+                var origOffset = el.style.outlineOffset;
+                var origShadow = el.style.boxShadow;
+                var origTrans = el.style.transition;
+                el.style.transition = 'outline 0.15s ease-out, box-shadow 0.15s ease-out';
                 el.style.outline = '3px solid #f59e0b';
                 el.style.outlineOffset = '2px';
+                el.style.boxShadow = '0 0 0 6px rgba(245,158,11,0.2)';
                 setTimeout(function() {
                   el.style.outline = orig || '';
-                  el.style.outlineOffset = '';
+                  el.style.outlineOffset = origOffset || '';
+                  el.style.boxShadow = origShadow || '';
+                  el.style.transition = origTrans || '';
                 }, 1200);
                 return { ok: true, tag: el.tagName, type: el.getAttribute('type') || '' };
               })();
@@ -1725,12 +1780,16 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     // 保留验证结果（result/report/steps/shots）：切换卡片后验证面板内容不丢失，便于回看与对比；
     // 开始新的核验时这些状态会被覆盖。
     setError(null);
-    setRunning(false);
     setVerifyStatus("idle");
     setMappings([]);
-    setPickedMarks([]);
     wsRef.current?.close();
     wsRef.current = null;
+    // 已完成教学（存在持久化模板）时，不清除 pickedMarks 和 running 状态，
+    // 否则会导致"查看"按钮找不到步骤而报错
+    if (!lastTemplateRef.current) {
+      setRunning(false);
+      setPickedMarks([]);
+    }
     // 切换卡片时不重置左右 BrowserView 的 URL，保留用户已打开的页面
     // 仅在右侧为空且当前卡片有 university_url 时设置
     setRightUrl((prev) => prev || selected?.university_url || "");
@@ -2571,11 +2630,12 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     }
   }, [selected, docExtractPanel, setError]);
 
-  // 开始添加点击按钮（连续添加多个点击动作，两侧网页皆可点击）
-  const startAddClickStep = useCallback((side?: "left" | "right" | "both") => {
-    rlog("[startAddClickStep] 激活添加点击按钮模式（两侧皆可）");
+  // 开始添加点击按钮：phase=pre(前置点击/搜索进入，步骤3) 或 post(收尾点击/保存返回，步骤5)
+  const startAddClickStep = useCallback((phase: "pre" | "post" = "pre", side?: "left" | "right" | "both") => {
+    rlog(`[startAddClickStep] 激活添加${phase === "pre" ? "前置" : "收尾"}点击按钮模式（两侧皆可）`);
     setAddingClickMode(true);
-    setNextClickLabel("点击按钮");
+    setAddingClickPhase(phase);
+    setNextClickLabel(phase === "pre" ? "前置点击" : "收尾点击");
     setPendingAction("click");
     setPickTarget(null);
     setBindInputSide(null);
@@ -2591,6 +2651,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   // 退出添加点击按钮模式
   const exitAddClickMode = useCallback(() => {
     setAddingClickMode(false);
+    setAddingClickPhase(null);
     setNextClickLabel(null);
     setPendingAction("none");
     setPickTarget(null);
@@ -2598,9 +2659,13 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
 
   // 教学完成：把 pickedMarks 按当前 appMode 保存为模板
   const finishTeaching = useCallback(() => {
-    const dataSourceMarks = pickedMarks.filter((m) => m.workflow === "data-source");
-    const reviewMarks = pickedMarks.filter((m) => m.workflow === "review");
-    const entryMarks = pickedMarks.filter((m) => m.workflow === "entry");
+    // 智能分类：带clickPhase(pre/post)的点击归入dataSource，其余按workflow字段分类
+    const dataSourceMarks = pickedMarks.filter((m) =>
+      (m.action === "click" || m.action === "input") &&
+      (m.clickPhase === "pre" || m.clickPhase === "post" || m.workflow === "data-source")
+    );
+    const reviewMarks = pickedMarks.filter((m) => !m.clickPhase && m.workflow === "review");
+    const entryMarks = pickedMarks.filter((m) => !m.clickPhase && m.workflow === "entry");
     // LOOP 模式：检查是否包含以 Excel 变量作为输入的搜索步骤
     const hasSearchSteps = pickedMarks.some(
       (m) => m.action === "input" && !!m.variableField
@@ -2626,6 +2691,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       hasSubmitStep,
     };
     setWorkflowTemplate(tpl);
+    workflowTemplateRef.current = tpl; // 同步更新 ref，确保立即可读
+    lastTemplateRef.current = tpl; // 持久化保存，防止被状态重置清空
     setTeachingPhase("done");
     // 退出所有拾取/教学模式
     setPendingAction("none");
@@ -2637,11 +2704,11 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     setPickTarget(null);
     setRightPicked(null);
     setLeftPicked(null);
+    setSelectMode(false);
     window.electronAPI?.viewStopPicking("left").catch(() => {});
     window.electronAPI?.viewStopPicking("right").catch(() => {});
     window.electronAPI?.viewClearHighlight("left").catch(() => {});
     window.electronAPI?.viewClearHighlight("right").catch(() => {});
-    if (selectMode) exitSelectMode();
     if (avatarMode) exitAvatarMode();
     return tpl;
   }, [pickedMarks, selected, selectMode, avatarMode, setError, appMode]);
@@ -2660,9 +2727,13 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
 
   // ============ SKILL 保存与执行 ============
   const buildTemplateFromMarks = useCallback((name: string, icon?: string): WorkflowTemplate => {
-    const dataSourceMarks = pickedMarks.filter((m) => m.workflow === "data-source");
-    const reviewMarks = pickedMarks.filter((m) => m.workflow === "review");
-    const entryMarks = pickedMarks.filter((m) => m.workflow === "entry");
+    // 智能分类：带clickPhase(pre/post)的点击归入dataSource，其余按workflow字段分类
+    const dataSourceMarks = pickedMarks.filter((m) =>
+      (m.action === "click" || m.action === "input") &&
+      (m.clickPhase === "pre" || m.clickPhase === "post" || m.workflow === "data-source")
+    );
+    const reviewMarks = pickedMarks.filter((m) => !m.clickPhase && m.workflow === "review");
+    const entryMarks = pickedMarks.filter((m) => !m.clickPhase && m.workflow === "entry");
     const hasSearchSteps = pickedMarks.some((m) => m.action === "input" && !!m.variableField);
     const hasSubmitStep = entryMarks.some((m) => m.action === "click");
     return {
@@ -2685,6 +2756,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     const tpl = buildTemplateFromMarks(name, icon);
     const saved = saveSkill(tpl);
     setWorkflowTemplate(saved);
+    workflowTemplateRef.current = saved; // 同步更新 ref
+    lastTemplateRef.current = saved; // 持久化保存
     setTeachingPhase("done");
     setPendingAction("none");
     setInputTarget(null);
@@ -2699,7 +2772,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     window.electronAPI?.viewStopPicking("right").catch(() => {});
     window.electronAPI?.viewClearHighlight("left").catch(() => {});
     window.electronAPI?.viewClearHighlight("right").catch(() => {});
-    if (selectMode) exitSelectMode();
+    setSelectMode(false);
     if (avatarMode) exitAvatarMode();
     setShowSaveSkill(false);
     setSkillVersion((v) => v + 1);
@@ -2719,6 +2792,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
 
   const handleRunSkill = useCallback((tpl: WorkflowTemplate) => {
     setWorkflowTemplate(tpl);
+    workflowTemplateRef.current = tpl; // 同步更新 ref
+    lastTemplateRef.current = tpl; // 持久化保存
     setTeachingPhase("done");
     setShowSkillPanel(false);
     if (runBatchRef.current) {
@@ -2821,6 +2896,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   const startNewLoop = useCallback(() => {
     if (batchRunning) return; // 执行中不允许重置
     setWorkflowTemplate(null);
+    workflowTemplateRef.current = null;
+    lastTemplateRef.current = null;
     setPickedMarks([]);
     setTeachingPhase("idle");
     setAddingStepMode(null);
@@ -3292,26 +3369,56 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     record: ApplicantRecord,
     recordIndex: number,
     onStepStart?: (recordIndex: number, mark: PickedMark) => void,
-    options?: { wrapWithVerify?: boolean; skipSubmit?: boolean }
+    options?: { wrapWithVerify?: boolean; skipSubmit?: boolean; preOnly?: boolean; postThenPre?: boolean }
   ): Promise<{ success: boolean; failedOrder?: number; error?: string; comparisons?: FieldComparison[]; verifyOverall?: "match" | "mismatch" }> => {
     // 根据模板模式选择执行哪一段 marks
     // - entry 模式：只执行录入流（填表+提交）
     // - review 模式：只执行审查流（搜索+对比）
-    // - loop 模式：按 order 顺序执行所有 marks（dataSource → review/entry混合 → 点击任务）
+    // - loop 模式：分三段执行：pre(搜索输入+前置点击) → body(审查/录入步骤) → post(收尾点击)
+    // - postThenPre 模式（查看卡片）：先执行post(收尾返回)，再执行pre(搜索+前置点击)
     let allMarks: PickedMark[];
+    let postThenPreBoundary = 0; // postThenPre模式下，post段结束的索引，之后需要等待页面加载
     if (tpl.mode === "entry") {
-      allMarks = [...tpl.entryMarks];
+      allMarks = options?.preOnly ? [] : [...tpl.entryMarks];
     } else if (tpl.mode === "review") {
       allMarks = [...tpl.dataSourceMarks, ...tpl.reviewMarks];
+      if (options?.preOnly || options?.postThenPre) {
+        // preOnly/postThenPre模式：只执行搜索输入+前置点击，不执行审查步骤
+        const preClicks = allMarks.filter(m => m.action === "click" && m.clickPhase === "pre");
+        const inputs = allMarks.filter(m => m.action === "input"); // 搜索输入
+        allMarks = [...inputs, ...preClicks].sort((a, b) => a.order - b.order);
+      }
     } else {
-      // loop 全流程模式：dataSource(前置步骤) + reviewMarks + entryMarks + 末尾点击，按order排序
-      allMarks = [
-        ...tpl.dataSourceMarks,
-        ...tpl.reviewMarks,
-        ...tpl.entryMarks,
-      ];
+      // loop 全流程模式：分三段
+      const allClickMarks = [...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks].filter(m => m.action === "click");
+      const preClickMarks = allClickMarks.filter(m => m.clickPhase === "pre");
+      const postClickMarks = allClickMarks.filter(m => m.clickPhase === "post");
+      const dataSourceInputs = tpl.dataSourceMarks.filter(m => m.action !== "click" || !m.clickPhase);
+      if (options?.postThenPre) {
+        // 查看卡片模式：先收尾点击(返回搜索页)，再搜索输入+前置点击(定位到新卡片)
+        const preMarks = [...dataSourceInputs, ...preClickMarks].sort((a, b) => a.order - b.order);
+        allMarks = [...postClickMarks, ...preMarks];
+        postThenPreBoundary = postClickMarks.length; // post结束后等待页面加载
+      } else if (options?.preOnly) {
+        // preOnly模式：只执行搜索输入+前置点击（定位到卡片页面），不执行body和post
+        allMarks = [...dataSourceInputs, ...preClickMarks].sort((a, b) => a.order - b.order);
+      } else {
+        const bodyMarks = [...tpl.reviewMarks, ...tpl.entryMarks].filter(m => {
+          if (m.action !== "click") return true;
+          return !m.clickPhase;
+        });
+        allMarks = [
+          ...dataSourceInputs,
+          ...preClickMarks,
+          ...bodyMarks,
+          ...postClickMarks,
+        ];
+        allMarks = allMarks.sort((a, b) => a.order - b.order);
+      }
     }
-    allMarks = allMarks.sort((a, b) => a.order - b.order);
+    if (!options?.preOnly && !options?.postThenPre) {
+      allMarks = allMarks.sort((a, b) => a.order - b.order);
+    }
     // 单卡导航模式（功能3）：跳过提交类点击，避免重复提交表单
     if (options?.skipSubmit) {
       allMarks = allMarks.filter(
@@ -3365,6 +3472,11 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         } else {
           await sleep(400);
         }
+        // postThenPre模式：post段结束后额外等待页面稳定（收尾点击后页面跳转回搜索页）
+        if (postThenPreBoundary > 0 && mi === postThenPreBoundary - 1) {
+          await sleep(800);
+          await Promise.race([waitPageSettled("left", 3000), waitPageSettled("right", 3000), sleep(2000)]);
+        }
       } catch (e) {
         rlog(`[batch] 第 ${recordIndex + 1} 行步骤 ${mark.order} 失败:`, e);
         return {
@@ -3391,12 +3503,14 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
 
   // ============ 批量执行：对所有卡片按模板执行，从当前选中卡片开始 ============
   const runBatch = useCallback(async (tplOverride?: WorkflowTemplate) => {
-    const tpl = tplOverride ?? workflowTemplate;
+    const tpl = tplOverride ?? workflowTemplateRef.current ?? lastTemplateRef.current;
     console.log("[runBatch] 🚀 开始执行，tpl=", !!tpl, "records.length=", records.length, "selectedId=", selectedId);
     if (!tpl) {
       console.warn("[runBatch] ❌ 无 workflowTemplate，退出");
       return;
     }
+    // 持久化保存当前使用的模板
+    lastTemplateRef.current = tpl;
     if (cardRecords.length === 0) {
       console.warn("[runBatch] ❌ cardRecords 为空（未框选生成卡片），退出");
       setError("请先在 Excel 视图框选 LOOP 行范围并点击「一键生成卡片」");
@@ -3423,8 +3537,13 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     setVerifyStatus("idle");
     setResult(null);
 
-    // 执行前退出选择/编辑模式
-    if (selectMode) exitSelectMode();
+    // 执行前退出选择/编辑模式（手动退出，不调用exitSelectMode以避免清空workflowTemplate）
+    if (selectMode) {
+      setSelectMode(false);
+      setPickTarget(null);
+      setRightPicked(null);
+      setLeftPicked(null);
+    }
     if (avatarMode) exitAvatarMode();
     setPendingAction("none");
     setBindInputSide(null);
@@ -3457,12 +3576,11 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       : tpl.mode === "review"
       ? [...tpl.dataSourceMarks, ...tpl.reviewMarks]
       : [...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks];
+    // 只重置右侧网页（目标网站），不重置左侧网页（数据源），
+    // 避免左侧网页侧边栏等状态因重新加载而丢失。
+    // 录入步骤从左网页读取值时也不重置左侧（左网页状态由用户控制）。
     const usedSides = new Set<ViewSide>();
-    for (const m of execMarks) {
-      usedSides.add(m.side === "left" ? "left" : "right");
-      // 录入步骤从左网页读取值时，也需要重置左侧页面
-      if (m.sourceSelector) usedSides.add("left");
-    }
+    usedSides.add("right"); // 右侧（目标网站）始终重置
 
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const startedAt = new Date().toISOString();
@@ -3861,18 +3979,11 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
           window.electronAPI?.viewClearHighlight("left").catch(() => {});
           window.electronAPI?.viewClearHighlight("right").catch(() => {});
 
-          // 重置网页到搜索页
+          // 重置网页到搜索页（只重置右侧目标网站，不重置左侧数据源）
+          // 避免左侧网页侧边栏等状态因重新加载而丢失
           const hasReviewSteps = task.workflowTemplate.reviewMarks.length > 0;
-          const execMarks = task.workflowTemplate.mode === "entry"
-            ? task.workflowTemplate.entryMarks
-            : task.workflowTemplate.mode === "review"
-              ? [...task.workflowTemplate.dataSourceMarks, ...task.workflowTemplate.reviewMarks]
-              : [...task.workflowTemplate.dataSourceMarks, ...task.workflowTemplate.reviewMarks, ...task.workflowTemplate.entryMarks];
-          const usedSides = new Set<ViewSide>();
-          for (const m of execMarks) {
-            usedSides.add(m.side === "left" ? "left" : "right");
-            if (m.sourceSelector) usedSides.add("left");
-          }
+          // 只重置右侧（目标网站），左侧（数据源）由用户控制，不重置
+          const usedSides = new Set<ViewSide>(["right"]);
           for (const side of usedSides) {
             const baseUrl = side === "left" ? task.leftUrl : task.rightUrl;
             if (!baseUrl || !window.electronAPI) continue;
@@ -4146,13 +4257,50 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     [performInputValue, setError, setSuccessToast]
   );
 
-  // ============ 功能3：单卡 LOOP 执行（点击人物卡片 → 自动导航到该人页面） ============
+  // ============ 功能3：点击「查看」按钮 → 执行步骤5(收尾)→步骤2+3(搜索+前置点击)，定位到该卡片页面 ============
   const runSingleRecord = useCallback(
     async (recordId: string) => {
-      const tpl = workflowTemplate;
+      // 优先使用 ref 中的 workflowTemplate（避免 setState 异步导致的旧值），再回退到持久化模板，最后从 pickedMarks 构建
+      let tpl = workflowTemplateRef.current || workflowTemplate || lastTemplateRef.current;
       if (!tpl) {
-        setError("尚未完成步骤设置，无法执行单卡 LOOP");
-        return;
+        // 未保存模板时，从当前 pickedMarks 构建临时模板（智能分类，不严格依赖workflow字段）
+        const allMarks = pickedMarksRef.current.filter((m) => m.action === "click" || m.action === "input");
+        // 智能分类：带clickPhase的点击归入dataSource，其余按原workflow分类
+        const dataSourceMarks = allMarks.filter((m) => m.clickPhase === "pre" || m.clickPhase === "post" || m.workflow === "data-source");
+        const reviewMarks = allMarks.filter((m) => !m.clickPhase && m.workflow === "review");
+        const entryMarks = allMarks.filter((m) => !m.clickPhase && m.workflow === "entry");
+        if (dataSourceMarks.length === 0 && reviewMarks.length === 0 && entryMarks.length === 0) {
+          setError("尚未配置任何步骤，无法定位到该卡片");
+          return;
+        }
+        tpl = {
+          id: `tpl-temp-${Date.now()}`,
+          name: "临时模板",
+          createdAt: Date.now(),
+          sourceRecordId: selected?.record_id,
+          mode: appMode,
+          dataSourceMarks,
+          reviewMarks,
+          entryMarks,
+          hasSearchSteps: dataSourceMarks.some((m) => m.action === "input" && !!m.variableField),
+          hasSubmitStep: entryMarks.some((m) => m.action === "click"),
+        };
+        // 持久化临时构建的模板，防止后续切换记录丢失
+        lastTemplateRef.current = tpl;
+      } else {
+        // 模板存在时，也要确保带clickPhase的点击在dataSourceMarks中（修复旧模板分类问题）
+        const allMarks = [...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks];
+        const prePostClicks = allMarks.filter((m) => m.action === "click" && (m.clickPhase === "pre" || m.clickPhase === "post"));
+        if (prePostClicks.length > 0) {
+          // 把pre/post点击合并到dataSourceMarks中（去重）
+          const existingIds = new Set(tpl.dataSourceMarks.map((m) => m.id || m.order));
+          const missingClicks = prePostClicks.filter((m) => !(m.id || m.order) || !existingIds.has(m.id || m.order));
+          if (missingClicks.length > 0) {
+            tpl = { ...tpl, dataSourceMarks: [...tpl.dataSourceMarks, ...missingClicks] };
+          }
+        }
+        // 确保使用的模板持久化保存
+        lastTemplateRef.current = tpl;
       }
       if (batchRunning || singleRunning) return;
       const recordIndex = records.findIndex((r) => r.record_id === recordId);
@@ -4164,7 +4312,13 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       setSingleRunning(true);
       setLogSignal((s) => s + 1);
       setError(null);
-      if (selectMode) exitSelectMode();
+      // 手动退出选择模式，不调用exitSelectMode以避免清空workflowTemplate
+      if (selectMode) {
+        setSelectMode(false);
+        setPickTarget(null);
+        setRightPicked(null);
+        setLeftPicked(null);
+      }
       if (avatarMode) exitAvatarMode();
       if (docPickMode) {
         setDocPickMode(false);
@@ -4185,7 +4339,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
           {
             step: prev.length + 1,
             action: mark.action || "pick",
-            description: `单卡 LOOP 步骤 ${mark.order}: ${mark.label || selector}`,
+            description: `定位步骤 ${mark.order}: ${mark.label || selector}`,
             success: true,
             detail: mark.action === "input"
               ? `填入: ${mark.variableField ? `[${mark.variableField}]` : (mark.value || "")}`
@@ -4200,16 +4354,16 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         {
           step: prev.length + 1,
           action: "start",
-          description: `单卡 LOOP 启动：${recordName}（自动导航到页面供人工审查，跳过比对/提交）`,
+          description: `开始查看「${recordName}」（先返回搜索页→再搜索定位）`,
           success: true,
           timestamp: new Date().toISOString(),
         },
       ]);
 
       try {
+        // postThenPre：先执行收尾点击(返回搜索页)，再执行搜索输入+前置点击(定位到卡片)
         const result = await executeTemplateForRecord(tpl, record, 0, onStepStart, {
-          wrapWithVerify: false,
-          skipSubmit: tpl.mode === "entry",
+          postThenPre: true,
         });
         if (result.success) {
           setSteps((prev) => [
@@ -4217,28 +4371,28 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
             {
               step: prev.length + 1,
               action: "done",
-              description: `单卡 LOOP 完成：已导航到「${recordName}」的页面，请人工审查`,
+              description: `已定位到「${recordName}」的卡片页面`,
               success: true,
               timestamp: new Date().toISOString(),
             },
           ]);
-          setSuccessToast(`已导航到「${recordName}」的页面`);
+          setSuccessToast(`已定位到「${recordName}」的页面`);
         } else {
           setSteps((prev) => [
             ...prev,
             {
               step: prev.length + 1,
               action: "error",
-              description: `单卡 LOOP 失败: ${result.error || "未知错误"}`,
+              description: `定位失败: ${result.error || "未知错误"}`,
               success: false,
               timestamp: new Date().toISOString(),
             },
           ]);
-          setError(`单卡执行失败: ${result.error || "未知错误"}`);
+          setError(`定位失败: ${result.error || "未知错误"}`);
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        setError(`单卡执行失败: ${msg}`);
+        setError(`定位失败: ${msg}`);
       } finally {
         setSingleRunning(false);
         setBatchMarkCursor(null);
@@ -4246,7 +4400,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         window.electronAPI?.viewClearHighlight("right").catch(() => {});
       }
     },
-    [workflowTemplate, batchRunning, singleRunning, records, selectMode, avatarMode, docPickMode, exitSelectMode, exitAvatarMode, executeTemplateForRecord, setError, setSuccessToast]
+    [workflowTemplate, appMode, batchRunning, singleRunning, records, selectMode, avatarMode, docPickMode, exitSelectMode, exitAvatarMode, executeTemplateForRecord, setError, setSuccessToast]
   );
 
   // ============ SKILL 拖拽到人物卡片：加载 SKILL 并在指定记录上单卡执行 ============
@@ -4268,12 +4422,20 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
 
       setSelectedId(recordId);
       setWorkflowTemplate(tpl);
+      workflowTemplateRef.current = tpl; // 同步更新 ref
+      lastTemplateRef.current = tpl; // 持久化保存
       setTeachingPhase("done");
       setShowSkillPanel(false);
       setSingleRunning(true);
       setLogSignal((s) => s + 1);
       setError(null);
-      if (selectMode) exitSelectMode();
+      // 手动退出选择模式，不调用exitSelectMode以避免清空workflowTemplate
+      if (selectMode) {
+        setSelectMode(false);
+        setPickTarget(null);
+        setRightPicked(null);
+        setLeftPicked(null);
+      }
       if (avatarMode) exitAvatarMode();
       if (docPickMode) {
         setDocPickMode(false);
@@ -4604,7 +4766,143 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     return () => off?.();
   }, [commitInput]);
 
-  const onRightPicked = useCallback((info: PickedElementInfo) => {
+  // === 元素屏蔽功能 ===
+  // 应用屏蔽规则到指定 side（从 localStorage 读取该 host 的规则 + 自动侧边栏折叠规则，发送到主进程）
+  const applyBlockRulesForUrl = useCallback((side: ViewSide, url: string) => {
+    if (!window.electronAPI) return;
+    const host = getHost(url);
+    const userRules = getBlockRules(host);
+    const autoCollapse = getSidebarAutoCollapse(host);
+    // 同步勾选状态到 React state（用于按钮显示）
+    setSidebarAutoCollapseState((prev) => {
+      const key = `${side}:${host}`;
+      return prev[key] === autoCollapse ? prev : { ...prev, [key]: autoCollapse };
+    });
+    // 合并用户规则 + 自动侧边栏折叠规则
+    const allRules: BlockRule[] = [...userRules];
+    if (autoCollapse) {
+      SIDEBAR_AUTO_SELECTORS.forEach((sel) => {
+        if (!allRules.some((r) => r.selector === sel)) {
+          allRules.push({ selector: sel, label: "侧边栏(自动)", createdAt: Date.now(), mode: "collapse" });
+        }
+      });
+    }
+    setBlockRulesState((prev) => ({ ...prev, [`${side}:${host}`]: allRules }));
+    window.electronAPI.viewSetBlockRules(side, allRules.map((r) => ({ selector: r.selector, mode: r.mode }))).catch(() => {});
+  }, []);
+
+  // 屏蔽元素拾取回调（hide 模式：完全隐藏）
+  const onBlockElementPicked = useCallback((side: ViewSide, info: PickedElementInfo) => {
+    const url = side === "left" ? leftUrl : rightUrl;
+    const host = getHost(url);
+    const label = info.label || info.text || info.tag || info.selector.slice(0, 40);
+    const rules = addBlockRule(host, info.selector, label, "hide");
+    setBlockRulesState((prev) => ({ ...prev, [`${side}:${host}`]: rules }));
+    window.electronAPI?.viewSetBlockRules(side, rules.map((r) => ({ selector: r.selector, mode: r.mode }))).catch(() => {});
+    setBlockPickingSide(null);
+  }, [leftUrl, rightUrl]);
+
+  // 切换自动侧边栏折叠开关（持久化，立即应用到当前页面）
+  const toggleSidebarAutoCollapse = useCallback((side: ViewSide) => {
+    const url = side === "left" ? leftUrl : rightUrl;
+    if (!url) return;
+    const host = getHost(url);
+    const next = !getSidebarAutoCollapse(host);
+    setSidebarAutoCollapse(host, next);
+    setSidebarAutoCollapseState((prev) => ({ ...prev, [`${side}:${host}`]: next }));
+    // 重新应用规则（合并用户规则 + 自动折叠规则）
+    const userRules = getBlockRules(host);
+    const allRules: BlockRule[] = [...userRules];
+    if (next) {
+      SIDEBAR_AUTO_SELECTORS.forEach((sel) => {
+        if (!allRules.some((r) => r.selector === sel)) {
+          allRules.push({ selector: sel, label: "侧边栏(自动)", createdAt: Date.now(), mode: "collapse" });
+        }
+      });
+    }
+    setBlockRulesState((prev) => ({ ...prev, [`${side}:${host}`]: allRules }));
+    window.electronAPI?.viewSetBlockRules(side, allRules.map((r) => ({ selector: r.selector, mode: r.mode }))).catch(() => {});
+  }, [leftUrl, rightUrl]);
+
+  // 删除一条屏蔽规则
+  const handleRemoveBlockRule = useCallback((side: ViewSide, host: string, selector: string) => {
+    // 不允许删除自动侧边栏规则（由开关控制）
+    if (SIDEBAR_AUTO_SELECTORS.includes(selector)) return;
+    const rules = removeBlockRule(host, selector);
+    // 重新合并自动折叠规则
+    const autoCollapse = getSidebarAutoCollapse(host);
+    const allRules: BlockRule[] = [...rules];
+    if (autoCollapse) {
+      SIDEBAR_AUTO_SELECTORS.forEach((sel) => {
+        if (!allRules.some((r) => r.selector === sel)) {
+          allRules.push({ selector: sel, label: "侧边栏(自动)", createdAt: Date.now(), mode: "collapse" });
+        }
+      });
+    }
+    setBlockRulesState((prev) => ({ ...prev, [`${side}:${host}`]: allRules }));
+    window.electronAPI?.viewSetBlockRules(side, allRules.map((r) => ({ selector: r.selector, mode: r.mode }))).catch(() => {});
+  }, []);
+
+  // === 账号密码凭证 ===
+  const handleAddCredential = useCallback((data: { host: string; name: string; username: string; password: string; note?: string }) => {
+    const all = addCredential(data);
+    setCredentials(all);
+  }, []);
+
+  const handleRemoveCredential = useCallback((id: string) => {
+    const all = removeCredential(id);
+    setCredentials(all);
+    if (activePasteId === id) {
+      setActivePasteId(null);
+      setPasteStep(0);
+      window.electronAPI?.cancelTwoStepPaste().catch(() => {});
+    }
+  }, [activePasteId]);
+
+  // 点击 COPY 按钮：激活两段式粘贴
+  const handleCopyCredential = useCallback((side: ViewSide, cred: Credential) => {
+    // 再次点击同一个凭证：取消
+    if (activePasteId === cred.id) {
+      setActivePasteId(null);
+      setPasteStep(0);
+      window.electronAPI?.cancelTwoStepPaste().catch(() => {});
+      return;
+    }
+    setActivePasteId(cred.id);
+    setPasteStep(0);
+    window.electronAPI?.startTwoStepPaste(side, cred.username, cred.password).catch(() => {});
+  }, [activePasteId]);
+
+  // 取消两段式粘贴
+  const handleCancelPaste = useCallback(() => {
+    setActivePasteId(null);
+    setPasteStep(0);
+    window.electronAPI?.cancelTwoStepPaste().catch(() => {});
+  }, []);
+
+  // 监听主进程的两段式粘贴进度通知
+  useEffect(() => {
+    if (!window.electronAPI?.onTwoStepPasteProgress) return;
+    const off = window.electronAPI.onTwoStepPasteProgress((data) => {
+      if (data.done) {
+        setActivePasteId(null);
+        setPasteStep(0);
+      } else {
+        setPasteStep(data.step);
+      }
+    });
+    return off;
+  }, []);
+
+  // URL 变化时自动应用屏蔽规则
+  useEffect(() => {
+    if (rightUrl) applyBlockRulesForUrl("right", rightUrl);
+  }, [rightUrl, applyBlockRulesForUrl]);
+  useEffect(() => {
+    if (leftUrl) applyBlockRulesForUrl("left", leftUrl);
+  }, [leftUrl, applyBlockRulesForUrl]);
+
+  const onRightPicked = useCallback(async (info: PickedElementInfo) => {
     // 用 ref 读取最新状态，避免 React 批量更新/闭包延迟
     const currentPendingAction = pendingActionRef.current;
     const currentPendingInputValue = pendingInputValueRef.current;
@@ -4640,16 +4938,19 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     // pendingAction=click：右侧点击 = 真实点击元素
     if (currentPendingAction === "click") {
       const clickLabel = nextClickLabelRef.current;
-      rlog("[onRightPicked] click模式, nextClickLabel=", clickLabel, "addingClickMode=", addingClickModeRef.current);
-      performRealClick("right", info.selector);
+      const currentPhase = addingClickPhaseRef.current;
+      rlog("[onRightPicked] click模式, nextClickLabel=", clickLabel, "addingClickMode=", addingClickModeRef.current, "phase=", currentPhase);
+      // 不调用 performRealClick：picker 的 pointerdown 拦截后物理 click 仍会触发元素，
+      // 再调 el.click() 会导致点击两次。物理点击已经完成。
       addPickedMark({
         side: "right",
         source: "web",
         selector: info.selector,
         label: clickLabel ? `${clickLabel} · ${info.label || info.tag || info.selector}` : `点击 · ${info.label || info.tag || info.selector}`,
         value: info.value,
-        workflow: teachingPhase === "data-source" ? "data-source" : teachingPhase === "entry" ? "entry" : "review",
+        workflow: currentPhase ? "data-source" : (teachingPhase === "data-source" ? "data-source" : teachingPhase === "entry" ? "entry" : "review"),
         action: "click",
+        clickPhase: currentPhase || undefined,
         recordId: selected?.record_id,
         rect: info.rect,
         tag: info.tag,
@@ -4657,8 +4958,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       });
       // 判断点击后的行为：添加点击按钮模式/教学搜索→确认人物/完成
       if (addingClickModeRef.current) {
-        // 连续添加点击按钮模式：保持点击状态
-        setNextClickLabel("点击按钮");
+        // 连续添加点击按钮模式：保持点击状态，使用对应phase的标签
+        setNextClickLabel(currentPhase === "post" ? "收尾点击" : "前置点击");
         setPendingAction("click");
         setPickTarget(null);
         setTimeout(() => {
@@ -4673,10 +4974,11 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         setNextClickLabel("确认人物");
         setPendingAction("click");
         setPickTarget(null);
+        // 搜索后等待稍长时间让页面加载再重新激活拾取
         setTimeout(() => {
           window.electronAPI?.viewStartPicking("left");
           window.electronAPI?.viewStartPicking("right");
-        }, 500); // 搜索后等待稍长时间让页面加载
+        }, 500);
       } else {
         // 确认人物点击完成，退出点击模式
         setPendingAction("none");
@@ -4757,7 +5059,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
             }).catch((e) => {
               console.error("[onRightPicked] 填入失败:", e);
             });
-          }, 150);
+          }, 350);
         } else {
           console.warn("[onRightPicked] previewValue 为空，无法填入", { selected, currentExcelCol });
         }
@@ -4810,7 +5112,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       });
       // 添加点击按钮模式下：继续保持点击状态，等待用户点击下一个按钮
       if (addingClickModeRef.current) {
-        setNextClickLabel("点击按钮");
+        const currentPhase = addingClickPhaseRef.current;
+        setNextClickLabel(currentPhase === "post" ? "收尾点击" : "前置点击");
         setPendingAction("click");
         setPickTarget("right");
         setTimeout(() => {
@@ -4887,7 +5190,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     // 自动进入下一步：选择左侧来源（默认提示用户选网页或 Excel）
   }, [addPickedMark, selected, performRealClick, performInputValue, teachingPhase, recyclePickedMark]);
 
-  const onLeftPicked = useCallback((info: PickedElementInfo) => {
+  const onLeftPicked = useCallback(async (info: PickedElementInfo) => {
     // 用 ref 读取最新状态，避免 React 批量更新/闭包延迟
     const currentPendingAction = pendingActionRef.current;
     const currentInputTarget = inputTargetRef.current;
@@ -4909,16 +5212,19 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     // pendingAction=click：左侧点击 = 真实点击元素
     if (currentPendingAction === "click") {
       const clickLabel = nextClickLabelRef.current;
-      rlog("[onLeftPicked] click模式, nextClickLabel=", clickLabel, "addingClickMode=", addingClickModeRef.current);
-      performRealClick("left", info.selector);
+      const currentPhase = addingClickPhaseRef.current;
+      rlog("[onLeftPicked] click模式, nextClickLabel=", clickLabel, "addingClickMode=", addingClickModeRef.current, "phase=", currentPhase);
+      // 不调用 performRealClick：picker 的 pointerdown 拦截后物理 click 仍会触发元素，
+      // 再调 el.click() 会导致点击两次。物理点击已经完成。
       addPickedMark({
         side: "left",
         source: "web",
         selector: info.selector,
         label: clickLabel ? `${clickLabel} · ${info.label || info.tag || info.selector}` : `点击 · ${info.label || info.tag || info.selector}`,
         value: info.value,
-        workflow: teachingPhase === "data-source" ? "data-source" : teachingPhase === "entry" ? "entry" : "review",
+        workflow: currentPhase ? "data-source" : (teachingPhase === "data-source" ? "data-source" : teachingPhase === "entry" ? "entry" : "review"),
         action: "click",
+        clickPhase: currentPhase || undefined,
         recordId: selected?.record_id,
         rect: info.rect,
         tag: info.tag,
@@ -4926,8 +5232,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       });
       // 判断点击后的行为：添加点击按钮模式/教学搜索→确认人物/完成
       if (addingClickModeRef.current) {
-        // 连续添加点击按钮模式：保持点击状态
-        setNextClickLabel("点击按钮");
+        // 连续添加点击按钮模式：保持点击状态，使用对应phase的标签
+        setNextClickLabel(currentPhase === "post" ? "收尾点击" : "前置点击");
         setPendingAction("click");
         setPickTarget(null);
         setTimeout(() => {
@@ -5059,7 +5365,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       });
       // 添加点击按钮模式下：继续保持点击状态，等待用户点击下一个按钮
       if (addingClickModeRef.current) {
-        setNextClickLabel("点击按钮");
+        const currentPhase = addingClickPhaseRef.current;
+        setNextClickLabel(currentPhase === "post" ? "收尾点击" : "前置点击");
         setPendingAction("click");
         setPickTarget("left");
         setTimeout(() => {
@@ -5362,12 +5669,11 @@ type: info.type,
           setSaveSkillRunAfter(false);
           setShowSaveSkill(true);
           break;
-        case "save-skill-and-run":
-          setSaveSkillRunAfter(true);
-          setShowSaveSkill(true);
-          break;
         case "quick-save-loop":
           handleQuickSaveLoop();
+          break;
+        case "direct-run":
+          finishTeachingAndRunBatch();
           break;
         case "teaching-back":
           goBackTeachingPhase();
@@ -5403,8 +5709,11 @@ type: info.type,
         case "exit-adding-step-mode":
           exitAddingStepMode();
           break;
-        case "start-add-click-step":
-          startAddClickStep();
+        case "start-add-pre-click":
+          startAddClickStep("pre");
+          break;
+        case "start-add-post-click":
+          startAddClickStep("post");
           break;
         case "exit-add-click-mode":
           exitAddClickMode();
@@ -5470,9 +5779,11 @@ type: info.type,
               nextClickLabel,
               addingStepMode,
               addingClickMode,
+              addingClickPhase,
               addingDocExtractMode,
               bindStepCount: pickedMarks.filter((m) => m.action === "input" || m.action === "click").length,
-              clickStepCount: pickedMarks.filter((m) => m.action === "click" && m.label.startsWith("点击按钮")).length,
+              preClickCount: pickedMarks.filter((m) => m.action === "click" && m.clickPhase === "pre").length,
+              postClickCount: pickedMarks.filter((m) => m.action === "click" && m.clickPhase === "post").length,
               docExtractStepCount: pickedMarks.filter((m) => m.docExtract).length,
               hasBoundInputs: pickedMarks.some((m) => m.action === "input" && !!m.variableField),
               hasConfirmClick: pickedMarks.some((m) => m.action === "click" && m.label.startsWith("确认人物")),
@@ -6259,7 +6570,7 @@ type: info.type,
               batchResults={batchResults}
               onDetach={() => detachPanel("left")}
               onRunRecord={runSingleRecord}
-              runDisabled={!workflowTemplate || batchRunning || singleRunning}
+              runDisabled={batchRunning || singleRunning}
               runningRecordId={singleRunning ? selectedId : null}
               onPickDocument={handleDocFilePick}
               docExtracting={docFileExtracting}
@@ -6351,6 +6662,24 @@ type: info.type,
                   onRequestAddExcel={() => browserExcelInputRef.current?.click()}
                   onExcelDrop={handleBrowserExcelUpload}
                   onCloseExcel={handleCloseLeftExcel}
+                  blockPicking={blockPickingSide === "left"}
+                  onBlockElement={(info) => onBlockElementPicked("left", info)}
+                  blockRuleCount={blockRulesState[`left:${getHost(leftUrl)}`]?.length || 0}
+                  onManageBlocks={() => {
+                    if (blockPickingSide === "left") {
+                      setBlockPickingSide(null);
+                    } else if (showBlockPanel === "left") {
+                      setShowBlockPanel(null);
+                    } else if (blockRulesState[`left:${getHost(leftUrl)}`]?.length) {
+                      setShowBlockPanel("left");
+                    } else {
+                      setBlockPickingSide("left");
+                    }
+                  }}
+                  sidebarCollapsed={!!sidebarAutoCollapse[`left:${getHost(leftUrl)}`]}
+                  onToggleSidebarCollapse={() => toggleSidebarAutoCollapse("left")}
+                  onOpenCredentials={() => setShowCredentialsPanel(showCredentialsPanel === "left" ? null : "left")}
+                  credentialCount={credentials.filter((c) => c.host === getHost(leftUrl)).length}
                   picking={(selectMode && pickTarget === "left") || avatarMode || (pendingAction === "click" && (pickTarget === "left" || (teachingPhase !== "idle" && !!nextClickLabel) || addingClickMode)) || (pendingAction === "input" && pickTarget === "left") || !!bindInputSide || (teachingPhase !== "idle" && !!nextClickLabel && pickTarget === "left")}
                   onPickedElement={avatarMode ? onAvatarPicked : onLeftPicked}
                   verifyStatus="idle"
@@ -6469,6 +6798,24 @@ type: info.type,
                   favoriteSites={rightFavoriteSites}
                   onAddFavoriteSite={handleAddFavoriteSite("right")}
                   onRemoveFavoriteSite={handleRemoveFavoriteSite("right")}
+                  blockPicking={blockPickingSide === "right"}
+                  onBlockElement={(info) => onBlockElementPicked("right", info)}
+                  blockRuleCount={blockRulesState[`right:${getHost(rightUrl)}`]?.length || 0}
+                  onManageBlocks={() => {
+                    if (blockPickingSide === "right") {
+                      setBlockPickingSide(null);
+                    } else if (showBlockPanel === "right") {
+                      setShowBlockPanel(null);
+                    } else if (blockRulesState[`right:${getHost(rightUrl)}`]?.length) {
+                      setShowBlockPanel("right");
+                    } else {
+                      setBlockPickingSide("right");
+                    }
+                  }}
+                  sidebarCollapsed={!!sidebarAutoCollapse[`right:${getHost(rightUrl)}`]}
+                  onToggleSidebarCollapse={() => toggleSidebarAutoCollapse("right")}
+                  onOpenCredentials={() => setShowCredentialsPanel(showCredentialsPanel === "right" ? null : "right")}
+                  credentialCount={credentials.filter((c) => c.host === getHost(rightUrl)).length}
                   picking={(selectMode && pickTarget === "right") || (pendingAction === "click" && (pickTarget === "right" || (teachingPhase !== "idle" && !!nextClickLabel) || addingClickMode)) || (pendingAction === "input" && pickTarget === "right") || !!bindInputSide || (teachingPhase !== "idle" && !!nextClickLabel && pickTarget === "right")}
                   onPickedElement={onRightPicked}
                   verifyStatus={verifyStatus}
@@ -6649,7 +6996,7 @@ type: info.type,
                     onAbortTeaching={abortTeaching}
                     onRequestQuickSave={handleQuickSaveLoop}
                     onRequestSaveSkill={() => { setSaveSkillRunAfter(false); setShowSaveSkill(true); }}
-                    onRequestSaveSkillAndRun={() => { setSaveSkillRunAfter(true); setShowSaveSkill(true); }}
+                    onDirectRun={finishTeachingAndRunBatch}
                     selectedExcelColumn={selectedExcelColumn}
                     bindInputSide={bindInputSide}
                     nextClickLabel={nextClickLabel}
@@ -6664,8 +7011,11 @@ type: info.type,
                     currentStepType={currentLoopStepType}
                     onSwitchStepType={switchLoopStepType}
                     addingClickMode={addingClickMode}
-                    clickStepCount={pickedMarks.filter((m) => m.action === "click" && m.label.startsWith("点击按钮")).length}
-                    onStartAddClickStep={() => startAddClickStep()}
+                    addingClickPhase={addingClickPhase}
+                    preClickCount={preClickCount}
+                    postClickCount={postClickCount}
+                    onStartAddPreClick={() => startAddClickStep("pre")}
+                    onStartAddPostClick={() => startAddClickStep("post")}
                     onExitAddClickMode={exitAddClickMode}
                     onSwapSide={() => setTeachingPanelSide((s) => (s === "left" ? "right" : "left"))}
                     onUndo={undoLastStep}
@@ -6711,8 +7061,6 @@ type: info.type,
               {/* 结果面板 ResultsPanel */}
               <div className="min-h-0 min-w-0 flex-1">
                 <ResultsPanel
-                  record={selected}
-                  mappings={mappings}
                   comparisons={result?.comparisons || []}
                   resultPresent={!!result}
                   report={report}
@@ -6722,42 +7070,15 @@ type: info.type,
                   running={running}
                   appMode={appMode}
                   logEndRef={logEndRef}
-                  onRemoveMapping={removeMapping}
                   onDetach={() => detachPanel("bottom")}
-                  pickedMarks={pickedMarks}
-                  onRemovePickedMark={removePickedMark}
-                  onClearPickedMarks={() => {
-                    clearPickedMarks();
-                    window.electronAPI?.viewClearHighlight("left").catch(() => {});
-                    window.electronAPI?.viewClearHighlight("right").catch(() => {});
-                    if (popupSide === "left") window.electronAPI?.popupClearHighlight("left").catch(() => {});
-                    if (popupSide === "right") window.electronAPI?.popupClearHighlight("right").catch(() => {});
-                  }}
-                  onReplay={replayAll}
-                  replaying={replaying}
-                  replayCursor={replayCursor}
-                  onStopReplay={stopReplay}
                   switchToLogSignal={logSignal}
                   docExtracts={currentDocExtracts}
                   activeDocIndex={safeDocIndex}
                   onSelectDocIndex={setActiveDocIndex}
                   docExtracting={docExtracting}
                   switchToDocSignal={docSignal}
-                  pickTarget={pickTarget}
                   addingStepMode={addingStepMode}
                   onPickExtractedField={onPickExtractedField}
-                  // 任务队列
-                  taskQueue={taskQueue}
-                  queueRunning={queueRunning}
-                  queueCursor={queueCursor}
-                  onAddToQueue={addToQueue}
-                  onRemoveFromQueue={removeFromQueue}
-                  onRenameQueueTask={renameQueueTask}
-                  onClearQueue={clearQueue}
-                  onRunQueue={() => runQueueRef.current?.()}
-                  onStopQueue={stopQueue}
-                  canAddToQueue={cardsGenerated && workflowTemplate !== null}
-                  switchToQueueSignal={queueSignal}
                 />
               </div>
 
@@ -6807,7 +7128,7 @@ type: info.type,
                     onAbortTeaching={abortTeaching}
                     onRequestQuickSave={handleQuickSaveLoop}
                     onRequestSaveSkill={() => { setSaveSkillRunAfter(false); setShowSaveSkill(true); }}
-                    onRequestSaveSkillAndRun={() => { setSaveSkillRunAfter(true); setShowSaveSkill(true); }}
+                    onDirectRun={finishTeachingAndRunBatch}
                     selectedExcelColumn={selectedExcelColumn}
                     bindInputSide={bindInputSide}
                     nextClickLabel={nextClickLabel}
@@ -6822,8 +7143,11 @@ type: info.type,
                     currentStepType={currentLoopStepType}
                     onSwitchStepType={switchLoopStepType}
                     addingClickMode={addingClickMode}
-                    clickStepCount={pickedMarks.filter((m) => m.action === "click" && m.label.startsWith("点击按钮")).length}
-                    onStartAddClickStep={() => startAddClickStep()}
+                    addingClickPhase={addingClickPhase}
+                    preClickCount={preClickCount}
+                    postClickCount={postClickCount}
+                    onStartAddPreClick={() => startAddClickStep("pre")}
+                    onStartAddPostClick={() => startAddClickStep("post")}
                     onExitAddClickMode={exitAddClickMode}
                     onSwapSide={() => setTeachingPanelSide((s) => (s === "left" ? "right" : "left"))}
                     onUndo={undoLastStep}
@@ -6879,7 +7203,7 @@ type: info.type,
                 onAbortTeaching={abortTeaching}
                 onRequestQuickSave={handleQuickSaveLoop}
                 onRequestSaveSkill={() => { setSaveSkillRunAfter(false); setShowSaveSkill(true); }}
-                onRequestSaveSkillAndRun={() => { setSaveSkillRunAfter(true); setShowSaveSkill(true); }}
+                onDirectRun={finishTeachingAndRunBatch}
                 selectedExcelColumn={selectedExcelColumn}
                 bindInputSide={bindInputSide}
                 nextClickLabel={nextClickLabel}
@@ -6894,8 +7218,11 @@ type: info.type,
                 currentStepType={currentLoopStepType}
                 onSwitchStepType={switchLoopStepType}
                 addingClickMode={addingClickMode}
-                clickStepCount={pickedMarks.filter((m) => m.action === "click" && m.label.startsWith("点击按钮")).length}
-                onStartAddClickStep={() => startAddClickStep()}
+                addingClickPhase={addingClickPhase}
+                preClickCount={preClickCount}
+                postClickCount={postClickCount}
+                onStartAddPreClick={() => startAddClickStep("pre")}
+                onStartAddPostClick={() => startAddClickStep("post")}
                 onExitAddClickMode={exitAddClickMode}
                 onSwapSide={() => setTeachingPanelSide((s) => (s === "left" ? "right" : "left"))}
                 onUndo={undoLastStep}
@@ -7028,6 +7355,150 @@ type: info.type,
         onSave={(name, icon) => handleSaveSkill(name, icon, false)}
         onSaveAndRun={(name, icon) => handleSaveSkill(name, icon, true)}
       />
+
+      {/* ============ 元素屏蔽：拾取中提示横幅 ============ */}
+      {blockPickingSide && (
+        <div className="fixed left-1/2 top-4 z-[9999] flex -translate-x-1/2 items-center gap-3 rounded-full bg-red-600 px-4 py-2 text-xs font-medium text-white shadow-lg">
+          <EyeOff className="h-3.5 w-3.5" />
+          <span>屏蔽模式：点击网页中要隐藏的元素</span>
+          <button
+            onClick={() => setBlockPickingSide(null)}
+            className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] hover:bg-white/30"
+          >
+            取消
+          </button>
+        </div>
+      )}
+
+      {/* ============ 元素屏蔽：规则管理面板 ============ */}
+      {showBlockPanel && (
+        <BlockRulesPanel
+          side={showBlockPanel}
+          url={showBlockPanel === "left" ? leftUrl : rightUrl}
+          rules={blockRulesState[`${showBlockPanel}:${getHost(showBlockPanel === "left" ? leftUrl : rightUrl)}`] || []}
+          onClose={() => setShowBlockPanel(null)}
+          onAddRule={() => {
+            setBlockPickingSide(showBlockPanel);
+            setShowBlockPanel(null);
+          }}
+          onRemoveRule={(selector) => {
+            const host = getHost(showBlockPanel === "left" ? leftUrl : rightUrl);
+            handleRemoveBlockRule(showBlockPanel, host, selector);
+          }}
+        />
+      )}
+
+      {/* ============ 账号密码管理面板 ============ */}
+      {showCredentialsPanel && (
+        <CredentialsPanel
+          currentHost={getHost(showCredentialsPanel === "left" ? leftUrl : rightUrl)}
+          credentials={credentials}
+          activePasteId={activePasteId}
+          pasteStep={pasteStep}
+          onAdd={handleAddCredential}
+          onRemove={handleRemoveCredential}
+          onCopy={(cred) => handleCopyCredential(showCredentialsPanel, cred)}
+          onCancelPaste={handleCancelPaste}
+          onClose={() => setShowCredentialsPanel(null)}
+        />
+      )}
+
+      {/* ============ 两段式粘贴激活提示横幅 ============ */}
+      {activePasteId && (
+        <div className="fixed left-1/2 top-4 z-[9999] flex -translate-x-1/2 items-center gap-3 rounded-full bg-amber-500 px-4 py-2 text-xs font-medium text-white shadow-lg">
+          <KeyRound className="h-3.5 w-3.5" />
+          <span>
+            两段式粘贴已激活：第 {pasteStep + 1} 次Ctrl+V 粘贴{pasteStep === 0 ? "用户名" : "密码"}
+          </span>
+          <button
+            onClick={handleCancelPaste}
+            className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] hover:bg-white/30"
+          >
+            取消
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============ 元素屏蔽规则管理面板 ============
+function BlockRulesPanel({
+  side: _side,
+  url,
+  rules,
+  onClose,
+  onAddRule,
+  onRemoveRule,
+}: {
+  side: ViewSide;
+  url: string;
+  rules: BlockRule[];
+  onClose: () => void;
+  onAddRule: () => void;
+  onRemoveRule: (selector: string) => void;
+}) {
+  const host = getHost(url);
+  return (
+    <div className="fixed right-4 top-12 z-[9998] w-72 rounded-lg border border-slate-200 bg-white shadow-xl">
+      <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2">
+        <div className="flex items-center gap-1.5">
+          <EyeOff className="h-3.5 w-3.5 text-red-500" />
+          <span className="text-xs font-semibold text-slate-700">屏蔽规则</span>
+          <span className="text-[10px] text-slate-400">{host}</span>
+        </div>
+        <button onClick={onClose} className="rounded p-0.5 text-slate-400 hover:bg-slate-100">
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <div className="max-h-60 overflow-y-auto px-3 py-2">
+        {rules.length === 0 ? (
+          <p className="py-4 text-center text-[11px] text-slate-400">
+            当前网站暂无屏蔽规则
+          </p>
+        ) : (
+          <ul className="space-y-1.5">
+            {rules.map((rule) => (
+              <li
+                key={rule.selector}
+                className="flex items-center gap-2 rounded-md bg-slate-50 px-2 py-1.5"
+              >
+                <div className="shrink-0">
+                  {rule.mode === "collapse" ? (
+                    <PanelLeftClose className="h-3 w-3 text-indigo-500" />
+                  ) : (
+                    <EyeOff className="h-3 w-3 text-red-400" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[11px] font-medium text-slate-600">
+                    {rule.label}
+                  </p>
+                  <p className="truncate text-[9px] text-slate-400" title={rule.selector}>
+                    {rule.selector}
+                  </p>
+                </div>
+                <button
+                  onClick={() => onRemoveRule(rule.selector)}
+                  className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-500"
+                  title="取消屏蔽"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className="flex gap-2 border-t border-slate-100 px-3 py-2">
+        <button
+          onClick={() => onAddRule()}
+          className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-red-50 py-1.5 text-[11px] font-medium text-red-600 transition-colors hover:bg-red-100"
+        >
+          <Plus className="h-3 w-3" />
+          隐藏元素
+        </button>
+      </div>
     </div>
   );
 }
