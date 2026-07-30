@@ -89,6 +89,9 @@ export interface ElectronAPI {
   viewStartPicking: (side: ViewSide) => Promise<unknown>;
   viewStopPicking: (side: ViewSide) => Promise<unknown>;
 
+  // 元素屏蔽规则（注入 display:none 或折叠 CSS，导航后自动重注入）
+  viewSetBlockRules: (side: ViewSide, rules: { selector: string; mode?: "hide" | "collapse" }[]) => Promise<{ ok: boolean }>;
+
   // 高亮
   viewHighlightBoxes: (side: ViewSide, boxes: HighlightBox[]) => Promise<unknown>;
   viewClearHighlight: (side: ViewSide) => Promise<unknown>;
@@ -146,6 +149,16 @@ export interface ElectronAPI {
   dockIsOpen: () => Promise<boolean>;
   pluginApi: (path: string, method?: string, body?: unknown) => Promise<{ ok: boolean; status: number; data: unknown }>;
   onDockState: (callback: (data: { open: boolean }) => void) => () => void;
+
+  // === 账号密码两段式粘贴 ===
+  /** 启动两段式粘贴：主进程会拦截对应 side 的 Ctrl+V，第一次粘贴 username，第二次粘贴 password */
+  startTwoStepPaste: (side: ViewSide, username: string, password: string) => Promise<{ ok: boolean }>;
+  /** 取消两段式粘贴 */
+  cancelTwoStepPaste: () => Promise<{ ok: boolean }>;
+  /** 查询两段式粘贴状态 */
+  getTwoStepPasteState: () => Promise<{ active: boolean; step: 0 | 1; side: ViewSide | null }>;
+  /** 当两段式粘贴步骤变化时通知前端（step 0→1→完成） */
+  onTwoStepPasteProgress: (callback: (data: { side: ViewSide | null; step: 0 | 1; done: boolean }) => void) => () => void;
 }
 
 declare global {
