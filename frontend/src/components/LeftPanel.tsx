@@ -455,9 +455,6 @@ function RecordItem({
 
   const handleCardClick = () => {
     onClick();
-    if (onRun && !runDisabled && !running) {
-      onRun();
-    }
   };
 
   return (
@@ -579,14 +576,14 @@ function RecordItem({
                 }}
                 disabled={runDisabled || running}
                 className="flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-600 transition-colors hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-40"
-                title="单卡 LOOP：自动执行该记录的步骤，导航到页面供人工审查（跳过比对/提交）"
+                title="查看：自动执行搜索+前置点击，定位到该人员的卡片页面"
               >
                 {running ? (
                   <Loader2 className="h-2.5 w-2.5 animate-spin" />
                 ) : (
                   <Play className="h-2.5 w-2.5" />
                 )}
-                {running ? "执行中" : "LOOP"}
+                {running ? "查看中" : "查看"}
               </button>
             )}
           </div>
