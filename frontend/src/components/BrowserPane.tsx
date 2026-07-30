@@ -2,10 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   ExternalLink,
+  EyeOff,
   FileSpreadsheet,
   Globe,
+  KeyRound,
   Loader2,
   Minus,
+  PanelLeftClose,
   Plus,
   RefreshCw,
   Search,
@@ -75,6 +78,22 @@ interface Props {
   onAddFavoriteSite?: (name: string, url: string) => void;
   /** 删除常用网页 */
   onRemoveFavoriteSite?: (url: string) => void;
+  /** 屏蔽元素模式激活时，点击元素触发屏蔽 */
+  blockPicking?: boolean;
+  /** 屏蔽元素回调 */
+  onBlockElement?: (info: PickedElementInfo) => void;
+  /** 当前网站的屏蔽规则数量（用于按钮角标） */
+  blockRuleCount?: number;
+  /** 点击屏蔽管理按钮（查看/删除已屏蔽的元素） */
+  onManageBlocks?: () => void;
+  /** 当前网站是否已启用自动侧边栏折叠（勾选状态） */
+  sidebarCollapsed?: boolean;
+  /** 点击切换自动侧边栏折叠开关 */
+  onToggleSidebarCollapse?: () => void;
+  /** 点击打开账号密码管理面板 */
+  onOpenCredentials?: () => void;
+  /** 该网站是否有保存的凭证（用于按钮角标） */
+  credentialCount?: number;
 }
 
 interface BrowserTab {
@@ -145,6 +164,14 @@ export default function BrowserPane({
   favoriteSites = [],
   onAddFavoriteSite,
   onRemoveFavoriteSite,
+  blockPicking,
+  onBlockElement,
+  blockRuleCount = 0,
+  onManageBlocks,
+  sidebarCollapsed,
+  onToggleSidebarCollapse,
+  onOpenCredentials,
+  credentialCount = 0,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -423,19 +450,43 @@ export default function BrowserPane({
   // 激活/取消元素选择模式（脱离模式走 detached API）
   useEffect(() => {
     if (!window.electronAPI) return;
-    console.log(`[BrowserPane:${side}] picking useEffect: picking=${picking}, detachedSide=${detachedSide || "null"}`);
+    // blockPicking 也需要激活拾取器
+    const effectivePicking = picking || blockPicking;
+    console.log(`[BrowserPane:${side}] picking useEffect: picking=${picking} blockPicking=${!!blockPicking}, detachedSide=${detachedSide || "null"}`);
     window.electronAPI?.rendererLog?.(`[BrowserPane:${side}] picking useEffect: picking=${picking}`);
-    if (picking) {
+    if (effectivePicking) {
       if (detachedSide) window.electronAPI.detachedViewStartPicking(detachedSide);
       else window.electronAPI.viewStartPicking(side);
-      // 弹窗也同步激活拾取
       if (popupActive) window.electronAPI.popupStartPicking(side);
     } else {
       if (detachedSide) window.electronAPI.detachedViewStopPicking(detachedSide);
       else window.electronAPI.viewStopPicking(side);
       if (popupActive) window.electronAPI.popupStopPicking(side);
     }
-  }, [picking, side, detachedSide, popupActive]);
+  }, [picking, blockPicking, side, detachedSide, popupActive]);
+
+  // 屏蔽元素拾取：监听 element-picked 消息，路由到对应回调
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    if (!blockPicking || !onBlockElement) return;
+    const off = window.electronAPI.onViewMessage((msg) => {
+      if (msg.side !== side) return;
+      if (msg.payload?.kind === "element-picked") {
+        const p = msg.payload as unknown as PickedElementInfo & { kind: string };
+        onBlockElement({
+          selector: p.selector,
+          label: p.label,
+          value: p.value,
+          tag: p.tag,
+          type: p.type,
+          text: p.text,
+          isContentEditable: p.isContentEditable,
+          rect: p.rect,
+        });
+      }
+    });
+    return () => off?.();
+  }, [blockPicking, side, onBlockElement]);
 
   const normalizeUrl = (raw: string): string => {
     const trimmed = raw.trim();
@@ -907,6 +958,50 @@ export default function BrowserPane({
           >
             <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} />
           </button>
+          {isWebMode && currentUrl && onBlockElement && (
+            <button
+              onClick={() => onManageBlocks?.()}
+              disabled={disabled || blockPicking}
+              className={`relative rounded p-0.5 transition-colors disabled:opacity-40 ${
+                blockPicking
+                  ? "bg-red-100 text-red-600"
+                  : blockRuleCount > 0
+                  ? "text-red-500 hover:bg-red-50"
+                  : "text-slate-400 hover:bg-white/60 hover:text-red-500"
+              }`}
+              title={blockPicking ? "屏蔽模式中：点击网页元素将其隐藏" : blockRuleCount > 0 ? `已屏蔽 ${blockRuleCount} 个元素（点击管理）` : "屏蔽网页元素"}
+            >
+              <EyeOff className="h-3 w-3" />
+            </button>
+          )}
+          {isWebMode && currentUrl && onToggleSidebarCollapse && (
+            <button
+              onClick={() => onToggleSidebarCollapse()}
+              disabled={disabled || blockPicking}
+              className={`rounded p-0.5 transition-colors disabled:opacity-40 ${
+                sidebarCollapsed
+                  ? "bg-indigo-100 text-indigo-600"
+                  : "text-slate-400 hover:bg-white/60 hover:text-indigo-500"
+              }`}
+              title={sidebarCollapsed ? "已开启自动折叠侧边栏（点击关闭）" : "自动折叠该网页侧边栏（长久生效）"}
+            >
+              <PanelLeftClose className="h-3 w-3" />
+            </button>
+          )}
+          {isWebMode && currentUrl && onOpenCredentials && (
+            <button
+              onClick={() => onOpenCredentials()}
+              disabled={disabled || blockPicking}
+              className={`relative rounded p-0.5 transition-colors disabled:opacity-40 ${
+                credentialCount > 0
+                  ? "text-amber-500 hover:bg-amber-50"
+                  : "text-slate-400 hover:bg-white/60 hover:text-amber-500"
+              }`}
+              title={credentialCount > 0 ? `已保存 ${credentialCount} 个账号（点击管理）` : "账号密码管理"}
+            >
+              <KeyRound className="h-3 w-3" />
+            </button>
+          )}
           {!enableTabs && (
             <button
               onClick={openPage}
@@ -915,16 +1010,6 @@ export default function BrowserPane({
               title="打开"
             >
               <ExternalLink className="h-3 w-3" />
-            </button>
-          )}
-          {enableViewSwitch && isWebMode && onRequestAddExcel && (
-            <button
-              onClick={onRequestAddExcel}
-              disabled={disabled}
-              className="rounded p-0.5 text-slate-400 hover:bg-white/60 hover:text-emerald-600 disabled:opacity-40"
-              title="导入 Excel/CSV"
-            >
-              <FileSpreadsheet className="h-3 w-3" />
             </button>
           )}
           {onDetach && (
