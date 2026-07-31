@@ -37,6 +37,11 @@ body {
   scrollbar-color: rgba(148, 163, 184, .30) transparent;
 }
 
+/* 极细滚动条（2px）—— 用于步骤小卡片横向滚动区域 */
+.scrollbar-tiny::-webkit-scrollbar { height: 2px; width: 2px; }
+.scrollbar-tiny::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, .25); border-radius: 2px; }
+.scrollbar-tiny::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, .40); }
+
 /* tab 切换无蓝色高亮 */
 button { -webkit-tap-highlight-color: transparent; }
 
