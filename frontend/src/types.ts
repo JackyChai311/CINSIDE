@@ -204,6 +204,12 @@ export interface PickedMark {
   docFileField?: string;
   /** 本地文件提取时：用户上传的文件列表（仅配置阶段使用，执行时按字段值匹配） */
   docLocalFiles?: Array<{ name: string; data?: string }>;
+  /** 本地文件提取（目录模式）：根目录绝对路径 */
+  docLocalRootPath?: string;
+  /** 本地文件提取（目录模式）：路径模板（如 {student_id}/护照，执行时替换占位符+尝试多扩展名） */
+  docLocalPattern?: string;
+  /** 本地文件提取（目录模式）：样本文件的相对路径（配置参考，如 123456/护照.jpg） */
+  docLocalSamplePath?: string;
   /** 文件提取序列中的导航点击步骤标记（配置阶段记录的多步点击） */
   docExtractClick?: boolean;
   /** 点击阶段：pre=前置点击（搜索/进入，步骤3），post=收尾点击（保存/返回，步骤5） */
@@ -328,7 +334,7 @@ export interface VerificationReport {
 export interface DocumentExtractResult {
   filename: string;
   /** 提取方式 */
-  method: "markitdown" | "vision_ocr";
+  method: "markitdown" | "vision_ocr" | "pdf_ocr";
   /** 提取出的全文 */
   text: string;
   /** 结构化字段（请求了 fields 时返回） */
