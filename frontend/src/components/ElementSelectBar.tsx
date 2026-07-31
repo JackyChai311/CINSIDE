@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeftRight,
   ArrowRight,
@@ -6,7 +6,7 @@ import {
   CheckCircle2,
   Database,
   FileSpreadsheet,
-  FileText,
+  FolderOpen,
   Globe,
   ListChecks,
   MousePointerClick,
@@ -16,7 +16,6 @@ import {
   RotateCcw,
   Save,
   Trash2,
-  Upload,
   Users,
   X,
 } from "lucide-react";
@@ -142,6 +141,18 @@ interface Props {
   onSetDocFileBindField?: (field: string) => void;
   /** 确认本地文件提取配置 */
   onConfirmDocLocalExtract?: () => void;
+  /** 目录模式：选择本地文件夹 */
+  onPickLocalDirectory?: () => void;
+  /** 目录模式：根目录绝对路径 */
+  docLocalRootPath?: string | null;
+  /** 目录模式：目录内文件列表 */
+  docLocalDirFiles?: Array<{ relativePath: string; name: string; size: number; ext: string }>;
+  /** 目录模式：用户点选的样本文件相对路径 */
+  docLocalSamplePath?: string | null;
+  /** 目录模式：推断出的路径模板 */
+  docLocalPattern?: string | null;
+  /** 目录模式：点选样本文件 */
+  onSelectDocLocalSample?: (relativePath: string) => void;
   /** 录入步骤子步骤：本地文件提取（上传图片 → 勾选字段 → 填入右侧网页） */
   onDocFileExtract?: () => void;
   /** 人物卡片是否已生成 */
@@ -216,6 +227,12 @@ onRemoveLocalFile,
 docFileBindField = null,
 onSetDocFileBindField,
 onConfirmDocLocalExtract,
+onPickLocalDirectory,
+docLocalRootPath = null,
+docLocalDirFiles = [],
+docLocalSamplePath = null,
+docLocalPattern = null,
+onSelectDocLocalSample,
 onDocFileExtract,
 cardsGenerated = false,
 rowRange = null,
@@ -226,6 +243,28 @@ onDirectRun,
   const [leftSource, setLeftSource] = useState<LeftSource>("database");
   const [excelField, setExcelField] = useState<string>("");
   const [method, setMethod] = useState<VerifyMethod>("smart");
+
+  // 顶部标题：宽度充足时显示完整标题，宽度不足时切换为简短标题，避免长标题换行把面板撑高
+  const fullTitle =
+    addingStepMode === "review" ? "添加审查步骤 · 选择映射"
+    : addingStepMode === "entry" ? "添加录入步骤 · 选择映射"
+    : "步骤设置 · 元素选择";
+  const shortTitle =
+    addingStepMode === "review" ? "审查映射"
+    : addingStepMode === "entry" ? "录入映射"
+    : "元素选择";
+  const leftHeaderRef = useRef<HTMLDivElement>(null);
+  const [compactTitle, setCompactTitle] = useState(false);
+  useEffect(() => {
+    const el = leftHeaderRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      // 阈值参考：完整标题约需 280px，简短标题约需 100px
+      setCompactTitle(el.clientWidth < 280);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   useEffect(() => {
     if (excelFields.length > 0 && !excelField) {
@@ -379,16 +418,18 @@ onDirectRun,
   );
 
   return (
-    <div className="flex h-full w-full flex-col rounded-lg bg-white px-3 py-2">
+    <div className={[
+      "flex h-full w-full flex-col rounded-lg bg-white px-3 py-2",
+      teachingPhase !== "idle" ? "overflow-y-auto" : "overflow-hidden",
+    ].join(" ")}>
       {/* 顶部：标题 + 步骤指示 + 取消 */}
-      <div className="mb-2.5 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <ListChecks className="h-4 w-4 text-indigo-600" />
-          <span className="text-sm font-semibold text-slate-800">
-            {addingStepMode === "review" ? "添加审查步骤 · 选择映射" : addingStepMode === "entry" ? "添加录入步骤 · 选择映射" : "步骤设置 · 元素选择"}
-          </span>
-          <span className="rounded-full bg-brand-100 px-2 py-0.5 text-[10px] font-medium text-brand-700">
-            已配 {mappingCount} 项
+      <div className="mb-2.5 flex shrink-0 items-center justify-between gap-2">
+        <div ref={leftHeaderRef} className="flex min-w-0 items-center gap-2">
+          <span
+            className="min-w-0 truncate text-sm font-semibold text-slate-800"
+            title={fullTitle}
+          >
+            {compactTitle ? shortTitle : fullTitle}
           </span>
           {/* 完成按钮组：保存Loop / 适配LOOP / 执行 */}
           {/* 当卡片已生成且有任何步骤（审查/录入/点击）时显示按钮，允许空LOOP测试卡片定位 */}
@@ -470,7 +511,7 @@ onDirectRun,
               <ArrowLeftRight className="h-4 w-4" />
             </button>
           )}
-          {onUndo && (
+          {onUndo && !compactTitle && (
             <button
               onClick={onUndo}
               disabled={!canUndo}
@@ -494,8 +535,12 @@ onDirectRun,
       </div>
 
       {/* 步骤内容：addingStepMode时显示为子面板（LOOP步骤4展开的映射配置） */}
+      {/* 当 LOOP 步骤配置面板同时存在时（teachingPhase !== "idle"），映射配置按内容自适应高度，由外层容器统一滚动 */}
       <div className={[
-        "flex-1 overflow-y-auto pr-1 transition-all",
+        "pr-1 transition-all",
+        teachingPhase !== "idle"
+          ? "shrink-0"
+          : "flex-1 overflow-y-auto",
         addingStepMode ? "mt-1.5 space-y-1.5 rounded-xl border-2 border-indigo-200 bg-gradient-to-br from-indigo-50/70 to-violet-50/40 px-2.5 py-2 shadow-sm" : "space-y-2.5",
         teachingPhase !== "idle" && !addingStepMode ? "mt-1.5 space-y-1.5 rounded-xl border-2 border-indigo-200 bg-gradient-to-br from-indigo-50/70 to-violet-50/40 px-2.5 py-2 shadow-sm" : "",
         addingStepMode ? "order-1" : "order-2",
@@ -901,44 +946,26 @@ onDirectRun,
                         </button>
                       )}
                       {addingDocExtractMode && docExtractSource === "choose" && (
-                        <div className="mt-1 w-full rounded-lg border-2 border-teal-200 bg-teal-50/60 p-2">
-                          <div className="mb-1.5 flex items-center gap-1.5">
-                            <FileText className="h-3 w-3 text-teal-700" />
-                            <span className="text-[10px] font-bold text-teal-800">选择文件提取来源</span>
-                            {onExitAddDocExtractMode && (
-                              <button
-                                onClick={onExitAddDocExtractMode}
-                                className="ml-auto rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-600"
-                              >
-                                <X className="h-3 w-3" />
-                              </button>
-                            )}
-                          </div>
-                          <div className="grid grid-cols-2 gap-1.5">
+                        <>
+                          <span className="step-highlight" key="step4-docchoose">
+                            文件提取 — 请在「文件处理」面板选择来源（网页 / 本地）
+                          </span>
+                          {onExitAddDocExtractMode && (
                             <button
-                              onClick={onChooseDocExtractWeb}
-                              className="flex flex-col items-center gap-1 rounded-md border border-teal-200 bg-white px-2 py-2 text-center transition-all hover:border-teal-400 hover:bg-teal-50"
+                              onClick={onExitAddDocExtractMode}
+                              className="rounded-md bg-slate-200 px-2 py-0.5 text-[10px] font-medium text-slate-700 hover:bg-slate-300"
                             >
-                              <Globe className="h-5 w-5 text-teal-600" />
-                              <span className="text-[10px] font-semibold text-slate-700">网页提取</span>
-                              <span className="text-[9px] text-slate-500">点击网页图片/PDF<br/>LOOP 自动下载提取</span>
+                              取消
                             </button>
-                            <button
-                              onClick={onChooseDocExtractLocal}
-                              className="flex flex-col items-center gap-1 rounded-md border border-teal-200 bg-white px-2 py-2 text-center transition-all hover:border-teal-400 hover:bg-teal-50"
-                            >
-                              <Upload className="h-5 w-5 text-teal-600" />
-                              <span className="text-[10px] font-semibold text-slate-700">本地文件</span>
-                              <span className="text-[9px] text-slate-500">上传文件按字段匹配<br/>如学号.jpg/pdf/png</span>
-                            </button>
-                          </div>
-                        </div>
+                          )}
+                        </>
                       )}
                       {addingDocExtractMode && docExtractSource === "web" && (
                         <>
                           <span className="step-highlight" key="step4-docweb">
-                            网页提取中 — 依次点击元素导航到下载按钮，下载会自动捕获
-                            {docExtractStepCount > 0 ? `（已记录 ${docExtractStepCount} 步点击）` : ""}
+                            网页提取中 — 请在右侧网页点击元素
+                            {docExtractStepCount > 0 ? `（已记录 ${docExtractStepCount} 步）` : ""}
+                            ，详细配置见「文件处理」面板
                           </span>
                           {onExitAddDocExtractMode && (
                             <button
@@ -952,9 +979,9 @@ onDirectRun,
                       )}
                       {addingDocExtractMode && docExtractSource === "local" && (
                         <div className="mt-1 w-full rounded-lg border-2 border-teal-200 bg-teal-50/60 p-2">
-                          <div className="mb-1.5 flex items-center gap-1.5">
-                            <Upload className="h-3 w-3 text-teal-700" />
-                            <span className="text-[10px] font-bold text-teal-800">本地文件提取配置</span>
+                          <div className="mb-1 flex items-center gap-1.5">
+                            <FolderOpen className="h-3 w-3 text-teal-700" />
+                            <span className="text-[10px] font-bold text-teal-800">本地文件提取（目录模式）</span>
                             {onExitAddDocExtractMode && (
                               <button
                                 onClick={onExitAddDocExtractMode}
@@ -964,79 +991,21 @@ onDirectRun,
                               </button>
                             )}
                           </div>
-                          {/* 隐藏的文件 input */}
-                          <input
-                            ref={localFileInputRef as any}
-                            type="file"
-                            multiple
-                            accept=".jpg,.jpeg,.png,.pdf"
-                            onChange={onLocalFilesSelected}
-                            className="hidden"
-                          />
-                          {/* 文件名绑定字段 */}
-                          <div className="mb-1.5">
-                            <label className="mb-0.5 block text-[9px] font-medium text-slate-600">
-                              文件名字段（LOOP 执行时按此字段值匹配文件）
-                            </label>
-                            <select
-                              value={docFileBindField || ""}
-                              onChange={(e) => onSetDocFileBindField?.(e.target.value)}
-                              className="w-full rounded border border-slate-200 bg-white px-1.5 py-1 text-[10px] outline-none focus:border-teal-400"
-                            >
-                              <option value="">-- 选择字段 --</option>
-                              {selectedExcelColumn && (
-                                <option value={selectedExcelColumn}>{selectedExcelColumn}（LOOP 列）</option>
-                              )}
-                              {excelFields.filter((f) => f !== selectedExcelColumn).map((f) => (
-                                <option key={f} value={f}>{f}</option>
-                              ))}
-                            </select>
-                          </div>
-                          {/* 上传按钮 */}
-                          <button
-                            onClick={onTriggerLocalFilePick}
-                            className="mb-1.5 flex w-full items-center justify-center gap-1 rounded-md border-2 border-dashed border-teal-300 bg-white py-2 text-[10px] font-medium text-teal-700 transition-all hover:border-teal-500 hover:bg-teal-50"
-                          >
-                            <Upload className="h-3.5 w-3.5" />
-                            点击上传文件（JPG / PNG / PDF）
-                          </button>
-                          {/* 文件列表 */}
-                          {docLocalFiles.length > 0 && (
-                            <div className="mb-1.5 max-h-24 space-y-0.5 overflow-y-auto rounded border border-slate-200 bg-white p-1">
-                              {docLocalFiles.map((f) => (
-                                <div key={f.name} className="flex items-center gap-1 rounded px-1 py-0.5 hover:bg-slate-50">
-                                  <FileText className="h-3 w-3 shrink-0 text-slate-400" />
-                                  <span className="min-w-0 flex-1 truncate text-[10px] text-slate-700">{f.name}</span>
-                                  <button
-                                    onClick={() => onRemoveLocalFile?.(f.name)}
-                                    className="rounded p-0.5 text-slate-300 hover:bg-rose-50 hover:text-rose-500"
-                                  >
-                                    <Trash2 className="h-2.5 w-2.5" />
-                                  </button>
-                                </div>
-                              ))}
+                          {/* 已配置状态摘要 */}
+                          {docLocalPattern ? (
+                            <div className="mb-1 rounded-md border border-teal-300 bg-teal-50 px-2 py-1">
+                              <p className="font-mono text-[10px] font-bold text-teal-900">
+                                {docLocalPattern}.<span className="text-teal-500">[jpg|png|pdf…]</span>
+                              </p>
+                              <p className="mt-0.5 text-[8px] text-teal-600">
+                                字段「{docFileBindField}」· {docLocalDirFiles.length} 个文件
+                              </p>
                             </div>
+                          ) : (
+                            <p className="mb-1 text-[9px] text-slate-500">
+                              请在下方「文件处理」面板中配置：选择文件名 LOOP 字段 → 根文件夹 → 点选样本文件
+                            </p>
                           )}
-                          {/* 确认按钮 */}
-                          <div className="flex items-center justify-end gap-1">
-                            <span className="text-[9px] text-slate-400">
-                              {docLocalFiles.length > 0 && docFileBindField
-                                ? `已选 ${docLocalFiles.length} 个文件，按「${docFileBindField}」匹配`
-                                : docLocalFiles.length === 0 ? "请上传文件" : "请选择绑定字段"}
-                            </span>
-                            <button
-                              onClick={onConfirmDocLocalExtract}
-                              disabled={docLocalFiles.length === 0 || !docFileBindField}
-                              className={[
-                                "rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
-                                docLocalFiles.length > 0 && docFileBindField
-                                  ? "bg-teal-600 text-white hover:bg-teal-700"
-                                  : "cursor-not-allowed bg-slate-200 text-slate-400",
-                              ].join(" ")}
-                            >
-                              确认添加
-                            </button>
-                          </div>
                         </div>
                       )}
                       {onExitAddingStepMode && (
