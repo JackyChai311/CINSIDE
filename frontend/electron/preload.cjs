@@ -77,6 +77,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // === 下载捕获（文件提取模式） ===
   setDownloadCapture: (side, enabled) => ipcRenderer.invoke("set-download-capture", side, enabled),
+
+  // === 本地文件提取：选择目录 + 读取文件 ===
+  pickLocalDirectory: () => ipcRenderer.invoke("pick-local-directory"),
+  readLocalDocFile: (rootPath, relativePath) => ipcRenderer.invoke("read-local-doc-file", rootPath, relativePath),
+  checkLocalFileExists: (rootPath, relativePath) => ipcRenderer.invoke("check-local-file-exists", rootPath, relativePath),
   onDownloadCaptured: (callback) => {
     const handler = (_e, data) => callback(data);
     ipcRenderer.on("download-captured", handler);
