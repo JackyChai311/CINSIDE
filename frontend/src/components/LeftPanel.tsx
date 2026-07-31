@@ -1,18 +1,23 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import {
+  Check,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   Database,
   ExternalLink,
   FileSpreadsheet,
   FileText,
+  GripVertical,
   Image as ImageIcon,
+  ListChecks,
   Loader2,
   Play,
   RefreshCw,
   Sparkles,
   Trash2,
   Upload,
+  X,
 } from "lucide-react";
 import { api } from "../api/client";
 import type { ApplicantRecord, BatchResult, BatchStatus, Overall } from "../types";
@@ -45,6 +50,28 @@ interface Props {
   emptyHint?: string;
   /** SKILL 拖放到卡片：(skillId, recordId) => void */
   onDropSkill?: (skillId: string, recordId: string) => void;
+  /** 已勾选的记录 ID 集合 */
+  checkedIds?: Set<string>;
+  /** 勾选状态变化回调 */
+  onCheckChange?: (ids: Set<string>) => void;
+  /** 勾选后执行当前 LOOP */
+  onRunCheckedLoop?: () => void;
+  /** 勾选后打开已保存 LOOP 列表选择适配 */
+  onAdaptLoopToChecked?: () => void;
+  /** 拖拽排序回调：传入新的记录数组 */
+  onReorder?: (records: ApplicantRecord[]) => void;
+  /** 卡片-LOOP 关联映射：record_id -> { loopName, setAt } */
+  cardLoopMap?: Record<string, { loopId: string; loopName: string; setAt: number }>;
+  /** 执行游标：控制"运行"按钮只跑前 N 张已设置 LOOP 的卡片；null=全部 */
+  runCursor?: number | null;
+  /** 游标变化回调 */
+  onRunCursorChange?: (n: number | null) => void;
+  /** 游标运行：跑前 N 张已设置 LOOP 的卡片 */
+  onRunLoopsWithCursor?: () => void;
+  /** 清除某张卡片的 LOOP 关联 */
+  onClearCardLoop?: (recordId: string) => void;
+  /** 清除所有卡片的 LOOP 关联 */
+  onClearAllCardLoops?: () => void;
 }
 
 type UploadKind = "excel" | "passport" | "document" | null;
@@ -65,6 +92,17 @@ export default function LeftPanel({
   docExtracting = false,
   emptyHint,
   onDropSkill,
+  checkedIds,
+  onCheckChange,
+  onRunCheckedLoop,
+  onAdaptLoopToChecked,
+  onReorder,
+  cardLoopMap,
+  runCursor,
+  onRunCursorChange,
+  onRunLoopsWithCursor,
+  onClearCardLoop,
+  onClearAllCardLoops,
 }: Props) {
   const [uploading, setUploading] = useState<UploadKind>(null);
   const [excelDrag, setExcelDrag] = useState(false);
@@ -74,6 +112,60 @@ export default function LeftPanel({
   const fileInputExcel = useRef<HTMLInputElement>(null);
   const fileInputPassport = useRef<HTMLInputElement>(null);
   const fileInputDoc = useRef<HTMLInputElement>(null);
+  /** 范围勾选：上次点击的记录索引（群组起点） */
+  const lastCheckIdxRef = useRef<number>(-1);
+  /** 群组操作面板是否展开 */
+  const [showGroupPanel, setShowGroupPanel] = useState(false);
+  /** 拖拽排序：正在拖拽的卡片 record_id */
+  const [dragId, setDragId] = useState<string | null>(null);
+  /** 拖拽排序：正在拖拽的批次 loopId（整批拖拽时使用） */
+  const [dragLoopId, setDragLoopId] = useState<string | null>(null);
+  /** 拖拽排序：拖拽悬停的目标索引 */
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+
+  /** 群组选择逻辑：点击第一张卡=起点，点击第二张卡=终点（范围全选），点击已选范围外=新群组 */
+  const handleToggleCheck = useCallback((idx: number, id: string) => {
+    if (!onCheckChange) return;
+    // 已保存到批次的卡片不可勾选
+    if (cardLoopMap?.[id]) return;
+    const cur = new Set(checkedIds || []);
+    const curSize = cur.size;
+
+    if (curSize === 0) {
+      // 无选择：设为起点
+      cur.clear();
+      cur.add(id);
+      lastCheckIdxRef.current = idx;
+    } else if (curSize === 1) {
+      // 已有1张（起点）：点击另一张=范围全选（跳过已保存批次的卡片）
+      const anchorIdx = lastCheckIdxRef.current;
+      if (idx === anchorIdx) {
+        // 点同一张：取消
+        cur.clear();
+        lastCheckIdxRef.current = -1;
+      } else {
+        const from = Math.min(anchorIdx, idx);
+        const to = Math.max(anchorIdx, idx);
+        cur.clear();
+        for (let i = from; i <= to; i++) {
+          const rid = records[i]?.record_id;
+          if (rid && !cardLoopMap?.[rid]) cur.add(rid);
+        }
+        // 若范围内没有可勾选卡片，则重置为点击的这张
+        if (cur.size === 0) {
+          cur.add(id);
+          lastCheckIdxRef.current = idx;
+        }
+      }
+    } else {
+      // 已有范围：点新的=重置为新起点
+      cur.clear();
+      cur.add(id);
+      lastCheckIdxRef.current = idx;
+    }
+    onCheckChange(cur);
+    setShowGroupPanel(false);
+  }, [checkedIds, onCheckChange, records, cardLoopMap]);
 
   useEffect(() => {
     if (!toast) return;
@@ -261,7 +353,91 @@ export default function LeftPanel({
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-auto p-1.5">
+        {/* 勾选提示栏：仅1张（起点）时显示提示 */}
+        {checkedIds && checkedIds.size === 1 && (
+          <div className="flex shrink-0 items-center gap-1.5 border-b border-amber-100 bg-amber-50/60 px-3 py-1.5 text-[10px] text-amber-700">
+            <Check className="h-3 w-3" strokeWidth={3} />
+            已选起点，再点击另一张卡片选择范围
+            <button
+              onClick={() => { onCheckChange?.(new Set()); lastCheckIdxRef.current = -1; }}
+              className="ml-auto rounded p-0.5 text-amber-400 hover:bg-rose-100 hover:text-rose-500"
+              title="取消"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        )}
+
+        {/* LOOP 控制栏：仅当有卡片关联了 LOOP 时显示 */}
+        {cardLoopMap && onRunLoopsWithCursor && (() => {
+          const loopCount = records.filter((r) => cardLoopMap[r.record_id]).length;
+          if (loopCount === 0) return null;
+          const cursorVal = runCursor ?? loopCount;
+          // 统计 LOOP 分组数
+          const loopIds = new Set<string>();
+          records.forEach((r) => {
+            const info = cardLoopMap[r.record_id];
+            if (info) loopIds.add(info.loopId);
+          });
+          return (
+            <div className="flex shrink-0 flex-col gap-1 border-b border-indigo-100 bg-indigo-50/40 px-3 py-1.5">
+              <div className="flex items-center gap-1.5 text-[10px]">
+                <Sparkles className="h-3 w-3 text-indigo-500" />
+                <span className="font-semibold text-indigo-700">
+                  {loopCount} 张已设 LOOP
+                </span>
+                <span className="text-slate-400">·</span>
+                <span className="text-slate-500">{loopIds.size} 个分组</span>
+                <div className="ml-auto flex items-center gap-0.5">
+                  <button
+                    onClick={onRunLoopsWithCursor}
+                    className="flex items-center gap-0.5 rounded-md bg-indigo-600 px-2 py-0.5 text-[10px] font-semibold text-white transition-colors hover:bg-indigo-700"
+                    title={`运行前 ${cursorVal} 张已设 LOOP 的卡片`}
+                  >
+                    <Play className="h-2.5 w-2.5" />
+                    运行 {cursorVal}/{loopCount}
+                  </button>
+                  {onClearAllCardLoops && (
+                    <button
+                      onClick={onClearAllCardLoops}
+                      className="rounded p-0.5 text-slate-400 hover:bg-rose-100 hover:text-rose-500"
+                      title="清除所有 LOOP 关联"
+                    >
+                      <Trash2 className="h-2.5 w-2.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+              {/* 游标滑块：1 ~ loopCount */}
+              {onRunCursorChange && (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[9px] text-slate-400">1</span>
+                  <input
+                    type="range"
+                    min={1}
+                    max={loopCount}
+                    value={cursorVal}
+                    onChange={(e) => onRunCursorChange(Number(e.target.value))}
+                    className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-slate-200 accent-indigo-600"
+                    title={`拖动控制运行范围：前 ${cursorVal} 张`}
+                  />
+                  <span className="text-[9px] text-slate-400">{loopCount}</span>
+                  {(runCursor ?? loopCount) < loopCount && (
+                    <button
+                      onClick={() => onRunCursorChange(null)}
+                      className="ml-1 rounded px-1 text-[9px] text-indigo-500 hover:bg-indigo-100"
+                      title="恢复全部"
+                    >
+                      全部
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        <div className="relative min-h-0 flex-1 overflow-auto p-1.5">
           {records.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-2 px-4 py-8 text-center text-xs text-slate-400">
               <FileSpreadsheet className="h-7 w-7 text-slate-300" />
@@ -273,20 +449,231 @@ export default function LeftPanel({
             </div>
           ) : (
             <ul className="space-y-1">
-              {records.map((r) => (
-                <RecordItem
-                  key={r.record_id}
-                  record={r}
-                  selected={r.record_id === selectedId}
-                  onClick={() => onSelect(r.record_id)}
-                  result={recordResults?.[r.record_id]}
-                  batchResult={batchResults?.[r.record_id]}
-                  onRun={onRunRecord ? () => onRunRecord(r.record_id) : undefined}
-                  runDisabled={runDisabled}
-                  running={runningRecordId === r.record_id}
-                  onDropSkill={onDropSkill ? (skillId) => onDropSkill(skillId, r.record_id) : undefined}
-                />
-              ))}
+              {records.map((r, idx) => {
+                const isChecked = checkedIds?.has(r.record_id) ?? false;
+                // 群组起点：已选范围内第一张卡的索引
+                const firstCheckedIdx = checkedIds && checkedIds.size > 0
+                  ? records.findIndex((rr) => checkedIds.has(rr.record_id))
+                  : -1;
+                const lastCheckedIdx = checkedIds && checkedIds.size > 0
+                  ? records.reduce((acc, rr, i) => checkedIds.has(rr.record_id) ? i : acc, -1)
+                  : -1;
+                const showGroupHeader = checkedIds && checkedIds.size > 1 && idx === firstCheckedIdx;
+
+                // 批次分隔线：检测是否是新批次的第一张卡，或是未保存区域的第一张卡（不在第一张卡上方显示）
+                const curLoopInfo = cardLoopMap?.[r.record_id];
+                const prevLoopInfo = idx > 0 ? cardLoopMap?.[records[idx - 1]?.record_id] : null;
+                const isBatchStart = idx > 0 && !!curLoopInfo && (!prevLoopInfo || prevLoopInfo.loopId !== curLoopInfo.loopId);
+                const isUnsavedStart = idx > 0 && !curLoopInfo && !!prevLoopInfo;
+                const showBatchDivider = isBatchStart || isUnsavedStart;
+                const isSaved = !!curLoopInfo;
+
+                return (
+                  <Fragment key={r.record_id}>
+                    {/* 批次分隔线：区分已保存批次和未保存区域 */}
+                    {showBatchDivider && (
+                      <div className={[
+                        "my-1.5 flex items-center gap-2",
+                        isBatchStart ? "pt-1" : "pt-2",
+                      ].join(" ")}>
+                        <div className={[
+                          "h-px flex-1",
+                          isBatchStart ? "bg-emerald-200" : "bg-slate-300",
+                        ].join(" ")} />
+                        <span className={[
+                          "shrink-0 rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider",
+                          isBatchStart
+                            ? "bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200"
+                            : "bg-slate-50 text-slate-400 ring-1 ring-slate-200",
+                        ].join(" ")}>
+                          {isBatchStart ? curLoopInfo.loopName : "待配置"}
+                        </span>
+                        <div className={[
+                          "h-px flex-1",
+                          isBatchStart ? "bg-emerald-200" : "bg-slate-300",
+                        ].join(" ")} />
+                      </div>
+                    )}
+                    {/* 群组头部：展开按钮 + 范围信息 */}
+                    {showGroupHeader && (
+                      <div className="relative mb-1 flex items-center gap-1.5 rounded-lg border border-indigo-300 bg-indigo-50/80 px-2 py-1.5 shadow-sm">
+                        <span className="flex items-center gap-1 text-[10px] font-semibold text-indigo-700">
+                          <Check className="h-3 w-3" strokeWidth={3} />
+                          群组 {firstCheckedIdx + 1}–{lastCheckedIdx + 1}（{checkedIds!.size} 张）
+                        </span>
+                        <button
+                          onClick={() => setShowGroupPanel((v) => !v)}
+                          className={[
+                            "ml-auto flex items-center gap-0.5 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
+                            showGroupPanel
+                              ? "bg-indigo-600 text-white"
+                              : "bg-white text-indigo-600 ring-1 ring-indigo-200 hover:bg-indigo-100",
+                          ].join(" ")}
+                          title="展开操作面板"
+                        >
+                          <ChevronDown className={["h-2.5 w-2.5 transition-transform", showGroupPanel ? "rotate-180" : ""].join(" ")} />
+                          操作面板
+                        </button>
+                        <button
+                          onClick={() => { onCheckChange?.(new Set()); lastCheckIdxRef.current = -1; setShowGroupPanel(false); }}
+                          className="rounded p-0.5 text-slate-400 hover:bg-rose-100 hover:text-rose-500"
+                          title="解散群组"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+
+                        {/* 浮动操作面板：自定义 / 适配已有循环 */}
+                        {showGroupPanel && (
+                          <div className="absolute left-0 right-0 top-full z-[9999] mt-1 rounded-lg border border-slate-200 bg-white p-1.5 shadow-xl">
+                            <div className="mb-1 px-1 text-[9px] font-semibold uppercase tracking-wide text-slate-400">选择执行方式</div>
+                            {onRunCheckedLoop && (
+                              <button
+                                onClick={() => { setShowGroupPanel(false); onRunCheckedLoop(); }}
+                                className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] font-medium text-slate-700 transition-colors hover:bg-indigo-50 hover:text-indigo-700"
+                              >
+                                <Play className="h-3 w-3 text-indigo-500" />
+                                自定义
+                                <span className="ml-auto text-[9px] text-slate-400">配置新步骤</span>
+                              </button>
+                            )}
+                            {onAdaptLoopToChecked && (
+                              <button
+                                onClick={() => { setShowGroupPanel(false); onAdaptLoopToChecked(); }}
+                                className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] font-medium text-slate-700 transition-colors hover:bg-indigo-50 hover:text-indigo-700"
+                              >
+                                <ListChecks className="h-3 w-3 text-indigo-500" />
+                                适配已有循环
+                                <span className="ml-auto text-[9px] text-slate-400">从已保存选择</span>
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <RecordItem
+                      record={r}
+                      selected={r.record_id === selectedId}
+                      onClick={() => onSelect(r.record_id)}
+                      result={recordResults?.[r.record_id]}
+                      batchResult={batchResults?.[r.record_id]}
+                      onRun={onRunRecord ? () => onRunRecord(r.record_id) : undefined}
+                      runDisabled={runDisabled}
+                      running={runningRecordId === r.record_id}
+                      onDropSkill={onDropSkill ? (skillId) => onDropSkill(skillId, r.record_id) : undefined}
+                      checked={isChecked}
+                      checkable={!!onCheckChange}
+                      checkDisabled={!!cardLoopMap?.[r.record_id]}
+                      isSaved={isSaved}
+                      onCheck={(e) => { e.stopPropagation(); handleToggleCheck(idx, r.record_id); }}
+                      draggable={!!onReorder}
+                      isDragging={dragId === r.record_id || (!!dragLoopId && cardLoopMap?.[r.record_id]?.loopId === dragLoopId)}
+                      isBatchDragging={!!dragLoopId && cardLoopMap?.[r.record_id]?.loopId === dragLoopId}
+                      isDragOver={dragOverIdx === idx}
+                      onDragStart={(e) => {
+                        const info = cardLoopMap?.[r.record_id];
+                        if (info) {
+                          setDragLoopId(info.loopId);
+                          setDragId(null);
+                          e.dataTransfer.effectAllowed = "move";
+                        } else {
+                          setDragId(r.record_id);
+                          setDragLoopId(null);
+                          e.dataTransfer.effectAllowed = "move";
+                        }
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        const targetInfo = cardLoopMap?.[r.record_id];
+                        // 整批拖拽：不能拖到自身批次内部；单卡拖拽：不能拖到批次卡片上
+                        if (dragLoopId) {
+                          if (targetInfo?.loopId === dragLoopId) return; // 自身批次不响应
+                          setDragOverIdx(idx);
+                        } else if (dragId) {
+                          if (targetInfo) return; // 单卡不能拖到批次上（不能拆分批）
+                          // 也不能拖到批次之间（需确保前后都不是批次或同批次边界）
+                          setDragOverIdx(idx);
+                        }
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (!onReorder) { setDragId(null); setDragLoopId(null); setDragOverIdx(null); return; }
+
+                        if (dragLoopId) {
+                          // 整批拖拽：移动同 loopId 的所有卡片作为一个块
+                          const batchIndices: number[] = [];
+                          records.forEach((rec, i) => {
+                            if (cardLoopMap?.[rec.record_id]?.loopId === dragLoopId) {
+                              batchIndices.push(i);
+                            }
+                          });
+                          if (batchIndices.length === 0) { setDragId(null); setDragLoopId(null); setDragOverIdx(null); return; }
+
+                          // 计算目标插入位置（排除正在拖拽的批次自身后）
+                          let insertIdx = idx;
+                          const batchStart = batchIndices[0];
+                          const batchEnd = batchIndices[batchIndices.length - 1];
+                          // 如果目标在批次之后，需要调整（因为移除批次后索引会偏移）
+                          if (insertIdx > batchEnd) {
+                            insertIdx -= batchIndices.length;
+                          }
+                          // 如果目标在批次内部，不移动
+                          if (insertIdx >= batchStart && insertIdx <= batchEnd) {
+                            setDragId(null); setDragLoopId(null); setDragOverIdx(null); return;
+                          }
+                          // 不允许插入到其他批次内部：调整到最近的批次边界
+                          const targetInfo = cardLoopMap?.[records[idx]?.record_id];
+                          if (targetInfo && targetInfo.loopId !== dragLoopId) {
+                            // 找到目标批次的起始位置
+                            let targetBatchStart = idx;
+                            while (targetBatchStart > 0 && cardLoopMap?.[records[targetBatchStart - 1]?.record_id]?.loopId === targetInfo.loopId) {
+                              targetBatchStart--;
+                            }
+                            insertIdx = targetBatchStart;
+                            // 重新计算移除批次后的偏移
+                            if (insertIdx > batchEnd) {
+                              insertIdx -= batchIndices.length;
+                            }
+                          }
+
+                          // 构造新数组
+                          const next = [...records];
+                          const moved: ApplicantRecord[] = [];
+                          // 从后往前移除，避免索引偏移
+                          for (let i = batchIndices.length - 1; i >= 0; i--) {
+                            moved.unshift(next.splice(batchIndices[i], 1)[0]);
+                          }
+                          // 插入到目标位置
+                          next.splice(insertIdx, 0, ...moved);
+                          onReorder(next);
+                        } else if (dragId && dragId !== r.record_id) {
+                          // 单卡拖拽：非批次卡片的移动
+                          const fromIdx = records.findIndex((rr) => rr.record_id === dragId);
+                          if (fromIdx < 0) { setDragId(null); setDragLoopId(null); setDragOverIdx(null); return; }
+                          const fromInfo = cardLoopMap?.[records[fromIdx]?.record_id];
+                          const targetInfo = cardLoopMap?.[r.record_id];
+                          // 批次卡片不能单拖（已在dragStart中处理），非批次卡片不能拖入批次
+                          if (fromInfo || targetInfo) {
+                            setDragId(null); setDragLoopId(null); setDragOverIdx(null); return;
+                          }
+                          const next = [...records];
+                          const [moved] = next.splice(fromIdx, 1);
+                          let toIdx = idx;
+                          if (fromIdx < idx) toIdx--;
+                          next.splice(toIdx, 0, moved);
+                          onReorder(next);
+                        }
+                        setDragId(null);
+                        setDragLoopId(null);
+                        setDragOverIdx(null);
+                      }}
+                      onDragEnd={() => { setDragId(null); setDragLoopId(null); setDragOverIdx(null); }}
+                      loopInfo={cardLoopMap?.[r.record_id]}
+                      onClearLoop={onClearCardLoop ? () => onClearCardLoop(r.record_id) : undefined}
+                    />
+                  </Fragment>
+                );
+              })}
             </ul>
           )}
         </div>
@@ -357,6 +744,21 @@ function RecordItem({
   runDisabled = true,
   running = false,
   onDropSkill,
+  checked = false,
+  checkable = false,
+  checkDisabled = false,
+  isSaved = false,
+  onCheck,
+  draggable = false,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
+  isDragging = false,
+  isDragOver = false,
+  isBatchDragging = false,
+  loopInfo,
+  onClearLoop,
 }: {
   record: ApplicantRecord;
   selected: boolean;
@@ -369,6 +771,36 @@ function RecordItem({
   running?: boolean;
   /** 接收 SKILL 拖放：(skillId) => void */
   onDropSkill?: (skillId: string) => void;
+  /** 是否已勾选 */
+  checked?: boolean;
+  /** 是否可勾选 */
+  checkable?: boolean;
+  /** 是否禁止勾选（已保存到批次的卡片） */
+  checkDisabled?: boolean;
+  /** 是否已保存到批次（视觉区分） */
+  isSaved?: boolean;
+  /** 勾选回调 */
+  onCheck?: (e: React.MouseEvent) => void;
+  /** 拖拽排序：是否可拖拽 */
+  draggable?: boolean;
+  /** 拖拽排序：开始拖拽 */
+  onDragStart?: (e: DragEvent) => void;
+  /** 拖拽排序：拖拽经过 */
+  onDragOver?: (e: DragEvent) => void;
+  /** 拖拽排序：释放 */
+  onDrop?: (e: DragEvent) => void;
+  /** 拖拽排序：拖拽结束 */
+  onDragEnd?: (e: DragEvent) => void;
+  /** 拖拽排序：是否正被拖拽 */
+  isDragging?: boolean;
+  /** 拖拽排序：是否是拖拽悬停目标 */
+  isDragOver?: boolean;
+  /** 是否是整批拖拽中的一员（视觉高亮） */
+  isBatchDragging?: boolean;
+  /** 该卡片关联的 LOOP 信息（已设置 LOOP 的卡片显示标签） */
+  loopInfo?: { loopId: string; loopName: string; setAt: number };
+  /** 清除该卡片的 LOOP 关联 */
+  onClearLoop?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [skillDragOver, setSkillDragOver] = useState(false);
@@ -380,7 +812,6 @@ function RecordItem({
     }
   }, [selected]);
 
-  const name = record.fields.name || record.fields.fullname || record.record_id;
   const passportNo = record.fields.passport_no || "";
   const studentId =
     record.fields.student_id ||
@@ -388,8 +819,8 @@ function RecordItem({
     record.fields.sid ||
     record.fields.id ||
     "";
+  const name = record.fields.name || record.fields.fullname || passportNo || studentId || record.fields.email || "";
   const hasPassport = record.has_passport;
-  const avatar = record.avatar;
 
   const PRIMARY_KEYS = new Set([
     "name", "fullname", "passport_no", "student_id", "student_no", "sid", "id",
@@ -457,28 +888,64 @@ function RecordItem({
     onClick();
   };
 
+  // 卡片排序拖拽：开始拖拽（设标记，与 SKILL 拖放区分）
+  const handleSortDragStart = (e: DragEvent) => {
+    if (!draggable) return;
+    e.dataTransfer.setData("text/plain", record.record_id);
+    e.dataTransfer.effectAllowed = "move";
+    onDragStart?.(e);
+  };
+  const handleSortDragOver = (e: DragEvent) => {
+    if (!draggable) return;
+    // 仅响应卡片排序拖拽（不响应 SKILL 拖放，SKILL 有自己的 MIME）
+    if (e.dataTransfer.types.includes(SKILL_DRAG_MIME)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    onDragOver?.(e);
+  };
+  const handleSortDrop = (e: DragEvent) => {
+    if (!draggable) return;
+    if (e.dataTransfer.types.includes(SKILL_DRAG_MIME)) return;
+    e.preventDefault();
+    onDrop?.(e);
+  };
+  const handleSortDragEnd = (e: DragEvent) => {
+    if (!draggable) return;
+    onDragEnd?.(e);
+  };
+
   return (
     <li
       ref={itemRef}
-      onDragOver={handleDragOver}
+      draggable={draggable}
+      onDragStart={handleSortDragStart}
+      onDragOver={(e) => { handleDragOver(e); handleSortDragOver(e); }}
       onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
+      onDrop={(e) => { handleSortDrop(e); handleDrop(e); }}
+      onDragEnd={handleSortDragEnd}
     >
       <div
         className={[
-          "w-full rounded-lg transition-all",
-          resultBg,
-          skillDragOver
-            ? "ring-2 ring-indigo-400 bg-indigo-50/70 shadow-md"
+          "w-full rounded-lg transition-all border",
+          isDragging || isBatchDragging
+            ? "opacity-40 ring-2 ring-indigo-400 border-transparent"
+            : isDragOver
+            ? "ring-2 ring-indigo-400 bg-indigo-50/50 border-transparent"
+            : skillDragOver
+            ? "ring-2 ring-indigo-400 bg-indigo-50/70 shadow-md border-transparent"
             : running
-            ? "ring-2 ring-indigo-400 bg-indigo-50/70 shadow-md animate-pulse"
+            ? "ring-2 ring-indigo-400 bg-indigo-50/70 shadow-md animate-pulse border-transparent"
+            : checked
+            ? "ring-1 ring-indigo-300 bg-indigo-50/40 border-transparent"
             : result
-            ? resultRing
+            ? resultBg + " " + resultRing + " border-transparent"
             : selected
-            ? "bg-brand-50 ring-1 ring-brand-200"
+            ? "bg-brand-50 ring-1 ring-brand-200 border-transparent"
+            : isSaved
+            ? "bg-emerald-50/60 border-emerald-200/70 hover:bg-emerald-50"
             : onRun && !runDisabled
-            ? "hover:bg-indigo-50/50 hover:ring-1 hover:ring-indigo-200 cursor-pointer"
-            : "hover:bg-slate-50",
+            ? "hover:bg-indigo-50/50 hover:ring-1 hover:ring-indigo-200 cursor-pointer border-transparent"
+            : "hover:bg-slate-50 border-transparent",
         ].join(" ")}
       >
         {/* 主行：点击=选中+单卡导航到该人页面（TAB 行为） */}
@@ -491,17 +958,36 @@ function RecordItem({
           title={onRun && !runDisabled && !running ? "点击切换到该人页面（步骤2+3自动导航）" : undefined}
         >
           <div className="flex items-center gap-2.5">
-            {/* 头像 */}
-            {avatar ? (
-              <img
-                src={`data:image/png;base64,${avatar}`}
-                alt={name}
-                className="h-9 w-9 shrink-0 rounded-full object-cover ring-1 ring-slate-200"
-              />
-            ) : (
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[11px] font-medium text-slate-400 ring-1 ring-slate-200">
-                {name.slice(0, 2).toUpperCase()}
-              </div>
+            {/* 拖拽手柄（长按拖拽调换位置；批次卡片整批拖拽） */}
+            {draggable && (
+              <span
+                className={[
+                  "flex h-4 w-3 shrink-0 items-center justify-center transition-colors active:cursor-grabbing",
+                  loopInfo
+                    ? "cursor-grab text-emerald-400 hover:text-emerald-600"
+                    : "cursor-grab text-slate-300 hover:text-slate-500",
+                ].join(" ")}
+                title={loopInfo ? "整批拖拽（批次内卡片一起移动）" : "拖拽调换位置"}
+              >
+                <GripVertical className="h-3 w-3" />
+              </span>
+            )}
+            {/* 勾选框 */}
+            {checkable && (
+              <button
+                onClick={checkDisabled ? undefined : onCheck}
+                className={[
+                  "flex h-5 w-5 shrink-0 items-center justify-center rounded-md border-2 transition-all",
+                  checkDisabled
+                    ? "cursor-not-allowed border-slate-200 bg-slate-100 opacity-40"
+                    : checked
+                    ? "border-indigo-500 bg-indigo-500 text-white"
+                    : "border-slate-300 bg-white hover:border-indigo-400",
+                ].join(" ")}
+                title={checkDisabled ? "已保存到批次，不可勾选" : checked ? "取消选择" : "点击选择（再点另一张卡选择范围）"}
+              >
+                {checked && !checkDisabled && <Check className="h-3 w-3" strokeWidth={3} />}
+              </button>
             )}
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-2">
@@ -513,6 +999,20 @@ function RecordItem({
                     <span className="flex items-center gap-0.5 rounded-full bg-indigo-500 px-1.5 py-0.5 text-[9px] font-medium text-white animate-pulse">
                       <Sparkles className="h-2.5 w-2.5" />
                       释放执行
+                    </span>
+                  )}
+                  {loopInfo && !skillDragOver && (
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onClearLoop?.();
+                      }}
+                      className="group flex items-center gap-0.5 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700 transition-colors hover:bg-rose-100 hover:text-rose-600"
+                      title={`${loopInfo.loopName}（点击移除 LOOP 关联）`}
+                    >
+                      <CheckCircle2 className="h-2.5 w-2.5" />
+                      <span className="max-w-[60px] truncate">{loopInfo.loopName}</span>
+                      <X className="h-2 w-2 opacity-0 transition-opacity group-hover:opacity-100" />
                     </span>
                   )}
                   {result && !skillDragOver && (
@@ -535,11 +1035,6 @@ function RecordItem({
                   {hasPassport && !skillDragOver && (
                     <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
                       护照
-                    </span>
-                  )}
-                  {!skillDragOver && (
-                    <span className="font-mono text-[10px] text-slate-400">
-                      {record.record_id}
                     </span>
                   )}
                 </div>
