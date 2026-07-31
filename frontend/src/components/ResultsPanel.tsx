@@ -1,20 +1,19 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import {
-  Activity,
-  Bot,
   CheckCircle2,
   ChevronDown,
   Database,
   Eye,
   ExternalLink,
   FileText,
-  Layers,
+  Loader2,
   MinusCircle,
   MousePointerClick,
   MoveRight,
-  ShieldCheck,
+  PanelRightOpen,
+  PanelRightClose,
   Table2,
-  UserCircle,
+  X,
   XCircle,
 } from "lucide-react";
 import type {
@@ -27,163 +26,98 @@ import type {
   VerificationStep,
 } from "../types";
 import {
-  EVIDENCE_LABELS,
-  EVIDENCE_STYLES,
   FIELD_LABELS,
   MATCH_LABELS,
-  MATCH_STYLES,
   OVERALL_LABELS,
 } from "../types";
-
-import PluginPanel from "./PluginPanel";
-
-type Tab = "report" | "execution" | "plugin";
 
 interface Props {
   comparisons: FieldComparison[];
   resultPresent: boolean;
   report: VerificationReport | null;
   loopReports?: VerificationReport[];
-  steps: VerificationStep[];
   shots: ScreenshotEvent[];
+  steps?: VerificationStep[];
   running: boolean;
-  /** 应用模式：审查=右侧网页→左侧/EXCEL；录入=左侧EXCEL→右侧网页 */
   appMode?: AppMode;
-  logEndRef: React.RefObject<HTMLDivElement>;
   onDetach?: () => void;
-  // 切换到日志tab的触发值（每次变化时切到log）
-  switchToLogSignal?: number;
-  /** 文档提取结果列表（当前卡片的多份文件，TAB切换） */
+  onClose?: () => void;
   docExtracts?: DocExtractState[];
-  /** 当前激活的文件索引 */
   activeDocIndex?: number;
-  /** 切换激活文件 */
   onSelectDocIndex?: (i: number) => void;
-  /** 文档提取进行中 */
   docExtracting?: boolean;
-  /** 切换到文档tab的触发值 */
   switchToDocSignal?: number;
-  /** 当前步骤模式：审查/录入 */
   addingStepMode?: "review" | "entry" | null;
-  /** 点击「提取元素」字段卡片时回调（注入为合成拾取值） */
   onPickExtractedField?: (side: "left" | "right", field: string, value: string) => void;
+  /** 本地文件提取配置内容（有值时"文件处理"卡片显示它，替代正常内容） */
+  docLocalConfigContent?: React.ReactNode;
+  /** 聚焦面板模式："field"=只显示字段对比，"doc"=只显示文件处理，null=三面板 */
+  focusPanel?: "field" | "doc" | null;
 }
-
-const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
-  { id: "report", label: "验证报告", icon: <ShieldCheck className="h-3.5 w-3.5" /> },
-  { id: "execution", label: "执行进度", icon: <Activity className="h-3.5 w-3.5" /> },
-  { id: "plugin", label: "站外循环记录", icon: <Bot className="h-3.5 w-3.5" /> },
-];
 
 export default function ResultsPanel({
   comparisons,
   resultPresent,
   report,
   loopReports = [],
-  steps,
   shots,
+  steps = [],
   running,
   appMode = "loop",
-  logEndRef,
   onDetach,
-  switchToLogSignal = 0,
+  onClose,
   docExtracts = [],
   activeDocIndex = 0,
   onSelectDocIndex,
   docExtracting = false,
-  switchToDocSignal = 0,
   addingStepMode = null,
   onPickExtractedField,
+  docLocalConfigContent,
+  focusPanel = null,
 }: Props) {
-  const [tab, setTab] = useState<Tab>("execution");
-
-  // 当 switchToLogSignal 变化时，自动切换到执行进度tab
-  useEffect(() => {
-    if (switchToLogSignal > 0) {
-      setTab("execution");
-    }
-  }, [switchToLogSignal]);
-
-  // 文档提取完成/进行中时，自动切换到验证报告tab
-  useEffect(() => {
-    if (switchToDocSignal > 0) {
-      setTab("report");
-    }
-  }, [switchToDocSignal]);
-
-  const counts: Partial<Record<Tab, number>> = {
-    report: (loopReports?.length || 0) + (report ? 1 : 0),
-    execution: steps.length,
-  };
-
   return (
-    <div className="glass-strong flex h-full flex-col overflow-hidden rounded-2xl">
-      {/* Tab 头 */}
-      <div className="flex shrink-0 items-center gap-0.5 border-b border-white/40 px-2 py-1.5">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={[
-              "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all",
-              tab === t.id
-                ? "bg-white/80 text-brand-700 shadow-sm ring-1 ring-brand-200/50"
-                : "text-slate-500 hover:bg-white/40 hover:text-slate-700",
-            ].join(" ")}
-          >
-            {t.icon}
-            {t.label}
-            {counts[t.id] ? (
-              <span className="rounded-full bg-slate-200/70 px-1.5 py-0.5 text-[9px] text-slate-600">
-                {counts[t.id]}
-              </span>
-            ) : null}
-          </button>
-        ))}
-        <div className="flex-1" />
+    <div className="glass-strong relative flex h-full flex-col overflow-hidden rounded-2xl">
+      {/* 右上角悬浮按钮（脱离、关闭） */}
+      <div className="absolute right-1.5 top-1.5 z-10 flex items-center gap-0.5">
         {onDetach && (
           <button
             onClick={onDetach}
-            className="rounded-md p-1 text-slate-400 hover:bg-white/60 hover:text-brand-600"
+            className="rounded-md p-1 text-slate-400 opacity-60 transition-all hover:bg-white/80 hover:text-brand-600 hover:opacity-100"
             title="脱离到独立窗口"
           >
             <ExternalLink className="h-3.5 w-3.5" />
           </button>
         )}
+        {onClose && (
+          <button
+            onClick={onClose}
+            className="rounded-md p-1 text-slate-400 opacity-60 transition-all hover:bg-rose-50 hover:text-rose-500 hover:opacity-100"
+            title="收起面板"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
 
-      {/* Tab 内容 */}
       <div className="min-h-0 flex-1 overflow-hidden">
-        {tab === "report" && (
-          <div className="h-full overflow-auto">
-            <ReportTab
-              report={report}
-              reports={loopReports}
-              comparisons={comparisons}
-              resultPresent={resultPresent}
-              docExtracts={docExtracts}
-              activeDocIndex={activeDocIndex}
-              onSelectDocIndex={onSelectDocIndex}
-              docExtracting={docExtracting}
-              shots={shots}
-              running={running}
-              appMode={appMode}
-              addingStepMode={addingStepMode}
-              onPickExtractedField={onPickExtractedField}
-            />
-          </div>
-        )}
-        {tab === "execution" && (
-          <ExecutionTab
-            steps={steps}
-            logEndRef={logEndRef}
-          />
-        )}
-        {tab === "plugin" && (
-          <div className="h-full overflow-hidden">
-            <PluginPanel />
-          </div>
-        )}
+        <ReportTab
+          report={report}
+          reports={loopReports}
+          comparisons={comparisons}
+          resultPresent={resultPresent}
+          docExtracts={docExtracts}
+          activeDocIndex={activeDocIndex}
+          onSelectDocIndex={onSelectDocIndex}
+          docExtracting={docExtracting}
+          shots={shots}
+          running={running}
+          steps={steps}
+          appMode={appMode}
+          addingStepMode={addingStepMode}
+          onPickExtractedField={onPickExtractedField}
+          docLocalConfigContent={docLocalConfigContent}
+          focusPanel={focusPanel}
+        />
       </div>
     </div>
   );
@@ -465,9 +399,12 @@ function ReportTab({
   docExtracting,
   shots,
   running,
+  steps,
   appMode,
   addingStepMode,
   onPickExtractedField,
+  docLocalConfigContent,
+  focusPanel = null,
 }: {
   report: VerificationReport | null;
   reports: VerificationReport[];
@@ -479,9 +416,14 @@ function ReportTab({
   docExtracting: boolean;
   shots: ScreenshotEvent[];
   running: boolean;
+  steps: VerificationStep[];
   appMode: AppMode;
   addingStepMode?: "review" | "entry" | null;
   onPickExtractedField?: (side: "left" | "right", field: string, value: string) => void;
+  /** 本地文件提取配置内容（有值时"文件处理"卡片显示它，替代正常内容） */
+  docLocalConfigContent?: React.ReactNode;
+  /** 聚焦面板模式："field"=只显示字段对比，"doc"=只显示文件处理，null=三面板 */
+  focusPanel?: "field" | "doc" | null;
 }) {
   const hasReports = reports && reports.length > 0;
   const hasCompare = resultPresent && comparisons.length > 0;
@@ -489,6 +431,201 @@ function ReportTab({
   const [showSample, setShowSample] = useState(false);
   const [showDocSample, setShowDocSample] = useState(false);
   const [filter, setFilter] = useState<"all" | "pass" | "fail" | "review">("all");
+  /** 提取元素面板开关：默认关闭，下栏右侧一般只显示「文件处理」+「字段对比」两个面板 */
+  const [showExtractPanel, setShowExtractPanel] = useState(false);
+
+  // 三栏宽度（百分比）
+  const [leftWidth, setLeftWidth] = useState(32);
+  const [midWidth, setMidWidth] = useState(36);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<null | "left" | "right">(null);
+  const liveScrollRef = useRef<HTMLDivElement>(null);
+
+  const onMouseDown = useCallback((which: "left" | "right") => {
+    return (e: React.MouseEvent) => {
+      e.preventDefault();
+      dragRef.current = which;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+    };
+  }, []);
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!dragRef.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const pct = Math.max(15, Math.min(70, (x / rect.width) * 100));
+      if (dragRef.current === "left") {
+        const newLeft = Math.max(15, Math.min(pct, 100 - midWidth - 15));
+        setLeftWidth(newLeft);
+      } else {
+        const newMid = Math.max(15, Math.min(pct - leftWidth, 100 - leftWidth - 15));
+        setMidWidth(newMid);
+      }
+    };
+    const onUp = () => {
+      dragRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [leftWidth, midWidth]);
+
+  // ============ LOOP 实时进度：将 steps 按 recordStart 分组 ============
+  interface LiveRecord {
+    name: string;
+    index: number;
+    total: number;
+    fieldSteps: { label: string; detail?: string; action: string; done: boolean }[];
+    status: "running" | "success" | "failed";
+  }
+  const liveRecords: LiveRecord[] = [];
+  let cur: LiveRecord | null = null;
+  for (const s of steps) {
+    // 检测记录开始：isRecordStart 标记（批量LOOP）或 action="start"（单卡执行/SKILL）
+    const isRecStart = s.isRecordStart || s.action === "start";
+    if (isRecStart) {
+      if (cur) {
+        // 上一条记录被新记录打断，如果没出错则标记为成功
+        if (cur.status === "running") cur.status = "success";
+        liveRecords.push(cur);
+      }
+      // 从描述中提取人名：支持「recordName」或直接跟在描述后面
+      let name = s.recordName || "";
+      if (!name) {
+        const m = s.description.match(/[「"']([^」"']+)[」"']/);
+        if (m) name = m[1];
+        else name = s.description.length > 20 ? s.description.slice(0, 20) + "…" : s.description;
+      }
+      cur = {
+        name,
+        index: s.recordIndex || 1,
+        total: s.recordTotal || 1,
+        fieldSteps: [],
+        status: "running",
+      };
+    } else if (cur) {
+      if (s.action === "error" || s.success === false) {
+        cur.status = "failed";
+      }
+      // 提取步骤描述（格式："..."步骤 M: 标签"）
+      const m = s.description.match(/步骤\s*\d+\s*[:：]\s*(.+)$/);
+      if (m) {
+        cur.fieldSteps.push({
+          label: m[1].trim(),
+          detail: s.detail || undefined,
+          action: s.action || "",
+          done: true,
+        });
+      }
+      // 检测完成动作
+      if (s.action === "done") {
+        cur.status = "success";
+      }
+    }
+  }
+  if (cur) {
+    if (!running && cur.status === "running") {
+      const hasErr = steps.some((s) => s.action === "error" || s.success === false);
+      cur.status = hasErr ? "failed" : "success";
+    }
+    if (cur.status === "running" && cur.fieldSteps.length > 0) {
+      cur.fieldSteps[cur.fieldSteps.length - 1].done = false;
+    }
+    liveRecords.push(cur);
+  }
+
+  // 自动滚动到当前运行的卡片
+  useEffect(() => {
+    if (liveScrollRef.current) {
+      const runningCard = liveScrollRef.current.querySelector("[data-running='true']");
+      if (runningCard) {
+        runningCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+    }
+  }, [steps.length]);
+
+  // 实时运行中：显示逐人卡片（展开当前运行的，已完成的折叠变色）
+  const LiveRecordCard = ({ rec }: { rec: LiveRecord }) => {
+    const isRunning = rec.status === "running";
+    const isFailed = rec.status === "failed";
+    const [expanded, setExpanded] = useState(isRunning);
+    // 运行中自动展开当前卡片
+    useEffect(() => {
+      if (isRunning) setExpanded(true);
+    }, [isRunning]);
+    // 完成后延迟1秒自动折叠
+    useEffect(() => {
+      if (!isRunning) {
+        const t = setTimeout(() => setExpanded(false), 1200);
+        return () => clearTimeout(t);
+      }
+    }, [isRunning, rec.fieldSteps.length]);
+
+    const doneCount = rec.fieldSteps.filter((f) => f.done).length;
+    const accent = isFailed
+      ? { head: "bg-rose-50/80 border-rose-200", text: "text-rose-700", badge: "bg-rose-500", badgeSoft: "bg-rose-100 text-rose-700", spin: "text-rose-500" }
+      : isRunning
+      ? { head: "bg-indigo-50/80 border-indigo-200", text: "text-indigo-700", badge: "bg-indigo-500", badgeSoft: "bg-indigo-100 text-indigo-700", spin: "text-indigo-500" }
+      : { head: "bg-emerald-50/80 border-emerald-200", text: "text-emerald-700", badge: "bg-emerald-500", badgeSoft: "bg-emerald-100 text-emerald-700", spin: "text-emerald-500" };
+
+    return (
+      <div data-running={isRunning} className={`overflow-hidden rounded-md border shadow-sm transition-all ${accent.head}`}>
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:brightness-[0.97]"
+        >
+          {isRunning ? (
+            <Loader2 className={`h-3.5 w-3.5 shrink-0 animate-spin ${accent.spin}`} />
+          ) : isFailed ? (
+            <XCircle className={`h-3.5 w-3.5 shrink-0 ${accent.spin}`} />
+          ) : (
+            <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${accent.spin}`} />
+          )}
+          <span className={`text-[12px] font-semibold ${accent.text}`}>{rec.name}</span>
+          <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-bold ${accent.badgeSoft}`}>
+            {rec.index}/{rec.total}
+          </span>
+          <span className={`ml-auto inline-flex items-center rounded-full ${accent.badge} px-2 py-0.5 text-[10px] font-semibold text-white`}>
+            {isRunning ? `${doneCount}步` : isFailed ? "失败" : "通过"}
+          </span>
+          <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
+        </button>
+        {expanded && rec.fieldSteps.length > 0 && (
+          <div className="border-t border-slate-200/60 bg-white/70 px-3 py-1.5">
+            <ul className="space-y-1">
+              {rec.fieldSteps.map((f, i) => {
+                const isCurrent = !f.done && isRunning;
+                return (
+                  <li key={i} className="flex items-center gap-1.5 text-[11px]">
+                    {isCurrent ? (
+                      <Loader2 className="h-3 w-3 shrink-0 animate-spin text-indigo-500" />
+                    ) : (
+                      <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-500" />
+                    )}
+                    <span className={isCurrent ? "font-medium text-indigo-700" : "text-slate-600"}>
+                      {f.label}
+                    </span>
+                    {isCurrent && f.detail && (
+                      <span className="ml-1 truncate rounded bg-indigo-50 px-1 py-0.5 font-mono text-[9px] text-indigo-500">
+                        {f.detail.replace(/^填入:\s*/, "")}
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   // DEMO示例数据
   const sampleReports: VerificationReport[] = [
@@ -702,7 +839,25 @@ function ReportTab({
   let fieldContent: React.ReactNode;
   let summaryBar: React.ReactNode = null;
 
-  if (hasReports) {
+  // 运行中或刚结束（有实时记录但还没有最终报告）：显示逐人可视化卡片
+  if (liveRecords.length > 0 && (!hasReports || running)) {
+    const passCount = liveRecords.filter((r) => r.status === "success").length;
+    const failCount = liveRecords.filter((r) => r.status === "failed").length;
+    const runCount = liveRecords.filter((r) => r.status === "running").length;
+    summaryBar = (
+      <div className="mb-2 flex shrink-0 flex-wrap items-center gap-1.5">
+        <span className="rounded-full bg-slate-800 px-2.5 py-0.5 text-[10px] font-medium text-white">
+          {running ? "执行中" : "执行完成"}
+        </span>
+        {passCount > 0 && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">✓ {passCount}</span>}
+        {failCount > 0 && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-medium text-rose-700">✗ {failCount}</span>}
+        {runCount > 0 && <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-medium text-indigo-700">
+          <Loader2 className="mr-0.5 inline h-2.5 w-2.5 animate-spin" />{runCount}
+        </span>}
+      </div>
+    );
+    fieldContent = <div className="space-y-1.5">{liveRecords.map((r, i) => <LiveRecordCard key={`${r.index}-${i}`} rec={r} />)}</div>;
+  } else if (hasReports) {
     const passCount = reports.filter((r) => r.overall === "pass").length;
     const failCount = reports.filter((r) => r.overall === "fail").length;
     const reviewCount = reports.filter((r) => r.overall === "review").length;
@@ -889,18 +1044,18 @@ function ReportTab({
     let filePreview: React.ReactNode = null;
     if (docExtract) {
       if (docExtract.processed_image) {
-        // 预处理后的图片（已自动旋转 + 裁剪白边）
+        // 预处理后的图片（已自动旋转 + 裁剪白边）- 填充可用空间
         filePreview = (
-          <div className="mb-2">
+          <div className="mb-2 flex min-h-0 flex-1 flex-col">
             <div className="mb-1 flex items-center gap-1 text-[9px] font-medium text-emerald-600">
               <CheckCircle2 className="h-3 w-3" />
               已处理：自动旋转到正面 + 裁剪白边
             </div>
-            <div className="overflow-hidden rounded-md border border-slate-200 bg-slate-50">
+            <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-slate-200 bg-slate-50">
               <img
                 src={`data:image/jpeg;base64,${docExtract.processed_image}`}
                 alt={docExtract.filename}
-                className="max-h-48 w-full object-contain"
+                className="h-full w-full object-contain"
               />
             </div>
           </div>
@@ -908,12 +1063,12 @@ function ReportTab({
       } else if (isImageFile && fileUrl) {
         // 原始图片 URL（未预处理或预处理失败）
         filePreview = (
-          <div className="mb-2">
-            <div className="overflow-hidden rounded-md border border-slate-200 bg-slate-50">
+          <div className="mb-2 flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-slate-200 bg-slate-50">
               <img
                 src={fileUrl}
                 alt={docExtract.filename}
-                className="max-h-48 w-full object-contain"
+                className="h-full w-full object-contain"
                 onError={(e) => {
                   (e.target as HTMLImageElement).style.display = "none";
                 }}
@@ -1025,11 +1180,15 @@ function ReportTab({
     ) : null;
 
     fileProcessContent = (
-      <div className="flex h-full flex-col">
+      <div className="flex h-full min-h-0 flex-col">
         {fileInfo}
         {filePreview}
-        {compareBlock}
-        {shotsBlock}
+        {(compareBlock || shotsBlock) && (
+          <div className={`shrink-0 ${filePreview ? "max-h-[35%] overflow-auto" : ""}`}>
+            {compareBlock}
+            {shotsBlock}
+          </div>
+        )}
         {!fileInfo && !compareBlock && !shotsBlock && (
           <div className="flex h-full min-h-[140px] flex-col items-center justify-center gap-2 text-center text-[11px] text-slate-400">
             <FileText className="h-8 w-8 text-slate-200" />
@@ -1167,58 +1326,142 @@ function ReportTab({
     );
   }
 
+  // 聚焦模式计算：focusPanel 为 null 时全部显示，否则只显示对应面板
+  const isFieldFocus = focusPanel === "field";
+  const isDocFocus = focusPanel === "doc";
+  const isAll = !focusPanel;
+  // 提取元素面板是否参与显示：仅 isAll 且用户开启时显示；开启时为三栏，关闭时为两栏（文件处理撑满右半）
+  const showExtract = isAll && showExtractPanel;
+
   return (
-    <div className="flex h-full flex-col p-3">
-      <div className="min-h-0 flex-1 grid grid-cols-1 gap-3 lg:grid-cols-3 lg:h-full">
-        {/* 字段对比卡片 */}
-        <div className="flex max-h-[55vh] flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm lg:max-h-full">
-          <div className="flex shrink-0 items-center gap-1.5 border-b border-slate-200 bg-slate-50/80 px-2.5 py-1.5 text-[11px] font-semibold text-slate-700">
+    <div className="flex h-full flex-col p-1.5" ref={containerRef}>
+      {/* 大屏：可拖拽三栏；小屏：垂直堆叠。聚焦模式通过 flex-grow + opacity 过渡实现丝滑动画 */}
+      <div className="min-h-0 flex-1 flex flex-col gap-1.5 lg:flex-row lg:gap-0 lg:h-full">
+        {/* 字段对比卡片 —— 最左侧，向右展开/向左回收（纯 flex-basis 过渡，max-w-0 不可过渡会 snap） */}
+        <div
+          className={[
+            "flex max-h-[55vh] flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full",
+            "transition-all duration-500 ease-in-out",
+            isFieldFocus ? "flex-1" : isAll ? "" : "lg:border-0 lg:px-0 lg:mx-0",
+          ].join(" ")}
+          style={{ flexBasis: isFieldFocus ? undefined : (isAll ? `${leftWidth}%` : "0%"), flexShrink: 0, flexGrow: isFieldFocus ? 1 : 0 }}
+        >
+          <div className="flex shrink-0 items-center gap-1.5 border-b border-slate-200 bg-slate-50/80 px-2 py-1 text-[11px] font-semibold text-slate-700">
             <Table2 className="h-3.5 w-3.5 text-slate-500" />
             字段对比
           </div>
-          {summaryBar && <div className="shrink-0 px-2 pt-2">{summaryBar}</div>}
-          <div className="min-h-0 flex-1 overflow-auto p-2">{fieldContent}</div>
+          {summaryBar && <div className="shrink-0 px-1.5 pt-1.5">{summaryBar}</div>}
+          <div ref={liveScrollRef} className="min-h-0 flex-1 min-w-[200px] overflow-y-auto overflow-x-hidden p-1.5">{fieldContent}</div>
         </div>
 
-        {/* 文件处理卡片（合并：文件对比 + AI视野） */}
-        <div className="flex max-h-[55vh] flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm lg:max-h-full">
-          <div className="flex shrink-0 items-center gap-1.5 border-b border-emerald-200 bg-emerald-50/60 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-800">
-            <FileText className="h-3.5 w-3.5 text-emerald-600" />
-            文件处理
-            {docExtracts.length > 0 && (
-              <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700">
-                {docExtracts.length} 个文件
-              </span>
-            )}
-            <span className="ml-auto text-[9px] font-normal text-emerald-600/70">PDF / JPG / JPEG</span>
-          </div>
-          {/* 多文件 TAB 切换栏 */}
-          {docExtracts.length > 1 && onSelectDocIndex && (
-            <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-slate-100 bg-slate-50/50 px-1.5 py-1">
-              {docExtracts.map((ext, i) => (
-                <button
-                  key={i}
-                  onClick={() => onSelectDocIndex(i)}
-                  className={[
-                    "flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium transition-all",
-                    i === safeDocIdx
-                      ? "bg-emerald-600 text-white shadow-sm"
-                      : "bg-white text-slate-500 ring-1 ring-slate-200 hover:bg-emerald-50 hover:text-emerald-700",
-                  ].join(" ")}
-                  title={ext.filename}
-                >
-                  {ext.method === "vision_ocr" ? <Eye className="h-2.5 w-2.5" /> : <FileText className="h-2.5 w-2.5" />}
-                  <span className="max-w-[80px] truncate">{ext.filename}</span>
-                </button>
-              ))}
-            </div>
+        {/* 左/中 拖拽分隔条 —— 聚焦模式下隐藏 */}
+        <div
+          className={[
+            "group relative hidden shrink-0 cursor-col-resize items-center justify-center lg:flex",
+            "transition-opacity duration-300",
+            isAll ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
+          ].join(" ")}
+          style={{ width: isAll ? 6 : 0 }}
+          onMouseDown={onMouseDown("left")}
+        >
+          <div className="h-full w-px bg-slate-200 transition-colors group-hover:bg-brand-400" />
+          <div className="absolute h-8 w-1 rounded-full bg-slate-300 opacity-0 transition-opacity group-hover:opacity-100" />
+        </div>
+
+        {/* 文件处理卡片 —— 2面板时在右半向左展开/向右回收；3面板时在中间左右展开/向中心回收 */}
+        <div
+          className={[
+            "relative flex max-h-[55vh] flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full",
+            "transition-all duration-500 ease-in-out",
+            isDocFocus ? "flex-1" : isAll ? "" : "lg:border-0 lg:px-0 lg:mx-0",
+          ].join(" ")}
+          style={{
+            flexBasis: showExtract ? `${midWidth}%` : "0%",
+            flexShrink: 0,
+            flexGrow: (isDocFocus || (isAll && !showExtract)) ? 1 : 0,
+          }}
+        >
+          {/* 展开/收起「提取元素」面板按钮 —— 贴在文件处理面板右边缘外侧（提取元素在文件处理右侧），配置模式和正常模式均可见 */}
+          {(isAll || isDocFocus) && (
+            <button
+              onClick={() => setShowExtractPanel((v) => !v)}
+              className={[
+                "absolute top-1/2 z-20 flex -translate-y-1/2 translate-x-1/2 items-center justify-center rounded-l-md border border-r-0 py-1 transition-all",
+                showExtractPanel
+                  ? "border-violet-200 bg-violet-100 text-violet-700 hover:bg-violet-200"
+                  : "border-emerald-200 bg-emerald-50 text-emerald-600 hover:bg-emerald-100",
+              ].join(" ")}
+              style={{ right: 0 }}
+              title={showExtractPanel ? "收起「提取元素」面板" : "展开「提取元素」面板"}
+            >
+              {showExtractPanel ? <PanelRightClose className="h-3.5 w-3.5" /> : <PanelRightOpen className="h-3.5 w-3.5" />}
+            </button>
           )}
-          <div className="min-h-0 flex-1 overflow-auto p-2">{fileProcessContent}</div>
+          {docLocalConfigContent ? (
+            /* 配置模式：直接渲染配置内容（组件自带标题条和底部按钮） */
+            <div className="flex min-h-0 flex-1 min-w-[200px] flex-col overflow-hidden">{docLocalConfigContent}</div>
+          ) : (
+            <>
+              <div className="flex shrink-0 items-center gap-1.5 border-b border-emerald-200 bg-emerald-50/60 px-2 py-1 text-[11px] font-semibold text-emerald-800">
+                <FileText className="h-3.5 w-3.5 text-emerald-600" />
+                文件处理
+                {docExtracts.length > 0 && (
+                  <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700">
+                    {docExtracts.length} 个文件
+                  </span>
+                )}
+                <span className="ml-auto text-[9px] font-normal text-emerald-600/70">PDF / JPG / JPEG</span>
+              </div>
+              {/* 多文件 TAB 切换栏 */}
+              {docExtracts.length > 1 && onSelectDocIndex && (
+                <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-slate-100 bg-slate-50/50 px-1 py-0.5">
+                  {docExtracts.map((ext, i) => (
+                    <button
+                      key={i}
+                      onClick={() => onSelectDocIndex(i)}
+                      className={[
+                        "flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium transition-all",
+                        i === safeDocIdx
+                          ? "bg-emerald-600 text-white shadow-sm"
+                          : "bg-white text-slate-500 ring-1 ring-slate-200 hover:bg-emerald-50 hover:text-emerald-700",
+                      ].join(" ")}
+                      title={ext.filename}
+                    >
+                      {ext.method === "vision_ocr" ? <Eye className="h-2.5 w-2.5" /> : <FileText className="h-2.5 w-2.5" />}
+                      <span className="max-w-[80px] truncate">{ext.filename}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="min-h-0 flex-1 min-w-[200px] overflow-y-auto overflow-x-hidden p-1.5">{fileProcessContent}</div>
+            </>
+          )}
         </div>
 
-        {/* 提取元素卡片（原 AI视野 位置） */}
-        <div className="flex max-h-[55vh] flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm lg:max-h-full">
-          <div className="flex shrink-0 items-center gap-1.5 border-b border-violet-200 bg-violet-50/60 px-2.5 py-1.5 text-[11px] font-semibold text-violet-800">
+        {/* 中/右 拖拽分隔条 —— 仅三栏模式（showExtract）下显示 */}
+        <div
+          className={[
+            "group relative hidden shrink-0 cursor-col-resize items-center justify-center lg:flex",
+            "transition-opacity duration-300",
+            showExtract ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
+          ].join(" ")}
+          style={{ width: showExtract ? 6 : 0 }}
+          onMouseDown={onMouseDown("right")}
+        >
+          <div className="h-full w-px bg-slate-200 transition-colors group-hover:bg-brand-400" />
+          <div className="absolute h-8 w-1 rounded-full bg-slate-300 opacity-0 transition-opacity group-hover:opacity-100" />
+        </div>
+
+        {/* 提取元素卡片 —— 最右侧，向左展开/向右回收（默认隐藏，通过文件处理面板左侧按钮开启） */}
+        <div
+          className={[
+            "flex max-h-[55vh] min-w-0 flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full",
+            "transition-all duration-500 ease-in-out",
+            showExtract ? "flex-1" : "lg:border-0 lg:px-0 lg:mx-0",
+          ].join(" ")}
+          style={{ flexBasis: showExtract ? "30%" : "0%", flexShrink: 0, flexGrow: showExtract ? 1 : 0 }}
+        >
+          <div className="flex shrink-0 items-center gap-1.5 border-b border-violet-200 bg-violet-50/60 px-2 py-1 text-[11px] font-semibold text-violet-800">
             <Database className="h-3.5 w-3.5 text-violet-600" />
             提取元素
             {docExtract && (
@@ -1227,7 +1470,7 @@ function ReportTab({
               </span>
             )}
           </div>
-          <div className="min-h-0 flex-1 overflow-auto p-2">{extractedContent}</div>
+          <div className="min-h-0 flex-1 min-w-[200px] overflow-y-auto overflow-x-hidden p-1.5">{extractedContent}</div>
         </div>
       </div>
     </div>
@@ -1248,75 +1491,6 @@ function Empty({
       {icon}
       <p className="text-sm font-medium text-slate-500">{title}</p>
       <p className="text-xs">{desc}</p>
-    </div>
-  );
-}
-
-// ============ 执行进度面板 ============
-function ExecutionTab({
-  steps,
-  logEndRef,
-}: {
-  steps: VerificationStep[];
-  logEndRef: React.RefObject<HTMLDivElement>;
-}) {
-  return (
-    <div className="flex h-full flex-col overflow-hidden">
-      {/* 执行进度 */}
-      <div className="min-h-0 flex-1 flex flex-col overflow-hidden">
-        <div className="min-h-0 flex-1 overflow-auto p-3">
-          {steps.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center text-[11px] text-slate-400">
-              <Activity className="mb-1 h-8 w-8 text-slate-300" />
-              执行时显示进度
-            </div>
-          ) : (
-            <ul className="space-y-1.5">
-              {steps.map((s) => {
-                // 任务大标题
-                if (s.isTaskStart) {
-                  return (
-                    <li key={`task-${s.step}`} className="-mx-2 my-2 first:mt-0">
-                      <div className="flex items-center gap-2 rounded-lg border-2 border-indigo-300 bg-gradient-to-r from-indigo-600 to-violet-600 px-3 py-2 shadow-md">
-                        <Layers className="h-4 w-4 shrink-0 text-white" />
-                        <span className="text-[12px] font-bold text-white">{s.taskName || "任务"}</span>
-                        <span className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] font-semibold text-white">{s.taskIndex}/{s.taskTotal}</span>
-                        <span className="ml-auto text-[10px] text-indigo-200">{s.taskRecordCount}张卡片</span>
-                      </div>
-                    </li>
-                  );
-                }
-                // 人物分隔
-                if (s.isRecordStart) {
-                  return (
-                    <li key={`record-${s.step}`} className="-mx-1 my-1.5">
-                      <div className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50/80 px-3 py-1.5 shadow-sm">
-                        <UserCircle className="h-4 w-4 shrink-0 text-indigo-600" />
-                        <span className="text-[11px] font-bold text-indigo-900">{s.recordName || "人物卡片"}</span>
-                        <span className="rounded-full bg-indigo-600 px-2 py-0.5 text-[10px] font-semibold text-white">{s.recordIndex}/{s.recordTotal}</span>
-                      </div>
-                    </li>
-                  );
-                }
-                // 普通步骤：人类可读简化版
-                const icon = s.success
-                  ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
-                  : <XCircle className="h-3.5 w-3.5 shrink-0 text-rose-500" />;
-                return (
-                  <li key={s.step} className="flex items-start gap-2 rounded px-2 py-1 animate-fade-in hover:bg-slate-50/60">
-                    {icon}
-                    <span className="text-[11px] text-slate-600 leading-5">
-                      {s.description}
-                      {s.detail && <span className="ml-1 text-slate-400">— {s.detail}</span>}
-                    </span>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-          <div ref={logEndRef} />
-        </div>
-      </div>
     </div>
   );
 }
