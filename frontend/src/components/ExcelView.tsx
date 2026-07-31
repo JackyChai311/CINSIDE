@@ -81,8 +81,8 @@ export default function ExcelView({
     return m;
   }, [records]);
 
-  // 是否处于行范围框选状态（外部启用了框选且卡片未生成）
-  const rangeSelecting = !!onRowRangeChange && !cardsGenerated;
+  // 是否处于行范围框选状态（卡片池模式下始终允许框选新段）
+  const rangeSelecting = !!onRowRangeChange;
 
   // 点击行号：第一次定起始行，第二次定结束行（自动排序）
   const handleRowNumClick = (realIdx: number) => {
@@ -137,51 +137,42 @@ export default function ExcelView({
             className="min-w-0 flex-1 bg-transparent text-[11px] text-slate-700 outline-none placeholder:text-slate-400"
           />
         </div>
-        {/* LOOP 行范围框选 + 一键生成卡片 */}
+        {/* LOOP 行范围框选 + 追加生成卡片（卡片池模式：始终允许框选新段追加） */}
         {onRowRangeChange && records.length > 0 && (
-          cardsGenerated ? (
-            <span className="flex shrink-0 items-center gap-1">
-              <span className="inline-flex items-center gap-0.5 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700">
-                <Check className="h-2.5 w-2.5" />
-                已生成 {rowRange ? rowRange.end - rowRange.start + 1 : records.length} 张卡片
-              </span>
-              {onResetCards && (
-                <button
-                  onClick={onResetCards}
-                  className="rounded-md bg-slate-200 px-1.5 py-0.5 text-[9px] font-medium text-slate-600 hover:bg-slate-300"
-                  title="清除已生成卡片，重新框选行范围"
-                >
-                  重新框选
-                </button>
-              )}
+          <span className="flex shrink-0 items-center gap-1">
+            <span className={[
+              "text-[9px]",
+              rowRange ? "font-medium text-indigo-600" : "text-slate-400",
+            ].join(" ")}>
+              {rowRange
+                ? `已选 第${rowRange.start + 1}–${rowRange.end + 1}行 (${rowRange.end - rowRange.start + 1}行)`
+                : rangeAnchor != null
+                ? "再点一行定结束行"
+                : "点行号框选范围"}
             </span>
-          ) : (
-            <span className="flex shrink-0 items-center gap-1">
-              <span className={[
-                "text-[9px]",
-                rowRange ? "font-medium text-indigo-600" : "text-slate-400",
-              ].join(" ")}>
-                {rowRange
-                  ? `已选 第${rowRange.start + 1}–${rowRange.end + 1}行 (${rowRange.end - rowRange.start + 1}行)`
-                  : rangeAnchor != null
-                  ? "再点一行（行号或LOOP列）定结束行"
-                  : "点行号或LOOP列框选范围"}
-              </span>
-              {rowRange && onGenerateCards && (
-                <button
-                  onClick={onGenerateCards}
-                  className={[
-                    "flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-medium text-white transition-all",
-                    !cardsGenerated ? "btn-flash-attention" : "bg-emerald-600 hover:bg-emerald-700",
-                  ].join(" ")}
-                  title="按框选的行范围生成左侧人物卡片"
-                >
-                  <Users className="h-2.5 w-2.5" />
-                  一键生成卡片
-                </button>
-              )}
-            </span>
-          )
+            {rowRange && onGenerateCards && (
+              <button
+                onClick={onGenerateCards}
+                className={[
+                  "flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-medium text-white transition-all",
+                  cardsGenerated ? "bg-emerald-600 hover:bg-emerald-700" : "btn-flash-attention",
+                ].join(" ")}
+                title="按框选的行范围追加人物卡片到左侧列表"
+              >
+                <Users className="h-2.5 w-2.5" />
+                {cardsGenerated ? "追加卡片" : "一键生成卡片"}
+              </button>
+            )}
+            {cardsGenerated && onResetCards && (
+              <button
+                onClick={onResetCards}
+                className="rounded-md bg-slate-200 px-1.5 py-0.5 text-[9px] font-medium text-slate-600 hover:bg-slate-300"
+                title="清空所有卡片，重新开始"
+              >
+                清空卡片
+              </button>
+            )}
+          </span>
         )}
       </div>
       {/* 表格区 */}
