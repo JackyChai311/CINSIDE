@@ -93,6 +93,15 @@ export default function ExecutionBubbles({ steps, running, onAllGone }: Props) {
     // 即使没有气泡也要标记退出开始，触发 onAllGone
     exitStartedRef.current = true;
 
+    // 若运行结束时没有气泡，直接延迟触发 onAllGone（否则 bubbles.length 一直为 0，effect 不会重跑）
+    if (count === 0) {
+      const t = setTimeout(() => {
+        exitStartedRef.current = false;
+        onAllGone?.();
+      }, HOLD_DURATION);
+      return;
+    }
+
     // rAF 驱动退出动画：停留 → 逐个上移淡出 → 完全消失
     const totalExitTime = HOLD_DURATION + Math.max(0, count - 1) * EXIT_STAGGER + EXIT_DURATION + 500;
     const startTime = now;
