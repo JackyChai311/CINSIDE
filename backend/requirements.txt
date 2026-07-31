@@ -7,6 +7,8 @@ httpx>=0.27
 rapidfuzz>=3.6
 pydantic>=2.6
 markitdown[pdf]>=0.1.0
+PyMuPDF>=1.24
+Pillow>=10.0
 
 # 真实跑 Browser Use 时再装（依赖较重）
 # browser-use>=0.1.30
