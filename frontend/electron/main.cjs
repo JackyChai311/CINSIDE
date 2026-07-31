@@ -578,8 +578,11 @@ function applyBlockRules(side) {
   blockCssKey[side] = null;
   const rules = blockRulesBySide[side];
   if (!rules || rules.length === 0) {
-    // 无规则：移除旧CSS，并注入清理JS恢复被折叠的元素
+    // 无规则：移除旧CSS（insertCSS + style标签），并注入清理JS恢复被折叠的元素
     if (oldCssKey) view.webContents.removeInsertedCSS(oldCssKey).catch(() => {});
+    view.webContents.executeJavaScript(
+      "(function(){var s=document.getElementById('cinside-block-style');if(s)s.remove();})();"
+    ).catch(() => {});
     var cleanupJs = "(function() {\n" +
       "  document.querySelectorAll('.cinside-sidebar-hidden, .cinside-collapsed').forEach(function(el) {\n" +
       "    el.classList.remove('cinside-sidebar-hidden', 'cinside-sidebar-left', 'cinside-sidebar-right', 'cinside-collapsed', 'cinside-expanded');\n" +
@@ -641,8 +644,34 @@ function applyBlockRules(side) {
   cssParts.push(".cinside-sidebar-hidden.cinside-sidebar-right { transform: translateX(105%) !important; }");
   cssParts.push(".cinside-expanded { width: revert !important; min-width: revert !important; max-width: revert !important; overflow: revert !important; padding: revert !important; margin: revert !important; border: revert !important; flex: revert !important; transform: none !important; opacity: 1 !important; pointer-events: auto !important; }");
 
+  // 自动侧边栏折叠：直接用 CSS 折叠所有匹配选择器的元素（不等 JS 检测）
+  // 排除已被用户手动展开的 (.cinside-expanded)
+  if (autoSidebarDetect) {
+    var autoCollapseCss = collapseSelectors.filter(function(s) {
+      return s.indexOf("[class*=") >= 0 || s === "aside" || s.indexOf("[id*=") >= 0;
+    }).map(function(s) {
+      return s + ":not(.cinside-expanded) { width: 0 !important; min-width: 0 !important; max-width: 0 !important; overflow: hidden !important; padding: 0 !important; margin: 0 !important; border: 0 !important; flex: 0 0 0 !important; opacity: 0 !important; pointer-events: none !important; }";
+    });
+    if (autoCollapseCss.length > 0) {
+      cssParts.push(autoCollapseCss.join("\n"));
+    }
+  }
+
   if (cssParts.length > 0) {
-    view.webContents.insertCSS(cssParts.join("\n")).then(function (key) {
+    var fullCss = cssParts.join("\n");
+    // 方式1：executeJavaScript 同步注入 <style> 标签 —— 比 insertCSS 更快生效，
+    // 在 dom-ready 时能在页面渲染前立即应用 CSS，避免侧边栏先显示再被隐藏的闪烁
+    var styleInjectJs = "(function(){\n" +
+      "  var existing = document.getElementById('cinside-block-style');\n" +
+      "  if (existing) existing.remove();\n" +
+      "  var style = document.createElement('style');\n" +
+      "  style.id = 'cinside-block-style';\n" +
+      "  style.textContent = " + JSON.stringify(fullCss) + ";\n" +
+      "  (document.head || document.documentElement).appendChild(style);\n" +
+      "})();";
+    view.webContents.executeJavaScript(styleInjectJs).catch(() => {});
+    // 方式2：insertCSS 作为持久化备份（防止页面 JS 移除 <style> 标签）
+    view.webContents.insertCSS(fullCss).then(function (key) {
       blockCssKey[side] = key;
       if (oldCssKey) {
         view.webContents.removeInsertedCSS(oldCssKey).catch(() => {});
@@ -650,6 +679,9 @@ function applyBlockRules(side) {
     }).catch(() => {});
   } else if (oldCssKey) {
     view.webContents.removeInsertedCSS(oldCssKey).catch(() => {});
+    view.webContents.executeJavaScript(
+      "(function(){var s=document.getElementById('cinside-block-style');if(s)s.remove();})();"
+    ).catch(() => {});
   }
 
   // 折叠 JS：手动选择器折叠 + 可选的自动几何检测
@@ -714,9 +746,40 @@ function applyBlockRules(side) {
       "      if (seen.has(el) || el.dataset.cinsideAutoMarked === '1' || el.classList.contains('cinside-expanded')) return;\n" +
       "      seen.add(el);\n" +
       "      try {\n" +
+      "        // 测量自然尺寸：临时移除 CSS 折叠来测量\n" +
       "        var rect = el.getBoundingClientRect();\n" +
-      "        if (rect.width < 80 || rect.width > 500) return;\n" +
-      "        if (rect.height < vh * 0.4) return;\n" +
+      "        var naturalW = rect.width;\n" +
+      "        var naturalH = rect.height;\n" +
+      "        if (naturalW === 0 || naturalH === 0) {\n" +
+      "          // 被 CSS 预折叠了，临时彻底展开测量（覆盖所有被 CSS 隐藏的属性）\n" +
+      "          var savedStyle = el.getAttribute('style') || '';\n" +
+      "          el.style.setProperty('width', 'auto', 'important');\n" +
+      "          el.style.setProperty('min-width', '0', 'important');\n" +
+      "          el.style.setProperty('max-width', 'none', 'important');\n" +
+      "          el.style.setProperty('opacity', '1', 'important');\n" +
+      "          el.style.setProperty('overflow', 'visible', 'important');\n" +
+      "          el.style.setProperty('display', 'block', 'important');\n" +
+      "          el.style.setProperty('flex', '0 0 auto', 'important');\n" +
+      "          el.style.setProperty('transform', 'none', 'important');\n" +
+      "          el.style.setProperty('padding', '0', 'important');\n" +
+      "          el.style.setProperty('margin', '0', 'important');\n" +
+      "          el.style.setProperty('border', '0', 'important');\n" +
+      "          el.style.setProperty('pointer-events', 'auto', 'important');\n" +
+      "          var r2 = el.getBoundingClientRect();\n" +
+      "          naturalW = r2.width;\n" +
+      "          naturalH = r2.height;\n" +
+      "          var onLeft2 = r2.left <= 10;\n" +
+      "          var onRight2 = r2.right >= vw - 10;\n" +
+      "          // 恢复原始内联样式（CSS 预折叠规则仍通过 <style> 标签生效）\n" +
+      "          if (savedStyle) el.setAttribute('style', savedStyle); else el.removeAttribute('style');\n" +
+      "          if (naturalW < 80 || naturalW > 500) return;\n" +
+      "          if (naturalH < vh * 0.4) return;\n" +
+      "          if (!onLeft2 && !onRight2) return;\n" +
+      "          found.push({ el: el, side: onLeft2 ? 'left' : 'right', area: naturalW * naturalH });\n" +
+      "          return;\n" +
+      "        }\n" +
+      "        if (naturalW < 80 || naturalW > 500) return;\n" +
+      "        if (naturalH < vh * 0.4) return;\n" +
       "        var onLeft = rect.left <= 10;\n" +
       "        var onRight = rect.right >= vw - 10;\n" +
       "        if (!onLeft && !onRight) return;\n" +
@@ -728,8 +791,8 @@ function applyBlockRules(side) {
       "        }\n" +
       "        // 检查元素是否真正可见\n" +
       "        var cs = getComputedStyle(el);\n" +
-      "        if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return;\n" +
-      "        found.push({ el: el, side: onLeft ? 'left' : 'right', area: rect.width * rect.height });\n" +
+      "        if (cs.display === 'none' || cs.visibility === 'hidden') return;\n" +
+      "        found.push({ el: el, side: onLeft ? 'left' : 'right', area: naturalW * naturalH });\n" +
       "      } catch(e) {}\n" +
       "    });\n" +
       "    // 在同一侧取面积最大的（通常是最外层容器）\n" +
@@ -1621,6 +1684,95 @@ app.whenReady().then(() => {
     downloadCapture[side] = !!enabled;
     debugLog(`[download] set-download-capture side=${side}, enabled=${enabled}`);
     return { ok: true };
+  });
+
+  // ============ 本地文件提取：选择目录 + 读取文件 ============
+  // 选择本地文件夹，递归扫描所有文件，返回根目录绝对路径 + 文件相对路径列表
+  ipcMain.handle("pick-local-directory", async () => {
+    const { dialog } = require("electron");
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "选择包含学号子文件夹的根目录",
+      properties: ["openDirectory"],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true, rootPath: "", files: [] };
+    }
+    const rootPath = result.filePaths[0];
+    // 递归扫描目录，收集所有支持的文件类型
+    const supportedExts = [".jpg", ".jpeg", ".png", ".pdf", ".webp", ".bmp", ".gif", ".tif", ".tiff",
+      ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"];
+    const files = [];
+    function scanDir(dir, depth) {
+      if (depth > 6) return; // 限制递归深度
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          scanDir(fullPath, depth + 1);
+        } else if (entry.isFile()) {
+          const ext = path.extname(entry.name).toLowerCase();
+          if (supportedExts.indexOf(ext) < 0) continue;
+          let stat;
+          try { stat = fs.statSync(fullPath); } catch (e) { continue; }
+          // 相对路径（用 / 分隔，跨平台一致）
+          const relativePath = path.relative(rootPath, fullPath).replace(/\\/g, "/");
+          files.push({
+            relativePath: relativePath,
+            name: entry.name,
+            size: stat.size,
+            ext: ext,
+          });
+        }
+      }
+    }
+    scanDir(rootPath, 0);
+    debugLog(`[local-doc] picked directory: ${rootPath}, ${files.length} files`);
+    return { canceled: false, rootPath: rootPath, files: files };
+  });
+
+  // 读取本地文件，返回 dataUrl（base64）+ 文件名 + mime
+  // 参数: rootPath(根目录绝对路径), relativePath(相对路径，用 / 分隔)
+  ipcMain.handle("read-local-doc-file", (_event, rootPath, relativePath) => {
+    if (!rootPath || !relativePath) return { ok: false, error: "缺少路径参数" };
+    // 安全校验：拼接路径必须在 rootPath 下（防止路径遍历攻击）
+    const fullPath = path.resolve(rootPath, relativePath);
+    const normalizedRoot = path.resolve(rootPath);
+    if (!fullPath.startsWith(normalizedRoot + path.sep) && fullPath !== normalizedRoot) {
+      return { ok: false, error: "路径越界" };
+    }
+    if (!fs.existsSync(fullPath)) return { ok: false, error: "文件不存在" };
+    try {
+      const buffer = fs.readFileSync(fullPath);
+      const ext = path.extname(fullPath).toLowerCase();
+      const mimeMap = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+        ".pdf": "application/pdf", ".webp": "image/webp", ".bmp": "image/bmp",
+        ".gif": "image/gif", ".tif": "image/tiff", ".tiff": "image/tiff",
+        ".doc": "application/msword", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".ppt": "application/vnd.ms-powerpoint", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      };
+      const mime = mimeMap[ext] || "application/octet-stream";
+      const dataUrl = `data:${mime};base64,${buffer.toString("base64")}`;
+      const filename = path.basename(fullPath);
+      debugLog(`[local-doc] read file: ${relativePath} (${buffer.length} bytes)`);
+      return { ok: true, dataUrl: dataUrl, filename: filename, mime: mime, size: buffer.length };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  });
+
+  // 检查文件是否存在（用于 LOOP 执行时按多扩展名尝试）
+  // 参数: rootPath, relativePath
+  ipcMain.handle("check-local-file-exists", (_event, rootPath, relativePath) => {
+    if (!rootPath || !relativePath) return { exists: false };
+    const fullPath = path.resolve(rootPath, relativePath);
+    const normalizedRoot = path.resolve(rootPath);
+    if (!fullPath.startsWith(normalizedRoot + path.sep) && fullPath !== normalizedRoot) {
+      return { exists: false };
+    }
+    return { exists: fs.existsSync(fullPath) };
   });
 
   // === ??????????????? ===
