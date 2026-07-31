@@ -11,7 +11,7 @@ binaries = []
 hiddenimports = []
 
 # 添加核心依赖
-for pkg in ['uvicorn', 'fastapi', 'openpyxl', 'httpx', 'rapidfuzz', 'pydantic', 'markitdown']:
+for pkg in ['uvicorn', 'fastapi', 'openpyxl', 'httpx', 'rapidfuzz', 'pydantic', 'markitdown', 'fitz', 'PIL']:
     try:
         ret = collect_all(pkg)
         datas += ret[0]
@@ -34,6 +34,8 @@ hiddenimports += [
     'uvicorn.lifespan.on',
     'multipart',
     'PIL',
+    'PIL._tkinter_finder',
+    'fitz',
     'lxml',
     'pdfminer',
 ]
