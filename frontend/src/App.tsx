@@ -267,6 +267,7 @@ function DetachedBottomPanel() {
   const [hasConfirmClick, setHasConfirmClick] = useState(false);
   const [cardsGenerated, setCardsGenerated] = useState(false);
   const [rowRange, setRowRange] = useState<{ start: number; end: number } | null>(null);
+  const [hasCheckedBatch, setHasCheckedBatch] = useState(false);
 
   useEffect(() => {
     document.title = "核验结果";
@@ -317,6 +318,7 @@ function DetachedBottomPanel() {
         hasConfirmClick?: boolean;
         cardsGenerated?: boolean;
         rowRange?: { start: number; end: number } | null;
+        hasCheckedBatch?: boolean;
       } | null;
       if (!s || typeof s !== "object") return;
       if ("record" in s) setRecord(s.record ?? null);
@@ -360,6 +362,7 @@ function DetachedBottomPanel() {
       if ("hasConfirmClick" in s) setHasConfirmClick(Boolean(s.hasConfirmClick));
       if ("cardsGenerated" in s) setCardsGenerated(Boolean(s.cardsGenerated));
       if ("rowRange" in s) setRowRange(s.rowRange ?? null);
+      if ("hasCheckedBatch" in s) setHasCheckedBatch(Boolean(s.hasCheckedBatch));
     });
     // 主动请求主窗口广播当前状态（解决广播早于监听注册的时序竞态）
     window.electronAPI?.panelSendAction("request-state", "bottom");
@@ -480,6 +483,8 @@ function DetachedBottomPanel() {
               running={running}
               appMode={appMode}
               addingStepMode={addingStepMode}
+              onSaveToBatch={() => window.electronAPI?.panelSendAction("save-to-batch", undefined)}
+              hasCheckedBatch={hasCheckedBatch}
             />
             {/* 步骤设置面板：下面板分离后，TeachingGuide 在此渲染（而非主窗口） */}
             {teachingPhase !== "idle" && !selectMode && (
@@ -952,8 +957,12 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   const [batchResults, setBatchResults] = useState<Record<string, BatchResult>>({});
   const [batchTargets, setBatchTargets] = useState<ApplicantRecord[]>([]); // 本次LOOP的执行顺序（从选中卡片开始）
   const batchStopRef = useRef(false);
-  const runBatchRef = useRef<((tplOverride?: WorkflowTemplate) => Promise<void>) | null>(null);
+  const runBatchRef = useRef<((tplOverride?: WorkflowTemplate, targetIds?: string[]) => Promise<void>) | null>(null);
   const [logSignal, setLogSignal] = useState(0); // 递增触发ResultsPanel切换到日志tab
+  /** 已勾选的卡片记录 ID 集合（用于批量跑 LOOP） */
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  /** 适配LOOP到勾选卡片：打开 SkillPanel 时标记，选中后只跑勾选的卡片 */
+  const adaptLoopToCheckedRef = useRef(false);
 
   // ============ 任务队列：多段批量执行 ============
   const [taskQueue, setTaskQueue] = useState<QueuedTask[]>([]);
@@ -1466,7 +1475,11 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   const wsRef = useRef<WebSocket | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
 
-  const selected = records.find((r) => r.record_id === selectedId) || null;
+  // 卡片池 state 提前声明，供 selected 查找（卡片池模式下卡片 record_id 带后缀，不在 records 里）
+  const [cardPool, setCardPool] = useState<ApplicantRecord[]>([]);
+
+  // 当前选中卡片：优先从卡片池查找（卡片池模式），回退到原始 records（兼容旧流程）
+  const selected = cardPool.find((r) => r.record_id === selectedId) || records.find((r) => r.record_id === selectedId) || null;
 
   // 当前卡片的提取文件列表 + 激活文件（依赖 selected，需在 selected 定义后计算）
   const currentRecordId = selected?.record_id || "_default";
@@ -1597,9 +1610,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     try {
       const r = await api.listRecords();
       setRecords(r.records);
-      // 记录刷新后回到框选状态：人物卡片需框选 LOOP 行范围后一键生成
+      // 记录刷新后重置框选范围（让用户重新框选新段），但不清空已有卡片池
       setRowRange(null);
-      setCardsGenerated(false);
       // 如果当前没有选中记录，或选中的记录在新列表中不存在，自动选择第一条
       // 确保 LOOP 第一行始终可用（绑定输入框时填入 previewValue）
       if (!selectedId || !r.records.find((x) => x.record_id === selectedId)) {
@@ -1613,32 +1625,87 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   };
 
   const clearRecords = async () => {
-    // 只清空验证/任务状态，保留 Excel 数据（records）和视图模式
+    // 只清空验证/任务状态，保留 Excel 数据（records）和卡片池
     setSelectedId(null);
     setRowRange(null);
-    setCardsGenerated(false);
   };
 
-  // 左侧人物卡片 = 框选生成后的记录子集；未生成时不显示卡片
-  const cardRecords = useMemo(() => {
-    if (!cardsGenerated) return [];
-    if (rowRange) return records.slice(rowRange.start, rowRange.end + 1);
-    return records;
-  }, [cardsGenerated, rowRange, records]);
+  // 左侧人物卡片池：支持从不同 Excel / 不同段持续追加，卡片数量越来越多
+  // cardPool state 已在上方提前声明（供 selected 查找）
 
-  // 一键生成人物卡片：按框选的行范围切片
+  // 卡片-LOOP 关联映射：record_id -> { loopId, loopName, setAt }
+  // 当用户在群组面板选择"自定义"或"适配已有循环"后，群组内所有卡片关联该 LOOP
+  // 有 LOOP 的卡片自动聚拢到列表前部（按设置时间升序），无 LOOP 的卡片排后
+  const [cardLoopMap, setCardLoopMap] = useState<Record<string, { loopId: string; loopName: string; setAt: number }>>({});
+  // 执行游标：控制"运行"按钮只跑前 N 张已设置 LOOP 的卡片；null 表示跑全部
+  const [runCursor, setRunCursor] = useState<number | null>(null);
+
+  // cardRecords：已保存批次放顶部（按保存时间setAt升序，第一批最上，第二批紧随其后），未保存卡片放底部
+  const cardRecords = useMemo(() => {
+    // 收集所有批次，按保存时间排序
+    const loopOrderMap: Record<string, number> = {};
+    const batchSetAt: Record<string, number> = {};
+    for (const r of cardPool) {
+      const info = cardLoopMap[r.record_id];
+      if (info && !(info.loopId in batchSetAt)) {
+        batchSetAt[info.loopId] = info.setAt;
+      }
+    }
+    const sortedLoopIds = Object.keys(batchSetAt).sort((a, b) => batchSetAt[a] - batchSetAt[b]);
+    sortedLoopIds.forEach((id, idx) => { loopOrderMap[id] = idx; });
+
+    // 按顺序收集每个批次的卡片（保持cardPool内的相对顺序）
+    const result: ApplicantRecord[] = [];
+    const placedLoopIds = new Set<string>();
+    for (const loopId of sortedLoopIds) {
+      if (placedLoopIds.has(loopId)) continue;
+      placedLoopIds.add(loopId);
+      for (const rr of cardPool) {
+        if (cardLoopMap[rr.record_id]?.loopId === loopId) {
+          result.push(rr);
+        }
+      }
+    }
+    // 最后追加未保存的卡片
+    for (const r of cardPool) {
+      if (!cardLoopMap[r.record_id]) {
+        result.push(r);
+      }
+    }
+    return result;
+  }, [cardPool, cardLoopMap]);
+
+  // 已设置 LOOP 的卡片数（用于游标范围上限）
+  const loopCardCount = useMemo(
+    () => cardPool.filter((r) => cardLoopMap[r.record_id]).length,
+    [cardPool, cardLoopMap]
+  );
+
+  // 一键生成人物卡片：按框选的行范围切片，追加到卡片池
   const generateCards = useCallback(() => {
     if (!rowRange || records.length === 0) return;
+    const slice = records.slice(rowRange.start, rowRange.end + 1);
+    // 深拷贝 + 生成唯一 record_id（避免不同 Excel 的 ID 冲突）
+    const newCards: ApplicantRecord[] = slice.map((r) => ({
+      ...r,
+      fields: { ...r.fields },
+      passport_fields: r.passport_fields ? { ...r.passport_fields } : undefined,
+      // 生成唯一 ID：原 ID + 短随机后缀
+      record_id: `${r.record_id}__${Math.random().toString(36).slice(2, 8)}`,
+    }));
+    setCardPool((prev) => [...prev, ...newCards]);
     setCardsGenerated(true);
-    const first = records[rowRange.start];
-    if (first) setSelectedId(first.record_id);
-    setSuccessToast(`已生成 ${rowRange.end - rowRange.start + 1} 张人物卡片`);
-  }, [rowRange, records, setSuccessToast]);
+    setSelectedId(newCards[0].record_id);
+    setSuccessToast(`已追加 ${newCards.length} 张人物卡片（共 ${cardPool.length + newCards.length} 张）`);
+  }, [rowRange, records, cardPool.length, setSuccessToast]);
 
-  // 重新框选：清除已生成卡片，回到框选状态
+  // 重新框选：清除已生成卡片池，回到框选状态
   const resetCards = useCallback(() => {
     setCardsGenerated(false);
     setRowRange(null);
+    setCardPool([]);
+    setCardLoopMap({});
+    setRunCursor(null);
   }, []);
 
   // ============ 任务队列操作 ============
@@ -2810,8 +2877,23 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     window.electronAPI?.viewClearHighlight("left").catch(() => {});
     window.electronAPI?.viewClearHighlight("right").catch(() => {});
     if (avatarMode) exitAvatarMode();
+    // 若是从"自定义（勾选卡片）"入口进入的教学，完成后把 LOOP 关联到勾选的卡片
+    if (checkedIds.size > 0) {
+      // 持久化保存 tpl 到 skills 列表，确保后续游标运行时 getSkillById 能找到
+      // （第二批教学完成会覆盖 workflowTemplateRef，第一批的 tpl 必须持久化才能保留）
+      saveSkill(tpl);
+      setSkillVersion((v) => v + 1);
+      const now = Date.now();
+      setCardLoopMap((prev) => {
+        const next = { ...prev };
+        checkedIds.forEach((id) => {
+          next[id] = { loopId: tpl.id, loopName: tpl.name, setAt: now };
+        });
+        return next;
+      });
+    }
     return tpl;
-  }, [pickedMarks, selected, selectMode, avatarMode, setError, appMode]);
+  }, [pickedMarks, selected, selectMode, avatarMode, setError, appMode, checkedIds]);
 
   // 教学模式向导：完成教学并立即开始 LOOP 批量执行
   const finishTeachingAndRunBatch = useCallback(() => {
@@ -2819,11 +2901,83 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     // 直接把模板传给 runBatch，不等 React state commit，彻底消除竞态
     if (tpl && runBatchRef.current) {
       console.log("[finishTeachingAndRunBatch] 直接调用 runBatch(tpl)");
-      runBatchRef.current(tpl);
+      // 若是从"自定义（勾选卡片）"入口进入的教学，只跑勾选的卡片
+      const ids = checkedIds.size > 0 ? Array.from(checkedIds) : undefined;
+      runBatchRef.current(tpl, ids);
     } else {
       console.error("[finishTeachingAndRunBatch] tpl 或 runBatchRef.current 为空!", !!tpl, !!runBatchRef.current);
     }
-  }, [finishTeaching]);
+  }, [finishTeaching, checkedIds]);
+
+  /**
+   * 保存当前步骤配置到这批勾选的卡片（分割批次用）
+   * - 构建当前 pickedMarks 为 tpl 并持久化到 skills 列表
+   * - 把 tpl 关联到勾选的卡片（cardLoopMap），触发自动聚拢排序
+   * - 清空 pickedMarks 但保留教学状态，方便用户继续为下一批卡片配置新步骤
+   */
+  const handleSaveToBatch = useCallback(() => {
+    if (checkedIds.size === 0) {
+      setError("请先勾选一批卡片再保存");
+      return;
+    }
+    if (pickedMarks.length === 0) {
+      setError("请先配置至少一个步骤再保存");
+      return;
+    }
+    // 构建模板（复用 buildTemplateFromMarks 的分类逻辑）
+    const dataSourceMarks = pickedMarks.filter((m) =>
+      (m.action === "click" || m.action === "input") &&
+      (m.clickPhase === "pre" || m.clickPhase === "post" || m.workflow === "data-source")
+    );
+    const reviewMarks = pickedMarks.filter((m) => !m.clickPhase && m.workflow === "review");
+    const entryMarks = pickedMarks.filter((m) => !m.clickPhase && m.workflow === "entry");
+    const hasSearchSteps = pickedMarks.some((m) => m.action === "input" && !!m.variableField);
+    const hasSubmitStep = entryMarks.some((m) => m.action === "click");
+    const tpl: WorkflowTemplate = {
+      id: `tpl-${Date.now()}`,
+      name: `LOOP批次 ${new Date().toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`,
+      createdAt: Date.now(),
+      sourceRecordId: selected?.record_id,
+      mode: appMode,
+      dataSourceMarks,
+      reviewMarks,
+      entryMarks,
+      hasSearchSteps,
+      hasSubmitStep,
+    };
+    // 持久化保存 tpl（确保游标运行时 getSkillById 能找到）
+    saveSkill(tpl);
+    setSkillVersion((v) => v + 1);
+    // 关联到勾选的卡片
+    const now = Date.now();
+    setCardLoopMap((prev) => {
+      const next = { ...prev };
+      checkedIds.forEach((id) => {
+        next[id] = { loopId: tpl.id, loopName: tpl.name, setAt: now };
+      });
+      return next;
+    });
+    setSuccessToast(`已保存到 ${checkedIds.size} 张卡片：${tpl.name}`);
+    // 清空步骤标记和勾选，重置教学交互状态到idle，方便选下一批重新开始配置
+    // 注意：selectedExcelColumn/cardsGenerated 等全局配置保留，不需要每批重选
+    setPickedMarks([]);
+    setMappings([]);
+    setCheckedIds(new Set());
+    setTeachingPhase("idle");
+    setSelectMode(false);
+    setPickTarget(null);
+    setRightPicked(null);
+    setLeftPicked(null);
+    setWorkflowTemplate(null);
+    setPendingAction("none");
+    setAvatarMode(false);
+    setBindInputSide(null);
+    setNextClickLabel(null);
+    setAddingStepMode(null);
+    setAddingClickMode(false);
+    setAddingClickPhase(null);
+    setAddingDocExtractMode(false);
+  }, [checkedIds, pickedMarks, cardLoopMap, selected, appMode, setError, setSuccessToast]);
 
   // ============ SKILL 保存与执行 ============
   const buildTemplateFromMarks = useCallback((name: string, icon?: string): WorkflowTemplate => {
@@ -2896,9 +3050,122 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     lastTemplateRef.current = tpl; // 持久化保存
     setTeachingPhase("done");
     setShowSkillPanel(false);
-    if (runBatchRef.current) {
-      runBatchRef.current(tpl);
+    // 若是从"适配LOOP到勾选卡片"入口打开的，只跑勾选的卡片
+    const ids = adaptLoopToCheckedRef.current ? Array.from(checkedIds) : undefined;
+    // 适配入口下，同时把 LOOP 关联到勾选的卡片（触发自动聚拢排序）
+    if (adaptLoopToCheckedRef.current && ids) {
+      const now = Date.now();
+      setCardLoopMap((prev) => {
+        const next = { ...prev };
+        ids.forEach((id) => {
+          next[id] = { loopId: tpl.id, loopName: tpl.name, setAt: now };
+        });
+        return next;
+      });
     }
+    adaptLoopToCheckedRef.current = false;
+    if (runBatchRef.current) {
+      runBatchRef.current(tpl, ids);
+    }
+  }, [checkedIds]);
+
+  /**
+   * 勾选卡片后点"自定义"：进入「步骤设置 · 元素选择」模式
+   * 以勾选的第一张卡片作为教学样本（selectedId 切到它，输入框绑定时填入它的数据）
+   * 教学完成后（finishTeaching）自动把 LOOP 关联到这批勾选的卡片
+   */
+  const handleRunCheckedLoop = useCallback(() => {
+    if (checkedIds.size === 0) return;
+    // 按卡片池当前顺序取勾选的第一张卡作为教学样本
+    const firstChecked = cardRecords.find((r) => checkedIds.has(r.record_id));
+    if (!firstChecked) {
+      setError("未找到勾选的卡片");
+      return;
+    }
+    // 切到第一张勾选卡作为教学样本
+    setSelectedId(firstChecked.record_id);
+    // 启动教学（步骤设置模式），以该卡为样本，重置教学交互状态
+    // 注意：selectedExcelColumn 是全局LOOP列配置，保留不重置；cards 已存在无需重复生成
+    setPickedMarks([]);
+    setMappings([]);
+    setTeachingPhase(appMode === "entry" ? "entry" : "data-source");
+    setWorkflowTemplate(null);
+    setBatchResults({});
+    setError(null);
+    setSelectMode(true);
+    setCardsGenerated(true);
+    // 已选中 LOOP 列时自动切到网页视图，方便拾取网页元素
+    if (selectedExcelColumnRef.current && leftViewMode === "excel") {
+      setLeftViewMode("web");
+      setTimeout(() => window.dispatchEvent(new Event("resize")), 50);
+    }
+    setPendingAction("none");
+    setAvatarMode(false);
+    setBindInputSide(null);
+    setNextClickLabel(null);
+    setAddingStepMode(null);
+    setAddingClickMode(false);
+    setAddingClickPhase(null);
+    setAddingDocExtractMode(false);
+    // loop 模式下不限定初始拾取侧（等用户选 Excel 列后绑定输入框）；review 用 right；entry 用 left
+    setPickTarget(appMode === "review" ? "right" : appMode === "entry" ? "left" : null);
+    setRightPicked(null);
+    setLeftPicked(null);
+    setSuccessToast(`已进入步骤设置，样本：${firstChecked.fields.name || firstChecked.fields.fullname || firstChecked.fields.passport_no || firstChecked.record_id}（共 ${checkedIds.size} 张勾选）`);
+  }, [checkedIds, cardRecords, appMode, setError, setSuccessToast, leftViewMode]);
+
+  /** 勾选卡片后打开已保存 LOOP 列表，选择适配 */
+  const handleAdaptLoopToChecked = useCallback(() => {
+    if (checkedIds.size === 0) return;
+    adaptLoopToCheckedRef.current = true;
+    setShowSkillPanel(true);
+  }, [checkedIds]);
+
+  /** 游标运行：跑前 N 张已设置 LOOP 的卡片（按 setAt 升序），多 LOOP 分组串联执行 */
+  const handleRunLoopsWithCursor = useCallback(async () => {
+    const loopCards = cardRecords.filter((r) => cardLoopMap[r.record_id]);
+    if (loopCards.length === 0) {
+      setError("请先在群组面板设置 LOOP 再运行");
+      return;
+    }
+    const N = runCursor ?? loopCards.length;
+    const targets = loopCards.slice(0, Math.max(1, Math.min(N, loopCards.length)));
+    // 按 loopId 分组（保持 setAt 顺序）
+    const groups = new Map<string, { tpl: WorkflowTemplate; ids: string[] }>();
+    const currentTpl = workflowTemplateRef.current ?? lastTemplateRef.current;
+    for (const r of targets) {
+      const info = cardLoopMap[r.record_id];
+      if (!info) continue;
+      const tpl = currentTpl && currentTpl.id === info.loopId
+        ? currentTpl
+        : getSkillById(info.loopId);
+      if (!tpl) continue;
+      if (!groups.has(info.loopId)) groups.set(info.loopId, { tpl, ids: [] });
+      groups.get(info.loopId)!.ids.push(r.record_id);
+    }
+    if (groups.size === 0) {
+      setError("未找到关联的 LOOP 模板，请重新设置");
+      return;
+    }
+    // 串联执行每组（单组直接调用，多组按顺序执行）
+    for (const [, g] of groups) {
+      await runBatchRef.current?.(g.tpl, g.ids);
+    }
+  }, [cardRecords, cardLoopMap, runCursor]);
+
+  /** 清除某张卡片的 LOOP 关联（取消其参与游标运行） */
+  const handleClearCardLoop = useCallback((recordId: string) => {
+    setCardLoopMap((prev) => {
+      const next = { ...prev };
+      delete next[recordId];
+      return next;
+    });
+  }, []);
+
+  /** 清除所有卡片的 LOOP 关联 */
+  const handleClearAllCardLoops = useCallback(() => {
+    setCardLoopMap({});
+    setRunCursor(null);
   }, []);
 
   // 中止教学
@@ -3654,9 +3921,9 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   }, [executeMark, compareFieldsForRecord, checkViewOnline, waitNetworkRestore, waitPageSettled]);
 
   // ============ 批量执行：对所有卡片按模板执行，从当前选中卡片开始 ============
-  const runBatch = useCallback(async (tplOverride?: WorkflowTemplate) => {
+  const runBatch = useCallback(async (tplOverride?: WorkflowTemplate, targetIds?: string[]) => {
     const tpl = tplOverride ?? workflowTemplateRef.current ?? lastTemplateRef.current;
-    console.log("[runBatch] 🚀 开始执行，tpl=", !!tpl, "records.length=", records.length, "selectedId=", selectedId);
+    console.log("[runBatch] 🚀 开始执行，tpl=", !!tpl, "records.length=", records.length, "selectedId=", selectedId, "targetIds=", targetIds?.length);
     if (!tpl) {
       console.warn("[runBatch] ❌ 无 workflowTemplate，退出");
       return;
@@ -3707,12 +3974,16 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     window.electronAPI?.viewClearHighlight("right").catch(() => {});
 
     // 从当前选中的卡片开始排序（第一条LOOP = 当前选中卡片）
+    // 若传入了 targetIds（勾选模式），则只执行勾选的卡片，按原列表顺序排列
     const selectedIdx = cardRecords.findIndex((r) => r.record_id === selectedId);
     const startIdx = selectedIdx >= 0 ? selectedIdx : 0;
-    const targets = [
+    const allTargets = [
       ...cardRecords.slice(startIdx),
       ...cardRecords.slice(0, startIdx),
     ];
+    const targets = targetIds && targetIds.length > 0
+      ? allTargets.filter((r) => targetIds.includes(r.record_id))
+      : allTargets;
     setBatchTargets(targets);
 
     // 快照教学时左右网页的 URL：每条 LOOP 开始前重置回这个搜索页，
@@ -4412,8 +4683,15 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   // ============ 功能3：点击「查看」按钮 → 执行步骤5(收尾)→步骤2+3(搜索+前置点击)，定位到该卡片页面 ============
   const runSingleRecord = useCallback(
     async (recordId: string) => {
-      // 优先使用 ref 中的 workflowTemplate（避免 setState 异步导致的旧值），再回退到持久化模板，最后从 pickedMarks 构建
+      // 优先使用 ref 中的 workflowTemplate（避免 setState 异步导致的旧值），再回退到持久化模板
       let tpl = workflowTemplateRef.current || workflowTemplate || lastTemplateRef.current;
+      // 如果当前没有活动模板，查找该卡片所属的已保存批次模板
+      if (!tpl) {
+        const loopInfo = cardLoopMap[recordId];
+        if (loopInfo) {
+          tpl = getSkillById(loopInfo.loopId);
+        }
+      }
       if (!tpl) {
         // 未保存模板时，从当前 pickedMarks 构建临时模板（智能分类，不严格依赖workflow字段）
         const allMarks = pickedMarksRef.current.filter((m) => m.action === "click" || m.action === "input");
@@ -4455,10 +4733,11 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         lastTemplateRef.current = tpl;
       }
       if (batchRunning || singleRunning) return;
-      const recordIndex = records.findIndex((r) => r.record_id === recordId);
+      // 从 cardPool 查找记录（cardPool 包含所有已生成的卡片，records 在重新导入 Excel 时会被替换）
+      const recordIndex = cardPool.findIndex((r) => r.record_id === recordId);
       if (recordIndex < 0) return;
-      const record = records[recordIndex];
-      const recordName = record.fields.name || record.record_id;
+      const record = cardPool[recordIndex];
+      const recordName = record.fields.name || record.fields.fullname || record.fields.passport_no || record.fields.student_id || record.record_id;
 
       setSelectedId(recordId);
       setHasRunOnce(true);
@@ -4553,7 +4832,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         window.electronAPI?.viewClearHighlight("right").catch(() => {});
       }
     },
-    [workflowTemplate, appMode, batchRunning, singleRunning, records, selectMode, avatarMode, docPickMode, exitSelectMode, exitAvatarMode, executeTemplateForRecord, setError, setSuccessToast]
+    [workflowTemplate, appMode, batchRunning, singleRunning, cardPool, cardLoopMap, selectMode, avatarMode, docPickMode, exitSelectMode, exitAvatarMode, executeTemplateForRecord, setError, setSuccessToast]
   );
 
   // ============ SKILL 拖拽到人物卡片：加载 SKILL 并在指定记录上单卡执行 ============
@@ -4568,10 +4847,10 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         setError("当前有任务正在执行，请等待完成");
         return;
       }
-      const recordIndex = records.findIndex((r) => r.record_id === recordId);
+      const recordIndex = cardPool.findIndex((r) => r.record_id === recordId);
       if (recordIndex < 0) return;
-      const record = records[recordIndex];
-      const recordName = record.fields.name || record.record_id;
+      const record = cardPool[recordIndex];
+      const recordName = record.fields.name || record.fields.fullname || record.fields.passport_no || record.fields.student_id || record.record_id;
 
       setSelectedId(recordId);
       setWorkflowTemplate(tpl);
@@ -4671,7 +4950,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         window.electronAPI?.viewClearHighlight("right").catch(() => {});
       }
     },
-    [batchRunning, singleRunning, records, selectMode, avatarMode, docPickMode, exitSelectMode, exitAvatarMode, executeTemplateForRecord, setError, setSuccessToast]
+    [batchRunning, singleRunning, cardPool, selectMode, avatarMode, docPickMode, exitSelectMode, exitAvatarMode, executeTemplateForRecord, setError, setSuccessToast]
   );
 
   // 用户在左侧浏览器点击了头像元素
@@ -5889,6 +6168,9 @@ type: info.type,
         case "exit-select-mode":
           exitSelectMode();
           break;
+        case "save-to-batch":
+          handleSaveToBatch();
+          break;
         case "request-state": {
           // 分离窗口 mount 后主动请求当前状态（解决广播早于监听注册的时序竞态）
           const reqSide = typeof payload === "string" ? payload : "";
@@ -5942,6 +6224,7 @@ type: info.type,
               hasConfirmClick: pickedMarks.some((m) => m.action === "click" && m.label.startsWith("确认人物")),
               cardsGenerated,
               rowRange,
+              hasCheckedBatch: checkedIds.size > 0,
             });
           }
           break;
@@ -5949,7 +6232,7 @@ type: info.type,
       }
     });
     return off;
-  }, [refreshRecords, clearRecords, removeMapping, removePickedMark, clearPickedMarks, replayAll, stopReplay, advanceToReviewPhase, abortTeaching, goBackTeachingPhase, browserLeftDetached, browserRightDetached, bottomDetached, leftUrl, rightUrl, selectMode, pickTarget, avatarMode, pendingAction, teachingPhase, selected, mappings, result, report, loopReports, steps, shots, running, pickedMarks, replaying, replayCursor, rightPicked, leftPicked, selectedExcelColumn, bindInputSide, nextClickLabel, addingStepMode, addingClickMode, addingDocExtractMode, cardsGenerated, rowRange, pickLeftFromWeb, pickLeftFromExcel, resetMappingRound, saveMapping, startBindBothInputs, exitBindInputs, startConfirmPerson, startAddingReviewSteps, startAddingEntrySteps, exitAddingStepMode, startAddClickStep, exitAddClickMode, undoLastStep, startAddDocExtract, exitAddDocExtractMode, requestDocFileExtract, exitSelectMode, setShowSaveSkill, setSaveSkillRunAfter, handleQuickSaveLoop]);
+  }, [refreshRecords, clearRecords, removeMapping, removePickedMark, clearPickedMarks, replayAll, stopReplay, advanceToReviewPhase, abortTeaching, goBackTeachingPhase, browserLeftDetached, browserRightDetached, bottomDetached, leftUrl, rightUrl, selectMode, pickTarget, avatarMode, pendingAction, teachingPhase, selected, mappings, result, report, loopReports, steps, shots, running, pickedMarks, replaying, replayCursor, rightPicked, leftPicked, selectedExcelColumn, bindInputSide, nextClickLabel, addingStepMode, addingClickMode, addingDocExtractMode, cardsGenerated, rowRange, pickLeftFromWeb, pickLeftFromExcel, resetMappingRound, saveMapping, startBindBothInputs, exitBindInputs, startConfirmPerson, startAddingReviewSteps, startAddingEntrySteps, exitAddingStepMode, startAddClickStep, exitAddClickMode, undoLastStep, startAddDocExtract, exitAddDocExtractMode, requestDocFileExtract, exitSelectMode, setShowSaveSkill, setSaveSkillRunAfter, handleQuickSaveLoop, handleSaveToBatch]);
 
   // Excel 拾取：把字段包装成 PickedElementInfo，并打 tag 区分来源
   const onExcelPicked = (info: ExcelPickedField) => {
@@ -6050,8 +6333,9 @@ type: info.type,
       dataSourceCount: pickedMarks.filter((m) => m.workflow === "data-source").length,
       reviewCount: pickedMarks.filter((m) => m.workflow === "review").length,
       entryCount: pickedMarks.filter((m) => m.workflow === "entry").length,
+      hasCheckedBatch: checkedIds.size > 0,
     });
-  }, [bottomDetached, selected, mappings, result, report, loopReports, steps, shots, running, pickedMarks, replaying, replayCursor, teachingPhase, appMode, selectMode]);
+  }, [bottomDetached, selected, mappings, result, report, loopReports, steps, shots, running, pickedMarks, replaying, replayCursor, teachingPhase, appMode, selectMode, checkedIds]);
 
   // 浏览器面板脱离时，广播 URL 和 picking 状态
   useEffect(() => {
@@ -6729,9 +7013,22 @@ type: info.type,
               onPickDocument={handleDocFilePick}
               docExtracting={docFileExtracting}
               onDropSkill={runSkillOnRecord}
+              checkedIds={checkedIds}
+              onCheckChange={setCheckedIds}
+              onRunCheckedLoop={handleRunCheckedLoop}
+              onAdaptLoopToChecked={handleAdaptLoopToChecked}
+              onReorder={setCardPool}
+              cardLoopMap={cardLoopMap}
+              runCursor={runCursor}
+              onRunCursorChange={setRunCursor}
+              onRunLoopsWithCursor={handleRunLoopsWithCursor}
+              onClearCardLoop={handleClearCardLoop}
+              onClearAllCardLoops={handleClearAllCardLoops}
               emptyHint={
-                records.length > 0 && !cardsGenerated
-                  ? "已在 Excel 载入数据\n请在 Excel 视图点行号框选 LOOP 行范围\n然后点击「一键生成卡片」"
+                records.length > 0 && cardPool.length === 0
+                  ? "已在 Excel 载入数据\n请在 Excel 视图点行号框选 LOOP 行范围\n然后点击「一键生成卡片」\n可多次框选不同段/不同Excel追加卡片"
+                  : cardPool.length === 0
+                  ? "上传 Excel/CSV 后这里会列出所有记录"
                   : undefined
               }
             />
@@ -7264,6 +7561,25 @@ type: info.type,
                     : (addingStepMode || addingClickMode) ? "field" as const
                     : null
                   }
+                  preClickMarks={pickedMarks.filter((m) => (m.action === "click" && m.clickPhase === "pre") || (m.action === "input" && m.workflow === "data-source"))}
+                  postClickMarks={pickedMarks.filter((m) => m.action === "click" && m.clickPhase === "post")}
+                  reviewMappings={mappings}
+                  onRemoveMark={removePickedMark}
+                  onPreviewMark={(mark) => {
+                    // 在对应网页高亮显示元素位置：点击卡片 → 网页上弹出定位框
+                    const side = mark.side || "right";
+                    const selector = mark.selector;
+                    if (!selector) return;
+                    const label = mark.label || "";
+                    rlog(`[onPreviewMark] 在${side}侧网页高亮元素: ${selector}`);
+                    window.electronAPI?.viewHighlightBoxes(side, [{ selector, status: "pending", label }]).catch(() => {});
+                    // 2 秒后自动清除高亮
+                    setTimeout(() => {
+                      window.electronAPI?.viewHighlightBoxes(side, []).catch(() => {});
+                    }, 2000);
+                  }}
+                  onSaveToBatch={handleSaveToBatch}
+                  hasCheckedBatch={checkedIds.size > 0}
                 />
               </div>
 
