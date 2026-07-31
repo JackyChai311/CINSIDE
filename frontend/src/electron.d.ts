@@ -104,6 +104,11 @@ export interface ElectronAPI {
   onDownloadCaptured: (callback: (data: { side: string; filename: string; dataUrl: string; size: number; mime: string; path: string }) => void) => () => void;
   onDownloadFailed: (callback: (data: { side: string; filename: string; error?: string; state?: string }) => void) => () => void;
 
+  // === 本地文件提取：选择目录 + 读取文件 ===
+  pickLocalDirectory: () => Promise<{ canceled: boolean; rootPath: string; files: Array<{ relativePath: string; name: string; size: number; ext: string }> }>;
+  readLocalDocFile: (rootPath: string, relativePath: string) => Promise<{ ok: boolean; dataUrl?: string; filename?: string; mime?: string; size?: number; error?: string }>;
+  checkLocalFileExists: (rootPath: string, relativePath: string) => Promise<{ exists: boolean }>;
+
   // 接收 BrowserView 内部消息
   onViewMessage: (callback: (msg: ViewMessage) => void) => () => void;
 
