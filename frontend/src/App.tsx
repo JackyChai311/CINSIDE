@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
+  Activity,
   ArrowLeft,
   ArrowLeftRight,
   Bot,
@@ -73,6 +74,9 @@ import DocFillDialog from "./components/DocFillDialog";
 import SkillPanel from "./components/SkillPanel";
 import SaveSkillDialog from "./components/SaveSkillDialog";
 import CredentialsPanel from "./components/CredentialsPanel";
+import DocLocalExtractConfig from "./components/DocLocalExtractConfig";
+import ExecutionBubbles from "./components/ExecutionBubbles";
+import ExecutionPanel from "./components/ExecutionPanel";
 import { saveSkill, getSkillById } from "./lib/skills";
 import { getBlockRules, addBlockRule, removeBlockRule, getHost, type BlockRule, SIDEBAR_AUTO_SELECTORS, getSidebarAutoCollapse, setSidebarAutoCollapse } from "./lib/blockRules";
 import { getAllCredentials, addCredential, removeCredential, type Credential } from "./lib/credentials";
@@ -471,11 +475,10 @@ function DetachedBottomPanel() {
               resultPresent={resultPresent}
               report={report}
               loopReports={loopReports}
-              steps={steps}
               shots={shots}
+              steps={steps}
               running={running}
               appMode={appMode}
-              logEndRef={logEndRef}
               addingStepMode={addingStepMode}
             />
             {/* 步骤设置面板：下面板分离后，TeachingGuide 在此渲染（而非主窗口） */}
@@ -645,6 +648,9 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [leftPanelOpen, setLeftPanelOpen] = useState(true);
   const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
+  const [hasRunOnce, setHasRunOnce] = useState(false);
+  const [executionPanelOpen, setExecutionPanelOpen] = useState(false); // 右侧执行进度面板
+  const [edgeButtonVisible, setEdgeButtonVisible] = useState(false); // 气泡消失后才显示侧边按钮
   // 面板脱离：true 表示该面板被弹出到独立窗口，主窗口不渲染对应区域
   const [leftDetached, setLeftDetached] = useState(false);
   const [bottomDetached, setBottomDetached] = useState(false);
@@ -818,6 +824,14 @@ const [docLocalFiles, setDocLocalFiles] = useState<File[]>([]);
 const [docFileBindField, setDocFileBindField] = useState<string | null>(null);
 // 本地文件选择 input ref
 const docLocalFileInputRef = useRef<HTMLInputElement>(null);
+// 本地文件提取（目录模式）：根目录绝对路径
+const [docLocalRootPath, setDocLocalRootPath] = useState<string | null>(null);
+// 本地文件提取（目录模式）：目录内文件列表（相对路径）
+const [docLocalDirFiles, setDocLocalDirFiles] = useState<Array<{ relativePath: string; name: string; size: number; ext: string }>>([]);
+// 本地文件提取（目录模式）：用户点选的样本文件相对路径
+const [docLocalSamplePath, setDocLocalSamplePath] = useState<string | null>(null);
+// 本地文件提取（目录模式）：推断出的路径模板（如 {student_id}/护照）
+const [docLocalPattern, setDocLocalPattern] = useState<string | null>(null);
 // 文件提取审查面板数据（原图 + 提取字段框 + 同名图片对比）
 const [docExtractPanel, setDocExtractPanel] = useState<{
   imageUrl: string;
@@ -997,11 +1011,12 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   // ============ 功能3：单卡 LOOP 执行（点击人物卡片 → 自动导航到该人页面） ============
   const [singleRunning, setSingleRunning] = useState(false);
 
-  // 审查流操作时自动收窄底部面板，退出后恢复用户之前的高度
+  // 审查流操作时自动收窄底部面板，退出后恢复用户之前的高度；教学模式下自动打开面板
   const savedBottomHeightRef = useRef<number>(20);
   useEffect(() => {
     if (selectMode) {
-      // 进入选择模式：保存当前高度并收窄
+      // 进入选择模式：自动打开面板，保存当前高度并收窄
+      setBottomPanelOpen(true);
       savedBottomHeightRef.current = bottomPanelHeight;
       setBottomPanelHeight(34);
     } else {
@@ -1010,7 +1025,6 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectMode]);
-
 
   // === ???????? ===
   useEffect(() => {
@@ -1414,6 +1428,13 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
 
   // 核验状态
   const [running, setRunning] = useState(false);
+
+  // 运行开始时隐藏侧边按钮，气泡全部消失后再显示
+  const isAnyRunning = running || singleRunning || batchRunning || queueRunning;
+  useEffect(() => {
+    if (isAnyRunning) setEdgeButtonVisible(false);
+  }, [isAnyRunning]);
+
   const [steps, setSteps] = useState<VerificationStep[]>([]);
   const [shots, setShots] = useState<ScreenshotEvent[]>([]);
   const [result, setResult] = useState<VerificationResult | null>(null);
@@ -2378,7 +2399,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     docLocalFileInputRef.current?.click();
   }, []);
 
-  // 处理本地文件选择
+  // 处理本地文件选择（保留兼容：多选文件模式）
   const handleDocLocalFilesSelected = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
@@ -2397,10 +2418,87 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     setDocLocalFiles((prev) => prev.filter((f) => f.name !== name));
   }, []);
 
+  // === 目录模式：选择本地文件夹 ===
+  const pickLocalDirectory = useCallback(async () => {
+    if (!window.electronAPI?.pickLocalDirectory) return;
+    const result = await window.electronAPI.pickLocalDirectory();
+    if (result.canceled || !result.rootPath) return;
+    setDocLocalRootPath(result.rootPath);
+    setDocLocalDirFiles(result.files);
+    setDocLocalSamplePath(null);
+    setDocLocalPattern(null);
+    rlog(`[docExtract] 选择目录: ${result.rootPath}, ${result.files.length} 个文件`);
+  }, []);
+
+  // === 目录模式：点选样本文件，自动推断路径模板 ===
+  // 逻辑：取样本文件相对路径 → 去扩展名 → 分段 → 匹配 Excel 字段值 → 替换为 {field} 占位符
+  const selectDocLocalSample = useCallback((relativePath: string) => {
+    setDocLocalSamplePath(relativePath);
+    if (!docFileBindField) {
+      setDocLocalPattern(null);
+      return;
+    }
+    // 去掉扩展名
+    const noExt = relativePath.replace(/\.[^.]+$/, "");
+    const segments = noExt.split("/");
+    // 收集所有 Excel 记录中该字段的值，用于匹配路径段
+    const fieldValues = new Set<string>();
+    records.forEach((r) => {
+      const v = r.fields?.[docFileBindField];
+      if (v && String(v).trim()) fieldValues.add(String(v).trim());
+    });
+    // 遍历路径段，找到第一个等于某个字段值的段，替换为 {field}
+    let found = false;
+    const patternSegments = segments.map((seg) => {
+      if (!found && fieldValues.has(seg)) {
+        found = true;
+        return `{${docFileBindField}}`;
+      }
+      return seg;
+    });
+    // 如果没匹配到字段值，默认替换第一段（通常是学号目录名）
+    if (!found && segments.length > 1) {
+      patternSegments[0] = `{${docFileBindField}}`;
+    }
+    setDocLocalPattern(patternSegments.join("/"));
+    rlog(`[docExtract] 样本: ${relativePath} → 模板: ${patternSegments.join("/")}`);
+  }, [docFileBindField, records]);
+
   // 确认本地文件提取配置：保存为一个 mark
   const confirmDocLocalExtract = useCallback(() => {
+    // 目录模式：根目录 + 路径模板
+    if (docLocalRootPath && docLocalPattern && docFileBindField) {
+      const side: "left" | "right" = addingStepMode === "entry" ? "left" : "right";
+      const workflow: "entry" | "review" = addingStepMode === "entry" ? "entry" : "review";
+      addPickedMark({
+        side,
+        source: "web",
+        selector: `local-doc-extract:${docFileBindField}`,
+        label: `本地文件提取 · 路径模板「${docLocalPattern}」（根目录 ${docLocalDirFiles.length} 文件）`,
+        workflow,
+        action: "click",
+        recordId: selected?.record_id,
+        docExtract: true,
+        docSource: "local",
+        docFileField: docFileBindField,
+        docLocalRootPath,
+        docLocalPattern,
+        docLocalSamplePath: docLocalSamplePath || undefined,
+      });
+      setSuccessToast(`已添加本地文件提取：模板「${docLocalPattern}」，LOOP 执行时自动按字段匹配`);
+      setAddingDocExtractMode(false);
+      setDocExtractSource(null);
+      setDocLocalFiles([]);
+      setDocFileBindField(null);
+      setDocLocalRootPath(null);
+      setDocLocalDirFiles([]);
+      setDocLocalSamplePath(null);
+      setDocLocalPattern(null);
+      return;
+    }
+    // 兼容旧模式：多选文件
     if (docLocalFiles.length === 0) {
-      setError("请先上传文件");
+      setError("请先选择文件夹或上传文件");
       return;
     }
     if (!docFileBindField) {
@@ -2409,7 +2507,6 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     }
     const side: "left" | "right" = addingStepMode === "entry" ? "left" : "right";
     const workflow: "entry" | "review" = addingStepMode === "entry" ? "entry" : "review";
-    // 文件列表只存名称（实际文件数据太大，不能存到 localStorage；执行时从匹配的文件中读取）
     const fileNames = docLocalFiles.map((f) => f.name);
     addPickedMark({
       side,
@@ -2425,18 +2522,21 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       docLocalFiles: fileNames.map((n) => ({ name: n })),
     });
     setSuccessToast(`已添加本地文件提取步骤：按「${docFileBindField}」字段匹配 ${docLocalFiles.length} 个文件`);
-    // 退出文件提取模式
     setAddingDocExtractMode(false);
     setDocExtractSource(null);
     setDocLocalFiles([]);
     setDocFileBindField(null);
-  }, [docLocalFiles, docFileBindField, addingStepMode, selected, addPickedMark, setError, setSuccessToast]);
+  }, [docLocalRootPath, docLocalPattern, docLocalSamplePath, docLocalDirFiles.length, docFileBindField, docLocalFiles, addingStepMode, selected, addPickedMark, setError, setSuccessToast]);
 
   const exitAddDocExtractMode = useCallback(() => {
     setAddingDocExtractMode(false);
     setDocExtractSource(null);
     setDocLocalFiles([]);
     setDocFileBindField(null);
+    setDocLocalRootPath(null);
+    setDocLocalDirFiles([]);
+    setDocLocalSamplePath(null);
+    setDocLocalPattern(null);
     window.electronAPI?.viewStopPicking("left").catch(() => {});
     window.electronAPI?.viewStopPicking("right").catch(() => {});
     // 关闭下载捕获
@@ -3090,6 +3190,58 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     if (mark.action === "click") {
       // 文件提取步骤
       if (mark.docExtract) {
+        // === local 模式（目录模式）：按路径模板 + 字段值拼路径，自动尝试多扩展名 → 读取文件 → OCR ===
+        if (mark.docSource === "local" && mark.docLocalRootPath && mark.docLocalPattern) {
+          console.log(`[executeMark] DOC-LOCAL side=${side}, pattern=${mark.docLocalPattern}, field=${mark.docFileField}`);
+          // 1. 取当前记录的字段值（如学号 123456）
+          const fieldValue = String(record.fields?.[mark.docFileField || ""] ?? "").trim();
+          if (!fieldValue) {
+            rlog(`[executeMark] 本地文件提取失败: 记录缺少字段「${mark.docFileField}」的值`);
+            return;
+          }
+          // 2. 替换模板中的 {field} 占位符
+          const basePath = mark.docLocalPattern.replace(/\{[^}]+\}/g, fieldValue);
+          // 3. 按扩展名顺序尝试读取文件
+          const tryExts = [".jpg", ".jpeg", ".png", ".pdf", ".webp", ".bmp", ".gif", ".tif", ".tiff",
+            ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"];
+          let readResult: { ok: boolean; dataUrl?: string; filename?: string; mime?: string; size?: number; error?: string } | null = null;
+          for (const ext of tryExts) {
+            const tryPath = basePath + ext;
+            const existsRes = await window.electronAPI?.checkLocalFileExists(mark.docLocalRootPath, tryPath);
+            if (existsRes?.exists) {
+              readResult = await window.electronAPI?.readLocalDocFile(mark.docLocalRootPath, tryPath) || null;
+              if (readResult?.ok) {
+                rlog(`[executeMark] 本地文件命中: ${tryPath}`);
+                break;
+              }
+            }
+          }
+          if (!readResult || !readResult.ok || !readResult.dataUrl) {
+            rlog(`[executeMark] 本地文件提取失败: 路径模板「${basePath}」所有扩展名均未找到文件`);
+            return;
+          }
+          // 4. 调 OCR 提取（后端会自动做图像预处理：EXIF 旋转 + 裁白边）
+          const file = dataUrlToFile(readResult.dataUrl, readResult.filename || "local-doc");
+          const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
+          const targetFields = mappedFields.length > 0
+            ? mappedFields
+            : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender"];
+          try {
+            const result = await api.extractDocumentFile(file, targetFields);
+            setDocExtractPanel({
+              imageUrl: readResult.dataUrl,
+              filename: result.filename,
+              method: result.method,
+              text: result.text,
+              fields: result.fields,
+              side,
+              workflow: side === "left" ? "entry" : "review",
+            });
+          } catch (e) {
+            rlog(`[executeMark] 本地文件 OCR 失败: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          return;
+        }
         // === web-download 模式：多步点击触发下载 → 捕获文件 → OCR ===
         if (mark.docSource === "web-download") {
           console.log(`[executeMark] DOC-DOWNLOAD side=${side}, selector=${mark.selector}`);
@@ -4309,6 +4461,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       const recordName = record.fields.name || record.record_id;
 
       setSelectedId(recordId);
+      setHasRunOnce(true);
       setSingleRunning(true);
       setLogSignal((s) => s + 1);
       setError(null);
@@ -4426,6 +4579,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       lastTemplateRef.current = tpl; // 持久化保存
       setTeachingPhase("done");
       setShowSkillPanel(false);
+      setHasRunOnce(true);
       setSingleRunning(true);
       setLogSignal((s) => s + 1);
       setError(null);
@@ -5659,8 +5813,7 @@ type: info.type,
           advanceToReviewPhase();
           break;
         case "teaching-finish":
-          setSaveSkillRunAfter(false);
-          setShowSaveSkill(true);
+          finishTeachingAndRunBatch();
           break;
         case "teaching-abort":
           abortTeaching();
@@ -5941,6 +6094,7 @@ type: info.type,
       setSelectedId(currentSelected.record_id);
     }
     if (!currentSelected && !canRunWithoutRecord) return;
+    setHasRunOnce(true);
     setRunning(true);
     setSteps([]);
     setShots([]);
@@ -6463,7 +6617,7 @@ type: info.type,
           const stepCount = appMode === "entry" ? enCount : dsCount + rvCount;
           return (
             <button
-              onClick={() => { setSaveSkillRunAfter(true); setShowSaveSkill(true); }}
+              onClick={finishTeachingAndRunBatch}
               disabled={batchRunning || stepCount === 0}
               className={[
                 "flex items-center gap-1.5 rounded-md px-3 py-0.5 text-[11px] font-medium text-white transition-all",
@@ -6613,7 +6767,7 @@ type: info.type,
         >
           {/* 两个浏览器并排（脱离后对应位置留空或单列），可拖拽调整比例 */}
           <div
-            className="flex min-h-0 min-w-0 flex-1 gap-1 overflow-hidden"
+            className={`flex min-h-0 min-w-0 flex-1 gap-1 overflow-hidden transition-[padding] duration-500 ${executionPanelOpen ? "pr-[360px]" : edgeButtonVisible ? "pr-12" : ""}`}
             onMouseMove={(e) => {
               if (!draggingRef.current) return;
               const rect = e.currentTarget.getBoundingClientRect();
@@ -7035,6 +7189,12 @@ type: info.type,
                     docFileBindField={docFileBindField}
                     onSetDocFileBindField={setDocFileBindField}
                     onConfirmDocLocalExtract={confirmDocLocalExtract}
+                    onPickLocalDirectory={pickLocalDirectory}
+                    docLocalRootPath={docLocalRootPath}
+                    docLocalDirFiles={docLocalDirFiles}
+                    docLocalSamplePath={docLocalSamplePath}
+                    docLocalPattern={docLocalPattern}
+                    onSelectDocLocalSample={selectDocLocalSample}
                     onDocFileExtract={requestDocFileExtract}
                     cardsGenerated={cardsGenerated}
                     rowRange={rowRange}
@@ -7058,20 +7218,19 @@ type: info.type,
                 </div>
               )}
 
-              {/* 结果面板 ResultsPanel */}
+              {/* 结果面板 ResultsPanel（验证报告三栏） */}
               <div className="min-h-0 min-w-0 flex-1">
                 <ResultsPanel
                   comparisons={result?.comparisons || []}
                   resultPresent={!!result}
                   report={report}
                   loopReports={loopReports}
-                  steps={steps}
                   shots={shots}
-                  running={running}
+                  steps={steps}
+                  running={running || singleRunning || batchRunning || queueRunning}
                   appMode={appMode}
-                  logEndRef={logEndRef}
                   onDetach={() => detachPanel("bottom")}
-                  switchToLogSignal={logSignal}
+                  onClose={selectMode ? undefined : () => setBottomPanelOpen(false)}
                   docExtracts={currentDocExtracts}
                   activeDocIndex={safeDocIndex}
                   onSelectDocIndex={setActiveDocIndex}
@@ -7079,6 +7238,32 @@ type: info.type,
                   switchToDocSignal={docSignal}
                   addingStepMode={addingStepMode}
                   onPickExtractedField={onPickExtractedField}
+                  docLocalConfigContent={addingDocExtractMode && (docExtractSource === "choose" || docExtractSource === "local" || docExtractSource === "web") ? (
+                    <DocLocalExtractConfig
+                      mode={docExtractSource}
+                      excelFields={excelFields}
+                      selectedExcelColumn={selectedExcelColumn}
+                      docFileBindField={docFileBindField}
+                      onSetDocFileBindField={setDocFileBindField}
+                      onChooseWeb={chooseDocExtractWeb}
+                      onChooseLocal={chooseDocExtractLocal}
+                      onExitChoose={exitAddDocExtractMode}
+                      webStepCount={pickedMarks.filter((m) => m.docExtractClick).length}
+                      onExitWebMode={exitAddDocExtractMode}
+                      docLocalRootPath={docLocalRootPath}
+                      docLocalDirFiles={docLocalDirFiles}
+                      docLocalSamplePath={docLocalSamplePath}
+                      docLocalPattern={docLocalPattern}
+                      onPickLocalDirectory={pickLocalDirectory}
+                      onSelectDocLocalSample={selectDocLocalSample}
+                      onConfirm={confirmDocLocalExtract}
+                    />
+                  ) : undefined}
+                  focusPanel={
+                    addingDocExtractMode ? "doc" as const
+                    : (addingStepMode || addingClickMode) ? "field" as const
+                    : null
+                  }
                 />
               </div>
 
@@ -7167,6 +7352,12 @@ type: info.type,
                     docFileBindField={docFileBindField}
                     onSetDocFileBindField={setDocFileBindField}
                     onConfirmDocLocalExtract={confirmDocLocalExtract}
+                    onPickLocalDirectory={pickLocalDirectory}
+                    docLocalRootPath={docLocalRootPath}
+                    docLocalDirFiles={docLocalDirFiles}
+                    docLocalSamplePath={docLocalSamplePath}
+                    docLocalPattern={docLocalPattern}
+                    onSelectDocLocalSample={selectDocLocalSample}
                     onDocFileExtract={requestDocFileExtract}
                     cardsGenerated={cardsGenerated}
                     rowRange={rowRange}
@@ -7417,6 +7608,49 @@ type: info.type,
             取消
           </button>
         </div>
+      )}
+
+      {/* ============ LOOP 执行气泡通知（运行时从右侧冒出，面板打开时隐藏） ============ */}
+      {!executionPanelOpen && (
+        <ExecutionBubbles
+          steps={steps}
+          running={running || singleRunning || batchRunning || queueRunning}
+          onAllGone={() => {
+            if (hasRunOnce) setEdgeButtonVisible(true);
+          }}
+        />
+      )}
+
+      {/* ============ 右侧独立「执行进度」面板 ============ */}
+      <ExecutionPanel
+        open={executionPanelOpen}
+        steps={steps}
+        logEndRef={logEndRef}
+        onClose={() => {
+          setExecutionPanelOpen(false);
+          if (hasRunOnce && !isAnyRunning) setEdgeButtonVisible(true);
+        }}
+      />
+
+      {/* ============ 右侧边缘「执行进度」浮动按钮（气泡消失后显示，面板打开时隐藏） ============ */}
+      {hasRunOnce && edgeButtonVisible && !selectMode && !executionPanelOpen && (
+        <button
+          onClick={() => setExecutionPanelOpen(true)}
+          className={[
+            "fixed right-0 top-1/2 z-[9996] -translate-y-1/2 transition-all duration-500",
+            "flex items-center gap-2 rounded-l-xl px-3 py-4 shadow-lg backdrop-blur-sm",
+            "border border-r-0 border-slate-200 bg-white/90 hover:bg-white",
+            "animate-slide-in-right",
+          ].join(" ")}
+          title="查看执行进度"
+        >
+          <div className="flex flex-col items-center gap-1">
+            <Activity className="h-4 w-4 text-brand-600" />
+            <span className="[writing-mode:vertical-rl] text-[11px] font-semibold tracking-wider text-slate-700">
+              执行进度
+            </span>
+          </div>
+        </button>
       )}
     </div>
   );
