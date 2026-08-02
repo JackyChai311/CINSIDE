@@ -115,6 +115,14 @@ export interface PickedElementInfo {
   href?: string;
   /** 图片地址（IMG 元素或其子 IMG），文档提取用 */
   src?: string;
+  /** 元素 accept 属性（file input 用） */
+  accept?: string;
+  /** 关联的 file input 选择器（点击上传按钮/label/容器时自动探测），绑定上传用 */
+  fileInputSelector?: string;
+  /** 关联 file input 的 accept 属性 */
+  fileInputAccept?: string;
+  /** 拾取来自弹窗 BrowserView（window.open 弹窗），执行时路由到弹窗 */
+  fromPopup?: boolean;
 }
 
 const STATUS_RING: Record<NonNullable<Props["verifyStatus"]>, string> = {
@@ -441,6 +449,12 @@ export default function BrowserPane({
           text: p.text,
           isContentEditable: p.isContentEditable,
           rect: p.rect,
+          href: p.href,
+          src: p.src,
+          accept: p.accept,
+          fileInputSelector: p.fileInputSelector,
+          fileInputAccept: p.fileInputAccept,
+          fromPopup: (msg as { fromPopup?: boolean }).fromPopup === true,
         });
       }
     });
