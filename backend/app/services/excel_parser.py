@@ -33,7 +33,7 @@ import io
 import os
 from typing import Iterable
 
-from ..models import ApplicantRecord
+from ..models import ApplicantRecord, VERIFY_FIELDS
 from .excel_ai_parser import ai_detect_column_mapping
 
 # 字段别名映射：归一化成英文 key
@@ -41,8 +41,11 @@ _FIELD_ALIASES: dict[str, str] = {
     "name": "name", "姓名": "name", "fullname": "name", "applicant": "name",
     "student": "name", "studentname": "name", "studentname": "name", "full name": "name",
     "applicant name": "name", "chinese name": "name", "english name": "name",
-    "passport_no": "passport_no", "护照号": "passport_no", "passport_number": "passport_no", "passport": "passport_no",
+    "大写": "name", "英文名": "name", "英文姓名": "name", "姓名大写": "name", "拼音": "name",
+    "passport_no": "passport_no", "护照号": "passport_no", "护照": "passport_no",
+    "passport_number": "passport_no",
     "passport no": "passport_no", "passport number": "passport_no", "passportno": "passport_no",
+    "passport no.": "passport_no", "护照号码": "passport_no",
     "nationality": "nationality", "国籍": "nationality",
     "birth_date": "birth_date", "出生日期": "birth_date", "birthday": "birth_date", "dob": "birth_date",
     "birth date": "birth_date", "date of birth": "birth_date",
@@ -95,8 +98,12 @@ def _safe_sheet_prefix(name: str) -> str:
     return s or "extra"
 
 
-def _row_to_record(idx: int, row: dict[str, str], ai_mapping: dict[str, str] | None = None) -> ApplicantRecord:
+def _row_to_record(idx: int, row: dict[str, str], ai_mapping: dict[str, str] | None = None) -> tuple[ApplicantRecord, dict[str, str]]:
+    """把一行数据转成 ApplicantRecord，同时返回 (record, detected_column_map)。
+    detected_column_map: 原始列名 -> 标准字段名（如 {"大写": "name", "护照": "passport_no"}）
+    """
     norm: dict[str, str] = {}
+    col_map: dict[str, str] = {}
     for k, v in row.items():
         if v is None:
             continue
@@ -110,7 +117,14 @@ def _row_to_record(idx: int, row: dict[str, str], ai_mapping: dict[str, str] | N
             continue
         if key in ("university_url", "university_name", "unknown", ""):
             continue
-        norm[key] = val
+        # 1. 始终保留原始列名（用户在Excel中看到的表头）
+        norm[k] = val
+        # 2. 如果标准化 key 与原始列名不同，也存标准化 key（兼容现有代码直接访问 fields["name"] 等）
+        if key != k:
+            norm[key] = val
+            # 记录自动识别的列映射（原始列 -> 标准字段）
+            if key in VERIFY_FIELDS or key in ("student_id",):
+                col_map[k] = key
 
     university_url = row.get("university_url") or row.get("大学申请页URL") or row.get("url") or ""
     university_name = row.get("university_name") or row.get("大学名称") or row.get("university") or ""
@@ -121,7 +135,7 @@ def _row_to_record(idx: int, row: dict[str, str], ai_mapping: dict[str, str] | N
         fields=norm,
         university_url=university_url.strip() or None,
         university_name=university_name.strip() or None,
-    )
+    ), col_map
 
 
 def _read_xlsx_rows(source: str | bytes) -> tuple[list[str], list[list]]:
@@ -260,28 +274,41 @@ def _rows_to_records(
     header_keys: list[str],
     data_rows: list[list],
     ai_mapping: dict[str, str] | None = None,
-) -> list[ApplicantRecord]:
-    """把 xlsx 的 list-of-list 数据行转成 ApplicantRecord。"""
+) -> tuple[list[ApplicantRecord], dict[str, str]]:
+    """把 xlsx 的 list-of-list 数据行转成 ApplicantRecord。
+    返回 (records, detected_column_map)。
+    """
     records: list[ApplicantRecord] = []
+    detected_map: dict[str, str] = {}
     for i, row in enumerate(data_rows, start=1):
         d = {header_keys[k]: ("" if row[k] is None else str(row[k])) for k in range(len(header_keys)) if k < len(row)}
-        rec = _row_to_record(i, d, ai_mapping)
+        rec, col_map = _row_to_record(i, d, ai_mapping)
+        # 合并列映射（只取第一次出现的，避免后续行覆盖）
+        for k, v in col_map.items():
+            if k not in detected_map:
+                detected_map[k] = v
         if rec.fields:
             records.append(rec)
-    return records
+    return records, detected_map
 
 
 def _rowdicts_to_records(
     row_dicts: list[dict[str, str]],
     ai_mapping: dict[str, str] | None = None,
-) -> list[ApplicantRecord]:
-    """把 csv 的 list-of-dict 行转成 ApplicantRecord。"""
+) -> tuple[list[ApplicantRecord], dict[str, str]]:
+    """把 csv 的 list-of-dict 行转成 ApplicantRecord。
+    返回 (records, detected_column_map)。
+    """
     records: list[ApplicantRecord] = []
+    detected_map: dict[str, str] = {}
     for i, row in enumerate(row_dicts, start=1):
-        rec = _row_to_record(i, row, ai_mapping)
+        rec, col_map = _row_to_record(i, row, ai_mapping)
+        for k, v in col_map.items():
+            if k not in detected_map:
+                detected_map[k] = v
         if rec.fields:
             records.append(rec)
-    return records
+    return records, detected_map
 
 
 def _build_record_indexes(records: list[ApplicantRecord]) -> dict[str, dict[str, ApplicantRecord]]:
@@ -339,20 +366,27 @@ def _merge_extra_row(
             key = _normalize_key(k)
         if key in ("university_url", "university_name", "unknown", ""):
             continue
-        # 关联键本身不重复写入
-        if key in _JOIN_KEYS or _normalize_key(key) in _JOIN_KEYS:
+        # 关联键本身不重复写入（用原始列名和标准化key都检查）
+        if k in _JOIN_KEYS or key in _JOIN_KEYS or _normalize_key(k) in _JOIN_KEYS:
             continue
-        # 主表已有该字段且非空：避免覆盖，加 sheet 前缀
-        if key in target.fields and target.fields[key]:
-            target.fields[f"{prefix}_{key}"] = val
-        else:
-            target.fields[key] = val
+        # 原始列名（带prefix）作为存储key
+        raw_prefixed_key = f"{prefix}_{k}"
+        std_prefixed_key = f"{prefix}_{key}" if key != k else raw_prefixed_key
+        # 主表已有该原始列名（带prefix）且非空：跳过
+        if raw_prefixed_key in target.fields and target.fields[raw_prefixed_key]:
+            continue
+        target.fields[raw_prefixed_key] = val
+        # 如果标准化key与原始列名不同，也存一份带prefix的标准化key
+        if std_prefixed_key != raw_prefixed_key:
+            target.fields[std_prefixed_key] = val
         merged += 1
     return merged
 
 
-def parse_excel_or_csv(path: str) -> list[ApplicantRecord]:
-    """根据后缀分流解析（同步版本，用硬编码别名表，不调用 AI）。"""
+def parse_excel_or_csv(path: str) -> tuple[list[ApplicantRecord], dict[str, str]]:
+    """根据后缀分流解析（同步版本，用硬编码别名表，不调用 AI）。
+    返回 (records, detected_column_map)。
+    """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".csv":
         header_keys, row_dicts = _read_csv_rows(path)
@@ -363,9 +397,9 @@ def parse_excel_or_csv(path: str) -> list[ApplicantRecord]:
         # xlsx：读取所有 sheet
         sheets = _read_xlsx_all_sheets(path)
     if not sheets:
-        return []
+        return [], {}
     main_name, main_header, main_rows = sheets[0]
-    records = _rows_to_records(main_header, main_rows)
+    records, detected_map = _rows_to_records(main_header, main_rows)
     if len(sheets) > 1 and records:
         indexes = _build_record_indexes(records)
         for sheet_name, header, rows in sheets[1:]:
@@ -375,23 +409,24 @@ def parse_excel_or_csv(path: str) -> list[ApplicantRecord]:
                 if matched:
                     _merge_extra_row(matched, d, sheet_name)
                 # 关联不上的行直接跳过（避免污染主表）
-    return records
+    return records, detected_map
 
 
-async def parse_bytes(content: bytes, filename: str) -> list[ApplicantRecord]:
+async def parse_bytes(content: bytes, filename: str) -> tuple[list[ApplicantRecord], dict[str, str]]:
     """从前端上传的字节流解析（异步版本，优先用 AI 识别字段映射）。
 
     多 sheet 处理：
     - 主 sheet 调 AI 识别列映射
     - 附加 sheet 也调 AI 识别（如果配置了 LLM），否则用硬编码别名表
     - 通过 name / passport_no / student_id 把附加字段合并到主 record
+    返回 (records, detected_column_map)，其中 detected_column_map 是原始列名 -> 标准字段名的映射。
     """
     ext = os.path.splitext(filename)[1].lower()
 
     if ext == ".csv":
         header_keys, row_dicts = _read_csv_rows(content)
         if not row_dicts:
-            return []
+            return [], {}
         # 准备样例数据给 AI（前 3 行）
         sample_rows = [list(r.values()) for r in row_dicts[:3]]
         ai_mapping = await ai_detect_column_mapping(header_keys, sample_rows)
@@ -403,13 +438,13 @@ async def parse_bytes(content: bytes, filename: str) -> list[ApplicantRecord]:
     else:
         sheets = _read_xlsx_all_sheets(content)
     if not sheets:
-        return []
+        return [], {}
 
     # 第一个非空 sheet 作为主表
     main_name, main_header, main_rows = sheets[0]
     main_sample = main_rows[:3]
     main_ai_mapping = await ai_detect_column_mapping(main_header, main_sample)
-    records = _rows_to_records(main_header, main_rows, main_ai_mapping or None)
+    records, detected_map = _rows_to_records(main_header, main_rows, main_ai_mapping or None)
 
     # 其他 sheet 的字段合并到匹配的 record
     if len(sheets) > 1 and records:
@@ -430,8 +465,12 @@ async def parse_bytes(content: bytes, filename: str) -> list[ApplicantRecord]:
                     if non_empty:
                         # 标记来源 sheet
                         non_empty["_source_sheet"] = sheet_name
-                        rec = _row_to_record(len(records) + 1, non_empty, extra_ai_mapping or None)
+                        rec, extra_map = _row_to_record(len(records) + 1, non_empty, extra_ai_mapping or None)
                         if rec.fields:
                             records.append(rec)
+                            # 合并附加sheet的列映射
+                            for k, v in extra_map.items():
+                                if k not in detected_map:
+                                    detected_map[k] = v
 
-    return records
+    return records, detected_map
