@@ -24,7 +24,7 @@ async def upload_excel(file: UploadFile = File(...)):
     if not content:
         raise HTTPException(400, "empty file")
     try:
-        records = await parse_bytes(content, file.filename or "upload.xlsx")
+        records, detected_map = await parse_bytes(content, file.filename or "upload.xlsx")
     except RuntimeError as e:
         raise HTTPException(500, str(e))
     except Exception as e:
@@ -34,6 +34,7 @@ async def upload_excel(file: UploadFile = File(...)):
     return {
         "count": len(records),
         "records": [r.model_dump() for r in records],
+        "detected_column_map": detected_map,
     }
 
 
@@ -44,7 +45,7 @@ async def upload_excel_right(file: UploadFile = File(...)):
     if not content:
         raise HTTPException(400, "empty file")
     try:
-        records = await parse_bytes(content, file.filename or "upload.xlsx")
+        records, detected_map = await parse_bytes(content, file.filename or "upload.xlsx")
     except RuntimeError as e:
         raise HTTPException(500, str(e))
     except Exception as e:
@@ -54,6 +55,7 @@ async def upload_excel_right(file: UploadFile = File(...)):
     return {
         "count": len(records),
         "records": [r.model_dump() for r in records],
+        "detected_column_map": detected_map,
     }
 
 
