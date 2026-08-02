@@ -372,6 +372,8 @@ function attachViewMessageRelay(view, side) {
           return;
         }
         debugLog(`[main] relay ${side}: kind=${payload.kind}, tag=${payload.tag || "n/a"}, selector=${payload.selector || "n/a"}`);
+        // 右键菜单请求：前端需要返回 Excel 列列表，这里需要特殊处理
+        // 前端通过 view-message 收到后，用 executeJavaScript 回传列列表到 picker 脚本
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send("view-message", { side, payload });
         }
@@ -392,6 +394,20 @@ function attachViewMessageRelay(view, side) {
 // 当网页调用 window.open() 时，创建一个覆盖在父 view 上的 BrowserView
 // 支持：拾取元素、高亮、关闭弹窗
 const popupViews = {}; // side -> { view, win, url }
+
+// 弹窗居中：在父 view bounds 内按 82% 缩放并居中（最小 520x400，不超过父 view）
+function computePopupBounds(parentBounds) {
+  const pw = parentBounds.width || 800;
+  const ph = parentBounds.height || 600;
+  const w = Math.max(Math.min(Math.round(pw * 0.82), pw), Math.min(520, pw));
+  const h = Math.max(Math.min(Math.round(ph * 0.82), ph), Math.min(400, ph));
+  return {
+    x: (parentBounds.x || 0) + Math.round((pw - w) / 2),
+    y: (parentBounds.y || 0) + Math.round((ph - h) / 2),
+    width: w,
+    height: h,
+  };
+}
 
 function createPopupView(parentSide, url, win) {
   // 先关闭已有的弹窗
@@ -485,13 +501,13 @@ view.webContents.on("console-message", (_e, level, message) => {
   if (message.startsWith(tag)) {
     try {
       const payload = JSON.parse(message.slice(tag.length).trim());
-      // 发给弹窗所在的窗口
+      // 发给弹窗所在的窗口（fromPopup 标记：拾取结果来自弹窗，执行时路由到弹窗 view）
       if (win && !win.isDestroyed()) {
-        win.webContents.send("view-message", { side: parentSide, payload });
+        win.webContents.send("view-message", { side: parentSide, payload, fromPopup: true });
       }
       // 如果是脱离窗口的弹窗，也要发给主窗口
       if (win !== mainWindow && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("view-message", { side: parentSide, payload });
+        mainWindow.webContents.send("view-message", { side: parentSide, payload, fromPopup: true });
       }
     } catch (_) {}
   }
@@ -505,9 +521,9 @@ view.webContents.on("console-message", (_e, level, message) => {
     return { action: "deny" };
   });
 
-  // 加载 URL 并设置 bounds（与父 view 完全重合）
+  // 加载 URL 并设置 bounds（居中于父 view，四周露出父页面）
   view.webContents.loadURL(url);
-  view.setBounds(parentBounds);
+  view.setBounds(computePopupBounds(parentBounds));
   win.addBrowserView(view);
 
   popupViews[parentSide] = { view, win, url };
@@ -701,6 +717,10 @@ function applyBlockRules(side) {
       "    el.style.setProperty('max-width', '0px', 'important');\n" +
       "    el.style.setProperty('overflow', 'hidden', 'important');\n" +
       "    el.style.setProperty('transform', 'translateX(-100%)', 'important');\n" +
+      "    // 尝试点击网站的原生关闭按钮，然后回收父容器预留空间\n" +
+      "    try { tryClickNativeToggle(el, 'left'); } catch(e) {}\n" +
+      "    setTimeout(function() { try { reclaimParentSpace(el, 'left'); } catch(e) {} }, 250);\n" +
+      "    setTimeout(function() { try { reclaimParentSpace(el, 'left'); } catch(e) {} }, 900);\n" +
       "    var obs = new MutationObserver(function() {\n" +
       "      if (el.classList.contains('cinside-expanded')) return;\n" +
       "      el.style.setProperty('width', '0px', 'important');\n" +
@@ -710,6 +730,164 @@ function applyBlockRules(side) {
       "      el.style.setProperty('transform', 'translateX(-100%)', 'important');\n" +
       "    });\n" +
       "    obs.observe(el, { attributes: true, attributeFilter: ['style', 'class'] });\n" +
+      "  }\n" +
+      "  // 尝试点击网站自身提供的侧边栏关闭/折叠/切换按钮（优先于纯样式隐藏）\n" +
+      "  function tryClickNativeToggle(el, side) {\n" +
+      "    if (el.dataset.cinsideToggled === '1') return false;\n" +
+      "    el.dataset.cinsideToggled = '1';\n" +
+      "    var elId = el.id ? el.id : null;\n" +
+      "    var toggles = [];\n" +
+      "    var addToggle = function(btn, score) {\n" +
+      "      if (!btn || btn.dataset && btn.dataset.cinsideToggleTried === '1') return;\n" +
+      "      try { btn.dataset.cinsideToggleTried = '1'; } catch(e) {}\n" +
+      "      toggles.push({ b: btn, score: score || 0 });\n" +
+      "    };\n" +
+      "    // 1) 侧边栏内部：通常有一个收起/关闭按钮（chevron / × / toggle 图标）\n" +
+      "    try {\n" +
+      "      var innerCandidates = el.querySelectorAll('button, [role=\"button\"], [data-toggle], [aria-controls], a[href=\"#\"], [class*=\"icon\" i], svg, i');\n" +
+      "      for (var ii = 0; ii < innerCandidates.length; ii++) {\n" +
+      "        var c = innerCandidates[ii];\n" +
+      "        var txt = ((c.textContent || '') + ' ' + (c.getAttribute('aria-label') || '') + ' ' + (c.getAttribute('title') || '') + ' ' + (c.className || '') + ' ' + (c.id || '')).toLowerCase();\n" +
+      "        var s = 0;\n" +
+      "        if (/(collapse|toggle|hide|close|minimize|收起|折叠|关闭|drawer|sider|sidebar|chevron|angle-left|angle-right|arrow-left|arrow-right|leftarrow|rightarrow|back|nav-toggle|menu|退出|收起侧栏|[×x»«<>]|三)/.test(txt)) s += 3;\n" +
+      "        if (c.querySelector('svg, i, [class*=\"icon\" i]')) s += 1;\n" +
+      "        if (s >= 3) addToggle(c, s);\n" +
+      "      }\n" +
+      "    } catch(e) {}\n" +
+      "    // 2) 外部：aria-controls 指向该侧边栏的元素\n" +
+      "    if (elId) {\n" +
+      "      try {\n" +
+      "        var controlled = document.querySelectorAll('[aria-controls=\"' + elId + '\"]');\n" +
+      "        for (var ci = 0; ci < controlled.length; ci++) addToggle(controlled[ci], 5);\n" +
+      "      } catch(e) {}\n" +
+      "      try {\n" +
+      "        var dtgt = document.querySelectorAll('[data-target=\"#' + elId + '\"]');\n" +
+      "        for (var di = 0; di < dtgt.length; di++) addToggle(dtgt[di], 4);\n" +
+      "      } catch(e) {}\n" +
+      "    }\n" +
+      "    // 3) 通用切换按钮选择器（顶部常见的汉堡/三横线等）\n" +
+      "    try {\n" +
+      "      var generic = document.querySelectorAll('.sidebar-toggle, .toggle-sidebar, .sidebar-toggle-btn, .sider-trigger, .ant-layout-sider-trigger, .drawer-toggle, .menu-toggle, .hamburger, .burger, .nav-toggle, .btn-collapse, .btn-menu, .app-sidebar__toggle, .main-sidebar__toggle, #sidebar-toggle, #menu-toggle, [data-sidebar-toggle], [data-action=\"toggle-sidebar\"], [data-toggle=\"sidebar\"], [class*=\"sidebar-toggle\" i], [id*=\"sidebar-toggle\" i], [class*=\"sider-trigger\" i]');\n" +
+      "      for (var gi = 0; gi < generic.length; gi++) {\n" +
+      "        var g = generic[gi];\n" +
+      "        var gSig = ((g.textContent || '') + ' ' + (g.getAttribute('aria-label') || '') + ' ' + (g.getAttribute('title') || '') + ' ' + (g.className || '') + ' ' + (g.id || '')).toLowerCase();\n" +
+      "        var gScore = 3;\n" +
+      "        if (/(collapse|toggle|hide|close|minimize|收起|折叠|关闭|menu|drawer|sider|sidebar|chevron|angle|arrow|hamburger|burger|nav|×|x|三|»|«)/.test(gSig)) gScore += 1;\n" +
+      "        if (g.getAttribute('aria-expanded') === 'true') gScore += 1;\n" +
+      "        addToggle(g, gScore);\n" +
+      "      }\n" +
+      "    } catch(e) {}\n" +
+      "    // 4) 父容器中的兄弟元素（布局中经常在标题栏放 toggle 按钮）\n" +
+      "    try {\n" +
+      "      var parent = el.parentElement;\n" +
+      "      if (parent) {\n" +
+      "        var sibs = parent.querySelectorAll('button, [role=\"button\"], a[href=\"#\"], [class*=\"icon\" i], svg, i');\n" +
+      "        for (var si = 0; si < sibs.length; si++) {\n" +
+      "          var sb = sibs[si];\n" +
+      "          if (sb === el || el.contains(sb)) continue;\n" +
+      "          var sbSig = ((sb.textContent || '') + ' ' + (sb.getAttribute('aria-label') || '') + ' ' + (sb.getAttribute('title') || '') + ' ' + (sb.className || '') + ' ' + (sb.id || '')).toLowerCase();\n" +
+      "          if (/(collapse|toggle|hide|close|minimize|收起|折叠|关闭|menu|drawer|sider|sidebar|chevron|angle|arrow|back|nav|hamburger|burger|[×x»«<>]|三)/.test(sbSig)) addToggle(sb, 2);\n" +
+      "        }\n" +
+      "      }\n" +
+      "    } catch(e) {}\n" +
+      "    // 按得分从高到低点击，最多尝试 3 个\n" +
+      "    toggles.sort(function(a, b) { return b.score - a.score; });\n" +
+      "    var clicked = 0;\n" +
+      "    for (var ti = 0; ti < toggles.length && clicked < 3; ti++) {\n" +
+      "      var t = toggles[ti].b;\n" +
+      "      try {\n" +
+      "        var rect = t.getBoundingClientRect && t.getBoundingClientRect();\n" +
+      "        var cs = window.getComputedStyle(t);\n" +
+      "        if (!cs || cs.display === 'none' || cs.visibility === 'hidden' || (rect && (rect.width < 2 || rect.height < 2))) continue;\n" +
+      "        var ev = new MouseEvent('click', { bubbles: true, cancelable: true, view: window, composed: true });\n" +
+      "        t.dispatchEvent(ev);\n" +
+      "        if (typeof t.click === 'function') try { t.click(); } catch(e) {}\n" +
+      "        clicked++;\n" +
+      "        el.dataset.cinsideNativeToggled = '1';\n" +
+      "      } catch(e) {}\n" +
+      "    }\n" +
+      "    return clicked > 0;\n" +
+      "  }\n" +
+      "  // 向上遍历容器，回收父/兄弟元素预留的侧边栏间距（grid/flex/margin/padding/left 等），消除黑区\n" +
+      "  function reclaimParentSpace(el, side) {\n" +
+      "    var marginSide = side === 'left' ? 'marginLeft' : 'marginRight';\n" +
+      "    var marginSideCSS = side === 'left' ? 'margin-left' : 'margin-right';\n" +
+      "    var paddingSide = side === 'left' ? 'paddingLeft' : 'paddingRight';\n" +
+      "    var paddingSideCSS = side === 'left' ? 'padding-left' : 'padding-right';\n" +
+      "    var posSide = side === 'left' ? 'left' : 'right';\n" +
+      "    // 1) 处理兄弟元素：常见「兄弟 main 有 margin-left: 200px」或 padding-left 预留\n" +
+      "    try {\n" +
+      "      var parent = el.parentElement;\n" +
+      "      if (parent) {\n" +
+      "        for (var bi = 0; bi < parent.children.length; bi++) {\n" +
+      "          var sib = parent.children[bi];\n" +
+      "          if (sib === el) continue;\n" +
+      "          try {\n" +
+      "            var sibTag = (sib.tagName || '').toLowerCase();\n" +
+      "            if (sibTag === 'script' || sibTag === 'style' || sibTag === 'link' || sibTag === 'meta' || sibTag === 'noscript') continue;\n" +
+      "            var sCS = window.getComputedStyle(sib);\n" +
+      "            var mv = parseFloat(sCS[marginSide]);\n" +
+      "            var pv = parseFloat(sCS[paddingSide]);\n" +
+      "            if (!isNaN(mv) && mv > 10) sib.style.setProperty(marginSideCSS, '0px', 'important');\n" +
+      "            if (!isNaN(pv) && pv > 10) sib.style.setProperty(paddingSideCSS, '0px', 'important');\n" +
+      "            var pos = sCS.position;\n" +
+      "            if (pos === 'absolute' || pos === 'fixed' || pos === 'sticky' || pos === 'relative') {\n" +
+      "              var lv = parseFloat(sCS[posSide]);\n" +
+      "              if (!isNaN(lv) && lv > 10) sib.style.setProperty(posSide, '0px', 'important');\n" +
+      "            }\n" +
+      "          } catch(e) {}\n" +
+      "        }\n" +
+      "      }\n" +
+      "    } catch(e) {}\n" +
+      "    // 2) 向上遍历祖先，修正 grid/flex/margin/padding 预留（向上最多 8 层）\n" +
+      "    var cur = el.parentElement;\n" +
+      "    var depth = 0;\n" +
+      "    while (cur && cur !== document.documentElement && depth < 8) {\n" +
+      "      depth++;\n" +
+      "      try {\n" +
+      "        var curCS = window.getComputedStyle(cur);\n" +
+      "        // Grid：把侧边栏对应列的宽度设为 0px（左→第一列，右→最后一列）\n" +
+      "        if (curCS.display === 'grid' || curCS.display === 'inline-grid') {\n" +
+      "          var tc = cur.style ? cur.style.gridTemplateColumns : '';\n" +
+      "          if (!tc) tc = curCS.gridTemplateColumns;\n" +
+      "          if (tc && /\\d/.test(tc)) {\n" +
+      "            var cols = tc.trim().split(/\\s+/).filter(function(x) { return x.length > 0; });\n" +
+      "            if (cols.length >= 2) {\n" +
+      "              var targetIdx = side === 'left' ? 0 : cols.length - 1;\n" +
+      "              var firstPx = parseFloat(cols[targetIdx]);\n" +
+      "              if (!isNaN(firstPx) && firstPx > 0) {\n" +
+      "                cols[targetIdx] = '0px';\n" +
+      "                cur.style.setProperty('grid-template-columns', cols.join(' '), 'important');\n" +
+      "              }\n" +
+      "            }\n" +
+      "          }\n" +
+      "        }\n" +
+      "        // 容器自身的 margin/padding/pos 预留\n" +
+      "        var mvC = parseFloat(curCS[marginSide]);\n" +
+      "        var pvC = parseFloat(curCS[paddingSide]);\n" +
+      "        if (!isNaN(mvC) && mvC > 10) cur.style.setProperty(marginSideCSS, '0px', 'important');\n" +
+      "        if (!isNaN(pvC) && pvC > 10) cur.style.setProperty(paddingSideCSS, '0px', 'important');\n" +
+      "        var posC = curCS.position;\n" +
+      "        if (posC === 'absolute' || posC === 'fixed' || posC === 'sticky' || posC === 'relative') {\n" +
+      "          var lvC = parseFloat(curCS[posSide]);\n" +
+      "          if (!isNaN(lvC) && lvC > 10) cur.style.setProperty(posSide, '0px', 'important');\n" +
+      "        }\n" +
+      "      } catch(e) {}\n" +
+      "      cur = cur.parentElement;\n" +
+      "    }\n" +
+      "    // 3) 兜底：body/documentElement 上的 margin/padding 预留（部分框架会在这里偏移）\n" +
+      "    try {\n" +
+      "      var bodyCS = window.getComputedStyle(document.body);\n" +
+      "      var bMv = parseFloat(bodyCS[marginSide]);\n" +
+      "      var bPv = parseFloat(bodyCS[paddingSide]);\n" +
+      "      if (!isNaN(bMv) && bMv > 10) document.body.style.setProperty(marginSideCSS, '0px', 'important');\n" +
+      "      if (!isNaN(bPv) && bPv > 10) document.body.style.setProperty(paddingSideCSS, '0px', 'important');\n" +
+      "      var docCS = window.getComputedStyle(document.documentElement);\n" +
+      "      var dMv = parseFloat(docCS[marginSide]);\n" +
+      "      var dPv = parseFloat(docCS[paddingSide]);\n" +
+      "      if (!isNaN(dMv) && dMv > 10) document.documentElement.style.setProperty(marginSideCSS, '0px', 'important');\n" +
+      "      if (!isNaN(dPv) && dPv > 10) document.documentElement.style.setProperty(paddingSideCSS, '0px', 'important');\n" +
+      "    } catch(e) {}\n" +
       "  }\n" +
       "  // 自动检测侧边栏：通过几何特征\n" +
       "  function autoDetectSidebars() {\n" +
@@ -810,6 +988,11 @@ function applyBlockRules(side) {
       "    if (el.dataset.cinsideAutoMarked === '1') return;\n" +
       "    el.dataset.cinsideAutoMarked = '1';\n" +
       "    el.classList.add('cinside-sidebar-hidden', sd === 'left' ? 'cinside-sidebar-left' : 'cinside-sidebar-right');\n" +
+      "    // 优先：尝试点击网站自身的侧边栏切换/关闭按钮\n" +
+      "    try { tryClickNativeToggle(el, sd); } catch(e) {}\n" +
+      "    // 回收父/兄弟/祖先容器的预留间距（消除黑区）——两次定时以兼容网站动画和异步 re-render\n" +
+      "    setTimeout(function() { try { reclaimParentSpace(el, sd); } catch(e) {} }, 250);\n" +
+      "    setTimeout(function() { try { reclaimParentSpace(el, sd); } catch(e) {} }, 900);\n" +
       "    // 创建展开按钮\n" +
       "    var btn = document.createElement('div');\n" +
       "    btn.className = 'cinside-expand-btn';\n" +
@@ -825,6 +1008,10 @@ function applyBlockRules(side) {
       "      e.preventDefault();\n" +
       "      el.classList.add('cinside-expanded');\n" +
       "      el.classList.remove('cinside-sidebar-hidden', 'cinside-sidebar-left', 'cinside-sidebar-right');\n" +
+      "      // 尝试反向点击原生按钮以恢复（若 site 支持）\n" +
+      "      try { tryClickNativeToggle(el, sd); } catch(e) {}\n" +
+      "      // 展开时也清理我们在兄弟/祖先上覆盖的 margin/padding/grid\n" +
+      "      try { clearReclaimedSpace(el, sd); } catch(e) {}\n" +
       "      btn.remove();\n" +
       "    });\n" +
       "    document.body.appendChild(btn);\n" +
@@ -839,14 +1026,47 @@ function applyBlockRules(side) {
       "        btn.style.opacity = '0';\n" +
       "      }\n" +
       "    });\n" +
-      "    // 监控被 SPA 恢复\n" +
+      "    // 监控被 SPA 恢复：若 sidebar 被重新加回，重设类名并再次回收间距\n" +
       "    var obs = new MutationObserver(function() {\n" +
       "      if (el.classList.contains('cinside-expanded')) return;\n" +
       "      if (!el.classList.contains('cinside-sidebar-hidden')) {\n" +
       "        el.classList.add('cinside-sidebar-hidden', sd === 'left' ? 'cinside-sidebar-left' : 'cinside-sidebar-right');\n" +
+      "        setTimeout(function() { try { reclaimParentSpace(el, sd); } catch(e) {} }, 100);\n" +
       "      }\n" +
       "    });\n" +
       "    obs.observe(el, { attributes: true, attributeFilter: ['style', 'class'] });\n" +
+      "  }\n" +
+      "  // 展开时清理在兄弟/祖先/body/html 上通过 reclaimParentSpace 设置的 !important 覆盖\n" +
+      "  function clearReclaimedSpace(el, side) {\n" +
+      "    var marginSideCSS = side === 'left' ? 'margin-left' : 'margin-right';\n" +
+      "    var paddingSideCSS = side === 'left' ? 'padding-left' : 'padding-right';\n" +
+      "    var posSide = side === 'left' ? 'left' : 'right';\n" +
+      "    var clearOn = function(node) {\n" +
+      "      try {\n" +
+      "        if (!node || !node.style) return;\n" +
+      "        node.style.removeProperty(marginSideCSS);\n" +
+      "        node.style.removeProperty(paddingSideCSS);\n" +
+      "        node.style.removeProperty(posSide);\n" +
+      "        node.style.removeProperty('grid-template-columns');\n" +
+      "      } catch(e) {}\n" +
+      "    };\n" +
+      "    try {\n" +
+      "      var parent = el.parentElement;\n" +
+      "      if (parent) {\n" +
+      "        for (var i = 0; i < parent.children.length; i++) {\n" +
+      "          if (parent.children[i] !== el) clearOn(parent.children[i]);\n" +
+      "        }\n" +
+      "      }\n" +
+      "    } catch(e) {}\n" +
+      "    var cur = el.parentElement;\n" +
+      "    var d = 0;\n" +
+      "    while (cur && cur !== document.documentElement && d < 8) {\n" +
+      "      d++;\n" +
+      "      clearOn(cur);\n" +
+      "      cur = cur.parentElement;\n" +
+      "    }\n" +
+      "    clearOn(document.body);\n" +
+      "    clearOn(document.documentElement);\n" +
       "  }\n" +
       "  function doScan() {\n" +
       "    scanTimer = null;\n" +
@@ -857,9 +1077,13 @@ function applyBlockRules(side) {
       "        // 手动折叠也创建展开按钮\n" +
       "        if (el.dataset.cinsideBtnAttached) return;\n" +
       "        el.dataset.cinsideBtnAttached = '1';\n" +
+      "        // 先判断方向：根据元素左/右边缘贴边情况，决定按钮在哪一侧\n" +
+      "        var r = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, right: window.innerWidth };\n" +
+      "        var onLeft = r.left <= 10 || r.left < (window.innerWidth - r.right);\n" +
+      "        var sdBtn = onLeft ? 'left' : 'right';\n" +
       "        var btn = document.createElement('div');\n" +
-      "        btn.style.cssText = 'position:fixed;left:0;top:50%;transform:translateY(-50%);width:14px;height:48px;background:rgba(99,102,241,0.85);color:#fff;cursor:pointer;z-index:2147483646;display:flex;align-items:center;justify-content:center;font-size:9px;border-radius:0 3px 3px 0;opacity:0;transition:opacity 0.2s;pointer-events:auto;';\n" +
-      "        btn.textContent = '\\u25B6';\n" +
+      "        btn.style.cssText = 'position:fixed;' + (onLeft ? 'left:0;border-radius:0 3px 3px 0;' : 'right:0;border-radius:3px 0 0 3px;') + 'top:50%;transform:translateY(-50%);width:14px;height:48px;background:rgba(99,102,241,0.85);color:#fff;cursor:pointer;z-index:2147483646;display:flex;align-items:center;justify-content:center;font-size:9px;opacity:0;transition:opacity 0.2s;pointer-events:auto;';\n" +
+      "        btn.textContent = onLeft ? '\\u25B6' : '\\u25C0';\n" +
       "        btn.title = '\\u70B9\\u51FB\\u5C55\\u5F00\\u4FA7\\u8FB9\\u680F';\n" +
       "        btn.addEventListener('mouseenter', function() { btn.style.opacity = '1'; });\n" +
       "        btn.addEventListener('mouseleave', function() { btn.style.opacity = '0'; });\n" +
@@ -872,12 +1096,19 @@ function applyBlockRules(side) {
       "          el.style.setProperty('max-width', '', 'important');\n" +
       "          el.style.setProperty('overflow', '', 'important');\n" +
       "          el.style.setProperty('transform', '', 'important');\n" +
+      "          // 清理回收的父/兄弟容器间距（让侧边栏展开时布局同步恢复）\n" +
+      "          try { clearReclaimedSpace(el, sdBtn); } catch(e) {}\n" +
       "          btn.remove();\n" +
       "        });\n" +
       "        document.body.appendChild(btn);\n" +
       "        document.addEventListener('mousemove', function(ev) {\n" +
-      "          if (ev.clientX < 8) btn.style.opacity = '1';\n" +
-      "          else if (ev.clientX > 30) btn.style.opacity = '0';\n" +
+      "          if (onLeft) {\n" +
+      "            if (ev.clientX < 8) btn.style.opacity = '1';\n" +
+      "            else if (ev.clientX > 30) btn.style.opacity = '0';\n" +
+      "          } else {\n" +
+      "            if (ev.clientX > window.innerWidth - 8) btn.style.opacity = '1';\n" +
+      "            else if (ev.clientX < window.innerWidth - 30) btn.style.opacity = '0';\n" +
+      "          }\n" +
       "        });\n" +
       "      });\n" +
       "    });\n" +
@@ -924,10 +1155,10 @@ function showView(side, bounds, _url) {
       }
     }, 100);
   }
-  // 同步弹窗 view 的 bounds
+  // 同步弹窗 view 的 bounds（居中于主 view）
   const popup = popupViews[side];
   if (popup && popup.win === mainWindow && bounds) {
-    popup.view.setBounds(bounds);
+    popup.view.setBounds(computePopupBounds(bounds));
     if (!mainWindow.getBrowserViews().includes(popup.view)) {
       mainWindow.addBrowserView(popup.view);
     }
@@ -1244,6 +1475,44 @@ const ELEMENT_PICKER_SCRIPT = `
     // 文档提取：收集元素的链接/图片地址（PDF、图片等）
     var linkEl = (el.closest && el.closest('a')) || (el.tagName === 'A' ? el : null);
     var imgEl = (el.tagName === 'IMG') ? el : (el.querySelector ? el.querySelector('img') : null);
+    // 文件上传：探测关联的 file input（自身是 file input，或点击上传按钮/label/容器时附近隐藏的 file input）
+    var fileInputEl = null;
+    try {
+      if (el.tagName === 'INPUT' && (el.getAttribute('type') || '').toLowerCase() === 'file') {
+        fileInputEl = el;
+      } else {
+        // 1. label[for] 指向 file input
+        var lbl = (el.tagName === 'LABEL') ? el : (el.closest ? el.closest('label') : null);
+        if (lbl) {
+          var lfor = lbl.getAttribute('for');
+          if (lfor) {
+            var lEl = lbl.ownerDocument.getElementById(lfor);
+            if (lEl && lEl.tagName === 'INPUT' && (lEl.getAttribute('type') || '').toLowerCase() === 'file') fileInputEl = lEl;
+          }
+          if (!fileInputEl) {
+            var inLbl = lbl.querySelector('input[type="file"]');
+            if (inLbl) fileInputEl = inLbl;
+          }
+        }
+        // 2. 上传容器内找 file input（按钮 + 隐藏 input 的常见结构）
+        if (!fileInputEl && el.closest) {
+          var upBox = el.closest('[class*="upload"], [class*="Upload"], [data-upload], .el-upload, .ant-upload, .file-upload, form, .form-item, .el-form-item, .ant-form-item, .field, .form-group');
+          if (upBox) {
+            var inBox = upBox.querySelector('input[type="file"]');
+            if (inBox) fileInputEl = inBox;
+          }
+        }
+        // 3. 临近兄弟节点兜底（按钮后跟隐藏 input）
+        if (!fileInputEl) {
+          var p = el.parentElement;
+          for (var depth2 = 0; depth2 < 2 && p; depth2++) {
+            var cand = p.querySelector(':scope > input[type="file"]');
+            if (cand) { fileInputEl = cand; break; }
+            p = p.parentElement;
+          }
+        }
+      }
+    } catch (_) {}
     var payload = {
       kind: 'element-picked',
       selector: buildSelector(el),
@@ -1251,14 +1520,141 @@ const ELEMENT_PICKER_SCRIPT = `
       value: el.value || el.getAttribute('value') || (el.isContentEditable ? (el.innerText || '').trim() : ''),
       tag: el.nodeName.toLowerCase(),
       type: el.getAttribute && el.getAttribute('type') || '',
+      accept: (el.getAttribute && el.getAttribute('accept')) || '',
       isContentEditable: !!el.isContentEditable,
       rect: getRect(el),
       text: (el.innerText || '').trim().slice(0, 120),
       href: linkEl && linkEl.href ? linkEl.href : (el.href || ''),
       src: imgEl && imgEl.src ? imgEl.src : (el.src || ''),
+      fileInputSelector: fileInputEl ? buildSelector(fileInputEl) : '',
+      fileInputAccept: (fileInputEl && fileInputEl.getAttribute && fileInputEl.getAttribute('accept')) || '',
     };
     console.log('[onPick] payload=', JSON.stringify({ tag: payload.tag, selector: payload.selector, isContentEditable: payload.isContentEditable, value: payload.value }));
     window.__cinsidePostMessage(payload);
+  }
+
+  // ============ 右键菜单：绑定输入时右键点输入框 → 弹出 Excel 列选择菜单 ============
+  // 仅在"绑定输入"模式（__cinsideBindInputMode=true 由主进程设置）下生效
+  // 菜单列出当前行的所有 Excel 列，点击后通过 IPC 回传选择的列名
+  window.__cinsideBindInputMode = false; // 由主进程通过 executeJavaScript 设置
+  var _cinsideCtxMenu = null; // 当前显示的右键菜单 DOM
+
+  function _removeCtxMenu() {
+    if (_cinsideCtxMenu && _cinsideCtxMenu.parentNode) {
+      _cinsideCtxMenu.parentNode.removeChild(_cinsideCtxMenu);
+    }
+    _cinsideCtxMenu = null;
+  }
+
+  function onContextMenu(e) {
+    if (!window.__cinsidePickerActive) return;
+    // 仅在绑定输入模式下拦截右键
+    if (!window.__cinsideBindInputMode) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+
+    // 找到目标元素（同 onPick 逻辑）
+    var rawTarget = null;
+    try {
+      var cp = e.composedPath ? e.composedPath() : null;
+      if (cp && cp.length) {
+        for (var ci = 0; ci < cp.length; ci++) {
+          if (cp[ci] && cp[ci].nodeType === 1) { rawTarget = cp[ci]; break; }
+        }
+      }
+    } catch (_) {}
+    if (!rawTarget) rawTarget = e.target;
+    if (!rawTarget || rawTarget.nodeType !== 1) return;
+
+    var el = findInputFromTarget(rawTarget, e.clientX, e.clientY) || rawTarget;
+    // 只对输入类元素弹出菜单
+    if (!isInputEl(el)) return;
+
+    // 先移除旧菜单
+    _removeCtxMenu();
+
+    // 向主进程请求 Excel 列列表（通过 IPC，携带目标元素选择器）
+    var selector = buildSelector(el);
+    var menuId = 'ctx-' + Date.now();
+
+    // 创建悬浮菜单容器（loading 状态）
+    var menu = document.createElement('div');
+    menu.id = 'cinside-ctx-menu';
+    menu.style.cssText = 'position:fixed;z-index:999999;background:#fff;border:1px solid #e2e8f0;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);padding:4px 0;min-width:160px;max-height:280px;overflow-y:auto;font-size:13px;font-family:system-ui,-apple-system,sans-serif;';
+    // 定位：鼠标位置，但避免超出视口
+    var x = e.clientX, y = e.clientY;
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+    // loading 提示
+    var loading = document.createElement('div');
+    loading.style.cssText = 'padding:8px 14px;color:#94a3b8;font-size:12px;';
+    loading.textContent = '加载列列表…';
+    menu.appendChild(loading);
+    document.body.appendChild(menu);
+    _cinsideCtxMenu = menu;
+
+    // 点击菜单外部时关闭
+    var closeHandler = function(ev) {
+      if (_cinsideCtxMenu && !_cinsideCtxMenu.contains(ev.target)) {
+        _removeCtxMenu();
+        document.removeEventListener('pointerdown', closeHandler, true);
+      }
+    };
+    document.addEventListener('pointerdown', closeHandler, true);
+
+    // 通知主进程：请求 Excel 列列表，附带目标元素选择器
+    window.__cinsidePostMessage({
+      kind: 'context-menu-request',
+      menuId: menuId,
+      selector: selector,
+      label: getLabel(el),
+    });
+
+    // 监听主进程回传的列列表（通过 __cinsideCtxMenuResponse 回调）
+    window.__cinsideCtxMenuResponse = function(columns, currentField) {
+      if (!_cinsideCtxMenu) return;
+      _cinsideCtxMenu.innerHTML = '';
+      if (!columns || !columns.length) {
+        var empty = document.createElement('div');
+        empty.style.cssText = 'padding:8px 14px;color:#94a3b8;font-size:12px;';
+        empty.textContent = '无可用列';
+        _cinsideCtxMenu.appendChild(empty);
+        return;
+      }
+      // 标题
+      var title = document.createElement('div');
+      title.style.cssText = 'padding:6px 14px 4px;font-size:11px;color:#94a3b8;border-bottom:1px solid #f1f5f9;margin-bottom:2px;';
+      title.textContent = '选择输入源列';
+      _cinsideCtxMenu.appendChild(title);
+      columns.forEach(function(col) {
+        var item = document.createElement('div');
+        item.style.cssText = 'padding:6px 14px;cursor:pointer;color:#334155;display:flex;align-items:center;gap:6px;transition:background .1s;';
+        if (col === currentField) {
+          item.style.color = '#6366f1';
+          item.style.fontWeight = '600';
+          item.textContent = '✓ ' + col;
+        } else {
+          item.textContent = col;
+        }
+        item.addEventListener('mouseenter', function() { item.style.background = '#f1f5f9'; });
+        item.addEventListener('mouseleave', function() { item.style.background = ''; });
+        item.addEventListener('click', function() {
+          _removeCtxMenu();
+          document.removeEventListener('pointerdown', closeHandler, true);
+          window.__cinsidePostMessage({
+            kind: 'context-menu-select',
+            selector: selector,
+            field: col,
+          });
+        });
+        _cinsideCtxMenu.appendChild(item);
+      });
+      // 确保菜单不超出视口
+      var rect = _cinsideCtxMenu.getBoundingClientRect();
+      if (rect.right > window.innerWidth) _cinsideCtxMenu.style.left = (window.innerWidth - rect.width - 8) + 'px';
+      if (rect.bottom > window.innerHeight) _cinsideCtxMenu.style.top = (window.innerHeight - rect.height - 8) + 'px';
+    };
   }
 
   // 拾取模式下阻止 Enter 触发表单提交/页面跳转，并把 Enter 回传给主窗口执行 commitInput
@@ -1282,6 +1678,7 @@ const ELEMENT_PICKER_SCRIPT = `
       doc.addEventListener('pointerdown', window.__cinsideOnPick, true);
       doc.addEventListener('click', window.__cinsideOnPick, true);
       doc.addEventListener('keydown', window.__cinsideOnEnter, true);
+      doc.addEventListener('contextmenu', window.__cinsideOnContextMenu, true);
       doc.__cinsideArmed = true;
       (window.__cinsideArmedDocs = window.__cinsideArmedDocs || []).push(doc);
       return true;
@@ -1320,6 +1717,7 @@ const ELEMENT_PICKER_SCRIPT = `
       try { d.removeEventListener('pointerdown', window.__cinsideOnPick, true); } catch (_) {}
       try { d.removeEventListener('click', window.__cinsideOnPick, true); } catch (_) {}
       try { d.removeEventListener('keydown', window.__cinsideOnEnter, true); } catch (_) {}
+      try { d.removeEventListener('contextmenu', window.__cinsideOnContextMenu, true); } catch (_) {}
       try { d.__cinsideArmed = false; } catch (_) {}
     }
     window.__cinsideArmedDocs = [];
@@ -1329,6 +1727,7 @@ const ELEMENT_PICKER_SCRIPT = `
     // pointerdown 比 click 更早触发，能更好捕获 input 等会抢占焦点的元素
     document.addEventListener('pointerdown', onPick, true);
     document.addEventListener('click', onPick, true);
+    document.addEventListener('contextmenu', onContextMenu, true);
   } else {
     // 重复注入：清掉旧武装，下面会用新闭包重新武装
     try { removeFrameArms(); } catch (_) {}
@@ -1343,6 +1742,7 @@ const ELEMENT_PICKER_SCRIPT = `
 
   window.__cinsideOnPick = onPick;
   window.__cinsideOnEnter = onEnter;
+  window.__cinsideOnContextMenu = onContextMenu;
   window.__cinsideRemoveFrameArms = removeFrameArms;
   window.__cinsidePickerActive = true;
   document.body.classList.add('cinside-picking');
@@ -1357,7 +1757,11 @@ const ELEMENT_PICKER_DEACTIVATE_SCRIPT = `
 (function () {
   window.__cinsidePickerActive = false;
   window.__cinsideBlockEnter = false;
+  window.__cinsideBindInputMode = false;
   document.body.classList.remove('cinside-picking');
+  // 清理右键菜单
+  var ctxMenu = document.getElementById('cinside-ctx-menu');
+  if (ctxMenu && ctxMenu.parentNode) ctxMenu.parentNode.removeChild(ctxMenu);
   if (window.__cinsideEnterHandler) {
     document.removeEventListener('keydown', window.__cinsideEnterHandler, true);
     window.__cinsideEnterHandler = null;
@@ -1643,6 +2047,23 @@ app.whenReady().then(() => {
     downloadCapture[side] = false;
     debugLog(`[download] 捕获下载: ${filename} → ${savePath} (side=${side})`);
 
+    // 通知渲染进程：下载已开始
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("download-started", { side, filename });
+    }
+
+    // 下载进度更新
+    item.on("updated", () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const received = item.getReceivedBytes();
+        const total = item.getTotalBytes();
+        mainWindow.webContents.send("download-progress", {
+          side, filename, received, total,
+          percent: total > 0 ? Math.min(100, Math.round((received / total) * 100)) : -1,
+        });
+      }
+    });
+
     item.once("done", (e, state) => {
       if (state === "completed") {
         try {
@@ -1773,6 +2194,28 @@ app.whenReady().then(() => {
       return { exists: false };
     }
     return { exists: fs.existsSync(fullPath) };
+  });
+
+  // 导出文件：弹保存对话框 → 写入磁盘
+  // 参数: defaultName(默认文件名), base64(文件内容 base64，可带 data: 前缀)
+  ipcMain.handle("save-exported-file", async (_event, defaultName, base64) => {
+    const { dialog } = require("electron");
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: "导出文件",
+      defaultPath: defaultName || "export.bin",
+    });
+    if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+    try {
+      let raw = String(base64 || "");
+      if (raw.startsWith("data:") && raw.indexOf(",") >= 0) raw = raw.slice(raw.indexOf(",") + 1);
+      const buffer = Buffer.from(raw, "base64");
+      fs.writeFileSync(result.filePath, buffer);
+      debugLog(`[export] saved: ${result.filePath} (${buffer.length} bytes)`);
+      return { ok: true, path: result.filePath, size: buffer.length };
+    } catch (e) {
+      debugLog(`[export] save failed: ${e.message}`);
+      return { ok: false, error: String(e) };
+    }
   });
 
   // === ??????????????? ===
@@ -2082,6 +2525,18 @@ ipcMain.handle("view-clear-highlight", (_event, side) => {
   return executeInView(side, CLEAR_HIGHLIGHT_SCRIPT);
 });
 
+// 设置绑定输入模式（右键菜单开关）：true=开启右键菜单，false=关闭
+ipcMain.handle("view-set-bind-input-mode", (_event, side, enabled) => {
+  return executeInView(side, `window.__cinsideBindInputMode = ${enabled ? "true" : "false"};`);
+});
+
+// 回传 Excel 列列表到 picker 脚本（右键菜单响应）
+ipcMain.handle("view-ctx-menu-response", (_event, side, columns, currentField) => {
+  const colsJson = JSON.stringify(columns || []);
+  const curField = JSON.stringify(currentField || "");
+  return executeInView(side, `if (window.__cinsideCtxMenuResponse) window.__cinsideCtxMenuResponse(${colsJson}, ${curField});`);
+});
+
 // 截图指定 view 中的元素区域，返回 base64 PNG（用于头像提取）
 ipcMain.handle("view-capture-element", async (_event, side, rect) => {
   const view = side === "left" ? leftBrowserView : side === "right" ? rightBrowserView : null;
@@ -2318,11 +2773,11 @@ ipcMain.handle("detached-view-show", (_event, side, bounds, _url) => {
       }
     }, 100);
   }
-  // 同步弹窗 view 的 bounds
+  // 同步弹窗 view 的 bounds（居中于父 view）
   const actualSide = side === "browser-left" ? "left" : "right";
   const popup = popupViews[actualSide];
   if (popup && popup.win === win && bounds) {
-    popup.view.setBounds(bounds);
+    popup.view.setBounds(computePopupBounds(bounds));
     if (!win.getBrowserViews().includes(popup.view)) {
       win.addBrowserView(popup.view);
     }
