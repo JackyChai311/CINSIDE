@@ -182,6 +182,7 @@ class VerificationReport(BaseModel):
     task_id: str
     record_id: str
     record_name: Optional[str] = None
+    student_id: Optional[str] = None
     university_url: str
     entries: list[VerificationReportEntry] = Field(default_factory=list)
     overall: Literal["pass", "fail", "review"] = "review"
