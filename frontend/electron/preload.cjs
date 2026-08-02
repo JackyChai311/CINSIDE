@@ -72,6 +72,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   viewHighlightBoxes: (side, boxes) => ipcRenderer.invoke("view-highlight-boxes", side, boxes),
   viewClearHighlight: (side) => ipcRenderer.invoke("view-clear-highlight", side),
 
+  // 绑定输入模式右键菜单：开启/关闭
+  viewSetBindInputMode: (side, enabled) => ipcRenderer.invoke("view-set-bind-input-mode", side, enabled),
+  // 回传 Excel 列列表到 picker 脚本（右键菜单响应）
+  viewCtxMenuResponse: (side, columns, currentField) => ipcRenderer.invoke("view-ctx-menu-response", side, columns, currentField),
+
   // 截图指定 view 中的元素区域（用于头像提取）
   viewCaptureElement: (side, rect) => ipcRenderer.invoke("view-capture-element", side, rect),
 
@@ -82,10 +87,22 @@ contextBridge.exposeInMainWorld("electronAPI", {
   pickLocalDirectory: () => ipcRenderer.invoke("pick-local-directory"),
   readLocalDocFile: (rootPath, relativePath) => ipcRenderer.invoke("read-local-doc-file", rootPath, relativePath),
   checkLocalFileExists: (rootPath, relativePath) => ipcRenderer.invoke("check-local-file-exists", rootPath, relativePath),
+  // === 导出文件：弹保存对话框并写入磁盘 ===
+  saveExportedFile: (defaultName, base64) => ipcRenderer.invoke("save-exported-file", defaultName, base64),
   onDownloadCaptured: (callback) => {
     const handler = (_e, data) => callback(data);
     ipcRenderer.on("download-captured", handler);
     return () => ipcRenderer.removeListener("download-captured", handler);
+  },
+  onDownloadStarted: (callback) => {
+    const handler = (_e, data) => callback(data);
+    ipcRenderer.on("download-started", handler);
+    return () => ipcRenderer.removeListener("download-started", handler);
+  },
+  onDownloadProgress: (callback) => {
+    const handler = (_e, data) => callback(data);
+    ipcRenderer.on("download-progress", handler);
+    return () => ipcRenderer.removeListener("download-progress", handler);
   },
   onDownloadFailed: (callback) => {
     const handler = (_e, data) => callback(data);
