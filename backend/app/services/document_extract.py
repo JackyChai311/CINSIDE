@@ -301,6 +301,58 @@ async def extract_fields_from_text(text: str, target_fields: list[str]) -> dict[
 
 
 # ============ 统一入口 ============
+async def preview_document(content: bytes, filename: str) -> dict:
+    """仅生成源文件预览图（不跑 OCR、不做字段提取，极快）。
+
+    用途：网页下载后先显示文件预览，用户点「录入提取」再跑完整 OCR。
+    返回: { filename, method, processed_image, text_preview? }
+    method: "image" | "pdf_render" | "markitdown_text"
+    processed_image: base64 JPEG 预览图（图片/PDF 有值）
+    """
+    processed_image: str | None = None
+    method: str = ""
+    text_preview: str | None = None
+
+    if is_image_file(filename):
+        # 图片：仅做预处理（EXIF 旋转 + 裁白边 + 降采样），不 OCR
+        _, processed_image = preprocess_image(content)
+        method = "image"
+
+    elif is_pdf_file(filename):
+        # PDF：先尝试 MarkItDown 提取文字层（原生 PDF 可快速得到文本预览）
+        try:
+            text = _extract_with_markitdown(content, filename)
+        except Exception:
+            text = ""
+        if text and len(text.strip()) >= 10:
+            text_preview = text[:2000]  # 仅返回前 2000 字符预览
+            method = "markitdown_text"
+        # 同时渲染首页为预览图（无论有无文字层，都给用户一个可视化预览）
+        rendered = render_pdf_to_image(content, dpi=150)  # 预览用稍低 DPI 更快
+        if rendered is not None:
+            _, processed_image = rendered
+        if not method:
+            method = "pdf_render"
+    else:
+        # Office 文档：用 MarkItDown 快速取文本预览，无图像
+        try:
+            text = _extract_with_markitdown(content, filename)
+            if text:
+                text_preview = text[:2000]
+                method = "markitdown_text"
+        except Exception:
+            pass
+        if not method:
+            method = "unknown"
+
+    return {
+        "filename": filename,
+        "method": method,
+        "processed_image": processed_image,
+        "text_preview": text_preview,
+    }
+
+
 async def extract_document(content: bytes, filename: str, target_fields: list[str] | None = None) -> dict:
     """提取文档文字 + 可选的字段结构化。
 
