@@ -273,10 +273,18 @@ async def run_configurable_verification(config: WorkflowConfig) -> str:
         raise ValueError(f"record {config.record_id} not found and no expected_fields provided")
 
     task_id = f"task-{uuid.uuid4().hex[:8]}"
+    # 兼容多个学号字段别名
+    def _pick_field(d: dict, keys: list[str], default: str = "") -> str:
+        for k in keys:
+            v = d.get(k)
+            if v:
+                return str(v).strip()
+        return default
     report = VerificationReport(
         task_id=task_id,
         record_id=config.record_id or "",
-        record_name=rec.fields.get("name", "") if rec else "",
+        record_name=_pick_field(rec.fields, ["name", "fullname", "姓名"], "") if rec else "",
+        student_id=_pick_field(rec.fields, ["student_id", "student_no", "sid", "id", "学号"], "") if rec else "",
         university_url=config.university_url,
         started_at=datetime.now().isoformat(timespec="seconds"),
     )
