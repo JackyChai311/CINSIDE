@@ -146,6 +146,9 @@ export function valuesEquivalent(field: string, a: string, b: string): boolean {
   const na = normalizeText(va);
   const nb = normalizeText(vb);
   if (na === nb) return true;
+  // 对于较短的字符串（如国家码、证件号、代码等），只接受完全相等；
+  // 一方包含另一方容易误伤（例如 "RUSSIA" 被 "COUNTRY RUSSIA" 错误包含）。
+  if (na.length < 12 || nb.length < 12) return false;
   const naCompact = na.replace(/\s+/g, "");
   const nbCompact = nb.replace(/\s+/g, "");
   return naCompact.includes(nbCompact) || nbCompact.includes(naCompact);
