@@ -2,7 +2,9 @@ import type {
   AppConfig,
   AppSettings,
   ApplicantRecord,
+  DocumentConvertResult,
   DocumentExtractResult,
+  DocumentPreviewResult,
   PluginRecord,
   PluginStatus,
   ScreenshotEvent,
@@ -22,12 +24,17 @@ const BASE = `${API_HOST}/api`;
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(url, init);
   if (!resp.ok) {
+    // 只读一次 body：先拿 text，再尝试解析成 JSON 提取 detail/message
+    // （避免先 json() 失败再 text() 触发 "body stream already read"）
+    const text = await resp.text().catch(() => "");
     let msg = `${resp.status}`;
-    try {
-      const j = await resp.json();
-      msg = j.detail || j.message || JSON.stringify(j);
-    } catch {
-      msg = await resp.text();
+    if (text) {
+      try {
+        const j = JSON.parse(text);
+        msg = j.detail || j.message || text;
+      } catch {
+        msg = text;
+      }
     }
     throw new Error(msg);
   }
@@ -54,7 +61,7 @@ export const api = {
   uploadExcel: (file: File) => {
     const fd = new FormData();
     fd.append("file", file);
-    return jsonFetch<{ count: number; records: ApplicantRecord[] }>(
+    return jsonFetch<{ count: number; records: ApplicantRecord[]; detected_column_map: Record<string, string> }>(
       `${BASE}/upload/excel`,
       { method: "POST", body: fd }
     );
@@ -63,7 +70,7 @@ export const api = {
   uploadExcelRight: (file: File) => {
     const fd = new FormData();
     fd.append("file", file);
-    return jsonFetch<{ count: number; records: ApplicantRecord[] }>(
+    return jsonFetch<{ count: number; records: ApplicantRecord[]; detected_column_map: Record<string, string> }>(
       `${BASE}/upload/excel-right`,
       { method: "POST", body: fd }
     );
@@ -139,6 +146,16 @@ export const api = {
 
   // ========== 文档提取（功能1/2） ==========
 
+  /** 上传本地文件（图片/PDF/Office）仅生成预览图（不跑 OCR，极快） */
+  previewDocumentFile: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return jsonFetch<DocumentPreviewResult>(`${BASE}/document/preview`, {
+      method: "POST",
+      body: fd,
+    });
+  },
+
   /** 上传本地文件（图片/PDF/Office）提取文字 + 字段 */
   extractDocumentFile: (file: File, fields?: string[]) => {
     const fd = new FormData();
@@ -159,6 +176,20 @@ export const api = {
         url,
         filename: filename || null,
         fields: fields && fields.length > 0 ? fields.join(",") : null,
+      }),
+    }),
+
+  /** 文件格式转换 + 压缩到目标大小（文件处理面板「导出」用）；sourceUrl 为远端文件时后端先下载再转换 */
+  convertDocument: (dataB64: string, filename: string, targetFormat: string, targetKb: number, sourceUrl?: string) =>
+    jsonFetch<DocumentConvertResult>(`${BASE}/document/convert`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        data_b64: dataB64,
+        filename,
+        target_format: targetFormat,
+        target_kb: targetKb,
+        source_url: sourceUrl || null,
       }),
     }),
 
