@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Check,
   ExternalLink,
@@ -6,6 +7,10 @@ import {
   MousePointerClick,
   Search,
   Users,
+  User,
+  CreditCard,
+  GraduationCap,
+  X,
 } from "lucide-react";
 import type { ApplicantRecord, PickedMark } from "../types";
 
@@ -17,6 +22,20 @@ export interface ExcelPickedField {
   /** 字段所在的行 record_id */
   record_id: string;
 }
+
+/** 标准字段定义：标准 key → 显示名 + 图标 */
+const STANDARD_FIELDS: { key: string; label: string; Icon: typeof User }[] = [
+  { key: "name", label: "姓名", Icon: User },
+  { key: "passport_no", label: "护照号", Icon: CreditCard },
+  { key: "student_id", label: "学号", Icon: GraduationCap },
+];
+
+/** 后端可能作为别名自动添加的标准字段 key 集合（用于过滤重复列） */
+const STANDARD_ALIAS_KEYS = new Set([
+  "name", "passport_no", "student_id", "nationality", "birth_date", "gender",
+  "passport_issue", "passport_expiry", "email", "phone",
+  "university_url", "university_name",
+]);
 
 interface Props {
   records: ApplicantRecord[];
@@ -47,6 +66,12 @@ interface Props {
   onGenerateCards?: () => void;
   /** 重新框选（清除已生成卡片） */
   onResetCards?: () => void;
+  /** 字段列映射：标准字段名 -> Excel 原始列 key（手动标记列用） */
+  fieldColumnMap?: Record<string, string>;
+  /** 字段列映射变化回调 */
+  onFieldColumnMapChange?: (field: string, columnKey: string | null) => void;
+  /** 后端自动识别的列映射：原始列名 -> 标准字段名（用于过滤重复的标准别名列） */
+  detectedColumnMap?: Record<string, string>;
 }
 
 /**
@@ -69,10 +94,25 @@ export default function ExcelView({
   cardsGenerated = false,
   onGenerateCards,
   onResetCards,
+  fieldColumnMap = {},
+  onFieldColumnMapChange,
+  detectedColumnMap = {},
 }: Props) {
   const [filter, setFilter] = useState("");
   // 行范围框选的锚点行（第一次点击的行号，0-based records 索引）
   const [rangeAnchor, setRangeAnchor] = useState<number | null>(null);
+
+  // 表头右键菜单状态
+  const [ctxMenu, setCtxMenu] = useState<{
+    column: string;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  // LOOP 列拖拽选择状态
+  const [dragSelecting, setDragSelecting] = useState(false);
+  const dragStartRef = useRef<number | null>(null);
+  const tbodyRef = useRef<HTMLTableSectionElement | null>(null);
 
   // record_id → records 数组索引（行范围基于完整 records 顺序，与搜索过滤无关）
   const recordIndexMap = useMemo(() => {
@@ -80,6 +120,18 @@ export default function ExcelView({
     records.forEach((r, i) => m.set(r.record_id, i));
     return m;
   }, [records]);
+
+  // 反向：列 key -> 标准字段 key（用于在表头显示已标记的标签）
+  const colToStandard = useMemo(() => {
+    const m = new Map<string, string>();
+    Object.entries(fieldColumnMap).forEach(([std, col]) => m.set(col, std));
+    return m;
+  }, [fieldColumnMap]);
+
+  // 被detectedColumnMap映射到的标准字段集合（这些标准key是后端自动添加的别名，应过滤掉）
+  const detectedStandardKeys = useMemo(() => {
+    return new Set(Object.values(detectedColumnMap));
+  }, [detectedColumnMap]);
 
   // 是否处于行范围框选状态（卡片池模式下始终允许框选新段）
   const rangeSelecting = !!onRowRangeChange;
@@ -96,14 +148,24 @@ export default function ExcelView({
     }
   };
 
-  // 收集所有字段名（保持出现顺序）
+  // 收集所有字段名（保持出现顺序，过滤后端自动添加的标准别名列）
   const columns = useMemo(() => {
     const set = new Set<string>();
     for (const r of records) {
-      for (const k of Object.keys(r.fields)) set.add(k);
+      for (const k of Object.keys(r.fields)) {
+        // 过滤掉后端自动添加的标准字段别名：如果k是标准字段名，且detectedColumnMap中有其他列映射到它，说明k是别名
+        if (STANDARD_ALIAS_KEYS.has(k) && detectedStandardKeys.has(k)) {
+          // 进一步确认：检查是否存在原始列名（即detectedColumnMap的key中有映射到k的）
+          const hasOriginalCol = Object.entries(detectedColumnMap).some(([origCol, stdKey]) => stdKey === k && origCol !== k);
+          if (hasOriginalCol) continue; // 跳过别名列
+        }
+        // 过滤掉_source_sheet等内部字段
+        if (k.startsWith("_")) continue;
+        set.add(k);
+      }
     }
     return Array.from(set);
-  }, [records]);
+  }, [records, detectedStandardKeys, detectedColumnMap]);
 
   // 过滤
   const filtered = useMemo(() => {
@@ -117,6 +179,99 @@ export default function ExcelView({
       return false;
     });
   }, [records, filter]);
+
+  // 表头右键菜单：阻止默认菜单，弹出自定义菜单
+  const handleHeaderContextMenu = (e: React.MouseEvent, column: string) => {
+    if (!onFieldColumnMapChange) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setCtxMenu({ column, x: e.clientX, y: e.clientY });
+  };
+
+  // 点击页面其他地方关闭右键菜单
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const close = () => setCtxMenu(null);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("contextmenu", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("contextmenu", close);
+    };
+  }, [ctxMenu]);
+
+  const handleMarkColumn = (stdKey: string) => {
+    if (!ctxMenu) return;
+    // 先清除其他列占用的同一标准字段（避免重复）
+    const existingCol = fieldColumnMap[stdKey];
+    if (onFieldColumnMapChange) {
+      // 如果点的是已经标记的同一列，则取消标记
+      if (existingCol === ctxMenu.column) {
+        onFieldColumnMapChange(stdKey, null);
+      } else {
+        onFieldColumnMapChange(stdKey, ctxMenu.column);
+      }
+    }
+    setCtxMenu(null);
+  };
+
+  const handleClearColumnMark = () => {
+    if (!ctxMenu) return;
+    const stdKey = colToStandard.get(ctxMenu.column);
+    if (stdKey && onFieldColumnMapChange) {
+      onFieldColumnMapChange(stdKey, null);
+    }
+    setCtxMenu(null);
+  };
+
+  // ===== LOOP 列拖拽选择（长按/按下鼠标往下拖即选择范围） =====
+  const handleLoopCellMouseDown = (e: React.MouseEvent, realIdx: number) => {
+    if (!rangeSelecting || !onRowRangeChange) return;
+    if (e.button !== 0) return; // 仅左键
+    e.preventDefault();
+    setDragSelecting(true);
+    dragStartRef.current = realIdx;
+    setRangeAnchor(realIdx);
+    onRowRangeChange({ start: realIdx, end: realIdx });
+  };
+
+  // 在 tbody 上监听 mousemove/mouseup，避免快速拖拽漏事件
+  useEffect(() => {
+    if (!dragSelecting) return;
+    const tbody = tbodyRef.current;
+    if (!tbody) return;
+
+    const getRealIdxFromEvent = (e: MouseEvent): number | null => {
+      const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      if (!el) return null;
+      const td = el.closest("td[data-real-idx]") as HTMLElement | null;
+      if (!td) return null;
+      const idx = td.getAttribute("data-real-idx");
+      return idx != null ? parseInt(idx, 10) : null;
+    };
+
+    const onMove = (e: MouseEvent) => {
+      const start = dragStartRef.current;
+      if (start == null || !onRowRangeChange) return;
+      const cur = getRealIdxFromEvent(e);
+      if (cur == null) return;
+      onRowRangeChange({ start: Math.min(start, cur), end: Math.max(start, cur) });
+    };
+    const onUp = () => {
+      setDragSelecting(false);
+      dragStartRef.current = null;
+      // 注意：不清除 rangeAnchor——保持锚点状态和点击选择一致；
+      // 但是拖拽完成相当于已经选定了一个范围，所以清除锚点允许下次重新开始
+      setRangeAnchor(null);
+    };
+
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    return () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+  }, [dragSelecting, onRowRangeChange]);
 
   const tableContent = (
     <>
@@ -147,8 +302,8 @@ export default function ExcelView({
               {rowRange
                 ? `已选 第${rowRange.start + 1}–${rowRange.end + 1}行 (${rowRange.end - rowRange.start + 1}行)`
                 : rangeAnchor != null
-                ? "再点一行定结束行"
-                : "点行号框选范围"}
+                ? "再点/拖一行定结束行"
+                : "点行号/拖LOOP列框选"}
             </span>
             {rowRange && onGenerateCards && (
               <button
@@ -191,21 +346,40 @@ export default function ExcelView({
                 </th>
                 {columns.map((c) => {
                   const isSelected = selectedColumn === c;
+                  const stdKey = colToStandard.get(c);
+                  const stdField = stdKey ? STANDARD_FIELDS.find((f) => f.key === stdKey) : null;
                   return (
                     <th
                       key={c}
                       onClick={() => onSelectColumn?.(isSelected ? null : c)}
+                      onContextMenu={(e) => handleHeaderContextMenu(e, c)}
                       className={[
-                        "border-b border-slate-200 px-2 py-1.5 text-left font-semibold whitespace-nowrap transition-all",
-                        onSelectColumn ? "cursor-pointer hover:bg-slate-100" : "",
+                        "group border-b border-slate-200 px-2 py-1.5 text-left font-semibold whitespace-nowrap transition-all",
+                        onSelectColumn || onFieldColumnMapChange ? "cursor-pointer" : "",
+                        "hover:bg-slate-100",
                         isSelected
                           ? "bg-brand-100 text-brand-700 ring-1 ring-brand-300"
+                          : stdField
+                          ? "bg-emerald-50 text-emerald-700"
                           : "text-slate-500",
                       ].join(" ")}
-                      title={onSelectColumn ? (isSelected ? "点击取消选中该列" : "点击选中该列作为 LOOP 变量") : c}
+                      title={
+                        onFieldColumnMapChange
+                          ? `右键标记此列（姓名/护照/学号）${onSelectColumn ? "；左键点击选中为 LOOP 变量" : ""}`
+                          : onSelectColumn ? (isSelected ? "点击取消选中该列" : "点击选中该列作为 LOOP 变量") : c
+                      }
                     >
                       <div className="flex items-center gap-1">
-                        {c}
+                        <span className="max-w-[150px] truncate">{c}</span>
+                        {stdField && (
+                          <span
+                            className="inline-flex items-center gap-0.5 rounded-full bg-emerald-500/15 px-1 py-0 text-[9px] font-bold text-emerald-700"
+                            title={`已标记为「${stdField.label}」列 · 右键可修改`}
+                          >
+                            <stdField.Icon className="h-2.5 w-2.5" />
+                            {stdField.label}
+                          </span>
+                        )}
                         {isSelected && (
                           <span className="rounded-full bg-brand-500 px-1 py-0 text-[9px] font-bold text-white">LOOP</span>
                         )}
@@ -215,7 +389,7 @@ export default function ExcelView({
                 })}
               </tr>
             </thead>
-            <tbody>
+            <tbody ref={tbodyRef}>
               {filtered.map((r, idx) => {
                 const isSelected = r.record_id === selectedId;
                 const realIdx = recordIndexMap.get(r.record_id) ?? idx;
@@ -235,6 +409,7 @@ export default function ExcelView({
                         : idx % 2 === 0
                         ? "bg-white/40"
                         : "bg-slate-50/30",
+                      dragSelecting ? "select-none" : "",
                     ].join(" ")}
                   >
                     <td
@@ -266,6 +441,7 @@ export default function ExcelView({
                       return (
                         <td
                           key={c}
+                          data-real-idx={realIdx}
                           onClick={() => {
                             if (isLoopCol) {
                               handleRowNumClick(realIdx);
@@ -276,6 +452,7 @@ export default function ExcelView({
                               onPickedField({ field: c, value: v, record_id: r.record_id });
                             }
                           }}
+                          onMouseDown={isLoopCol ? (e) => handleLoopCellMouseDown(e, realIdx) : undefined}
                           className={[
                             "group relative border-b border-slate-100/60 px-2 py-1 align-top transition-all",
                             isLoopCol
@@ -291,7 +468,11 @@ export default function ExcelView({
                             isLoopCol && isAnchor ? "bg-indigo-200" : "",
                             justPicked ? "animate-glow-pulse" : "",
                           ].join(" ")}
-                          title={isLoopCol ? (rangeAnchor == null ? "点击设为 LOOP 起始行" : "点击设为 LOOP 结束行") : (picking ? `点击拾取字段「${c}」` : (mark ? `第 ${mark.order} 个拾取 · ${mark.label}` : display))}
+                          title={
+                            isLoopCol
+                              ? "按下鼠标向下拖拽即可框选多行；点击可设置起止行"
+                              : (picking ? `点击拾取字段「${c}」` : (mark ? `第 ${mark.order} 个拾取 · ${mark.label}` : display))
+                          }
                         >
                           <span className={["block max-w-[200px] truncate", v ? "text-slate-700" : "text-slate-300"].join(" ")}>
                             {display}
@@ -325,6 +506,64 @@ export default function ExcelView({
           </table>
         )}
       </div>
+
+      {/* 表头右键菜单：通过 Portal 挂载到 body，避免父容器 transform/overflow 导致定位错位 */}
+      {ctxMenu && typeof document !== "undefined" && createPortal(
+        <div
+          className="fixed z-[9999] min-w-[180px] overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-xl"
+          style={{
+            left: Math.min(ctxMenu.x, (window.innerWidth || 1200) - 200),
+            top: Math.min(ctxMenu.y, (window.innerHeight || 800) - 160),
+          }}
+        >
+          <div className="border-b border-slate-100 px-3 py-1.5 text-[10px] font-medium text-slate-400">
+            标记 <span className="font-semibold text-slate-600">「{ctxMenu.column}」</span> 为：
+          </div>
+          {STANDARD_FIELDS.map(({ key, label, Icon }) => {
+            const isMarked = fieldColumnMap[key] === ctxMenu.column;
+            const otherCol = fieldColumnMap[key];
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => handleMarkColumn(key)}
+                className={[
+                  "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition-colors",
+                  isMarked
+                    ? "bg-emerald-50 text-emerald-700"
+                    : "text-slate-700 hover:bg-slate-50",
+                ].join(" ")}
+              >
+                <Icon className="h-3.5 w-3.5 shrink-0" />
+                <span className="flex-1">{label}</span>
+                {isMarked ? (
+                  <span className="inline-flex items-center gap-0.5 text-[10px] text-emerald-600">
+                    <Check className="h-3 w-3" /> 已标记
+                  </span>
+                ) : otherCol ? (
+                  <span className="text-[10px] text-slate-400" title={`当前标记在列「${otherCol}」，点击将切换至此列`}>
+                    替换「{otherCol.length > 6 ? otherCol.slice(0, 6) + "…" : otherCol}」
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+          {colToStandard.get(ctxMenu.column) && (
+            <>
+              <div className="my-1 border-t border-slate-100" />
+              <button
+                type="button"
+                onClick={handleClearColumnMark}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-rose-600 hover:bg-rose-50"
+              >
+                <X className="h-3.5 w-3.5 shrink-0" />
+                清除此列标记
+              </button>
+            </>
+          )}
+        </div>,
+        document.body
+      )}
     </>
   );
 
