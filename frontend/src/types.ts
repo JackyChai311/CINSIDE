@@ -25,6 +25,8 @@ export interface VerificationStep {
   isRecordStart?: boolean;
   /** 人物卡片名称 */
   recordName?: string;
+  /** 人物记录ID（用于点击跳转到对应卡片） */
+  recordId?: string;
   /** 当前是第几张卡片（1-based） */
   recordIndex?: number;
   /** 总卡片数 */
@@ -133,6 +135,65 @@ export type WorkflowAction = "click" | "type" | "select" | "wait" | "screenshot"
 export type VerifyMethod = "smart" | "exact";
 export type LeftSource = "excel" | "database" | "passport" | "manual";
 
+// ========== 点击展开型控件（选项控件 / 日历控件） ==========
+
+/** 选项控件的单个可选项 */
+export interface WidgetOption {
+  /** 选项显示文字 */
+  text: string;
+  /** 选项元素选择器（面板内定位用） */
+  selector: string;
+  /** 用户标注的别名：左侧值与选项文字不一致时用于匹配 */
+  alias?: string;
+}
+
+/** 日历控件的可标注角色 */
+export type CalendarRole =
+  | "panel"      // 日历面板容器
+  | "header"     // 年月整体显示（如 "2024年1月"）
+  | "year"       // 单独的年显示
+  | "month"      // 单独的月显示
+  | "prevYear"   // 上一年
+  | "nextYear"   // 下一年
+  | "prevMonth"  // 上一月
+  | "nextMonth"  // 下一月
+  | "dayCell";   // 日格子（当前月）
+
+/** 日历控件结构（自动识别 + 用户修正） */
+export interface CalendarControls {
+  /** 日历面板容器选择器 */
+  panelSelector?: string;
+  /** 年月整体显示元素（如 "2024年1月"） */
+  headerSelector?: string;
+  /** 单独的年显示元素（与 monthSelector 配合，替代 headerSelector） */
+  yearSelector?: string;
+  /** 单独的月显示元素 */
+  monthSelector?: string;
+  prevYearSelector?: string;
+  nextYearSelector?: string;
+  prevMonthSelector?: string;
+  nextMonthSelector?: string;
+  /** 日格子通用选择器（定位日历面板内所有日期格） */
+  dayCellSelector?: string;
+}
+
+/** 点击展开型控件定义：点击触发框后展开选项面板/日历面板 */
+export interface WidgetDef {
+  id: string;
+  kind: "option" | "calendar";
+  /** 触发框选择器（点击后展开面板的元素） */
+  triggerSelector: string;
+  /** 触发框标签（显示用） */
+  triggerLabel?: string;
+  /** 展开面板容器选择器 */
+  panelSelector?: string;
+  /** 选项控件：可选项列表 */
+  options?: WidgetOption[];
+  /** 日历控件：结构角色 */
+  calendar?: CalendarControls;
+  createdAt: number;
+}
+
 export interface WorkflowStep {
   action: WorkflowAction;
   selector?: string | null;
@@ -153,6 +214,8 @@ export interface FieldMapping {
   left_record_key?: string | null;
   verify_method?: VerifyMethod;
   note?: string | null;
+  /** 点击展开型控件（存在时，录入/审查走控件脚本而非普通填值/读值） */
+  widget?: WidgetDef | null;
 }
 
 /** 已拾取的元素标记（用于在 UI 上显示顺序编号 1, 2, 3...） */
@@ -212,8 +275,22 @@ export interface PickedMark {
   docLocalSamplePath?: string;
   /** 文件提取序列中的导航点击步骤标记（配置阶段记录的多步点击） */
   docExtractClick?: boolean;
+  /** 文件上传步骤标记：把文件槽位中的文件填入网页 file input（DataTransfer 方案） */
+  docUpload?: boolean;
+  /** 上传来源：绑定的文件提取步骤 mark id（执行时从该槽位取文件）；空=取最近一次提取的文件 */
+  uploadSourceMarkId?: string;
+  /** 上传前压缩到目标大小（KB），0/undefined=不压缩 */
+  uploadCompressKb?: number;
+  /** 上传前格式转换：original | jpg | png | pdf */
+  uploadFormat?: string;
+  /** 上传框 accept 属性（配置时记录，显示用） */
+  uploadAccept?: string;
   /** 点击阶段：pre=前置点击（搜索/进入，步骤3），post=收尾点击（保存/返回，步骤5） */
   clickPhase?: "pre" | "post";
+  /** 点击展开型控件（选项/日历）：录入时按左侧值自动选择/翻页点选 */
+  widget?: WidgetDef | null;
+  /** 弹窗内拾取的元素：执行时 JS/高亮路由到弹窗 BrowserView 而非主 view */
+  inPopup?: boolean;
 }
 
 /** 教学模式状态：人类教 AI 自动化流程的阶段 */
@@ -242,8 +319,10 @@ export interface WorkflowTemplate {
   id: string;
   /** 模板名称 */
   name: string;
-  /** 图标（emoji 字符） */
+  /** 图标（emoji 字符，默认 🔍） */
   icon?: string;
+  /** 自定义图标图片（base64 dataURL）：存在时优先显示该图片，左侧渐隐融入卡片背景 */
+  iconImage?: string;
   /** 创建时间 */
   createdAt: number;
   /** 更新时间 */
@@ -319,6 +398,7 @@ export interface VerificationReport {
   task_id: string;
   record_id: string;
   record_name?: string | null;
+  student_id?: string | null;
   university_url: string;
   entries: VerificationReportEntry[];
   overall: Overall;
@@ -341,6 +421,33 @@ export interface DocumentExtractResult {
   fields: Record<string, string>;
   /** 预处理后的图片预览（base64，仅图片文件有值）— 自动旋转到正面 + 裁剪白边后 */
   processed_image?: string | null;
+}
+
+/** 文档预览结果（仅预览图/文本预览，不跑 OCR） */
+export interface DocumentPreviewResult {
+  filename: string;
+  method: "image" | "pdf_render" | "markitdown_text" | "unknown";
+  /** JPEG 预览图（base64） */
+  processed_image?: string | null;
+  /** 文本类文件的前 2000 字符预览 */
+  text_preview?: string | null;
+}
+
+/** 文件格式转换 + 压缩结果（文件处理面板「导出」） */
+export interface DocumentConvertResult {
+  /** 转换后文件内容（base64，无 data: 前缀） */
+  data_b64: string;
+  mime: string;
+  ext: string;
+  /** 输出字节数 */
+  size: number;
+  width: number;
+  height: number;
+  /** 是否压到目标大小以内 */
+  reached: boolean;
+  note: string;
+  pages: number;
+  warnings: string[];
 }
 
 /** 文档对比条目：左侧记录值 vs 文档提取值 */
