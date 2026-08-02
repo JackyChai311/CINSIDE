@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -18,11 +18,13 @@ import {
   Settings2,
   Table2,
   Trash2,
+  Type,
   X,
   XCircle,
 } from "lucide-react";
 import type {
   AppMode,
+  ApplicantRecord,
   DocExtractState,
   FieldComparison,
   FieldMapping,
@@ -37,6 +39,24 @@ import {
   MATCH_LABELS,
   OVERALL_LABELS,
 } from "../types";
+
+/** 执行步骤项：统一表达前置点击/输入/审查字段/收尾点击 */
+export interface ExecStepItem {
+  /** 唯一id，用于DOM定位 */
+  id: string;
+  /** 步骤分组：pre=前置点击/输入, review=审查/录入字段, post=收尾点击 */
+  group: "pre" | "review" | "post";
+  /** 分组内序号（1-based） */
+  orderInGroup: number;
+  /** 显示标签 */
+  label: string;
+  /** 动作类型 */
+  action: "click" | "input" | "compare" | "fill";
+  /** 对应的PickedMark.order 或 reviewMapping索引 */
+  sourceOrder?: number;
+  /** 对应mark的id（用于DOM元素定位） */
+  markId?: string;
+}
 
 interface Props {
   comparisons: FieldComparison[];
@@ -58,8 +78,8 @@ interface Props {
   onPickExtractedField?: (side: "left" | "right", field: string, value: string) => void;
   /** 本地文件提取配置内容（有值时"文件处理"卡片显示它，替代正常内容） */
   docLocalConfigContent?: React.ReactNode;
-  /** 聚焦面板模式："field"=只显示字段对比，"doc"=只显示文件处理，null=三面板 */
-  focusPanel?: "field" | "doc" | null;
+  /** 聚焦面板模式："field"=只显示字段对比，"doc"=只显示文件处理，"doc-extract"=文件处理+提取元素两栏，null=三面板 */
+  focusPanel?: "field" | "doc" | "doc-extract" | null;
   /** 字段对比设置模式数据：前置点击 marks */
   preClickMarks?: PickedMark[];
   /** 字段对比设置模式数据：收尾点击 marks */
@@ -74,6 +94,29 @@ interface Props {
   onSaveToBatch?: () => void;
   /** 当前是否有勾选的卡片（控制"保存到这批"按钮显隐） */
   hasCheckedBatch?: boolean;
+  /** 自定义文本面板内容（有值时"提取元素"卡片显示它，替代正常内容） */
+  customTextContent?: React.ReactNode;
+  /** 外部信号：当为 true 时，自动切换"提取元素"面板到设置模式 */
+  customTextMode?: boolean;
+  /** 控件提取面板内容（点击展开选项/日历控件，有值时优先于自定义文本显示） */
+  widgetExtractContent?: React.ReactNode;
+  /** 外部信号：当为 true 时，自动切换"提取元素"面板到设置模式（控件提取） */
+  widgetSetupSignal?: boolean;
+  /** 数据源记录（用于卡片显示名字+学号） */
+  records?: ApplicantRecord[];
+  /** 点击人物卡片跳转到该记录 */
+  onSelectRecord?: (recordId: string) => void;
+  // ============ 执行时光标动画相关 ============
+  /** 执行阶段：idle=未执行，marks=执行点击/输入，verify=逐字段审查，done=完成 */
+  execPhase?: "idle" | "marks" | "verify" | "done";
+  /** 当前正在执行的mark.order（marks阶段有效） */
+  currentMarkOrder?: number | null;
+  /** 当前正在审查的字段索引（reviewMappings中的位置，verify阶段有效，-1=未在审查） */
+  activeVerifyIdx?: number;
+  /** 审查字段比对结果（key = reviewMappings 中的索引 i） */
+  reviewFieldResults?: Record<number, FieldMatch>;
+  /** 所有已选marks（按order升序），用于执行步骤进度条 */
+  allPickedMarks?: PickedMark[];
 }
 
 export default function ResultsPanel({
@@ -102,6 +145,17 @@ export default function ResultsPanel({
   onPreviewMark,
   onSaveToBatch,
   hasCheckedBatch = false,
+  customTextContent,
+  customTextMode = false,
+  widgetExtractContent,
+  widgetSetupSignal = false,
+  records = [],
+  onSelectRecord,
+  execPhase = "idle",
+  currentMarkOrder = null,
+  activeVerifyIdx = -1,
+  reviewFieldResults,
+  allPickedMarks = [],
 }: Props) {
   return (
     <div className="glass-strong relative flex h-full flex-col overflow-hidden rounded-2xl">
@@ -152,6 +206,17 @@ export default function ResultsPanel({
           onPreviewMark={onPreviewMark}
           onSaveToBatch={onSaveToBatch}
           hasCheckedBatch={hasCheckedBatch}
+          customTextContent={customTextContent}
+          customTextMode={customTextMode}
+          widgetExtractContent={widgetExtractContent}
+          widgetSetupSignal={widgetSetupSignal}
+          records={records}
+          onSelectRecord={onSelectRecord}
+          execPhase={execPhase}
+          currentMarkOrder={currentMarkOrder}
+          activeVerifyIdx={activeVerifyIdx}
+          reviewFieldResults={reviewFieldResults}
+          allPickedMarks={allPickedMarks}
         />
       </div>
     </div>
@@ -447,6 +512,17 @@ function ReportTab({
   onPreviewMark,
   onSaveToBatch,
   hasCheckedBatch = false,
+  customTextContent,
+  customTextMode = false,
+  widgetExtractContent,
+  widgetSetupSignal = false,
+  records = [],
+  onSelectRecord,
+  execPhase = "idle",
+  currentMarkOrder = null,
+  activeVerifyIdx = -1,
+  reviewFieldResults = {},
+  allPickedMarks = [],
 }: {
   report: VerificationReport | null;
   reports: VerificationReport[];
@@ -464,8 +540,8 @@ function ReportTab({
   onPickExtractedField?: (side: "left" | "right", field: string, value: string) => void;
   /** 本地文件提取配置内容（有值时"文件处理"卡片显示它，替代正常内容） */
   docLocalConfigContent?: React.ReactNode;
-  /** 聚焦面板模式："field"=只显示字段对比，"doc"=只显示文件处理，null=三面板 */
-  focusPanel?: "field" | "doc" | null;
+  /** 聚焦面板模式："field"=只显示字段对比，"doc"=只显示文件处理，"doc-extract"=文件处理+提取元素两栏，null=三面板 */
+  focusPanel?: "field" | "doc" | "doc-extract" | null;
   /** 字段对比设置模式数据：前置点击 marks */
   preClickMarks?: PickedMark[];
   /** 字段对比设置模式数据：收尾点击 marks */
@@ -480,6 +556,29 @@ function ReportTab({
   onSaveToBatch?: () => void;
   /** 当前是否有勾选的卡片（控制"保存到这批"按钮显隐） */
   hasCheckedBatch?: boolean;
+  /** 自定义文本面板内容（有值时"提取元素"卡片显示它，替代正常内容） */
+  customTextContent?: React.ReactNode;
+  /** 外部信号：当为 true 时，自动切换"提取元素"面板到设置模式 */
+  customTextMode?: boolean;
+  /** 控件提取面板内容（点击展开选项/日历控件，有值时优先于自定义文本显示） */
+  widgetExtractContent?: React.ReactNode;
+  /** 外部信号：当为 true 时，自动切换"提取元素"面板到设置模式（控件提取） */
+  widgetSetupSignal?: boolean;
+  /** 数据源记录（用于卡片显示名字+学号） */
+  records?: ApplicantRecord[];
+  /** 点击人物卡片跳转到该记录 */
+  onSelectRecord?: (recordId: string) => void;
+  // ============ 执行时光标动画相关 ============
+  /** 执行阶段：idle=未执行，marks=执行点击/输入，verify=逐字段审查，done=完成 */
+  execPhase?: "idle" | "marks" | "verify" | "done";
+  /** 当前正在执行的mark.order（marks阶段有效） */
+  currentMarkOrder?: number | null;
+  /** 当前正在审查的字段索引（reviewMappings中的位置，verify阶段有效，-1=未在审查） */
+  activeVerifyIdx?: number;
+  /** 审查字段比对结果（key = reviewMappings 中的索引 i） */
+  reviewFieldResults?: Record<number, FieldMatch>;
+  /** 所有已选marks（按order升序），用于执行步骤进度条 */
+  allPickedMarks?: PickedMark[];
 }) {
   const hasReports = reports && reports.length > 0;
   const hasCompare = resultPresent && comparisons.length > 0;
@@ -493,6 +592,8 @@ function ReportTab({
   const [fieldSetupMode, setFieldSetupMode] = useState(false);
   /** 文件处理面板模式开关：true=步骤设置版，false=结果显示版 */
   const [docSetupMode, setDocSetupMode] = useState(false);
+  /** 提取元素面板模式开关：true=设置（自定义字段），false=结果（提取内容/DEMO） */
+  const [extractSetupMode, setExtractSetupMode] = useState(false);
 
   // 聚焦字段对比面板时（用户正在添加前置/收尾点击或审查步骤），自动切换到设置模式
   useEffect(() => {
@@ -500,8 +601,172 @@ function ReportTab({
   }, [focusPanel]);
   // 聚焦文件处理面板时（用户正在配置文件提取），自动切换到设置模式
   useEffect(() => {
-    if (focusPanel === "doc") setDocSetupMode(true);
+    if (focusPanel === "doc" || focusPanel === "doc-extract") setDocSetupMode(true);
   }, [focusPanel]);
+  // doc-extract 模式自动展开提取元素面板到设置态
+  useEffect(() => {
+    if (focusPanel === "doc-extract") {
+      setShowExtractPanel(true);
+      setExtractSetupMode(true);
+    }
+  }, [focusPanel]);
+  // 外部激活自定义文本时，自动切换提取元素面板到设置模式
+  useEffect(() => {
+    if (customTextMode) setExtractSetupMode(true);
+  }, [customTextMode]);
+  // 外部激活控件提取时，自动切换提取元素面板到设置模式
+  useEffect(() => {
+    if (widgetSetupSignal) setExtractSetupMode(true);
+  }, [widgetSetupSignal]);
+  // 运行开始时，自动将所有面板切到"结果"态
+  useEffect(() => {
+    if (running) {
+      setFieldSetupMode(false);
+      setDocSetupMode(false);
+      setExtractSetupMode(false);
+    }
+  }, [running]);
+
+  // ============ 执行步骤进度条：构建扁平步骤列表 + FLIP光标动画 ============
+  // 步骤顺序：所有marks（按order升序，包含前置/中间/收尾的点击和输入）→ reviewMappings（审查字段）
+  const flatSteps = useMemo(() => {
+    type StepItem = {
+      key: string;
+      label: string;
+      type: "mark" | "review";
+      mark?: PickedMark;
+      reviewIdx?: number;
+      side?: "left" | "right";
+    };
+    const items: StepItem[] = [];
+    // 所有marks按order升序排列
+    for (const m of allPickedMarks) {
+      items.push({
+        key: `mark:${m.order}`,
+        label: m.label || (m.action === "input" ? "输入" : "点击"),
+        type: "mark",
+        mark: m,
+        side: m.side,
+      });
+    }
+    for (let i = 0; i < reviewMappings.length; i++) {
+      const mp = reviewMappings[i];
+      items.push({
+        key: `review:${i}`,
+        label: mp.right_label || mp.left_field || `字段${i + 1}`,
+        type: "review",
+        reviewIdx: i,
+        side: "right",
+      });
+    }
+    return items;
+  }, [allPickedMarks, reviewMappings]);
+
+  // 计算当前活动步骤在 flatSteps 中的索引
+  const activeStepIndex = useMemo(() => {
+    if (execPhase === "idle" || execPhase === "done") return -1;
+    if (execPhase === "marks" && currentMarkOrder != null) {
+      return flatSteps.findIndex((s) => s.type === "mark" && s.mark?.order === currentMarkOrder);
+    }
+    if (execPhase === "verify" && activeVerifyIdx >= 0) {
+      return flatSteps.findIndex((s) => s.type === "review" && s.reviewIdx === activeVerifyIdx);
+    }
+    return -1;
+  }, [execPhase, currentMarkOrder, activeVerifyIdx, flatSteps]);
+
+  // FLIP 动画：光标平滑移动到当前活动步骤
+  const stepItemRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const cursorRef = useRef<HTMLDivElement>(null);
+  const stepBarRef = useRef<HTMLDivElement>(null);
+  // 上一次光标DOM矩形，用于FLIP
+  const lastCursorRect = useRef<{ left: number; top: number; width: number; height: number } | null>(null);
+
+  useEffect(() => {
+    const cursor = cursorRef.current;
+    if (!cursor) return;
+    if (activeStepIndex < 0 || !stepItemRefs.current[activeStepIndex]) {
+      // 无活动步骤时隐藏光标
+      cursor.style.opacity = "0";
+      lastCursorRect.current = null;
+      return;
+    }
+    const target = stepItemRefs.current[activeStepIndex]!;
+    const bar = stepBarRef.current;
+    if (!bar) return;
+    const barRect = bar.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+
+    // 相对于bar容器的目标位置
+    const nextLeft = targetRect.left - barRect.left;
+    const nextTop = targetRect.top - barRect.top;
+    const nextWidth = targetRect.width;
+    const nextHeight = targetRect.height;
+
+    if (!lastCursorRect.current) {
+      // 第一次出现，直接定位
+      cursor.style.transition = "none";
+      cursor.style.transform = `translate(${nextLeft}px, ${nextTop}px)`;
+      cursor.style.width = `${nextWidth}px`;
+      cursor.style.height = `${nextHeight}px`;
+      cursor.style.opacity = "1";
+      // 强制reflow
+      cursor.getBoundingClientRect();
+    } else {
+      // FLIP: First(记录上一位置), Last(新位置), Invert(先放回旧位置), Play(transition到新位置)
+      const prev = lastCursorRect.current;
+      const deltaX = prev.left - nextLeft;
+      const deltaY = prev.top - nextTop;
+      const scaleX = prev.width / nextWidth;
+      const scaleY = prev.height / nextHeight;
+      // 先invert（无transition），从当前位置"反向"补偿到上一帧视觉位置
+      cursor.style.transition = "none";
+      cursor.style.transform = `translate(${nextLeft + deltaX}px, ${nextTop + deltaY}px) scale(${scaleX}, ${scaleY})`;
+      cursor.style.width = `${nextWidth}px`;
+      cursor.style.height = `${nextHeight}px`;
+      cursor.style.opacity = "1";
+      // 强制reflow让invert生效
+      cursor.getBoundingClientRect();
+      // 再play（有transition）回到新位置
+      cursor.style.transition = "transform 280ms cubic-bezier(0.22, 1, 0.36, 1), opacity 200ms";
+      cursor.style.transform = `translate(${nextLeft}px, ${nextTop}px) scale(1, 1)`;
+    }
+    lastCursorRect.current = { left: nextLeft, top: nextTop, width: nextWidth, height: nextHeight };
+  }, [activeStepIndex, flatSteps.length]);
+
+  // 窗口大小变化时重置光标位置
+  useEffect(() => {
+    const onResize = () => { lastCursorRect.current = null; };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  /** 判断某个步骤项的状态：'active' | 'done' | 'fail' | 'pending' */
+  const getStepStatus = useCallback((s: typeof flatSteps[number]): "active" | "done" | "fail" | "pending" => {
+    if (s.type === "mark") {
+      const order = s.mark?.order;
+      if (order == null) return "pending";
+      if (execPhase === "marks" && currentMarkOrder === order) return "active";
+      if (execPhase === "verify" || execPhase === "done") {
+        // marks阶段已过；若当前mark.order < 正在执行或已审查的起点，视作完成
+        // 简单处理：所有mark在verify/done阶段都视为已完成（成功）
+        return "done";
+      }
+      return "pending";
+    } else {
+      // review step
+      const idx = s.reviewIdx!;
+      if (execPhase === "verify" && activeVerifyIdx === idx) return "active";
+      if (reviewFieldResults[idx]) {
+        return reviewFieldResults[idx] === "match" ? "done" : "fail";
+      }
+      if (execPhase === "done" && reviewFieldResults[idx]) {
+        return reviewFieldResults[idx] === "match" ? "done" : "fail";
+      }
+      // done阶段但没有结果（理论上都有了），默认pending
+      if (execPhase === "done") return "done";
+      return "pending";
+    }
+  }, [execPhase, currentMarkOrder, activeVerifyIdx, reviewFieldResults]);
 
   // 三栏宽度（百分比）
   const [leftWidth, setLeftWidth] = useState(32);
@@ -547,8 +812,28 @@ function ReportTab({
   }, [leftWidth, midWidth]);
 
   // ============ LOOP 实时进度：将 steps 按 recordStart 分组 ============
+  // 用 recordMap 快速查找记录信息（姓名/学号）
+  const recordMap = useMemo(() => {
+    const m = new Map<string, ApplicantRecord>();
+    records.forEach((r) => m.set(r.record_id, r));
+    return m;
+  }, [records]);
+
+  // 辅助：从 record 中获取学号（兼容标准字段和常见别名）
+  const getStudentId = (rec: ApplicantRecord | undefined): string => {
+    if (!rec) return "";
+    return rec.fields.student_id || rec.fields.student_no || rec.fields.sid || rec.fields.id || rec.fields.学号 || "";
+  };
+  // 辅助：从 record 中获取姓名
+  const getDisplayName = (rec: ApplicantRecord | undefined, fallback: string): string => {
+    if (!rec) return fallback;
+    return rec.fields.name || rec.fields.fullname || fallback;
+  };
+
   interface LiveRecord {
     name: string;
+    studentId: string;
+    recordId: string;
     index: number;
     total: number;
     fieldSteps: { label: string; detail?: string; action: string; done: boolean }[];
@@ -572,8 +857,13 @@ function ReportTab({
         if (m) name = m[1];
         else name = s.description.length > 20 ? s.description.slice(0, 20) + "…" : s.description;
       }
+      // 从records中查找补充姓名和学号
+      const rid = s.recordId || "";
+      const rec = rid ? recordMap.get(rid) : undefined;
       cur = {
-        name,
+        name: getDisplayName(rec, name),
+        studentId: getStudentId(rec),
+        recordId: rid,
         index: s.recordIndex || 1,
         total: s.recordTotal || 1,
         fieldSteps: [],
@@ -646,26 +936,44 @@ function ReportTab({
 
     return (
       <div data-running={isRunning} className={`overflow-hidden rounded-md border shadow-sm transition-all ${accent.head}`}>
-        <button
-          onClick={() => setExpanded((v) => !v)}
-          className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:brightness-[0.97]"
-        >
-          {isRunning ? (
-            <Loader2 className={`h-3.5 w-3.5 shrink-0 animate-spin ${accent.spin}`} />
-          ) : isFailed ? (
-            <XCircle className={`h-3.5 w-3.5 shrink-0 ${accent.spin}`} />
-          ) : (
-            <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${accent.spin}`} />
+        <div className="flex w-full items-center gap-2 px-3 py-1.5">
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            className="flex flex-1 items-center gap-2 text-left transition-colors hover:brightness-[0.97]"
+          >
+            {isRunning ? (
+              <Loader2 className={`h-3.5 w-3.5 shrink-0 animate-spin ${accent.spin}`} />
+            ) : isFailed ? (
+              <XCircle className={`h-3.5 w-3.5 shrink-0 ${accent.spin}`} />
+            ) : (
+              <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${accent.spin}`} />
+            )}
+            <span className={`text-[12px] font-semibold ${accent.text}`}>{rec.name || "未命名"}</span>
+            {rec.studentId && (
+              <span className="rounded bg-slate-200/70 px-1.5 py-0.5 font-mono text-[9px] text-slate-500">
+                {rec.studentId}
+              </span>
+            )}
+          </button>
+          {onSelectRecord && rec.recordId && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onSelectRecord(rec.recordId); }}
+              className="shrink-0 rounded px-1.5 py-0.5 text-[9px] text-slate-400 transition-colors hover:bg-slate-200/60 hover:text-slate-600"
+              title="跳转到该记录"
+            >
+              查看
+            </button>
           )}
-          <span className={`text-[12px] font-semibold ${accent.text}`}>{rec.name}</span>
-          <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-bold ${accent.badgeSoft}`}>
-            {rec.index}/{rec.total}
-          </span>
-          <span className={`ml-auto inline-flex items-center rounded-full ${accent.badge} px-2 py-0.5 text-[10px] font-semibold text-white`}>
+          <span className={`inline-flex shrink-0 items-center rounded-full ${accent.badge} px-2 py-0.5 text-[10px] font-semibold text-white`}>
             {isRunning ? `${doneCount}步` : isFailed ? "失败" : "通过"}
           </span>
-          <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
-        </button>
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            className="shrink-0 rounded p-0.5 transition-colors hover:bg-slate-200/50"
+          >
+            <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
+          </button>
+        </div>
         {expanded && rec.fieldSteps.length > 0 && (
           <div className="border-t border-slate-200/60 bg-white/70 px-3 py-1.5">
             <ul className="space-y-1">
@@ -752,10 +1060,10 @@ function ReportTab({
 
     // 状态色系
     const accent = isPass
-      ? { headerBg: "bg-emerald-50/50", badge: "bg-emerald-500", badgeSoft: "bg-emerald-100 text-emerald-700", footer: "bg-slate-50 text-emerald-700" }
+      ? { headerBg: "bg-emerald-50/60", badge: "bg-emerald-500", badgeSoft: "bg-emerald-100 text-emerald-700", footer: "bg-slate-50 text-emerald-700", border: "border-emerald-300/70 ring-1 ring-emerald-200/50" }
       : isReview
-      ? { headerBg: "bg-amber-50/50", badge: "bg-amber-500", badgeSoft: "bg-amber-100 text-amber-700", footer: "bg-slate-50 text-amber-700" }
-      : { headerBg: "bg-rose-50/50", badge: "bg-rose-500", badgeSoft: "bg-rose-100 text-rose-700", footer: "bg-slate-50 text-rose-700" };
+      ? { headerBg: "bg-amber-50/50", badge: "bg-amber-500", badgeSoft: "bg-amber-100 text-amber-700", footer: "bg-slate-50 text-amber-700", border: "border-amber-300/70 ring-1 ring-amber-200/50" }
+      : { headerBg: "bg-rose-50/60", badge: "bg-rose-500", badgeSoft: "bg-rose-100 text-rose-700", footer: "bg-slate-50 text-rose-700", border: "border-rose-300/70 ring-1 ring-rose-200/50" };
 
     // 中间状态图标 —— 录入=箭头，审查=✓/✗/−
     const StatusIcon = ({ match }: { match: FieldMatch }) => {
@@ -773,22 +1081,48 @@ function ReportTab({
       return <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-amber-100 ring-1 ring-amber-200"><MinusCircle className="h-5 w-5 text-amber-600" /></div>;
     };
 
+    // 从 records 中补充学号信息（如果后端没返回 student_id）
+    const srcRec = r.record_id ? recordMap.get(r.record_id) : undefined;
+    const displayName = r.record_name || getDisplayName(srcRec, "人物卡片");
+    const studentId = r.student_id || getStudentId(srcRec);
+
     return (
-      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm transition-shadow hover:shadow-md">
+      <div className={`overflow-hidden rounded-lg border bg-white shadow-sm transition-all hover:shadow-md ${accent.border}`}>
         {/* 头部 */}
-        <button
-          onClick={() => setExpanded((v) => !v)}
-          className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${accent.headerBg} hover:brightness-[0.97]`}
-        >
-          <span className="text-sm font-semibold text-slate-800">{r.record_name || "人物卡片"}</span>
-          <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${accent.badgeSoft}`}>
-            {mc}/{rows.length}
-          </span>
-          <span className={`ml-auto inline-flex items-center rounded-full ${accent.badge} px-2.5 py-0.5 text-[11px] font-semibold text-white`}>
+        <div className={`flex items-center gap-2 px-4 py-2.5 ${accent.headerBg}`}>
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            className="flex flex-1 items-center gap-2 text-left transition-colors hover:brightness-[0.97]"
+          >
+            <span className="text-sm font-semibold text-slate-800">{displayName}</span>
+            {studentId && (
+              <span className="rounded bg-slate-200/70 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">
+                {studentId}
+              </span>
+            )}
+            <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${accent.badgeSoft}`}>
+              {mc}/{rows.length}
+            </span>
+          </button>
+          {onSelectRecord && r.record_id && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onSelectRecord(r.record_id); }}
+              className="shrink-0 rounded px-2 py-0.5 text-[10px] text-slate-400 transition-colors hover:bg-slate-200/60 hover:text-slate-600"
+              title="跳转到该记录"
+            >
+              查看
+            </button>
+          )}
+          <span className={`inline-flex shrink-0 items-center rounded-full ${accent.badge} px-2.5 py-0.5 text-[11px] font-semibold text-white`}>
             {OVERALL_LABELS[r.overall]}
           </span>
-          <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
-        </button>
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            className="shrink-0 rounded p-0.5 transition-colors hover:bg-slate-200/50"
+          >
+            <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
+          </button>
+        </div>
 
         {/* 展开内容 */}
         {expanded && (
@@ -811,12 +1145,13 @@ function ReportTab({
                 <tbody>
                   {rows.map((row) => {
                     const isMismatch = row.match === "mismatch" || row.match === "error";
+                    const isMatch = row.match === "match";
                     return (
-                      <tr key={row.key} className={`border-b border-slate-50 last:border-0 ${isMismatch && !isEntry ? "bg-rose-50/20" : ""}`}>
+                      <tr key={row.key} className={`border-b border-slate-50 last:border-0 ${isMismatch && !isEntry ? "bg-rose-50/30" : isMatch && !isEntry ? "bg-emerald-50/20" : ""}`}>
                         {/* 左侧值 */}
                         <td className="px-4 py-2.5 align-top">
                           <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-400">{row.leftLabel}</div>
-                          <div className={`mt-1 text-[13px] leading-relaxed ${isMismatch && !isEntry ? "font-semibold text-rose-600" : "text-slate-700"}`}>
+                          <div className={`mt-1 text-[13px] leading-relaxed ${isMismatch && !isEntry ? "font-semibold text-rose-600" : isMatch && !isEntry ? "text-emerald-700" : "text-slate-700"}`}>
                             {row.leftValue || <span className="text-slate-300">—</span>}
                           </div>
                         </td>
@@ -827,7 +1162,7 @@ function ReportTab({
                         {/* 右侧值 */}
                         <td className="px-4 py-2.5 align-top">
                           <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-400">{row.rightLabel}</div>
-                          <div className={`mt-1 text-[13px] leading-relaxed ${isMismatch && !isEntry ? "font-semibold text-rose-600" : "text-slate-700"}`}>
+                          <div className={`mt-1 text-[13px] leading-relaxed ${isMismatch && !isEntry ? "font-semibold text-rose-600" : isMatch && !isEntry ? "text-emerald-700" : "text-slate-700"}`}>
                             {row.rightValue || <span className="text-slate-300">—</span>}
                           </div>
                         </td>
@@ -1398,12 +1733,17 @@ function ReportTab({
   // 聚焦模式计算：focusPanel 为 null 时全部显示，否则只显示对应面板
   const isFieldFocus = focusPanel === "field";
   const isDocFocus = focusPanel === "doc";
+  const isDocExtractFocus = focusPanel === "doc-extract";
   const isAll = !focusPanel;
   // 提取元素面板显示逻辑：
   // - 非步骤设置模式（结果查看）：始终显示（三栏布局）
   // - 步骤设置模式：按用户手动开关控制（默认隐藏，给步骤卡片更多空间，可手动展开）
-  const isSetupMode = fieldSetupMode || docSetupMode;
-  const showExtract = isAll && (!isSetupMode || showExtractPanel);
+  // - 自定义文本/控件提取模式：强制显示
+  // - doc-extract 聚焦模式：强制显示（文件处理+提取元素两栏）
+  const isSetupMode = fieldSetupMode || docSetupMode || extractSetupMode;
+  const showExtract = isAll
+    ? (!isSetupMode || showExtractPanel || !!customTextContent || !!widgetExtractContent || extractSetupMode)
+    : isDocExtractFocus;
 
   // 横向滚动容器的滚轮处理：垂直滚轮 → 水平滚动
   const handleHorizontalWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
@@ -1644,21 +1984,31 @@ function ReportTab({
             "transition-all duration-500 ease-in-out",
             isFieldFocus ? "flex-1" : isAll ? "" : "lg:border-0 lg:px-0 lg:mx-0",
           ].join(" ")}
-          style={{ flexBasis: isFieldFocus ? undefined : (isAll ? `${leftWidth}%` : "0%"), flexShrink: 0, flexGrow: isFieldFocus ? 1 : 0 }}
+          style={{
+            flexBasis: isFieldFocus ? undefined : (isAll ? `${leftWidth}%` : "0%"),
+            flexShrink: 0,
+            flexGrow: isFieldFocus ? 1 : 0,
+            opacity: (isDocFocus || isDocExtractFocus) ? 0 : 1,
+            maxWidth: isDocExtractFocus ? 0 : undefined,
+            pointerEvents: isDocExtractFocus ? "none" : undefined,
+          }}
         >
           <div className="flex shrink-0 items-center gap-1.5 border-b border-slate-200 bg-slate-50/80 px-2 py-1 text-[11px] font-semibold text-slate-700">
             <Table2 className="h-3.5 w-3.5 text-slate-500 shrink-0" />
             <span className="shrink-0">字段对比</span>
-            {onSaveToBatch && (
+            {onSaveToBatch && fieldSetupMode && (
               <button
-                onClick={onSaveToBatch}
+                onClick={() => { if (!running) onSaveToBatch?.(); }}
+                disabled={running}
                 className={[
                   "ml-1 flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold transition-all",
-                  hasCheckedBatch
+                  running
+                    ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                    : hasCheckedBatch
                     ? "bg-emerald-500 text-white hover:bg-emerald-600 shadow-sm"
                     : "bg-slate-200 text-slate-500 hover:bg-slate-300",
                 ].join(" ")}
-                title={hasCheckedBatch ? "保存当前步骤配置到这批勾选的卡片" : "请先在左侧勾选一批卡片（点第一张定起点，点第二张定范围）"}
+                title={running ? "运行中…" : hasCheckedBatch ? "保存当前步骤配置到这批勾选的卡片" : "请先在左侧勾选一批卡片（点第一张定起点，点第二张定范围）"}
               >
                 <Save className="h-2.5 w-2.5" />
                 保存这批
@@ -1682,6 +2032,97 @@ function ReportTab({
             <div className="min-h-0 flex-1 min-w-[200px] overflow-y-auto overflow-x-hidden">{fieldSetupContent}</div>
           ) : (
             <>
+              {/* 执行步骤进度条：运行中或刚完成时显示 */}
+              {(execPhase !== "idle" || running) && flatSteps.length > 0 && (
+                <div className="shrink-0 border-b border-slate-100 bg-gradient-to-b from-white to-slate-50/60 px-2.5 py-2">
+                  <div className="mb-1 flex items-center justify-between text-[11px] text-slate-500">
+                    <span className="flex items-center gap-1">
+                      {execPhase === "marks" && (
+                        <><span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-brand-500" />执行步骤中…</>
+                      )}
+                      {execPhase === "verify" && (
+                        <><span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />字段比对中…</>
+                      )}
+                      {execPhase === "done" && (
+                        <><CheckCircle2 className="h-3 w-3 text-emerald-500" />执行完成</>
+                      )}
+                      {execPhase === "idle" && running && "准备中…"}
+                    </span>
+                    <span className="tabular-nums text-slate-400">
+                      {Math.max(0, activeStepIndex + 1)}/{flatSteps.length}
+                    </span>
+                  </div>
+                  <div
+                    ref={stepBarRef}
+                    className="relative flex flex-wrap gap-1.5"
+                  >
+                    {/* 光标（绝对定位） */}
+                    <div
+                      ref={cursorRef}
+                      className="pointer-events-none absolute left-0 top-0 rounded-md bg-brand-500/20 ring-2 ring-brand-500/70 shadow-[0_0_12px_rgba(99,102,241,0.35)]"
+                      style={{
+                        width: 60,
+                        height: 24,
+                        opacity: 0,
+                        transformOrigin: "top left",
+                        willChange: "transform, width, height, opacity",
+                      }}
+                    />
+                    {flatSteps.map((s, i) => {
+                      const status = getStepStatus(s);
+                      const isActive = status === "active";
+                      const isDone = status === "done";
+                      const isFail = status === "fail";
+                      const side = s.side;
+                      return (
+                        <div
+                          key={s.key}
+                          ref={(el) => { stepItemRefs.current[i] = el; }}
+                          className={[
+                            "relative flex h-6 min-w-[56px] max-w-[160px] items-center gap-1 rounded-md px-2 text-[11px] font-medium transition-colors",
+                            isActive
+                              ? "bg-brand-500/10 text-brand-700"
+                              : isFail
+                              ? "bg-rose-50 text-rose-600 ring-1 ring-rose-200"
+                              : isDone
+                              ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+                              : "bg-slate-100/70 text-slate-500",
+                          ].join(" ")}
+                          title={s.label + (side ? ` (${side === "left" ? "左" : "右"})` : "")}
+                        >
+                          {/* 步骤序号圆点 */}
+                          <span
+                            className={[
+                              "flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full text-[9px] font-bold",
+                              isActive
+                                ? "bg-brand-500 text-white"
+                                : isFail
+                                ? "bg-rose-500 text-white"
+                                : isDone
+                                ? "bg-emerald-500 text-white"
+                                : "bg-slate-300 text-white",
+                            ].join(" ")}
+                          >
+                            {isFail ? "✕" : isDone ? "✓" : i + 1}
+                          </span>
+                          <span className="truncate">{s.label}</span>
+                          {/* 小L/R标记表示左/右 */}
+                          {side && (
+                            <span className={[
+                              "ml-0.5 shrink-0 rounded px-0.5 text-[9px] font-bold",
+                              side === "left"
+                                ? (isFail ? "bg-rose-200/70 text-rose-700" : isDone ? "bg-emerald-200/70 text-emerald-700" : isActive ? "bg-brand-200/70 text-brand-800" : "bg-slate-200 text-slate-500")
+                                : (isFail ? "bg-rose-200/70 text-rose-700" : isDone ? "bg-emerald-200/70 text-emerald-700" : isActive ? "bg-brand-200/70 text-brand-800" : "bg-slate-200 text-slate-500"),
+                            ].join(" ")}>
+                              {side === "left" ? "L" : "R"}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               {summaryBar && <div className="shrink-0 px-1.5 pt-1.5">{summaryBar}</div>}
               <div ref={liveScrollRef} className="min-h-0 flex-1 min-w-[200px] overflow-y-auto overflow-x-hidden p-1.5">{fieldContent}</div>
             </>
@@ -1707,12 +2148,20 @@ function ReportTab({
           className={[
             "relative flex max-h-[55vh] flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full",
             "transition-all duration-500 ease-in-out",
-            isDocFocus ? "flex-1" : isAll ? "" : "lg:border-0 lg:px-0 lg:mx-0",
+            (isDocFocus || isDocExtractFocus) ? "flex-1" : isAll ? "" : "lg:border-0 lg:px-0 lg:mx-0",
           ].join(" ")}
           style={{
-            flexBasis: showExtract ? `${midWidth}%` : "0%",
+            flexBasis: isFieldFocus
+              ? "0%"
+              : isDocFocus
+                ? undefined
+                : isDocExtractFocus
+                  ? "50%"
+                  : isAll
+                    ? (showExtract ? `${midWidth}%` : undefined)
+                    : "0%",
             flexShrink: 0,
-            flexGrow: (isDocFocus || (isAll && !showExtract)) ? 1 : 0,
+            flexGrow: (isDocFocus || isDocExtractFocus || (isAll && !showExtract)) ? 1 : 0,
           }}
         >
           {/* 展开/收起「提取元素」面板按钮 —— 仅步骤设置模式下显示（结果模式始终展开三栏），贴在文件处理面板右边缘外侧 */}
@@ -1791,14 +2240,14 @@ function ReportTab({
           )}
         </div>
 
-        {/* 中/右 拖拽分隔条 —— 仅三栏模式（showExtract）下显示 */}
+        {/* 中/右 拖拽分隔条 —— 仅三栏模式（showExtract且非doc-extract聚焦）下显示 */}
         <div
           className={[
             "group relative hidden shrink-0 cursor-col-resize items-center justify-center lg:flex",
             "transition-opacity duration-300",
-            showExtract ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
+            (showExtract && isAll) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
           ].join(" ")}
-          style={{ width: showExtract ? 6 : 0 }}
+          style={{ width: (showExtract && isAll) ? 6 : 0 }}
           onMouseDown={onMouseDown("right")}
         >
           <div className="h-full w-px bg-slate-200 transition-colors group-hover:bg-brand-400" />
@@ -1812,7 +2261,17 @@ function ReportTab({
             "transition-all duration-500 ease-in-out",
             showExtract ? "flex-1" : "lg:border-0 lg:px-0 lg:mx-0",
           ].join(" ")}
-          style={{ flexBasis: showExtract ? "30%" : "0%", flexShrink: 0, flexGrow: showExtract ? 1 : 0 }}
+          style={{
+            flexBasis: isFieldFocus
+              ? "0%"
+              : isDocFocus
+                ? "0%"
+                : isDocExtractFocus
+                  ? "50%"
+                  : showExtract ? "30%" : "0%",
+            flexShrink: 0,
+            flexGrow: showExtract ? 1 : 0,
+          }}
         >
           <div className="flex shrink-0 items-center gap-1.5 border-b border-violet-200 bg-violet-50/60 px-2 py-1 text-[11px] font-semibold text-violet-800">
             <Database className="h-3.5 w-3.5 text-violet-600" />
@@ -1822,8 +2281,29 @@ function ReportTab({
                 {docExtract.filename}
               </span>
             )}
+            <button
+              onClick={() => setExtractSetupMode((v) => !v)}
+              className={[
+                "ml-auto flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
+                extractSetupMode
+                  ? "bg-violet-200 text-violet-700"
+                  : "text-violet-500/70 hover:bg-violet-100 hover:text-violet-700",
+              ].join(" ")}
+              title={extractSetupMode ? "切换到结果显示" : "切换到自定义字段设置"}
+            >
+              {extractSetupMode ? <Settings2 className="h-3 w-3" /> : <Database className="h-3 w-3" />}
+              {extractSetupMode ? "设置" : "结果"}
+            </button>
           </div>
-          <div className="min-h-0 flex-1 min-w-[200px] overflow-y-auto overflow-x-hidden p-1.5">{extractedContent}</div>
+          <div className="min-h-0 flex-1 min-w-[200px] overflow-y-auto overflow-x-hidden p-1.5">
+            {extractSetupMode ? (widgetExtractContent || customTextContent || (
+              <div className="flex h-full min-h-[140px] flex-col items-center justify-center gap-2 text-center text-[11px] text-slate-400">
+                <Type className="h-8 w-8 text-violet-200" />
+                <div className="text-violet-500">点击「自定义文本」添加临时字段</div>
+                <div className="text-[10px] text-slate-400">补充 Excel 和网页上都没有的信息</div>
+              </div>
+            )) : extractedContent}
+          </div>
         </div>
       </div>
     </div>
