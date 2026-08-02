@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type DragEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import {
   Check,
   CheckCircle2,
@@ -25,6 +25,13 @@ import { OVERALL_LABELS } from "../types";
 
 const SKILL_DRAG_MIME = "application/x-cinside-skill-id";
 
+/** 后端可能作为别名自动添加的标准字段 key 集合（用于过滤重复列） */
+const STANDARD_ALIAS_KEYS = new Set([
+  "name", "passport_no", "student_id", "nationality", "birth_date", "gender",
+  "passport_issue", "passport_expiry", "email", "phone",
+  "university_url", "university_name",
+]);
+
 interface Props {
   records: ApplicantRecord[];
   selectedId: string | null;
@@ -32,6 +39,10 @@ interface Props {
   onRefresh: () => Promise<void>;
   onClear: () => Promise<void>;
   onDetach?: () => void;
+  /** Excel上传成功回调，传回后端自动识别的列映射 */
+  onExcelUploaded?: (detectedColumnMap: Record<string, string>) => void;
+  /** 后端自动识别的列映射（用于过滤列选择浮层中的别名列） */
+  detectedColumnMap?: Record<string, string>;
   /** 每条记录的核验结论：record_id -> overall */
   recordResults?: Record<string, Overall>;
   /** 批量执行结果：record_id -> BatchResult */
@@ -72,6 +83,16 @@ interface Props {
   onClearCardLoop?: (recordId: string) => void;
   /** 清除所有卡片的 LOOP 关联 */
   onClearAllCardLoops?: () => void;
+  /** 字段列映射：标准字段名 -> Excel 原始列 key（用于手动修正识别失败的列） */
+  fieldColumnMap?: Record<string, string>;
+  /** 字段列映射变化回调：(标准字段名, Excel列key | null) => void */
+  onFieldColumnMapChange?: (field: string, columnKey: string | null) => void;
+  /** 卡片自定义图片：record_id -> base64 dataURL（Ctrl+V 或拖拽设置） */
+  cardImages?: Record<string, string>;
+  /** 设置某张卡片的图片：(recordId, dataUrl) => void */
+  onSetCardImage?: (recordId: string, dataUrl: string) => void;
+  /** 清除某张卡片的图片：(recordId) => void */
+  onClearCardImage?: (recordId: string) => void;
 }
 
 type UploadKind = "excel" | "passport" | "document" | null;
@@ -83,6 +104,8 @@ export default function LeftPanel({
   onRefresh,
   onClear,
   onDetach,
+  onExcelUploaded,
+  detectedColumnMap = {},
   recordResults,
   batchResults,
   onRunRecord,
@@ -103,6 +126,11 @@ export default function LeftPanel({
   onRunLoopsWithCursor,
   onClearCardLoop,
   onClearAllCardLoops,
+  fieldColumnMap = {},
+  onFieldColumnMapChange,
+  cardImages = {},
+  onSetCardImage,
+  onClearCardImage,
 }: Props) {
   const [uploading, setUploading] = useState<UploadKind>(null);
   const [excelDrag, setExcelDrag] = useState(false);
@@ -122,6 +150,76 @@ export default function LeftPanel({
   const [dragLoopId, setDragLoopId] = useState<string | null>(null);
   /** 拖拽排序：拖拽悬停的目标索引 */
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+
+  /** 字段列选择器：当前正在为哪个标准字段选列（null=未激活） */
+  const [pickingField, setPickingField] = useState<null | "name" | "passport_no" | "student_id">(null);
+  /** 列选择器锚定的卡片 record_id（在该卡片下方展示） */
+  const [pickingAnchorId, setPickingAnchorId] = useState<string | null>(null);
+  /** 选择器浮层的锚点位置（相对面板容器） */
+  const pickerRef = useRef<HTMLDivElement | null>(null);
+
+  // 计算当前 Excel 可用的所有列（从第一张记录推断），用于列选择浮层
+  // 过滤掉后端自动添加的标准别名列（如原始列是"大写"时，name 作为别名应被过滤）
+  const detectedStandardKeys = useMemo(() => new Set(Object.values(detectedColumnMap)), [detectedColumnMap]);
+  const availableColumns: { key: string; sample: string }[] = useMemo(() => {
+    const sample = records[0];
+    if (!sample) return [];
+    return Object.entries(sample.fields)
+      .filter(([k, v]) => {
+        if (v === undefined || v === null) return false;
+        // 过滤内部字段
+        if (k.startsWith("_")) return false;
+        // 过滤后端自动添加的标准别名列
+        if (STANDARD_ALIAS_KEYS.has(k) && detectedStandardKeys.has(k)) {
+          const hasOriginalCol = Object.entries(detectedColumnMap).some(([origCol, stdKey]) => stdKey === k && origCol !== k);
+          if (hasOriginalCol) return false;
+        }
+        return true;
+      })
+      .map(([k, v]) => ({
+        key: k,
+        sample: String(v).slice(0, 30),
+      }));
+  }, [records, detectedStandardKeys, detectedColumnMap]);
+
+  // 点击面板外部关闭列选择浮层
+  useEffect(() => {
+    if (!pickingField) return;
+    const handler = (e: MouseEvent) => {
+      if (!pickerRef.current) return;
+      if (!pickerRef.current.contains(e.target as Node)) {
+        setPickingField(null);
+        setPickingAnchorId(null);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [pickingField]);
+
+  const handleRequestPickField = useCallback((recordId: string, field: "name" | "passport_no" | "student_id") => {
+    setPickingField(field);
+    setPickingAnchorId(recordId);
+  }, []);
+
+  const handlePickColumn = useCallback((columnKey: string) => {
+    if (pickingField && onFieldColumnMapChange) {
+      onFieldColumnMapChange(pickingField, columnKey);
+    }
+    setPickingField(null);
+    setPickingAnchorId(null);
+  }, [pickingField, onFieldColumnMapChange]);
+
+  /** 从 record 中取标准字段值，优先已识别字段，其次手动映射列 */
+  const getFieldValue = useCallback((record: ApplicantRecord, field: "name" | "passport_no" | "student_id") => {
+    const direct = record.fields[field];
+    if (direct && direct.trim()) return direct;
+    const mapped = fieldColumnMap[field];
+    if (mapped) {
+      const v = record.fields[mapped];
+      if (v && v.trim()) return v;
+    }
+    return "";
+  }, [fieldColumnMap]);
 
   /** 群组选择逻辑：点击第一张卡=起点，点击第二张卡=终点（范围全选），点击已选范围外=新群组 */
   const handleToggleCheck = useCallback((idx: number, id: string) => {
@@ -179,6 +277,8 @@ export default function LeftPanel({
       try {
         const r = await api.uploadExcel(file);
         setToast(`已导入 ${r.count} 条记录`);
+        // 通知父组件后端自动识别的列映射
+        if (onExcelUploaded) onExcelUploaded(r.detected_column_map || {});
         await onRefresh();
       } catch (e: any) {
         setToast(`导入失败: ${e.message}`);
@@ -186,7 +286,7 @@ export default function LeftPanel({
         setUploading(null);
       }
     },
-    [onRefresh]
+    [onRefresh, onExcelUploaded]
   );
 
   const handlePassport = useCallback(
@@ -670,6 +770,15 @@ export default function LeftPanel({
                       onDragEnd={() => { setDragId(null); setDragLoopId(null); setDragOverIdx(null); }}
                       loopInfo={cardLoopMap?.[r.record_id]}
                       onClearLoop={onClearCardLoop ? () => onClearCardLoop(r.record_id) : undefined}
+                      cardImage={cardImages[r.record_id]}
+                      onSetCardImage={onSetCardImage ? (dataUrl) => onSetCardImage(r.record_id, dataUrl) : undefined}
+                      onClearCardImage={onClearCardImage ? () => onClearCardImage(r.record_id) : undefined}
+                      getFieldValue={getFieldValue}
+                      onRequestPickField={onFieldColumnMapChange ? (field) => handleRequestPickField(r.record_id, field) : undefined}
+                      showPicker={pickingAnchorId === r.record_id && !!pickingField}
+                      pickerField={pickingField}
+                      availableColumns={availableColumns}
+                      onPickColumn={handlePickColumn}
                     />
                   </Fragment>
                 );
@@ -759,6 +868,15 @@ function RecordItem({
   isBatchDragging = false,
   loopInfo,
   onClearLoop,
+  cardImage,
+  onSetCardImage,
+  onClearCardImage,
+  getFieldValue,
+  onRequestPickField,
+  showPicker = false,
+  pickerField = null,
+  availableColumns = [],
+  onPickColumn,
 }: {
   record: ApplicantRecord;
   selected: boolean;
@@ -801,6 +919,24 @@ function RecordItem({
   loopInfo?: { loopId: string; loopName: string; setAt: number };
   /** 清除该卡片的 LOOP 关联 */
   onClearLoop?: () => void;
+  /** 该卡片自定义图片（base64 dataURL），显示在卡片左侧渐隐 */
+  cardImage?: string;
+  /** 设置该卡片图片：(dataUrl) => void */
+  onSetCardImage?: (dataUrl: string) => void;
+  /** 清除该卡片图片：() => void */
+  onClearCardImage?: () => void;
+  /** 从 record 中取标准字段值（含手动映射） */
+  getFieldValue?: (record: ApplicantRecord, field: "name" | "passport_no" | "student_id") => string;
+  /** 请求为某字段打开列选择器：(field) => void */
+  onRequestPickField?: (field: "name" | "passport_no" | "student_id") => void;
+  /** 是否在该卡片下方显示列选择器 */
+  showPicker?: boolean;
+  /** 当前选列器针对哪个字段 */
+  pickerField?: null | "name" | "passport_no" | "student_id";
+  /** 所有可选列 */
+  availableColumns?: { key: string; sample: string }[];
+  /** 用户选完列后的回调 */
+  onPickColumn?: (columnKey: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [skillDragOver, setSkillDragOver] = useState(false);
@@ -812,14 +948,15 @@ function RecordItem({
     }
   }, [selected]);
 
-  const passportNo = record.fields.passport_no || "";
-  const studentId =
-    record.fields.student_id ||
-    record.fields.student_no ||
-    record.fields.sid ||
-    record.fields.id ||
-    "";
-  const name = record.fields.name || record.fields.fullname || passportNo || studentId || record.fields.email || "";
+  const passportNo = getFieldValue ? getFieldValue(record, "passport_no") : (record.fields.passport_no || "");
+  // 学号：优先直接字段，其次手动映射列
+  const studentId = getFieldValue
+    ? getFieldValue(record, "student_id") || record.fields.student_no || record.fields.sid || record.fields.id || ""
+    : (record.fields.student_id || record.fields.student_no || record.fields.sid || record.fields.id || "");
+  // 上方主标题：严格只显示名字（优先直接字段，其次手动映射列）；学号在底部单独显示，这里不重复
+  const displayName = getFieldValue ? getFieldValue(record, "name") : (record.fields.name || record.fields.fullname || "");
+  // 副信息（横杠位置）：优先护照号
+  const subInfo = passportNo || "";
   const hasPassport = record.has_passport;
 
   const PRIMARY_KEYS = new Set([
@@ -888,6 +1025,49 @@ function RecordItem({
     onClick();
   };
 
+  // 卡片自定义图片：把图片文件读取为 base64 dataURL 并设置
+  const setImageFromFile = (file: File) => {
+    if (!file.type.startsWith("image/") || !onSetCardImage) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === "string" ? reader.result : "";
+      if (dataUrl) onSetCardImage(dataUrl);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Ctrl+V 粘贴图片到卡片（设置卡片图片）
+  const handlePasteImage = (e: React.ClipboardEvent) => {
+    if (!onSetCardImage) return;
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const it of items) {
+      if (it.type.startsWith("image/")) {
+        const f = it.getAsFile();
+        if (f) {
+          e.preventDefault();
+          e.stopPropagation();
+          setImageFromFile(f);
+          return;
+        }
+      }
+    }
+  };
+
+  // 拖拽图片进卡片：设置卡片图片（区别于排序拖拽 / SKILL 拖放）
+  const handleImageDrop = (e: DragEvent) => {
+    if (!onSetCardImage) return false;
+    const files = Array.from(e.dataTransfer.files || []);
+    const img = files.find((f) => f.type.startsWith("image/"));
+    if (img) {
+      e.preventDefault();
+      e.stopPropagation();
+      setImageFromFile(img);
+      return true;
+    }
+    return false;
+  };
+
   // 卡片排序拖拽：开始拖拽（设标记，与 SKILL 拖放区分）
   const handleSortDragStart = (e: DragEvent) => {
     if (!draggable) return;
@@ -921,8 +1101,13 @@ function RecordItem({
       onDragStart={handleSortDragStart}
       onDragOver={(e) => { handleDragOver(e); handleSortDragOver(e); }}
       onDragLeave={handleDragLeave}
-      onDrop={(e) => { handleSortDrop(e); handleDrop(e); }}
+      onDrop={(e) => {
+        if (handleImageDrop(e)) { setSkillDragOver(false); return; }
+        handleSortDrop(e);
+        handleDrop(e);
+      }}
       onDragEnd={handleSortDragEnd}
+      onPaste={handlePasteImage}
     >
       <div
         className={[
@@ -958,6 +1143,35 @@ function RecordItem({
           title={onRun && !runDisabled && !running ? "点击切换到该人页面（步骤2+3自动导航）" : undefined}
         >
           <div className="flex items-center gap-2.5">
+            {/* 卡片自定义图片：左侧图片向右渐隐（Ctrl+V 粘贴或拖入图片设置；点击右上 × 移除） */}
+            {cardImage ? (
+              <div
+                className="relative h-12 w-16 shrink-0 overflow-hidden rounded-l-lg"
+                title="Ctrl+V 或拖入图片可更换卡片图片；点击右上角 × 移除"
+              >
+                <img
+                  src={cardImage}
+                  alt=""
+                  draggable={false}
+                  className="h-full w-full object-cover"
+                  style={{
+                    WebkitMaskImage: "linear-gradient(to right, black 0%, black 68%, transparent 100%)",
+                    maskImage: "linear-gradient(to right, black 0%, black 68%, transparent 100%)",
+                    WebkitMaskRepeat: "no-repeat",
+                    maskRepeat: "no-repeat",
+                  }}
+                />
+                <span
+                  role="button"
+                  tabIndex={-1}
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); onClearCardImage?.(); }}
+                  className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-slate-900/60 text-white opacity-50 transition-opacity hover:bg-rose-600 hover:opacity-100"
+                  title="移除卡片图片"
+                >
+                  <X className="h-2.5 w-2.5" />
+                </span>
+              </div>
+            ) : null}
             {/* 拖拽手柄（长按拖拽调换位置；批次卡片整批拖拽） */}
             {draggable && (
               <span
@@ -991,28 +1205,28 @@ function RecordItem({
             )}
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-2">
-                <span className="truncate text-sm font-medium text-slate-800">
-                  {name}
-                </span>
+                {displayName ? (
+                  <span className="truncate text-sm font-medium text-slate-800">
+                    {displayName}
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRequestPickField?.("name");
+                    }}
+                    className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                    title="点击选择姓名列"
+                  >
+                    <span className="italic">— 选择姓名列</span>
+                  </button>
+                )}
                 <div className="flex shrink-0 items-center gap-1">
                   {skillDragOver && (
                     <span className="flex items-center gap-0.5 rounded-full bg-indigo-500 px-1.5 py-0.5 text-[9px] font-medium text-white animate-pulse">
                       <Sparkles className="h-2.5 w-2.5" />
                       释放执行
-                    </span>
-                  )}
-                  {loopInfo && !skillDragOver && (
-                    <span
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onClearLoop?.();
-                      }}
-                      className="group flex items-center gap-0.5 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700 transition-colors hover:bg-rose-100 hover:text-rose-600"
-                      title={`${loopInfo.loopName}（点击移除 LOOP 关联）`}
-                    >
-                      <CheckCircle2 className="h-2.5 w-2.5" />
-                      <span className="max-w-[60px] truncate">{loopInfo.loopName}</span>
-                      <X className="h-2 w-2 opacity-0 transition-opacity group-hover:opacity-100" />
                     </span>
                   )}
                   {result && !skillDragOver && (
@@ -1039,14 +1253,77 @@ function RecordItem({
                   )}
                 </div>
               </div>
-              <div className="mt-0.5 truncate text-xs text-slate-500">
-                {passportNo || record.fields.email || "—"}
+              <div className="mt-0.5 flex min-w-0 items-center gap-1.5 truncate text-xs text-slate-500">
+                {loopInfo ? (
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onClearLoop?.();
+                    }}
+                    className="group inline-flex min-w-0 items-center gap-0.5 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700 transition-colors hover:bg-rose-100 hover:text-rose-600"
+                    title={`${loopInfo.loopName}（点击移除 LOOP 关联）`}
+                  >
+                    <CheckCircle2 className="h-2.5 w-2.5 shrink-0" />
+                    <span className="max-w-[120px] truncate">{loopInfo.loopName}</span>
+                    <X className="h-2 w-2 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" />
+                  </span>
+                ) : null}
+                {subInfo ? (
+                  <span className="truncate">{subInfo}</span>
+                ) : record.fields.email ? (
+                  <span className="truncate">{record.fields.email}</span>
+                ) : loopInfo ? null : (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRequestPickField?.("passport_no");
+                    }}
+                    className="truncate italic text-slate-400 hover:text-slate-600"
+                    title="点击选择护照号列"
+                  >
+                    — 选择护照列
+                  </button>
+                )}
               </div>
             </div>
           </div>
         </button>
 
-        {/* 底部行：展开详情切换 + 单卡 LOOP 运行按钮 */}
+        {/* 列选择浮层：点击"— 选择XX列"时在此卡片下方展开 */}
+        {showPicker && pickerField && (
+          <div
+            ref={undefined}
+            className="border-t border-indigo-200 bg-indigo-50/60 px-2 py-1.5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-[10px] font-medium text-indigo-700">
+                选择作为{pickerField === "name" ? "姓名" : pickerField === "passport_no" ? "护照号" : "学号"}的列：
+              </span>
+            </div>
+            <div className="max-h-48 overflow-y-auto rounded-md border border-indigo-200 bg-white shadow-sm">
+              {availableColumns.map((col) => (
+                <button
+                  key={col.key}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onPickColumn?.(col.key);
+                  }}
+                  className="flex w-full items-center gap-2 border-b border-slate-100 px-2 py-1 text-left text-[11px] last:border-b-0 hover:bg-indigo-50"
+                >
+                  <span className="min-w-0 flex-1 truncate font-medium text-slate-700">{col.key}</span>
+                  <span className="max-w-[45%] shrink-0 truncate text-slate-400" title={col.sample}>
+                    {col.sample || <span className="italic text-slate-300">空</span>}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 底部行：展开详情切换 + 学号 + 单卡 LOOP 运行按钮 */}
         <div className="flex w-full items-center justify-between border-t border-slate-200/50 px-3 py-1">
           <button
             onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }}
@@ -1059,10 +1336,26 @@ function RecordItem({
             )}
             {expanded ? "收起" : "详情"}
           </button>
-          <div className="flex items-center gap-2">
-            <span className="font-mono text-[10px] text-slate-400">
-              {studentId ? `学号 ${studentId}` : "无学号"}
-            </span>
+          <div className="flex shrink-0 items-center gap-2">
+            {studentId ? (
+              <span className="font-mono text-[10px] text-slate-400">
+                学号 {studentId}
+              </span>
+            ) : onRequestPickField ? (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRequestPickField("student_id");
+                }}
+                className="italic text-[10px] text-slate-400 hover:text-slate-600"
+                title="点击选择学号列"
+              >
+                — 选择学号列
+              </button>
+            ) : (
+              <span className="font-mono text-[10px] text-slate-400">无学号</span>
+            )}
             {onRun && (
               <button
                 onClick={(e) => {
