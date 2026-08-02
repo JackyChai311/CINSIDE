@@ -42,11 +42,17 @@ export function deleteSkill(id: string) {
   saveSkills(skills);
 }
 
-export function updateSkillMeta(id: string, patch: { name?: string; icon?: string }) {
+export function updateSkillMeta(id: string, patch: { name?: string; icon?: string; iconImage?: string | null }) {
   const skills = loadSkills();
   const idx = skills.findIndex((s) => s.id === id);
   if (idx >= 0) {
-    skills[idx] = { ...skills[idx], ...patch, updatedAt: Date.now() };
+    // 先构建设置字段（不包含 null 的 iconImage）
+    const { iconImage, ...rest } = patch;
+    const next: WorkflowTemplate = { ...skills[idx], ...rest, updatedAt: Date.now() };
+    if (typeof iconImage === "string") next.iconImage = iconImage;
+    // iconImage 为 null 表示清除自定义图片
+    if (iconImage === null) delete next.iconImage;
+    skills[idx] = next;
     saveSkills(skills);
   }
 }
