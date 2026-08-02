@@ -24,6 +24,8 @@ export interface ViewMessage {
   payload:
     | { kind: "element-picked"; [k: string]: unknown }
     | { kind: string; [k: string]: unknown };
+  /** 消息来自 window.open 弹窗 BrowserView（弹窗内拾取/中继） */
+  fromPopup?: boolean;
 }
 
 /** 高亮框定义 */
@@ -96,18 +98,26 @@ export interface ElectronAPI {
   viewHighlightBoxes: (side: ViewSide, boxes: HighlightBox[]) => Promise<unknown>;
   viewClearHighlight: (side: ViewSide) => Promise<unknown>;
 
+  // 绑定输入模式右键菜单：开启/关闭
+  viewSetBindInputMode: (side: ViewSide, enabled: boolean) => Promise<unknown>;
+  // 回传 Excel 列列表到 picker 脚本（右键菜单响应）
+  viewCtxMenuResponse: (side: ViewSide, columns: string[], currentField: string) => Promise<unknown>;
+
   // 截图指定 view 中的元素区域（用于头像提取）
   viewCaptureElement: (side: ViewSide, rect: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
 
   // === 下载捕获（文件提取模式） ===
   setDownloadCapture: (side: ViewSide, enabled: boolean) => Promise<{ ok: boolean }>;
   onDownloadCaptured: (callback: (data: { side: string; filename: string; dataUrl: string; size: number; mime: string; path: string }) => void) => () => void;
+  onDownloadStarted: (callback: (data: { side: string; filename: string }) => void) => () => void;
+  onDownloadProgress: (callback: (data: { side: string; filename: string; received: number; total: number; percent: number }) => void) => () => void;
   onDownloadFailed: (callback: (data: { side: string; filename: string; error?: string; state?: string }) => void) => () => void;
 
   // === 本地文件提取：选择目录 + 读取文件 ===
   pickLocalDirectory: () => Promise<{ canceled: boolean; rootPath: string; files: Array<{ relativePath: string; name: string; size: number; ext: string }> }>;
   readLocalDocFile: (rootPath: string, relativePath: string) => Promise<{ ok: boolean; dataUrl?: string; filename?: string; mime?: string; size?: number; error?: string }>;
   checkLocalFileExists: (rootPath: string, relativePath: string) => Promise<{ exists: boolean }>;
+  saveExportedFile: (defaultName: string, base64: string) => Promise<{ ok: boolean; canceled?: boolean; path?: string; size?: number; error?: string }>;
 
   // 接收 BrowserView 内部消息
   onViewMessage: (callback: (msg: ViewMessage) => void) => () => void;
