@@ -4,6 +4,7 @@ import {
   ArrowRight,
   Check,
   CheckCircle2,
+  ChevronDown,
   Database,
   FileSpreadsheet,
   FolderOpen,
@@ -15,7 +16,8 @@ import {
   Repeat2,
   RotateCcw,
   Save,
-  Trash2,
+  Type,
+  Upload,
   Users,
   X,
 } from "lucide-react";
@@ -23,6 +25,22 @@ import type { AppMode, FieldMapping, LeftSource, TeachingPhase, VerifyMethod } f
 import type { PickedElementInfo } from "./BrowserPane";
 
 export type PickTarget = "right" | "left" | null;
+
+/** 自定义文本条目：用户手动输入的临时内容，可关联网页元素用于审查/录入 */
+export interface CustomTextEntry {
+  id: string;
+  /** 框框名字（仅显示，方便理解功能，不参与数据对比/录入） */
+  name: string;
+  /** 实际内容值（参与审查对比/录入填入） */
+  text: string;
+  selector?: string;
+  label?: string;
+  side?: "left" | "right";
+  tag?: string;
+  type?: string;
+  /** 是否已保存为映射步骤 */
+  saved?: boolean;
+}
 
 interface Props {
   /** 当前是否处于选择模式 */
@@ -117,6 +135,8 @@ interface Props {
   docExtractSource?: null | "choose" | "web" | "local";
   /** 已添加的文件提取步骤数 */
   docExtractStepCount?: number;
+  /** 已绑定的文件上传步骤数（绑定上传 mark） */
+  docUploadStepCount?: number;
   /** 开始添加文件提取步骤（审查：右侧网页拾取） */
   onStartAddDocExtract?: () => void;
   /** 退出文件提取模式 */
@@ -155,6 +175,30 @@ interface Props {
   onSelectDocLocalSample?: (relativePath: string) => void;
   /** 录入步骤子步骤：本地文件提取（上传图片 → 勾选字段 → 填入右侧网页） */
   onDocFileExtract?: () => void;
+  /** 自定义文本模式：在步骤4中添加用户自定义文本框，配合录入/审核 */
+  customTextMode?: boolean;
+  /** 自定义文本条目列表 */
+  customTextEntries?: CustomTextEntry[];
+  /** 当前正在拾取的自定义文本条目 ID */
+  customTextPickingId?: string | null;
+  /** 切换自定义文本模式 */
+  onToggleCustomText?: () => void;
+  /** 添加一个自定义文本框 */
+  onAddCustomText?: () => void;
+  /** 删除一个自定义文本框 */
+  onRemoveCustomText?: (id: string) => void;
+  /** 更新自定义文本内容 */
+  onUpdateCustomText?: (id: string, text: string) => void;
+  /** 为某个文本框拾取网页元素 */
+  onPickForCustomText?: (id: string) => void;
+  /** 将所有已配置的文本框保存为审查/录入步骤 */
+  onSaveCustomTextSteps?: () => void;
+  /** 控件提取模式：提取点击展开型控件（下拉选项/日历）到「提取元素」面板 */
+  widgetExtractMode?: boolean;
+  /** 已保存的控件数量 */
+  widgetCount?: number;
+  /** 切换控件提取模式 */
+  onToggleWidgetExtract?: () => void;
   /** 人物卡片是否已生成 */
   cardsGenerated?: boolean;
   /** LOOP 行范围框选（0-based 闭区间） */
@@ -165,6 +209,10 @@ interface Props {
   onRequestSaveSkill?: () => void;
   /** 直接执行当前配置（不保存弹窗，临时运行） */
   onDirectRun?: () => void;
+  /** 右侧网页绑定输入框时取的 Excel 列（null=跟随 LOOP 列） */
+  rightBindColumn?: string | null;
+  /** 设置右侧绑定列 */
+  onRightBindColumnChange?: (col: string | null) => void;
 }
 
 export default function ElementSelectBar({
@@ -215,6 +263,7 @@ canUndo = false,
 addingDocExtractMode = false,
 docExtractSource = null,
 docExtractStepCount = 0,
+docUploadStepCount = 0,
 onStartAddDocExtract,
 onExitAddDocExtractMode,
 onChooseDocExtractWeb,
@@ -234,11 +283,25 @@ docLocalSamplePath = null,
 docLocalPattern = null,
 onSelectDocLocalSample,
 onDocFileExtract,
-cardsGenerated = false,
+  customTextMode = false,
+  customTextEntries = [],
+  customTextPickingId = null,
+  onToggleCustomText,
+  onAddCustomText,
+  onRemoveCustomText,
+  onUpdateCustomText,
+  onPickForCustomText,
+  onSaveCustomTextSteps,
+  widgetExtractMode = false,
+  widgetCount = 0,
+  onToggleWidgetExtract,
+  cardsGenerated = false,
 rowRange = null,
 onRequestQuickSave,
 onRequestSaveSkill,
 onDirectRun,
+rightBindColumn = null,
+onRightBindColumnChange,
 }: Props) {
   const [leftSource, setLeftSource] = useState<LeftSource>("database");
   const [excelField, setExcelField] = useState<string>("");
@@ -292,6 +355,20 @@ onDirectRun,
     return () => window.removeEventListener("keydown", handler);
   }, [active, onPickLeftFromWeb, onPickLeftFromExcel]);
 
+  // 右侧取列下拉：文档流内展开，点击外部自动收起
+  const [rightBindDropdownOpen, setRightBindDropdownOpen] = useState(false);
+  const rightBindDropdownRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!rightBindDropdownOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (rightBindDropdownRef.current && !rightBindDropdownRef.current.contains(e.target as Node)) {
+        setRightBindDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [rightBindDropdownOpen]);
+
   if (!active) return null;
 
   // 步骤判定（审查模式：先右侧元素 → 后左侧来源；录入模式：先左侧来源 → 后右侧输入框，顺序相反）
@@ -306,6 +383,71 @@ onDirectRun,
   // 当前左侧来源是否处于网页/Excel 激活态（避免 TS 在 JSX 里对 pickTarget 做多余窄化报错）
   const webSourceActive = pickTarget === "left" || (pickTarget == null && leftSource === "database");
   const excelSourceActive = leftSource === "excel" && pickTarget == null;
+
+  // 右侧取列选择器：指定右侧网页输入框绑定时取哪一列（默认跟随 LOOP 列）。
+  // 自定义下拉（非原生 select），文档流内展开，避免被 overflow 裁切 / iframe 覆盖。
+  const rightBindPicker = onRightBindColumnChange ? (
+    <div className="relative shrink-0" ref={rightBindDropdownRef}>
+      <button
+        onClick={() => setRightBindDropdownOpen((v) => !v)}
+        disabled={!excelFields.length}
+        title="右侧网页输入框绑定时取哪一列（默认跟随 LOOP 列）"
+        className={[
+          "inline-flex h-6 items-center gap-1 rounded-md border px-2 text-[11px] font-medium transition-all",
+          rightBindColumn
+            ? "border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+            : excelFields.length
+              ? "border-slate-300 bg-white text-slate-600 hover:border-slate-400 hover:bg-slate-50"
+              : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400",
+        ].join(" ")}
+      >
+        <span className="max-w-32 truncate">
+          {rightBindColumn ? `右侧取列「${rightBindColumn}」` : "右侧取列"}
+        </span>
+        <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${rightBindDropdownOpen ? "rotate-180" : ""}`} />
+      </button>
+      {rightBindDropdownOpen && (
+        <div className="mt-0.5 max-h-40 overflow-y-auto rounded-md border border-slate-200 bg-white shadow-lg">
+          <button
+            onClick={() => {
+              onRightBindColumnChange(null);
+              setRightBindDropdownOpen(false);
+            }}
+            className={[
+              "flex w-full items-center gap-1 px-2 py-1 text-left text-[11px] transition-colors",
+              !rightBindColumn ? "bg-indigo-100 font-semibold text-indigo-800" : "text-slate-700 hover:bg-indigo-50",
+            ].join(" ")}
+          >
+            {!rightBindColumn && <Check className="h-2.5 w-2.5 shrink-0 text-indigo-600" />}
+            <span className="min-w-0 flex-1 truncate">跟随 LOOP 列{selectedExcelColumn ? `「${selectedExcelColumn}」` : ""}</span>
+          </button>
+          {excelFields.map((f) => {
+            const isSel = rightBindColumn === f;
+            const isLoop = f === selectedExcelColumn;
+            return (
+              <button
+                key={f}
+                onClick={() => {
+                  onRightBindColumnChange(isLoop ? null : f);
+                  setRightBindDropdownOpen(false);
+                }}
+                className={[
+                  "flex w-full items-center gap-1 px-2 py-1 text-left text-[11px] transition-colors",
+                  isSel ? "bg-indigo-100 font-semibold text-indigo-800" : "text-slate-700 hover:bg-indigo-50",
+                ].join(" ")}
+              >
+                {isSel && <Check className="h-2.5 w-2.5 shrink-0 text-indigo-600" />}
+                <span className="min-w-0 flex-1 truncate">{f}</span>
+                {isLoop && (
+                  <span className="shrink-0 rounded bg-amber-200 px-1 text-[8px] font-medium text-amber-700">LOOP</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  ) : null;
 
   const handleSave = () => {
     if (!rightPicked) return;
@@ -714,9 +856,108 @@ onDirectRun,
           </div>
 
           {appMode === "entry" ? (
-            <p className="text-[11px] leading-relaxed text-slate-600">
-              录入流 LOOP：点击右侧表单输入框 → 按 S → 点击左侧 Excel 对应字段，重复配置所有字段，最后按空格点击保存/提交按钮。
-            </p>
+            <div className="space-y-1.5">
+              <p className="text-[11px] leading-relaxed text-slate-600">
+                录入流 LOOP：点击右侧表单输入框 → 按 S → 点击左侧 Excel 对应字段，重复配置所有字段，最后按空格点击保存/提交按钮。
+              </p>
+              {/* 回访查看步骤（右侧网页）：录入模式的查看界面/步骤与审查模式不同，需单独录制搜索定位流程 */}
+              <div className="flex items-center gap-2 text-[11px]">
+                <span className={[
+                  "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white",
+                  hasBoundInputs || preClickCount > 0 || postClickCount > 0 ? "bg-emerald-500" : "bg-amber-500",
+                ].join(" ")}>
+                  {hasBoundInputs || preClickCount > 0 || postClickCount > 0 ? <Check className="h-2.5 w-2.5" /> : "查"}
+                </span>
+                <div className="flex flex-1 flex-wrap items-center gap-1.5">
+                  {bindInputSide ? (
+                    <>
+                      <span className="step-highlight" key="entry-revisit-bind">
+                        回访录制中 — 点右侧搜索输入框绑定「{rightBindColumn || selectedExcelColumn}」，点按钮/链接=真实点击（已 {bindStepCount} 步）
+                      </span>
+                      {rightBindPicker}
+                      {onExitBindInputs && (
+                        <button
+                          onClick={onExitBindInputs}
+                          className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md bg-slate-200 px-2.5 text-[11px] font-medium text-slate-700 transition-all hover:bg-slate-300"
+                        >
+                          完成
+                        </button>
+                      )}
+                    </>
+                  ) : pendingAction === "click" && addingClickMode ? (
+                    <>
+                      <span className="step-highlight" key="entry-revisit-click">
+                        正在添加{addingClickPhase === "post" ? "收尾" : "前置"}点击 — 点击右侧网页的搜索/确认人物/返回等按钮
+                      </span>
+                      {onExitAddClickMode && (
+                        <button
+                          onClick={onExitAddClickMode}
+                          className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md bg-slate-200 px-2.5 text-[11px] font-medium text-slate-700 transition-all hover:bg-slate-300"
+                        >
+                          完成
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-slate-500">回访查看（右侧网页搜索→确认人物）：</span>
+                      {hasBoundInputs && <span className="rounded bg-emerald-100 px-1 text-emerald-700">输入✓</span>}
+                      {preClickCount > 0 && <span className="rounded bg-sky-100 px-1 text-sky-700">前置 {preClickCount}</span>}
+                      {postClickCount > 0 && <span className="rounded bg-amber-100 px-1 text-amber-700">收尾 {postClickCount}</span>}
+                      {onStartBindInputs && !addingStepMode && (
+                        <button
+                          onClick={() => {
+                            if (onExitAddClickMode) onExitAddClickMode();
+                            onStartBindInputs();
+                          }}
+                          disabled={!selectedExcelColumn}
+                          className={[
+                            "inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2.5 text-[11px] font-medium transition-all",
+                            selectedExcelColumn
+                              ? "bg-brand-600 text-white hover:bg-brand-700"
+                              : "cursor-not-allowed bg-slate-200 text-slate-400",
+                          ].join(" ")}
+                        >
+                          <Plus className="h-3 w-3" />
+                          搜索输入
+                        </button>
+                      )}
+                      {rightBindPicker}
+                      {onStartAddPreClick && !addingStepMode && (
+                        <button
+                          onClick={onStartAddPreClick}
+                          disabled={!!bindInputSide}
+                          className={[
+                            "inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2.5 text-[11px] font-medium transition-all",
+                            bindInputSide
+                              ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                              : "bg-sky-600 text-white hover:bg-sky-700",
+                          ].join(" ")}
+                        >
+                          <Plus className="h-3 w-3" />
+                          前置点击
+                        </button>
+                      )}
+                      {onStartAddPostClick && !addingStepMode && (
+                        <button
+                          onClick={onStartAddPostClick}
+                          disabled={!!bindInputSide}
+                          className={[
+                            "inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2.5 text-[11px] font-medium transition-all",
+                            bindInputSide
+                              ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                              : "bg-amber-500 text-white hover:bg-amber-600",
+                          ].join(" ")}
+                        >
+                          <Plus className="h-3 w-3" />
+                          收尾点击
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
           ) : (
             <div className="space-y-1.5">
               {/* Step 1 */}
@@ -769,6 +1010,7 @@ onDirectRun,
                       <span className="step-highlight" key="step2-active">
                         教学拾取中 — 点任意侧输入框绑定「{selectedExcelColumn}」，点按钮/链接=真实点击（已 {bindStepCount} 步）
                       </span>
+                      {rightBindPicker}
                       {onExitBindInputs && (
                         <button
                           onClick={onExitBindInputs}
@@ -799,6 +1041,7 @@ onDirectRun,
                           继续绑定
                         </button>
                       )}
+                      {rightBindPicker}
                     </>
                   ) : cardsGenerated ? (
                     <>
@@ -821,6 +1064,7 @@ onDirectRun,
                       >
                         搜索输入
                       </button>
+                      {rightBindPicker}
                     </>
                   ) : (
                     <span className="text-slate-400">搜索输入（生成卡片后可配置）</span>
@@ -948,6 +1192,16 @@ onDirectRun,
                           文件提取{docExtractStepCount > 0 ? ` (${docExtractStepCount})` : ""}
                         </button>
                       )}
+                      {/* 已绑定的文件上传步骤指示 */}
+                      {docUploadStepCount > 0 && (
+                        <span
+                          className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md bg-orange-100 px-2 text-[11px] font-medium text-orange-700 ring-1 ring-orange-200"
+                          title={`已绑定 ${docUploadStepCount} 个文件上传步骤：LOOP 执行时自动把提取的文件填入网页上传框`}
+                        >
+                          <Upload className="h-3 w-3" />
+                          文件上传 ({docUploadStepCount})
+                        </span>
+                      )}
                       {addingDocExtractMode && docExtractSource === "choose" && (
                         <>
                           <span className="step-highlight" key="step4-docchoose">
@@ -1009,6 +1263,46 @@ onDirectRun,
                             </p>
                           )}
                         </div>
+                      )}
+                      {/* 自定义文本子步骤 */}
+                      {addingStepMode && onToggleCustomText && !addingDocExtractMode && (
+                        <button
+                          onClick={onToggleCustomText}
+                          className={`inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2.5 text-[11px] font-medium transition-all ${
+                            customTextMode
+                              ? "bg-violet-600 text-white hover:bg-violet-700"
+                              : "bg-violet-100 text-violet-700 hover:bg-violet-200"
+                          }`}
+                          title="添加自定义文本框：手动输入临时内容，关联网页元素后可用于审查/录入"
+                        >
+                          <Type className="h-3 w-3" />
+                          自定义文本{customTextEntries.length > 0 ? ` (${customTextEntries.length})` : ""}
+                        </button>
+                      )}
+                      {customTextMode && (
+                        <span className="step-highlight" key="step4-customtext">
+                          自定义文本 — 请在右侧「提取元素」面板中添加文本框并拾取网页元素
+                        </span>
+                      )}
+                      {/* 控件提取子步骤：点击展开型控件（下拉选项/日历） */}
+                      {addingStepMode && onToggleWidgetExtract && !addingDocExtractMode && (
+                        <button
+                          onClick={onToggleWidgetExtract}
+                          className={`inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2.5 text-[11px] font-medium transition-all ${
+                            widgetExtractMode
+                              ? "bg-fuchsia-600 text-white hover:bg-fuchsia-700"
+                              : "bg-fuchsia-100 text-fuchsia-700 hover:bg-fuchsia-200"
+                          }`}
+                          title="提取点击展开型控件：下拉选项框 / 日历选择器，配置后可自动选择选项或设置日期"
+                        >
+                          <ListChecks className="h-3 w-3" />
+                          控件提取{widgetCount > 0 ? ` (${widgetCount})` : ""}
+                        </button>
+                      )}
+                      {widgetExtractMode && (
+                        <span className="step-highlight" key="step4-widgetextract">
+                          控件提取 — 请在右侧「提取元素」面板中选择控件类型并拾取网页元素
+                        </span>
                       )}
                       {onExitAddingStepMode && (
                         <button
