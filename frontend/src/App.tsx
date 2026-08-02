@@ -5,11 +5,14 @@ import {
   ArrowLeft,
   ArrowLeftRight,
   Bot,
+  Check,
   CheckCircle2,
   ClipboardCheck,
   ClipboardEdit,
   Clock,
+  Database,
   EyeOff,
+  FileDown,
   FileSpreadsheet,
   Globe,
   GraduationCap,
@@ -24,18 +27,22 @@ import {
   Play,
   Plus,
   Repeat2,
+  Save,
   Settings2,
   ShieldCheck,
   SkipForward,
   Sparkles,
   Square,
   Trash2,
+  Type,
+  Upload,
   UserCircle,
   X,
   XCircle,
 } from "lucide-react";
 import { api, subscribeTask } from "./api/client";
 import appIconPng from "./assets/app-icon.png";
+import DocExportDialog from "./components/DocExportDialog";
 import splashSvg from "./assets/splash.svg";
 import type {
   AppConfig,
@@ -63,11 +70,25 @@ import type {
   WorkflowTemplate,
 } from "./types";
 import { FIELD_LABELS, OVERALL_LABELS, OVERALL_STYLES } from "./types";
-import { valuesEquivalent } from "./utils/formatNormalize";
+import type { CalendarRole, WidgetDef } from "./types";
+import { normalizeText, parseDateCandidates, valuesEquivalent } from "./utils/formatNormalize";
+import WidgetExtractPanel, { type WidgetBinding, type WidgetTestResult } from "./components/WidgetExtractPanel";
+import {
+  buildCalendarSetScript,
+  buildOptionSelectScript,
+  buildWidgetCloseScript,
+  buildWidgetOpenScript,
+  buildWidgetReadScript,
+  buildWidgetSnapshotScript,
+  type CalendarSetResult,
+  type OptionSelectResult,
+  type WidgetReadResult,
+  type WidgetSnapshotResult,
+} from "./lib/widgetScripts";
 import LeftPanel from "./components/LeftPanel";
 import BrowserPane, { type PickedElementInfo } from "./components/BrowserPane";
 import ExcelView, { type ExcelPickedField } from "./components/ExcelView";
-import ElementSelectBar, { type PickTarget } from "./components/ElementSelectBar";
+import ElementSelectBar, { type PickTarget, type CustomTextEntry } from "./components/ElementSelectBar";
 import ResultsPanel from "./components/ResultsPanel";
 import SettingsModal from "./components/SettingsModal";
 import DocFillDialog from "./components/DocFillDialog";
@@ -132,6 +153,51 @@ const DEEP_QUERY_HELPER = `function __cinsideDeepQuery(sel) {
 // 页面中第一个可输入框的通用选择器（querySelector 取文档序第一个匹配项）
 const FIRST_INPUT_SELECTOR =
   'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio]):not([type=file]):not([type=reset]):not([type=image]), textarea, [contenteditable="true"]';
+
+// ============ 点击展开型控件（选项/日历）：模块级辅助 ============
+/** 日历角色 → CalendarControls 字段名 */
+const WIDGET_ROLE_TO_FIELD: Record<string, string> = {
+  header: "headerSelector",
+  year: "yearSelector",
+  month: "monthSelector",
+  prevYear: "prevYearSelector",
+  nextYear: "nextYearSelector",
+  prevMonth: "prevMonthSelector",
+  nextMonth: "nextMonthSelector",
+  dayCell: "dayCellSelector",
+};
+
+/** 控件快照失败原因 → 人类可读提示 */
+const WIDGET_SNAPSHOT_REASONS: Record<string, string> = {
+  trigger_not_found: "未在网页中找到该元素，请重新拾取",
+  panel_not_found: "点击后未检测到展开的面板，请确认点的是「可展开的框框」",
+  options_empty: "面板展开后未识别到选项，请确认这是点击展开选项的控件",
+  calendar_header_not_found: "未识别到日历的年月显示，请确认点的是日历控件",
+  calendar_nav_not_found: "未识别到日历的翻页按钮（上一月/下一月）",
+  calendar_days_not_found: "未识别到日历的日期格子",
+};
+
+/**
+ * 日格子选择器泛化：用户「重选」点到的是某一个具体日期格（选择器带 :nth-of-type 等序数定位），
+ * 泛化为匹配所有同类日格子的选择器，否则翻月后只能点当初点的那一个格子。
+ */
+function generalizeDayCellSelector(sel: string): string {
+  if (!sel) return sel;
+  // 只处理最后一个 shadow/iframe 段的最后一段路径
+  const shadowSegs = sel.split(">>>");
+  const lastSeg = shadowSegs[shadowSegs.length - 1];
+  const parts = lastSeg.split(">").map((p) => p.trim()).filter(Boolean);
+  if (!parts.length) return sel;
+  let last = parts[parts.length - 1];
+  last = last
+    .replace(/:nth-(of-type|child|last-of-type|last-child)\([^)]*\)/g, "")
+    .replace(/:first-(of-type|child)/g, "")
+    .replace(/:last-(of-type|child)/g, "");
+  if (!last) last = "*";
+  parts[parts.length - 1] = last;
+  shadowSegs[shadowSegs.length - 1] = parts.join(" > ");
+  return shadowSegs.join(" >>> ");
+}
 
 const DEFAULT_SETTINGS: AppSettings = {
   agent_backend: "browser_use",
@@ -253,6 +319,7 @@ function DetachedBottomPanel() {
   const [mappingCount, setMappingCount] = useState(0);
   const [pendingAction, setPendingAction] = useState<"none" | "input" | "click">("none");
   const [selectedExcelColumn, setSelectedExcelColumn] = useState<string | null>(null);
+  const [rightBindColumn, setRightBindColumn] = useState<string | null>(null);
   const [bindInputSide, setBindInputSide] = useState<"left" | "right" | "both" | null>(null);
   const [nextClickLabel, setNextClickLabel] = useState<string | null>(null);
   const [addingStepMode, setAddingStepMode] = useState<"review" | "entry" | null>(null);
@@ -304,6 +371,7 @@ function DetachedBottomPanel() {
         mappingCount?: number;
         pendingAction?: "none" | "input" | "click";
         selectedExcelColumn?: string | null;
+        rightBindColumn?: string | null;
         bindInputSide?: "left" | "right" | "both" | null;
         nextClickLabel?: string | null;
         addingStepMode?: "review" | "entry" | null;
@@ -348,6 +416,7 @@ function DetachedBottomPanel() {
       if ("mappingCount" in s) setMappingCount(Number(s.mappingCount ?? 0));
       if ("pendingAction" in s) setPendingAction(s.pendingAction ?? "none");
       if ("selectedExcelColumn" in s) setSelectedExcelColumn(s.selectedExcelColumn ?? null);
+      if ("rightBindColumn" in s) setRightBindColumn(s.rightBindColumn ?? null);
       if ("bindInputSide" in s) setBindInputSide(s.bindInputSide ?? null);
       if ("nextClickLabel" in s) setNextClickLabel(s.nextClickLabel ?? null);
       if ("addingStepMode" in s) setAddingStepMode(s.addingStepMode ?? null);
@@ -442,6 +511,8 @@ function DetachedBottomPanel() {
               onRequestSaveSkill={() => window.electronAPI?.panelSendAction("save-skill", undefined)}
               onDirectRun={() => window.electronAPI?.panelSendAction("direct-run", undefined)}
               selectedExcelColumn={selectedExcelColumn}
+              rightBindColumn={rightBindColumn}
+              onRightBindColumnChange={(col) => window.electronAPI?.panelSendAction("set-right-bind-column", col)}
               bindInputSide={bindInputSide}
               nextClickLabel={nextClickLabel}
               onStartBindInputs={() => window.electronAPI?.panelSendAction("start-bind-inputs", undefined)}
@@ -485,6 +556,8 @@ function DetachedBottomPanel() {
               addingStepMode={addingStepMode}
               onSaveToBatch={() => window.electronAPI?.panelSendAction("save-to-batch", undefined)}
               hasCheckedBatch={hasCheckedBatch}
+              records={record ? [record] : []}
+              onSelectRecord={(id) => window.electronAPI?.panelSendAction("select-record", id)}
             />
             {/* 步骤设置面板：下面板分离后，TeachingGuide 在此渲染（而非主窗口） */}
             {teachingPhase !== "idle" && !selectMode && (
@@ -714,6 +787,12 @@ const [selectedExcelColumn, setSelectedExcelColumn] = useState<string | null>(nu
 const selectedExcelColumnRef = useRef(selectedExcelColumn);
 selectedExcelColumnRef.current = selectedExcelColumn;
 
+// 右侧网页绑定输入时使用的 Excel 列（null = 跟随 LOOP 列）
+// 左侧网页绑定输入始终用 LOOP 列；右侧学习系统可能搜同一行的其他列（如护照号）
+const [rightBindColumn, setRightBindColumn] = useState<string | null>(null);
+const rightBindColumnRef = useRef(rightBindColumn);
+rightBindColumnRef.current = rightBindColumn;
+
   // 两个浏览器面板的宽度比例（左侧面板百分比）
   const [leftPaneWidth, setLeftPaneWidth] = useState<number>(50);
   const draggingRef = useRef(false);
@@ -823,6 +902,36 @@ addingDocExtractModeRef.current = addingDocExtractMode;
 const [docExtractSource, setDocExtractSource] = useState<null | "choose" | "web" | "local">(null);
 const docExtractSourceRef = useRef(docExtractSource);
 docExtractSourceRef.current = docExtractSource;
+// 文件提取配置后是否展示"文件处理+提取元素"两栏分屏（点击"提取元素"后开启）
+const [docExtractSplitView, setDocExtractSplitView] = useState(false);
+const docExtractSplitViewRef = useRef(docExtractSplitView);
+docExtractSplitViewRef.current = docExtractSplitView;
+// 源文件预览（嵌套在文件提取配置面板里的持久预览窗口；字段送「提取元素」后仍保留）
+const [docSourcePreview, setDocSourcePreview] = useState<{
+  imageUrl: string;
+  filename: string;
+  method: string;
+} | null>(null);
+const docSourcePreviewRef = useRef(docSourcePreview);
+docSourcePreviewRef.current = docSourcePreview;
+// 退出文件提取模式时自动关闭两栏分屏并清空预览
+useEffect(() => {
+  if (!addingDocExtractMode) {
+    setDocExtractSplitView(false);
+    setDocSourcePreview(null);
+  }
+}, [addingDocExtractMode]);
+// 网页下载提取过程的反馈状态（idle=等待, downloading=下载中, preview=预览就绪, ocr=OCR中, success=提取成功, error=失败）
+type DocWebStatus =
+  | { phase: "idle" }
+  | { phase: "downloading"; filename: string; received: number; total: number; percent: number }
+  | { phase: "preview"; filename: string; size: number }
+  | { phase: "ocr"; filename: string }
+  | { phase: "success"; filename: string; size: number }
+  | { phase: "error"; message: string; filename?: string };
+const [docWebStatus, setDocWebStatus] = useState<DocWebStatus>({ phase: "idle" });
+// 暂存已下载但尚未触发 OCR 的文件数据（预览后点击「录入提取」才消费）
+const pendingWebFileRef = useRef<{ dataUrl: string; filename: string; size: number; side: "left" | "right" } | null>(null);
 // 本地文件提取：已上传的文件列表
 const [docLocalFiles, setDocLocalFiles] = useState<File[]>([]);
 // 本地文件提取：用于匹配文件名的字段（绑定的 Excel 字段）
@@ -837,6 +946,43 @@ const [docLocalDirFiles, setDocLocalDirFiles] = useState<Array<{ relativePath: s
 const [docLocalSamplePath, setDocLocalSamplePath] = useState<string | null>(null);
 // 本地文件提取（目录模式）：推断出的路径模板（如 {student_id}/护照）
 const [docLocalPattern, setDocLocalPattern] = useState<string | null>(null);
+// 自定义文本模式：在步骤4中添加用户自定义文本框，关联网页元素后用于审查/录入
+const [customTextMode, setCustomTextMode] = useState(false);
+const customTextModeRef = useRef(false);
+customTextModeRef.current = customTextMode;
+const [customTextEntries, setCustomTextEntries] = useState<CustomTextEntry[]>([]);
+const [customTextPickingId, setCustomTextPickingId] = useState<string | null>(null);
+const customTextPickingIdRef = useRef<string | null>(null);
+customTextPickingIdRef.current = customTextPickingId;
+// 控件提取模式：点击展开型控件（选项控件/日历控件）的提取、标注与绑定
+const [widgetExtractMode, setWidgetExtractMode] = useState(false);
+const widgetExtractModeRef = useRef(false);
+widgetExtractModeRef.current = widgetExtractMode;
+// 正在拾取触发框的控件类型（null=未在拾取）
+const [widgetPickKind, setWidgetPickKind] = useState<"option" | "calendar" | null>(null);
+const widgetPickKindRef = useRef<"option" | "calendar" | null>(null);
+widgetPickKindRef.current = widgetPickKind;
+// 控件快照执行中 / 失败提示
+const [widgetSnapshotBusy, setWidgetSnapshotBusy] = useState(false);
+const [widgetSnapshotError, setWidgetSnapshotError] = useState<string | null>(null);
+// 草稿控件（快照完成待绑定保存）+ 草稿绑定
+const [widgetDraft, setWidgetDraft] = useState<WidgetDef | null>(null);
+const widgetDraftRef = useRef<WidgetDef | null>(null);
+widgetDraftRef.current = widgetDraft;
+const [widgetDraftBinding, setWidgetDraftBinding] = useState<WidgetBinding>({ leftSource: "excel", leftField: "" });
+const widgetDraftBindingRef = useRef<WidgetBinding>({ leftSource: "excel", leftField: "" });
+widgetDraftBindingRef.current = widgetDraftBinding;
+// 正在重选日历角色的 key（"draft:prevMonth" 或 "saved:<selector>:prevMonth"）
+const [widgetRolePickingKey, setWidgetRolePickingKey] = useState<string | null>(null);
+const widgetRolePickingKeyRef = useRef<string | null>(null);
+widgetRolePickingKeyRef.current = widgetRolePickingKey;
+// 正在从左侧网页拾取来源的 key（"draft" 或 "saved:<selector>"）
+const [widgetLeftPickingKey, setWidgetLeftPickingKey] = useState<string | null>(null);
+const widgetLeftPickingKeyRef = useRef<string | null>(null);
+widgetLeftPickingKeyRef.current = widgetLeftPickingKey;
+// 控件试跑结果 / 执行中
+const [widgetTestResults, setWidgetTestResults] = useState<Record<string, WidgetTestResult>>({});
+const [widgetTestBusyKey, setWidgetTestBusyKey] = useState<string | null>(null);
 // 文件提取审查面板数据（原图 + 提取字段框 + 同名图片对比）
 const [docExtractPanel, setDocExtractPanel] = useState<{
   imageUrl: string;
@@ -847,6 +993,48 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   side: "left" | "right";
   workflow: "entry" | "review";
 } | null>(null);
+// docExtractPanel 更新时同步源文件预览（仅非空时；null 不清空，保留最后一次的预览）
+useEffect(() => {
+  if (docExtractPanel) {
+    setDocSourcePreview({
+      imageUrl: docExtractPanel.imageUrl,
+      filename: docExtractPanel.filename,
+      method: docExtractPanel.method,
+    });
+  }
+}, [docExtractPanel]);
+// 将后端 extractDocumentFile 返回结果转为可在 <img> 中显示的预览 URL：
+// - processed_image 存在时（PDF 扫描件渲染后 / 图片旋转裁剪后）用它（需要补 data:image/jpeg;base64, 前缀）
+// - 否则回退到原始文件 URL（普通图片可直接显示；原始 PDF 无法用 <img> 直接渲染）
+const toPreviewImageUrl = (rawUrl: string, processed?: string | null) => {
+  if (processed) return `data:image/jpeg;base64,${processed}`;
+  return rawUrl;
+};
+// 文件导出对话框开关（文件提取预览面板 →「导出」）
+const [docExportOpen, setDocExportOpen] = useState(false);
+// 绑定上传模式：从文件提取预览面板点「绑定上传」→ 拾取网页 file input → 确认后生成上传步骤
+const [uploadBindMode, setUploadBindMode] = useState(false);
+const uploadBindModeRef = useRef(false);
+uploadBindModeRef.current = uploadBindMode;
+// 绑定上传来源：文件提取步骤 mark id（执行时从该槽位取文件）；null=取最近一次提取的文件
+const [uploadBindSourceMarkId, setUploadBindSourceMarkId] = useState<string | null>(null);
+const uploadBindSourceMarkIdRef = useRef<string | null>(null);
+uploadBindSourceMarkIdRef.current = uploadBindSourceMarkId;
+// 绑定上传确认对话框数据（拾取到 file input 后弹出，确认格式/压缩设置）
+const [uploadBindDraft, setUploadBindDraft] = useState<{
+  side: "left" | "right";
+  selector: string;          // file input 的 selector
+  clickedSelector: string;   // 用户实际点击的元素 selector（显示用）
+  label: string;
+  accept: string;
+  sourceMarkId: string | null;
+  sourceLabel: string;
+} | null>(null);
+// LOOP 执行时：文件提取步骤产出文件的运行时槽位（markId → 文件），供上传步骤取文件
+// dataUrl=本地文件/下载捕获的内容；url=网页 URL 直提模式（上传时由后端下载）
+const docRuntimeFileSlotsRef = useRef<Record<string, { dataUrl?: string; url?: string; filename: string }>>({});
+// LOOP 执行时：最近一次提取的文件（上传步骤未绑定来源时的兜底）
+const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename: string; markId: string } | null>(null);
   // 完成教学后自动开始 LOOP 批量执行
   const [startBatchAfterTeaching, setStartBatchAfterTeaching] = useState(false);
 
@@ -862,6 +1050,8 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   // ref 始终持有最新 pickedMarks，供 recyclePickedMark 等回调读取，避免闭包陷阱
   const pickedMarksRef = useRef(pickedMarks);
   pickedMarksRef.current = pickedMarks;
+  // 每侧最近一次拾取是否来自弹窗（addPickedMark 据此打 inPopup 标记）
+  const pickFromPopupRef = useRef<Record<ViewSide, boolean>>({ left: false, right: false });
   // 前置点击数量（步骤3：搜索/进入）
   const preClickCount = useMemo(() => pickedMarks.filter((m) => m.action === "click" && m.clickPhase === "pre").length, [pickedMarks]);
   // 收尾点击数量（步骤5：保存/返回）
@@ -871,7 +1061,10 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       setPickedMarks((prev) => {
         const order = prev.length + 1;
         const id = `mk-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-        return [...prev, { ...mark, id, order, createdAt: Date.now() }];
+        // 弹窗内拾取的元素：打上 inPopup 标记（Excel 来源不打，执行时路由到弹窗 view）
+        const mSide = mark.side === "left" ? "left" : "right";
+        const inPopup = mark.inPopup ?? (mark.source !== "excel" && pickFromPopupRef.current[mSide] ? true : undefined);
+        return [...prev, { ...mark, inPopup, id, order, createdAt: Date.now() }];
       });
     },
     []
@@ -956,6 +1149,12 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   const [batchMarkCursor, setBatchMarkCursor] = useState<{ recordIndex: number; markOrder: number } | null>(null); // 当前执行的 mark
   const [batchResults, setBatchResults] = useState<Record<string, BatchResult>>({});
   const [batchTargets, setBatchTargets] = useState<ApplicantRecord[]>([]); // 本次LOOP的执行顺序（从选中卡片开始）
+  /** 执行阶段：idle=未执行，marks=执行点击/输入步骤，verify=逐字段审查，done=完成 */
+  const [execPhase, setExecPhase] = useState<"idle" | "marks" | "verify" | "done">("idle");
+  /** 当前审查的字段索引（在mappings中的位置），-1=未在审查 */
+  const [verifyFieldIdx, setVerifyFieldIdx] = useState(-1);
+  /** 每个审查字段的结果，key=mappings索引 */
+  const [reviewFieldResults, setReviewFieldResults] = useState<Record<number, FieldMatch>>({});
   const batchStopRef = useRef(false);
   const runBatchRef = useRef<((tplOverride?: WorkflowTemplate, targetIds?: string[]) => Promise<void>) | null>(null);
   const [logSignal, setLogSignal] = useState(0); // 递增触发ResultsPanel切换到日志tab
@@ -1070,7 +1269,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   }, []);
 
   // pendingAction=click：执行真实点击（element.click()）
-  const performRealClick = useCallback(async (side: ViewSide, selector: string) => {
+  const performRealClick = useCallback(async (side: ViewSide, selector: string, inPopup?: boolean) => {
     if (!window.electronAPI) return;
     try {
       const script = `
@@ -1098,7 +1297,9 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
           return { ok: true, tag: el.tagName };
         })();
       `;
-      const result = await window.electronAPI.viewExecuteJS(side, script);
+      const result = inPopup
+        ? await window.electronAPI.popupExecuteJS(side, script)
+        : await window.electronAPI.viewExecuteJS(side, script);
       // 等待一小段时间让点击生效和页面开始响应
       await new Promise((r) => setTimeout(r, 300));
       return result;
@@ -1109,7 +1310,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
 
   // pendingAction=input：把 value 填入目标输入框 selector
   // 返回 { ok, reason, foundValue } 便于调用方判断是否成功
-  const performInputValue = useCallback(async (targetSide: ViewSide, targetSelector: string, value: string): Promise<{ ok: boolean; reason?: string; [key: string]: unknown }> => {
+  const performInputValue = useCallback(async (targetSide: ViewSide, targetSelector: string, value: string, inPopup?: boolean): Promise<{ ok: boolean; reason?: string; [key: string]: unknown }> => {
     if (!window.electronAPI) return { ok: false, reason: "no-electron" };
     try {
       const script = `
@@ -1202,7 +1403,9 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
           return { ok: true, reason: 'ok', tag: el.tagName, currentValue: el.value || el.textContent || '', setOk: setOk };
         })();
       `;
-      const result = await window.electronAPI.viewExecuteJS(targetSide, script) as { ok: boolean; reason?: string; [key: string]: unknown } | null;
+      const result = (inPopup
+        ? await window.electronAPI.popupExecuteJS(targetSide, script)
+        : await window.electronAPI.viewExecuteJS(targetSide, script)) as { ok: boolean; reason?: string; [key: string]: unknown } | null;
       console.log("[performInputValue] 结果:", result);
       return result || { ok: false, reason: "no-result" };
     } catch (e) {
@@ -1278,13 +1481,15 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   }, []);
 
   /** 等待元素出现：慢渲染/弹窗延迟加载时轮询，最多 maxMs，找到返回 true */
-  const waitElementAppear = useCallback(async (side: ViewSide, selector: string, maxMs = 6000): Promise<boolean> => {
+  const waitElementAppear = useCallback(async (side: ViewSide, selector: string, maxMs = 6000, inPopup?: boolean): Promise<boolean> => {
     if (!window.electronAPI) return false;
     const start = Date.now();
     const script = `${DEEP_QUERY_HELPER}(function(){ try { return !!__cinsideDeepQuery(${JSON.stringify(sanitizeSelector(selector))}); } catch(e) { return false; } })()`;
     while (Date.now() - start < maxMs) {
       try {
-        const found = await window.electronAPI.viewExecuteJS(side, script);
+        const found = inPopup
+          ? await window.electronAPI.popupExecuteJS(side, script)
+          : await window.electronAPI.viewExecuteJS(side, script);
         if (found) return true;
       } catch {
         // 页面导航中，继续等
@@ -1478,6 +1683,32 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   // 卡片池 state 提前声明，供 selected 查找（卡片池模式下卡片 record_id 带后缀，不在 records 里）
   const [cardPool, setCardPool] = useState<ApplicantRecord[]>([]);
 
+  // 卡片自定义图片：record_id -> base64 dataURL，用户可通过 Ctrl+V 或拖拽设置，持久化到 localStorage
+  const [cardImages, setCardImages] = useState<Record<string, string>>(() => {
+    try {
+      const raw = localStorage.getItem("cinside-card-images");
+      return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    } catch {
+      return {};
+    }
+  });
+  const setCardImage = useCallback((recordId: string, dataUrl: string) => {
+    setCardImages((prev) => {
+      const next = { ...prev, [recordId]: dataUrl };
+      try { localStorage.setItem("cinside-card-images", JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
+  const clearCardImage = useCallback((recordId: string) => {
+    setCardImages((prev) => {
+      if (!(recordId in prev)) return prev;
+      const next = { ...prev };
+      delete next[recordId];
+      try { localStorage.setItem("cinside-card-images", JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
+
   // 当前选中卡片：优先从卡片池查找（卡片池模式），回退到原始 records（兼容旧流程）
   const selected = cardPool.find((r) => r.record_id === selectedId) || records.find((r) => r.record_id === selectedId) || null;
 
@@ -1640,6 +1871,22 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   // 执行游标：控制"运行"按钮只跑前 N 张已设置 LOOP 的卡片；null 表示跑全部
   const [runCursor, setRunCursor] = useState<number | null>(null);
 
+  /** 字段列手动映射：标准字段名 -> Excel 原始列 key（当 AI/别名识别失败时由用户手动指定） */
+  const [fieldColumnMap, setFieldColumnMap] = useState<Record<string, string>>({});
+  const handleFieldColumnMapChange = useCallback((field: string, columnKey: string | null) => {
+    setFieldColumnMap((prev) => {
+      const next = { ...prev };
+      if (columnKey === null) {
+        delete next[field];
+      } else {
+        next[field] = columnKey;
+      }
+      return next;
+    });
+  }, []);
+  /** 后端自动识别的列映射（原始列名 -> 标准字段名），用于过滤Excel表头中的别名列和自动初始化fieldColumnMap */
+  const [detectedColumnMap, setDetectedColumnMap] = useState<Record<string, string>>({});
+
   // cardRecords：已保存批次放顶部（按保存时间setAt升序，第一批最上，第二批紧随其后），未保存卡片放底部
   const cardRecords = useMemo(() => {
     // 收集所有批次，按保存时间排序
@@ -1778,11 +2025,19 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       if (r.count === 0) {
         alert("Excel 文件为空或没有有效数据行，请检查文件内容。");
       } else {
+        // 保存后端自动识别的列映射，并反转初始化fieldColumnMap（标准字段 -> 原始列名）
+        setDetectedColumnMap(r.detected_column_map || {});
+        const autoMap: Record<string, string> = {};
+        Object.entries(r.detected_column_map || {}).forEach(([origCol, stdField]) => {
+          autoMap[stdField] = origCol;
+        });
+        setFieldColumnMap((prev) => ({ ...autoMap, ...prev })); // 手动映射优先覆盖自动映射
+
         await refreshRecords();
         setRowRange(null);
         setCardsGenerated(false);
         setLeftViewMode("excel");
-        console.log(`[BrowserExcel] 已导入 ${r.count} 条记录`);
+        console.log(`[BrowserExcel] 已导入 ${r.count} 条记录，自动识别字段:`, r.detected_column_map);
       }
     } catch (e: any) {
       console.warn("Excel upload failed", e);
@@ -1953,6 +2208,29 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   // ============ 下载捕获事件监听（教学模式：文件提取网页下载） ============
   useEffect(() => {
     if (!window.electronAPI) return;
+    const removeStarted = window.electronAPI.onDownloadStarted((data) => {
+      if (!addingDocExtractModeRef.current) return;
+      rlog(`[download-started] side=${data.side}, filename=${data.filename}`);
+      setDocWebStatus({ phase: "downloading", filename: data.filename, received: 0, total: 0, percent: 0 });
+      setSameNameImages(null);
+    });
+
+    const removeProgress = window.electronAPI.onDownloadProgress((data) => {
+      if (!addingDocExtractModeRef.current) return;
+      setDocWebStatus((prev) => {
+        // 仅在已进入 downloading 态时更新进度（避免乱序）
+        if (prev.phase !== "downloading") return prev;
+        if (prev.filename !== data.filename) return prev;
+        return {
+          phase: "downloading",
+          filename: data.filename,
+          received: data.received,
+          total: data.total,
+          percent: data.percent,
+        };
+      });
+    });
+
     const removeCaptured = window.electronAPI.onDownloadCaptured((data) => {
       // 仅在文件提取教学模式中处理
       if (!addingDocExtractModeRef.current) return;
@@ -1975,46 +2253,33 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         return marks;
       });
 
-      // OCR 提取下载的文件
+      // 先做轻量预览（不跑 OCR），预览就绪后用户点击「录入提取」再触发 OCR
       const file = dataUrlToFile(data.dataUrl, data.filename);
-      const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
-      const targetFields = mappedFields.length > 0
-        ? mappedFields
-        : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender"];
-      api.extractDocumentFile(file, targetFields)
-        .then((result) => {
-          // 更新文件提取面板
-          const newExtract: DocExtractState = {
-            filename: result.filename,
-            method: result.method,
-            text: result.text,
-            fields: result.fields,
-            entries: [],
-            source: data.dataUrl,
-            file_url: data.dataUrl,
-            processed_image: result.processed_image,
-          };
-          const rid = selected?.record_id || "_default";
-          setDocExtractsByRecord((prev) => {
-            const arr = prev[rid] || [];
-            const filtered = arr.filter((e) => e.file_url !== newExtract.file_url);
-            return { ...prev, [rid]: [...filtered, newExtract] };
-          });
-          setActiveDocIndex(999);
-          setDocSignal((s) => s + 1);
-          setDocExtractPanel({
-            imageUrl: data.dataUrl,
-            filename: result.filename,
-            method: result.method,
-            text: result.text,
-            fields: result.fields,
+      api.previewDocumentFile(file)
+        .then((previewResult) => {
+          // 暂存原始文件数据，等待用户点击「录入提取」
+          pendingWebFileRef.current = {
+            dataUrl: data.dataUrl,
+            filename: data.filename,
+            size: data.size,
             side: data.side as "left" | "right",
-            workflow: data.side === "left" ? "entry" : "review",
+          };
+          // 显示源文件预览
+          setDocSourcePreview({
+            imageUrl: `data:image/jpeg;base64,${previewResult.processed_image}`,
+            filename: previewResult.filename,
+            method: previewResult.method,
           });
-          setSuccessToast(`下载文件提取完成：${result.filename} (${data.size} bytes)`);
+          // 清空之前的提取结果（如有）
+          setDocExtractPanel(null);
+          setSameNameImages(null);
+          // 状态：预览就绪
+          setDocWebStatus({ phase: "preview", filename: data.filename, size: data.size });
         })
         .catch((e) => {
-          setError(`下载文件提取失败: ${e instanceof Error ? e.message : String(e)}`);
+          const msg = e instanceof Error ? e.message : String(e);
+          setDocWebStatus({ phase: "error", message: `预览失败：${msg}`, filename: data.filename });
+          setError(`文件预览失败: ${msg}`);
         });
 
       // 重新激活下载捕获（允许用户继续添加更多提取序列）
@@ -2024,12 +2289,16 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     const removeFailed = window.electronAPI.onDownloadFailed((data) => {
       if (!addingDocExtractModeRef.current) return;
       rlog(`[download-failed] side=${data.side}, filename=${data.filename}`);
-      setError(`下载捕获失败: ${data.error || data.state || "未知错误"}`);
+      const msg = data.error || data.state || "未知错误";
+      setDocWebStatus({ phase: "error", message: `下载失败：${msg}`, filename: data.filename });
+      setError(`下载捕获失败: ${msg}`);
       // 重新激活下载捕获
       window.electronAPI?.setDownloadCapture(data.side as "left" | "right", true).catch(() => {});
     });
 
     return () => {
+      removeStarted?.();
+      removeProgress?.();
       removeCaptured?.();
       removeFailed?.();
     };
@@ -2223,6 +2492,9 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         rlog("[startBindBothInputs] 注入左右两侧拾取脚本");
         window.electronAPI?.viewStartPicking("left");
         window.electronAPI?.viewStartPicking("right");
+        // 开启右键菜单模式：绑定输入时右键点输入框可选择其他 Excel 列
+        window.electronAPI?.viewSetBindInputMode("left", true).catch(() => {});
+        window.electronAPI?.viewSetBindInputMode("right", true).catch(() => {});
       }
     }, 500);
   }, [setError]);
@@ -2232,6 +2504,9 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     rlog("[exitBindInputs] 退出灵活绑定模式");
     setBindInputSide(null);
     setPickTarget(null);
+    // 关闭右键菜单模式
+    window.electronAPI?.viewSetBindInputMode("left", false).catch(() => {});
+    window.electronAPI?.viewSetBindInputMode("right", false).catch(() => {});
     window.electronAPI?.viewStopPicking("left").catch(() => {});
     window.electronAPI?.viewStopPicking("right").catch(() => {});
   }, []);
@@ -2335,10 +2610,304 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       setAddingDocExtractMode(false);
       window.electronAPI?.viewStopPicking("right").catch(() => {});
     }
+    // 同时退出自定义文本模式
+    if (customTextModeRef.current) {
+      setCustomTextMode(false);
+      setCustomTextEntries([]);
+      setCustomTextPickingId(null);
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+    }
+    // 同时退出控件提取模式（保留已保存的控件映射，丢弃草稿与拾取状态）
+    if (widgetExtractModeRef.current) {
+      setWidgetExtractMode(false);
+      setWidgetPickKind(null);
+      setWidgetRolePickingKey(null);
+      setWidgetLeftPickingKey(null);
+      setWidgetDraft(null);
+      setWidgetSnapshotError(null);
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+    }
     setPickTarget(null);
     setRightPicked(null);
     setLeftPicked(null);
   }, []);
+
+  // === 自定义文本模式 ===
+  const toggleCustomText = useCallback(() => {
+    setCustomTextMode((prev) => {
+      const next = !prev;
+      if (!next) {
+        setCustomTextPickingId(null);
+        window.electronAPI?.viewStopPicking("left").catch(() => {});
+        window.electronAPI?.viewStopPicking("right").catch(() => {});
+      }
+      return next;
+    });
+  }, []);
+
+  const addCustomTextEntry = useCallback(() => {
+    const id = `ct-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    setCustomTextEntries((prev) => [...prev, { id, name: "", text: "" }]);
+  }, []);
+
+  /** 文件提取预览面板：勾选字段送到「提取元素」面板（转为自定义文本条目，沿用拾取关联/保存步骤机制） */
+  const sendDocFieldsToExtractPanel = useCallback((fields: Record<string, string>) => {
+    const entries = Object.entries(fields)
+      .filter(([, v]) => v)
+      .map(([f, v]) => ({
+        id: `ct-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-${f}`,
+        name: FIELD_LABELS[f] || f,
+        text: v,
+      }));
+    if (entries.length === 0) return;
+    setCustomTextEntries((prev) => [...prev, ...entries]);
+    setCustomTextMode(true);
+    setDocExtractPanel(null);
+    setSameNameImages(null);
+    // 关闭内联结果视图，切换到「文件处理+提取元素」两栏分屏模式
+    setDocExtractSplitView(true);
+    setBottomPanelOpen(true);
+    setSuccessToast(`已送 ${entries.length} 个字段到「提取元素」面板，请逐个拾取关联网页元素后保存为步骤`);
+  }, [setSuccessToast]);
+
+  /** 网页模式：预览就绪后用户点击「录入提取」触发 OCR 识别 */
+  const triggerWebExtract = useCallback(() => {
+    const pending = pendingWebFileRef.current;
+    if (!pending) return;
+    // 进入 OCR 阶段
+    setDocWebStatus({ phase: "ocr", filename: pending.filename });
+    const file = dataUrlToFile(pending.dataUrl, pending.filename);
+    const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
+    const targetFields = mappedFields.length > 0
+      ? mappedFields
+      : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender"];
+    api.extractDocumentFile(file, targetFields)
+      .then((result) => {
+        const newExtract: DocExtractState = {
+          filename: result.filename,
+          method: result.method,
+          text: result.text,
+          fields: result.fields,
+          entries: [],
+          source: pending.dataUrl,
+          file_url: pending.dataUrl,
+          processed_image: result.processed_image,
+        };
+        const rid = selected?.record_id || "_default";
+        setDocExtractsByRecord((prev) => {
+          const arr = prev[rid] || [];
+          const filtered = arr.filter((e) => e.file_url !== newExtract.file_url);
+          return { ...prev, [rid]: [...filtered, newExtract] };
+        });
+        setActiveDocIndex(999);
+        setDocSignal((s) => s + 1);
+        setDocExtractPanel({
+          imageUrl: toPreviewImageUrl(pending.dataUrl, result.processed_image),
+          filename: result.filename,
+          method: result.method,
+          text: result.text,
+          fields: result.fields,
+          side: pending.side,
+          workflow: pending.side === "left" ? "entry" : "review",
+        });
+        setDocWebStatus({ phase: "success", filename: result.filename, size: pending.size });
+        setSuccessToast(`文件提取完成：${result.filename}`);
+        // 清空暂存
+        pendingWebFileRef.current = null;
+      })
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        setDocWebStatus({ phase: "error", message: msg, filename: pending.filename });
+        setError(`文件提取失败: ${msg}`);
+      });
+  }, [mappings, selected, setSuccessToast, setError]);
+
+  const removeCustomTextEntry = useCallback((id: string) => {
+    setCustomTextEntries((prev) => prev.filter((e) => e.id !== id));
+    if (customTextPickingIdRef.current === id) {
+      setCustomTextPickingId(null);
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+    }
+  }, []);
+
+  const renameCustomTextEntry = useCallback((id: string, name: string) => {
+    setCustomTextEntries((prev) => prev.map((e) => (e.id === id ? { ...e, name } : e)));
+  }, []);
+
+  const updateCustomTextEntry = useCallback((id: string, text: string) => {
+    setCustomTextEntries((prev) => prev.map((e) => (e.id === id ? { ...e, text } : e)));
+  }, []);
+
+  const pickForCustomText = useCallback((id: string) => {
+    setCustomTextPickingId(id);
+    window.electronAPI?.viewStartPicking("left").catch(() => {});
+    window.electronAPI?.viewStartPicking("right").catch(() => {});
+  }, []);
+
+  const saveCustomTextSteps = useCallback(() => {
+    const stepType = currentLoopStepTypeRef.current;
+    const isEntry = stepType === "entry";
+    let saved = 0;
+    const newlySavedIds: string[] = [];
+    customTextEntries.forEach((entry) => {
+      if (!entry.text || !entry.selector || entry.saved) return;
+      // right_label 只用拾取到的元素标签；框框名字（entry.name）不参与保存，仅在 UI 显示
+      saveMapping({
+        right_selector: entry.selector,
+        right_label: entry.label || entry.selector,
+        right_input_type: entry.type || null,
+        left_source: "manual",
+        left_field: entry.text,
+        verify_method: "smart",
+      });
+      newlySavedIds.push(entry.id);
+      saved++;
+    });
+    if (saved > 0) {
+      // 标记已保存的条目，保留在面板中
+      setCustomTextEntries((prev) =>
+        prev.map((e) => (newlySavedIds.includes(e.id) ? { ...e, saved: true } : e))
+      );
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customTextEntries]);
+
+  // 自定义文本面板内容（渲染在 ResultsPanel 的「提取元素」卡片中）
+  const customTextContent = useMemo(() => {
+    // 有条目时始终可渲染（由 ResultsPanel 的 设置/结果 开关控制显隐）
+    if (!customTextMode && customTextEntries.length === 0) return null;
+    return (
+      <div className="flex h-full flex-col gap-2 overflow-y-auto px-2 py-1.5">
+        <div className="mb-0.5 flex items-center gap-1 text-[10px] font-bold text-violet-800">
+          <Type className="h-3 w-3 text-violet-700" />
+          自定义文本 — 补充 Excel 和数据源网页上都没有的信息
+        </div>
+        {customTextEntries.length === 0 && (
+          <p className="text-[9px] text-slate-500">
+            点击下方「添加」创建文本框：上方输入框是框框名字（仅显示），下方是实际内容（参与审查/录入）
+          </p>
+        )}
+        {customTextEntries.map((entry) => (
+          <div
+            key={entry.id}
+            className={`relative w-full rounded-lg border-2 px-2.5 py-2 transition-all ${
+              customTextPickingId === entry.id
+                ? "border-violet-400 bg-violet-100/80 ring-1 ring-violet-300 animate-pulse"
+                : entry.selector
+                ? "border-indigo-200 bg-indigo-50/60"
+                : "border-indigo-100 bg-indigo-50/30"
+            }`}
+          >
+            {/* 右上角徽章：已拾取 / 拾取中 */}
+            <div className="absolute right-1.5 top-1.5 flex shrink-0 items-center gap-1">
+              {entry.saved && !customTextPickingId && (
+                <span
+                  className="inline-flex items-center rounded-md bg-emerald-100 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700 ring-1 ring-emerald-200 max-w-[130px] truncate"
+                  title="已保存为步骤"
+                >
+                  已保存
+                </span>
+              )}
+              {entry.selector && !entry.saved && customTextPickingId !== entry.id && (
+                <span
+                  className="inline-flex items-center rounded-md bg-indigo-100 px-1.5 py-0.5 text-[9px] font-medium text-indigo-700 ring-1 ring-indigo-200 max-w-[130px] truncate"
+                  title={`${entry.side === "left" ? "左" : "右"}侧：${entry.label || entry.selector}`}
+                >
+                  关联
+                </span>
+              )}
+            </div>
+            {/* 第一行：框框名字（仅用于理解，不参与数据） */}
+            <div className="mb-1 flex items-center gap-1 pr-16">
+              <input
+                value={entry.name}
+                onChange={(e) => renameCustomTextEntry(entry.id, e.target.value)}
+                placeholder="框框名字…（仅显示，不参与录入/审查）"
+                className="w-full bg-transparent px-0.5 py-0.5 text-[11px] font-bold text-indigo-500 outline-none placeholder:text-indigo-300"
+              />
+            </div>
+            {/* 分隔线：名字与内容之间的细横线（模仿截图） */}
+            <div className="mb-1 h-px w-full bg-indigo-100/80" />
+            {/* 第二行：实际内容值（参与审查/录入） */}
+            <textarea
+              value={entry.text}
+              onChange={(e) => updateCustomTextEntry(entry.id, e.target.value)}
+              placeholder="输入实际内容…（用于审查对比或录入填入）"
+              rows={2}
+              className="w-full resize-none bg-transparent px-0.5 py-0.5 text-[11px] leading-snug text-slate-700 outline-none placeholder:text-slate-300"
+            />
+            {/* 拾取提示 / 关联详情 */}
+            <div className="mt-0.5">
+              {customTextPickingId === entry.id ? (
+                <span className="text-[9px] text-violet-600 animate-pulse">
+                  请在网页中点击目标元素…
+                </span>
+              ) : entry.selector ? (
+                <span
+                  className="text-[9px] text-indigo-500/80 truncate block"
+                  title={`${entry.side === "left" ? "左" : "右"}侧网页：${entry.label || entry.selector}`}
+                >
+                  {entry.side === "left" ? "左" : "右"}侧元素：{entry.label || entry.selector}
+                </span>
+              ) : null}
+            </div>
+            {/* 底部一排操作按钮：拾取 / 删除 */}
+            <div className="mt-1.5 flex items-center gap-1">
+              <button
+                onClick={() => pickForCustomText(entry.id)}
+                disabled={!!customTextPickingId && customTextPickingId !== entry.id}
+                className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors ${
+                  customTextPickingId === entry.id
+                    ? "bg-violet-500 text-white"
+                    : entry.selector
+                    ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                    : "bg-slate-200 text-slate-600 hover:bg-slate-300"
+                } disabled:opacity-40`}
+                title={entry.selector ? "重新选择关联元素" : "点击后在网页中拾取目标元素"}
+              >
+                <MousePointerClick className="h-2.5 w-2.5" />
+                {entry.selector ? "重选" : "拾取"}
+              </button>
+              <button
+                onClick={() => removeCustomTextEntry(entry.id)}
+                className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium text-slate-400 transition-colors hover:bg-rose-100 hover:text-rose-600"
+                title="删除此文本框"
+              >
+                <Trash2 className="h-2.5 w-2.5" />
+                删除
+              </button>
+            </div>
+          </div>
+        ))}
+        <div className="mt-auto flex shrink-0 items-center gap-1.5 pt-1">
+          <button
+            onClick={addCustomTextEntry}
+            className="inline-flex items-center gap-0.5 rounded-md bg-violet-600 px-2 py-0.5 text-[10px] font-medium text-white transition-all hover:bg-violet-700"
+          >
+            <Plus className="h-2.5 w-2.5" />
+            添加
+          </button>
+          {customTextEntries.some((e) => e.text && e.selector && !e.saved) && (
+            <button
+              onClick={saveCustomTextSteps}
+              className="inline-flex items-center gap-0.5 rounded-md bg-brand-600 px-2 py-0.5 text-[10px] font-medium text-white transition-all hover:bg-brand-700"
+            >
+              <Save className="h-2.5 w-2.5" />
+              保存为{addingStepMode === "review" ? "审查" : "录入"}步骤
+            </button>
+          )}
+          <span className="ml-auto text-[9px] text-slate-400">
+            {customTextEntries.filter((e) => e.text && e.selector && !e.saved).length}/{customTextEntries.length} 已就绪
+          </span>
+        </div>
+      </div>
+    );
+  }, [customTextMode, customTextEntries, customTextPickingId, addingStepMode, renameCustomTextEntry, updateCustomTextEntry, pickForCustomText, removeCustomTextEntry, addCustomTextEntry, saveCustomTextSteps]);
 
   // 重置当前映射选择轮次：根据当前步骤模式回到初始拾取侧
   // 审查模式（先右后左）：回到 right；录入模式（先左后右）：回到 left
@@ -2440,6 +3009,9 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
   const chooseDocExtractWeb = useCallback(() => {
     rlog("[docExtract] 选择网页提取来源（多步点击 + 下载捕获）");
     setDocExtractSource("web");
+    setDocWebStatus({ phase: "idle" });
+    setDocExtractPanel(null);
+    setSameNameImages(null);
     // 开启双侧下载捕获：用户点击多个元素后，任一侧触发下载都会被捕获
     window.electronAPI?.setDownloadCapture("left", true).catch(() => {});
     window.electronAPI?.setDownloadCapture("right", true).catch(() => {});
@@ -2604,12 +3176,104 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     setDocLocalDirFiles([]);
     setDocLocalSamplePath(null);
     setDocLocalPattern(null);
+    setDocWebStatus({ phase: "idle" });
+    setDocExtractPanel(null);
+    setDocExtractSplitView(false);
+    setDocSourcePreview(null);
+    setSameNameImages(null);
+    pendingWebFileRef.current = null;
     window.electronAPI?.viewStopPicking("left").catch(() => {});
     window.electronAPI?.viewStopPicking("right").catch(() => {});
     // 关闭下载捕获
     window.electronAPI?.setDownloadCapture("left", false).catch(() => {});
     window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
   }, []);
+
+  // ============ 绑定上传：把文件槽位的文件填入网页 file input ============
+  /** 从文件提取预览面板点「绑定上传」：记录来源槽位 → 关闭面板 → 激活双侧拾取 */
+  const startBindUpload = useCallback(() => {
+    // 优先绑定最近创建的文件提取步骤 mark
+    const sourceMark = [...pickedMarksRef.current].reverse().find((m) => m.docExtract);
+    setUploadBindSourceMarkId(sourceMark?.id || null);
+    setUploadBindMode(true);
+    setDocExtractPanel(null);
+    setSameNameImages(null);
+    rlog(`[uploadBind] 开始绑定上传, sourceMarkId=${sourceMark?.id || "（最近一次提取）"}`);
+    setTimeout(() => {
+      if (uploadBindModeRef.current) {
+        window.electronAPI?.viewStartPicking("left");
+        window.electronAPI?.viewStartPicking("right");
+      }
+    }, 200);
+    setSuccessToast("绑定上传：请点击网页上的文件上传框（或上传按钮），ESC 取消");
+  }, [setSuccessToast]);
+
+  /** 取消绑定上传模式 */
+  const cancelBindUpload = useCallback(() => {
+    setUploadBindMode(false);
+    setUploadBindSourceMarkId(null);
+    setUploadBindDraft(null);
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+  }, []);
+
+  /** 绑定上传模式下拾取到元素：识别 file input → 弹确认对话框 */
+  const handleUploadBindPick = useCallback((side: "left" | "right", info: PickedElementInfo) => {
+    const isFileInput = info.tag === "input" && (info.type || "").toLowerCase() === "file";
+    const fileSel = isFileInput ? info.selector : (info.fileInputSelector || "");
+    const accept = isFileInput ? (info.accept || "") : (info.fileInputAccept || "");
+    rlog(`[uploadBind] picked side=${side}, isFileInput=${isFileInput}, fileSel=${fileSel}`);
+    if (!fileSel) {
+      setError("未识别到文件上传框（input[type=file]），请点击上传按钮或上传区域");
+      // 保持模式继续拾取
+      setTimeout(() => {
+        if (uploadBindModeRef.current) {
+          window.electronAPI?.viewStartPicking(side);
+        }
+      }, 200);
+      return;
+    }
+    // 停止拾取，弹确认对话框
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+    const sourceMark = uploadBindSourceMarkIdRef.current
+      ? pickedMarksRef.current.find((m) => m.id === uploadBindSourceMarkIdRef.current)
+      : null;
+    setUploadBindDraft({
+      side,
+      selector: fileSel,
+      clickedSelector: info.selector,
+      label: info.label || info.tag || "上传框",
+      accept,
+      sourceMarkId: uploadBindSourceMarkIdRef.current,
+      sourceLabel: sourceMark?.label || "最近一次提取的文件",
+    });
+  }, [setError]);
+
+  /** 确认绑定上传：生成 docUpload 步骤 mark */
+  const confirmUploadBind = useCallback((opts: { compressKb: number; format: string }) => {
+    const draft = uploadBindDraft;
+    if (!draft) return;
+    const workflow: "entry" | "review" = draft.side === "left" ? "entry" : "review";
+    addPickedMark({
+      side: draft.side,
+      source: "web",
+      selector: draft.selector,
+      label: `文件上传 · ${draft.label}${opts.compressKb > 0 ? `（压到 ${opts.compressKb}KB）` : ""}`,
+      workflow,
+      action: "click",
+      recordId: selected?.record_id,
+      docUpload: true,
+      uploadSourceMarkId: draft.sourceMarkId || undefined,
+      uploadCompressKb: opts.compressKb > 0 ? opts.compressKb : undefined,
+      uploadFormat: opts.format !== "original" ? opts.format : undefined,
+      uploadAccept: draft.accept || undefined,
+    });
+    setSuccessToast(`已添加文件上传步骤：${draft.label}${opts.compressKb > 0 ? `，上传前压缩到 ${opts.compressKb}KB` : ""}`);
+    setUploadBindMode(false);
+    setUploadBindSourceMarkId(null);
+    setUploadBindDraft(null);
+  }, [uploadBindDraft, selected, addPickedMark, setSuccessToast]);
 
   /** 网页提取点击处理：记录导航点击步骤，重新激活下载捕获，继续拾取 */
   const handleDocExtractClick = useCallback((side: "left" | "right", info: PickedElementInfo) => {
@@ -2721,7 +3385,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         setActiveDocIndex(999); // 切到最新（会被 safeDocIndex 钳制到最后一项）
         setDocSignal((s) => s + 1);
         setDocExtractPanel({
-          imageUrl: url,
+          imageUrl: toPreviewImageUrl(url, result.processed_image),
           filename: result.filename,
           method: result.method,
           text: result.text,
@@ -3369,6 +4033,11 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       return;
     }
     const side: ViewSide = mark.side === "left" ? "left" : "right";
+    // 弹窗内元素：JS 执行路由到弹窗 BrowserView（弹窗由前序点击步骤打开）
+    const inPopup = !!mark.inPopup;
+    const execJS = (script: string) => inPopup
+      ? window.electronAPI!.popupExecuteJS(side, script)
+      : window.electronAPI!.viewExecuteJS(side, script);
 
     // 计算变量替换后的值
     let resolvedValue = mark.value || "";
@@ -3417,6 +4086,38 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         }
       }
 
+      // 控件映射：点击展开型控件（选项/日历）用专用脚本设定值，而非普通填值
+      if (mark.widget) {
+        const w = mark.widget;
+        if (!resolvedValue) {
+          throw new Error(`控件取值失败: 左侧值为空 (${w.triggerLabel || w.triggerSelector})`);
+        }
+        // 等待触发框出现（SPA 页面可能需要时间渲染）
+        const triggerAppeared = await waitElementAppear(side, w.triggerSelector, 8000, inPopup);
+        if (!triggerAppeared) {
+          throw new Error(`控件触发框未出现: ${w.triggerSelector}`);
+        }
+        if (w.kind === "option") {
+          const wres = (await execJS(buildOptionSelectScript(w, resolvedValue))) as OptionSelectResult | null;
+          rlog(`[executeMark] 选项控件结果:`, wres);
+          if (!wres?.ok) {
+            throw new Error(`选项控件未匹配「${resolvedValue}」: ${wres?.reason || "未知"}${wres?.options?.length ? `（可选项：${wres.options.slice(0, 8).join("/")}）` : ""}`);
+          }
+        } else {
+          const cands = parseDateCandidates(resolvedValue);
+          if (!cands.length) {
+            throw new Error(`日历控件取值失败: 「${resolvedValue}」不是可识别的日期 (${w.triggerLabel || w.triggerSelector})`);
+          }
+          const [yy, mm, dd] = cands[0].split("-").map(Number);
+          const wres = (await execJS(buildCalendarSetScript(w, yy, mm, dd))) as CalendarSetResult | null;
+          rlog(`[executeMark] 日历控件结果:`, wres);
+          if (!wres?.ok) {
+            throw new Error(`日历控件设定失败: ${wres?.reason || "未知"} (${w.triggerSelector})`);
+          }
+        }
+        return;
+      }
+
       rlog(`[executeMark] INPUT side=${side}, target=${mark.inputTarget}, value="${resolvedValue}", variableField=${mark.variableField || "(none)"}, sourceSelector=${mark.sourceSelector || "(none)"}`);
 
       // 2. 先停止拾取模式，避免拾取脚本干扰填值（与 commitInput 一致）
@@ -3430,21 +4131,21 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       await new Promise((r) => setTimeout(r, 150));
 
       // 3. 等待目标输入框出现（SPA 页面可能需要时间渲染）
-      const targetAppeared = await waitElementAppear(side, mark.inputTarget, 8000);
+      const targetAppeared = await waitElementAppear(side, mark.inputTarget, 8000, inPopup);
       if (!targetAppeared) {
         throw new Error(`目标输入框未出现: ${mark.inputTarget}`);
       }
 
       // 4. 执行填值
-      let result = await performInputValue(side, mark.inputTarget, resolvedValue);
+      let result = await performInputValue(side, mark.inputTarget, resolvedValue, inPopup);
       rlog(`[executeMark] performInputValue 结果:`, result);
 
       // 5. 如果失败，兜底重试一次（等待更长时间后重试）
       if (!result?.ok) {
         rlog(`[executeMark] 首次填入失败(${result?.reason})，等待后重试...`);
         await new Promise((r) => setTimeout(r, 1000));
-        await waitElementAppear(side, mark.inputTarget, 5000);
-        result = await performInputValue(side, mark.inputTarget, resolvedValue);
+        await waitElementAppear(side, mark.inputTarget, 5000, inPopup);
+        result = await performInputValue(side, mark.inputTarget, resolvedValue, inPopup);
         rlog(`[executeMark] 重试结果:`, result);
       }
       if (!result?.ok) {
@@ -3455,6 +4156,79 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
 
     // click 动作：真实点击
     if (mark.action === "click") {
+      // === 文件上传步骤：从运行时槽位取文件 → 可选压缩/转格式 → DataTransfer 填入 file input ===
+      if (mark.docUpload) {
+        console.log(`[executeMark] DOC-UPLOAD side=${side}, selector=${mark.selector}, sourceMarkId=${mark.uploadSourceMarkId || "last"}`);
+        // 1. 取文件：优先绑定的槽位，兜底最近一次提取
+        const slot = (mark.uploadSourceMarkId && docRuntimeFileSlotsRef.current[mark.uploadSourceMarkId]) || null;
+        const lastFile = lastDocRuntimeFileRef.current;
+        let dataUrl = slot?.dataUrl || "";
+        let filename = slot?.filename || lastFile?.filename || "upload.bin";
+        // URL 直提模式：文件在远端，先调后端下载（顺带可按需压缩）
+        const remoteUrl = slot?.url || (!dataUrl ? lastFile?.url : "") || "";
+        if (!dataUrl && remoteUrl) {
+          rlog(`[executeMark] 上传文件为远端 URL，后端下载: ${remoteUrl}`);
+          const conv = await api.convertDocument("", filename, mark.uploadFormat || "original", mark.uploadCompressKb || 0, remoteUrl);
+          dataUrl = `data:${conv.mime};base64,${conv.data_b64}`;
+          filename = filename.replace(/\.[^.]+$/, "") + "." + conv.ext;
+        } else if (!dataUrl && lastFile?.dataUrl) {
+          dataUrl = lastFile.dataUrl;
+          filename = filename || lastFile.filename;
+        }
+        if (!dataUrl) {
+          throw new Error("上传失败: 无可用文件（文件提取步骤未执行或未产出文件）");
+        }
+        // 2. 可选：上传前压缩/转格式（URL 模式已在下载时处理过则跳过）
+        if (mark.uploadCompressKb && mark.uploadCompressKb > 0 && !remoteUrl) {
+          rlog(`[executeMark] 上传前压缩: 目标 ${mark.uploadCompressKb}KB, 格式 ${mark.uploadFormat || "original"}`);
+          const conv = await api.convertDocument(dataUrl, filename, mark.uploadFormat || "original", mark.uploadCompressKb);
+          dataUrl = `data:${conv.mime};base64,${conv.data_b64}`;
+          filename = filename.replace(/\.[^.]+$/, "") + "." + conv.ext;
+          rlog(`[executeMark] 压缩完成: ${conv.size} bytes (${conv.reached ? "已达标" : "压到极限"})`);
+        }
+        // 3. 等待上传框出现
+        await waitElementAppear(side, mark.selector, 6000, inPopup).catch(() => {});
+        // 4. DataTransfer 填入 file input（分块传输 base64，避免超大文件单次注入失败）
+        const commaIdx = dataUrl.indexOf(",");
+        const mime = (dataUrl.slice(5, commaIdx).split(";")[0]) || "application/octet-stream";
+        const b64 = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl;
+        await execJS("window.__cinsideUploadB64='';'init'");
+        const CHUNK = 2 * 1024 * 1024;
+        for (let i = 0; i < b64.length; i += CHUNK) {
+          const part = b64.slice(i, i + CHUNK);
+          await execJS(`window.__cinsideUploadB64+=${JSON.stringify(part)};'ok'`);
+        }
+        const fillScript = `
+          ${DEEP_QUERY_HELPER}
+          (function() {
+            var el = null;
+            try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(mark.selector))}); } catch(e) { el = null; }
+            if (!el) return { ok: false, reason: 'not_found' };
+            try {
+              var bstr = atob(window.__cinsideUploadB64 || '');
+              var n = bstr.length;
+              var u8 = new Uint8Array(n);
+              for (var i = 0; i < n; i++) u8[i] = bstr.charCodeAt(i);
+              var file = new File([u8], ${JSON.stringify(filename)}, { type: ${JSON.stringify(mime)} });
+              var dt = new DataTransfer();
+              dt.items.add(file);
+              el.files = dt.files;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              window.__cinsideUploadB64 = '';
+              return { ok: true, name: file.name, size: file.size };
+            } catch (e) {
+              return { ok: false, reason: String(e) };
+            }
+          })();
+        `;
+        const fillRes = await execJS(fillScript) as { ok: boolean; name?: string; size?: number; reason?: string } | null;
+        if (!fillRes?.ok) {
+          throw new Error(`上传填入失败: ${fillRes?.reason || "未知原因"} (${mark.selector})`);
+        }
+        rlog(`[executeMark] 上传填入成功: ${fillRes.name} (${fillRes.size} bytes)`);
+        return;
+      }
       // 文件提取步骤
       if (mark.docExtract) {
         // === local 模式（目录模式）：按路径模板 + 字段值拼路径，自动尝试多扩展名 → 读取文件 → OCR ===
@@ -3487,6 +4261,9 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
             rlog(`[executeMark] 本地文件提取失败: 路径模板「${basePath}」所有扩展名均未找到文件`);
             return;
           }
+          // 3.5 存入运行时文件槽位（供后续上传步骤取文件）
+          docRuntimeFileSlotsRef.current[mark.id] = { dataUrl: readResult.dataUrl, filename: readResult.filename || "local-doc" };
+          lastDocRuntimeFileRef.current = { dataUrl: readResult.dataUrl, filename: readResult.filename || "local-doc", markId: mark.id };
           // 4. 调 OCR 提取（后端会自动做图像预处理：EXIF 旋转 + 裁白边）
           const file = dataUrlToFile(readResult.dataUrl, readResult.filename || "local-doc");
           const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
@@ -3496,7 +4273,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
           try {
             const result = await api.extractDocumentFile(file, targetFields);
             setDocExtractPanel({
-              imageUrl: readResult.dataUrl,
+              imageUrl: toPreviewImageUrl(readResult.dataUrl, result.processed_image),
               filename: result.filename,
               method: result.method,
               text: result.text,
@@ -3515,15 +4292,18 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
           // 1. 开启下载捕获
           await window.electronAPI.setDownloadCapture(side, true);
           // 2. 真实点击触发下载
-          let clickResult = await performRealClick(side, mark.selector);
+          let clickResult = await performRealClick(side, mark.selector, inPopup);
           if (clickResult && typeof clickResult === "object" && "ok" in clickResult && clickResult.ok === false) {
-            await waitElementAppear(side, mark.selector, 6000);
-            clickResult = await performRealClick(side, mark.selector);
+            await waitElementAppear(side, mark.selector, 6000, inPopup);
+            clickResult = await performRealClick(side, mark.selector, inPopup);
           }
           // 3. 等待下载完成
           try {
             const downloadData = await waitForDownload(side, 30000);
             rlog(`[executeMark] 下载完成: ${downloadData.filename} (${downloadData.size} bytes)`);
+            // 3.5 存入运行时文件槽位（供后续上传步骤取文件）
+            docRuntimeFileSlotsRef.current[mark.id] = { dataUrl: downloadData.dataUrl, filename: downloadData.filename };
+            lastDocRuntimeFileRef.current = { dataUrl: downloadData.dataUrl, filename: downloadData.filename, markId: mark.id };
             // 4. OCR 提取
             const file = dataUrlToFile(downloadData.dataUrl, downloadData.filename);
             const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
@@ -3532,7 +4312,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
               : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender"];
             const result = await api.extractDocumentFile(file, targetFields);
             setDocExtractPanel({
-              imageUrl: downloadData.dataUrl,
+              imageUrl: toPreviewImageUrl(downloadData.dataUrl, result.processed_image),
               filename: result.filename,
               method: result.method,
               text: result.text,
@@ -3563,11 +4343,21 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
             return { ok: !!url, url: url, reason: url ? '' : 'no_url' };
           })();
         `;
-        const readRes = await window.electronAPI.viewExecuteJS(side, readScript) as { ok: boolean; url?: string; reason?: string } | null;
+        const readRes = await execJS(readScript) as { ok: boolean; url?: string; reason?: string } | null;
         const docUrl = readRes?.url || mark.docUrl || "";
         if (!docUrl) {
           throw new Error(`文件提取失败: 元素未找到或无文件地址 (${mark.selector})`);
         }
+        // 存入运行时文件槽位（URL 模式：上传时由后端下载）；文件名从 URL 推断
+        const urlName = (() => {
+          try {
+            const p = decodeURIComponent(new URL(docUrl).pathname);
+            const n = p.split("/").filter(Boolean).pop() || "";
+            return n.includes(".") ? n : "document.pdf";
+          } catch { return "document.pdf"; }
+        })();
+        docRuntimeFileSlotsRef.current[mark.id] = { url: docUrl, filename: urlName };
+        lastDocRuntimeFileRef.current = { url: docUrl, filename: urlName, markId: mark.id };
         // 调后端提取并弹审查面板（异步不阻塞批量循环，面板自动覆盖上一条）
         const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
         const targetFields = mappedFields.length > 0
@@ -3576,7 +4366,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         api.extractDocumentUrl(docUrl, targetFields)
           .then((result) => {
             setDocExtractPanel({
-              imageUrl: docUrl,
+              imageUrl: toPreviewImageUrl(docUrl, result.processed_image),
               filename: result.filename,
               method: result.method,
               text: result.text,
@@ -3591,17 +4381,17 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         return;
       }
       console.log(`[executeMark] CLICK side=${side}, selector=${mark.selector}, label=${mark.label}`);
-      let result = await performRealClick(side, mark.selector);
+      let result = await performRealClick(side, mark.selector, inPopup);
       // 页面慢渲染/弹窗延迟加载时元素可能还没出现，轮询等待最多 6s
       if (result && typeof result === "object" && "ok" in result && result.ok === false) {
         rlog(`[executeMark] 元素未出现，等待加载: ${mark.selector}`);
-        await waitElementAppear(side, mark.selector, 6000);
-        result = await performRealClick(side, mark.selector);
+        await waitElementAppear(side, mark.selector, 6000, inPopup);
+        result = await performRealClick(side, mark.selector, inPopup);
       }
       // 再兜底重试一次
       if (result && typeof result === "object" && "ok" in result && result.ok === false) {
         await new Promise((r) => setTimeout(r, 800));
-        result = await performRealClick(side, mark.selector);
+        result = await performRealClick(side, mark.selector, inPopup);
       }
       if (result && typeof result === "object" && "ok" in result && result.ok === false) {
         throw new Error(`点击失败: 元素未找到 (${mark.selector})`);
@@ -3645,11 +4435,14 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       return { comparisons, overall: "match" };
     }
 
+    // 进入逐字段审查阶段
+    setExecPhase("verify");
+    setReviewFieldResults({});
+
     // 等待页面稳定，让数据渲染出来
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 1200));
 
     let allMatch = true;
-    const highlightBoxes: { selector: string; status: string; label: string }[] = [];
 
     // 通用读取元素值的JS脚本工厂（清洗选择器中的 cinside-* 临时类）
     const makeReadScript = (selector: string) => `
@@ -3671,15 +4464,44 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       })();
     `;
 
-    for (const mp of mappings) {
+    // 先清空两侧高亮
+    window.electronAPI?.viewClearHighlight("right").catch(() => {});
+    window.electronAPI?.viewClearHighlight("left").catch(() => {});
+
+    for (let fi = 0; fi < mappings.length; fi++) {
+      if (batchStopRef.current) break;
+      const mp = mappings[fi];
+      // 更新当前审查字段索引（触发UI光标移动）
+      setVerifyFieldIdx(fi);
+
+      // 1. 先pending高亮当前字段（右侧目标元素）
+      const pendingLabel = `${mp.right_label || mp.left_field}：比对中…`;
+      window.electronAPI?.viewHighlightBoxes("right", [{
+        selector: mp.right_selector,
+        status: "pending",
+        label: pendingLabel,
+      }]).catch(() => {});
+      // 如果左侧是database源，也pending高亮左侧
+      if (mp.left_source === "database") {
+        window.electronAPI?.viewHighlightBoxes("left", [{
+          selector: mp.left_field,
+          status: "pending",
+          label: `${mp.right_label || mp.left_field}：比对中…`,
+        }]).catch(() => {});
+      }
+
+      // 给用户视觉感知时间，再读取值（避免闪烁太快）
+      await new Promise((r) => setTimeout(r, 350));
+
       let leftValue = "";
       let leftFound = true;
 
       if (mp.left_source === "passport") {
         const docFields = getRecordDocFields(record.record_id);
         leftValue = record.passport_fields?.[mp.left_field] || docFields[mp.left_field] || "";
+      } else if (mp.left_source === "manual") {
+        leftValue = mp.left_field;
       } else if (mp.left_source === "database") {
-        // database 来源：left_field 是左侧网页的CSS选择器，直接从左网页读取值
         try {
           const leftResult = await window.electronAPI.viewExecuteJS("left", makeReadScript(mp.left_field)) as { found: boolean; value: string } | null;
           if (leftResult && typeof leftResult === "object" && leftResult.found) {
@@ -3691,17 +4513,25 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
           leftFound = false;
         }
       } else {
-        // excel 来源：left_field 是字段名，从 record.fields 读取
         leftValue = record.fields[mp.left_field] || "";
       }
 
       let websiteValue = "";
       let rightFound = false;
       try {
-        const result = await window.electronAPI.viewExecuteJS("right", makeReadScript(mp.right_selector)) as { found: boolean; value: string } | null;
-        if (result && typeof result === "object" && result.found) {
-          rightFound = true;
-          websiteValue = result.value || "";
+        if (mp.widget) {
+          // 控件映射：读触发框显示值（选项控件额外找面板选中态）
+          const result = await window.electronAPI.viewExecuteJS("right", buildWidgetReadScript(mp.widget)) as WidgetReadResult | null;
+          if (result && typeof result === "object" && result.found) {
+            rightFound = true;
+            websiteValue = result.value || "";
+          }
+        } else {
+          const result = await window.electronAPI.viewExecuteJS("right", makeReadScript(mp.right_selector)) as { found: boolean; value: string } | null;
+          if (result && typeof result === "object" && result.found) {
+            rightFound = true;
+            websiteValue = result.value || "";
+          }
         }
       } catch {
         websiteValue = "";
@@ -3710,56 +4540,61 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       const found = leftFound && rightFound;
       const lv = (leftValue || "").trim();
       const wv = (websiteValue || "").trim();
+      // 选项控件：左侧值命中某选项别名时，按该选项的显示文字核对（选项文字≠左侧值的情形）
+      let compareLv = lv;
+      if (mp.widget?.kind === "option" && mp.widget.options) {
+        const hit = mp.widget.options.find((o) => o.alias && normalizeText(o.alias) === normalizeText(lv));
+        if (hit) compareLv = hit.text;
+      }
       let match: FieldMatch = "match";
       if (!found) {
         match = "missing";
         allMatch = false;
       } else if (mp.verify_method === "smart") {
-        // 格式等价比对：语义相同但格式不同（电话/日期/大小写/空格）不算错误
         const fieldHint = mp.left_source === "database" ? (mp.right_label || "") : mp.left_field;
-        match = valuesEquivalent(fieldHint, lv, wv) ? "match" : "mismatch";
+        match = valuesEquivalent(fieldHint, compareLv, wv) ? "match" : "mismatch";
         if (match === "mismatch") allMatch = false;
       } else {
-        // exact 模式同样走格式等价（格式差异本身不算错误）
         const fieldHint = mp.left_source === "database" ? (mp.right_label || "") : mp.left_field;
-        match = valuesEquivalent(fieldHint, lv, wv) ? "match" : "mismatch";
+        match = valuesEquivalent(fieldHint, compareLv, wv) ? "match" : "mismatch";
         if (match === "mismatch") allMatch = false;
       }
 
       comparisons.push({
         field: mp.left_source === "database" ? (mp.right_label || mp.left_field) : mp.left_field,
-        excel_value: mp.left_source === "passport" ? "" : (mp.left_source === "database" ? lv : lv),
+        excel_value: mp.left_source === "passport" ? "" : lv,
         passport_value: mp.left_source === "passport" ? lv : "",
         website_value: wv,
         match,
         website_label: mp.right_label,
         selector_hint: mp.right_selector,
-        evidence_source: mp.left_source === "passport" ? "passport" : mp.left_source === "database" ? "web" : "excel",
+        evidence_source: mp.left_source === "passport" ? "passport" : mp.left_source === "database" ? "web" : mp.left_source === "manual" ? "manual" : "excel",
       });
 
-      if (rightFound) {
-        const status = match === "match" ? "match" : match === "mismatch" ? "mismatch" : "missing";
-        highlightBoxes.push({
-          selector: mp.right_selector,
-          status,
-          label: `${mp.right_label || mp.left_field}: ${wv || "—"}`,
-        });
-      }
-      // 也在左侧高亮对应的源元素
-      if (leftFound && mp.left_source === "database") {
+      // 2. 用结果颜色高亮当前字段（match=绿, mismatch=红, missing=黄灰）
+      const resultStatus = match === "match" ? "match" : match === "mismatch" ? "mismatch" : "missing";
+      const resultLabel = `${mp.right_label || mp.left_field}: ${wv || "—"}${match === "match" ? " ✓" : match === "mismatch" ? " ✗" : " ?"}`;
+      window.electronAPI?.viewHighlightBoxes("right", [{
+        selector: mp.right_selector,
+        status: resultStatus,
+        label: resultLabel,
+      }]).catch(() => {});
+      if (mp.left_source === "database") {
         window.electronAPI?.viewHighlightBoxes("left", [{
           selector: mp.left_field,
-          status: match === "match" ? "match" : "mismatch",
-          label: `${mp.right_label || ""}: ${lv || "—"}`,
+          status: resultStatus,
+          label: `${mp.right_label || ""}: ${lv || "—"}${match === "match" ? " ✓" : " ✗"}`,
         }]).catch(() => {});
       }
+      // 记录结果到state（供UI显示颜色）
+      setReviewFieldResults((prev) => ({ ...prev, [fi]: match }));
+
+      // 字段间短暂停留
+      await new Promise((r) => setTimeout(r, 400));
     }
 
-    // 高亮右侧页面
-    if (highlightBoxes.length > 0) {
-      window.electronAPI.viewClearHighlight("right").catch(() => {});
-      window.electronAPI.viewHighlightBoxes("right", highlightBoxes as any).catch(() => {});
-    }
+    // 审查阶段结束
+    setExecPhase("done");
 
     // 记录比对步骤到操作日志
     const matchCount = comparisons.filter((c) => c.match === "match").length;
@@ -3788,17 +4623,32 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     record: ApplicantRecord,
     recordIndex: number,
     onStepStart?: (recordIndex: number, mark: PickedMark) => void,
-    options?: { wrapWithVerify?: boolean; skipSubmit?: boolean; preOnly?: boolean; postThenPre?: boolean }
+    options?: { wrapWithVerify?: boolean; skipSubmit?: boolean; preOnly?: boolean; postThenPre?: boolean; entryReview?: boolean }
   ): Promise<{ success: boolean; failedOrder?: number; error?: string; comparisons?: FieldComparison[]; verifyOverall?: "match" | "mismatch" }> => {
     // 根据模板模式选择执行哪一段 marks
     // - entry 模式：只执行录入流（填表+提交）
     // - review 模式：只执行审查流（搜索+对比）
     // - loop 模式：分三段执行：pre(搜索输入+前置点击) → body(审查/录入步骤) → post(收尾点击)
     // - postThenPre 模式（查看卡片）：先执行post(收尾返回)，再执行pre(搜索+前置点击)
+    // - entryReview 模式（录入模式查看卡片）：只回放右侧网页的搜索定位步骤（不执行左侧录入/提交）
     let allMarks: PickedMark[];
-    let postThenPreBoundary = 0; // postThenPre模式下，post段结束的索引，之后需要等待页面加载
+    let postThenPreBoundary = 0; // postThenPre/entryReview模式下，post段结束的索引，之后需要等待页面加载
     if (tpl.mode === "entry") {
-      allMarks = options?.preOnly ? [] : [...tpl.entryMarks];
+      if (options?.entryReview) {
+        // 录入模式回访查看：右侧网页的界面和步骤与审查模式完全不同，
+        // 只回放右侧网页步骤（搜索输入+确认人物）和前置/收尾点击，跳过左侧录入表单和提交
+        const pool = [...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks]
+          .filter((m) => m.side === "right" || m.clickPhase === "pre" || m.clickPhase === "post")
+          .filter((m) => m.action === "input" || m.action === "click");
+        const postClicks = pool.filter((m) => m.action === "click" && m.clickPhase === "post");
+        const restMarks = pool
+          .filter((m) => !(m.action === "click" && m.clickPhase === "post"))
+          .sort((a, b) => a.order - b.order);
+        allMarks = [...postClicks, ...restMarks];
+        postThenPreBoundary = postClicks.length; // post结束后等待页面加载
+      } else {
+        allMarks = options?.preOnly ? [] : [...tpl.entryMarks];
+      }
     } else if (tpl.mode === "review") {
       allMarks = [...tpl.dataSourceMarks, ...tpl.reviewMarks];
       if (options?.preOnly || options?.postThenPre) {
@@ -3835,7 +4685,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         allMarks = allMarks.sort((a, b) => a.order - b.order);
       }
     }
-    if (!options?.preOnly && !options?.postThenPre) {
+    if (!options?.preOnly && !options?.postThenPre && !options?.entryReview) {
       allMarks = allMarks.sort((a, b) => a.order - b.order);
     }
     // 单卡导航模式（功能3）：跳过提交类点击，避免重复提交表单
@@ -3853,6 +4703,15 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       || fieldKeys.map((k) => record.fields[k]).find((v) => v && String(v).trim())
       || record.record_id;
     rlog(`[batch] 开始执行第 ${recordIndex + 1} 行: ${recordKey}, marks=${allMarks.length}`);
+
+    // 每张卡片执行前清空文件运行时槽位（避免跨卡片串文件）
+    docRuntimeFileSlotsRef.current = {};
+    lastDocRuntimeFileRef.current = null;
+
+    // 进入marks执行阶段（触发UI光标动画）
+    setExecPhase("marks");
+    setVerifyFieldIdx(-1);
+    setReviewFieldResults({});
 
     for (let mi = 0; mi < allMarks.length; mi++) {
       if (batchStopRef.current) {
@@ -3955,6 +4814,10 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     setLoopReports([]);
     setVerifyStatus("idle");
     setResult(null);
+    // 重置执行阶段状态
+    setExecPhase("idle");
+    setVerifyFieldIdx(-1);
+    setReviewFieldResults({});
 
     // 执行前退出选择/编辑模式（手动退出，不调用exitSelectMode以避免清空workflowTemplate）
     if (selectMode) {
@@ -4087,6 +4950,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
             timestamp: new Date().toISOString(),
             isRecordStart: true,
             recordName: record.fields.name || record.record_id,
+            recordId: record.record_id,
             recordIndex: i + 1,
             recordTotal: targets.length,
           },
@@ -4243,6 +5107,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       setBatchRunning(false);
       setBatchCursor(-1);
       setBatchMarkCursor(null);
+      // 保持execPhase="done"让用户看到最终结果，不重置verifyFieldIdx/reviewFieldResults（方便查看最终状态）
 
       const total = successCount + failCount;
       const overall: Overall = failCount === 0 ? "pass" : "fail";
@@ -4394,6 +5259,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
               timestamp: new Date().toISOString(),
               isRecordStart: true,
               recordName: record.fields.name || record.record_id,
+              recordId: record.record_id,
               recordIndex: ri + 1,
               recordTotal: targets.length,
             },
@@ -4793,10 +5659,21 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       ]);
 
       try {
-        // postThenPre：先执行收尾点击(返回搜索页)，再执行搜索输入+前置点击(定位到卡片)
-        const result = await executeTemplateForRecord(tpl, record, 0, onStepStart, {
-          postThenPre: true,
-        });
+        // 录入模式：右侧网页的查看界面/步骤与审查模式完全不同，走 entryReview 回放已录制的右侧查看步骤
+        // 审查/LOOP模式：postThenPre 先执行收尾点击(返回搜索页)，再执行搜索输入+前置点击(定位到卡片)
+        const isEntryTpl = tpl.mode === "entry";
+        if (isEntryTpl) {
+          const revisitCount = [...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks]
+            .filter((m) => (m.side === "right" || m.clickPhase === "pre" || m.clickPhase === "post") && (m.action === "input" || m.action === "click"))
+            .length;
+          if (revisitCount === 0) {
+            setError("录入模式下尚未录制右侧网页的查看步骤：请在「录入流 · 步骤配置」中通过搜索输入/前置点击/收尾点击，录制右侧网页搜索→确认人物的查看流程");
+            return;
+          }
+        }
+        const result = await executeTemplateForRecord(tpl, record, 0, onStepStart,
+          isEntryTpl ? { entryReview: true } : { postThenPre: true }
+        );
         if (result.success) {
           setSteps((prev) => [
             ...prev,
@@ -5199,6 +6076,71 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     return () => off?.();
   }, [commitInput]);
 
+  // ============ 右键菜单：绑定输入时右键点输入框 → 选择 Excel 列 ============
+  // picker 脚本右键点输入框 → 发 context-menu-request → 前端回传列列表
+  // 用户点选列 → 发 context-menu-select → 前端更新 input mark 的 variableField
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    const off = window.electronAPI.onViewMessage((msg) => {
+      const kind = msg.payload?.kind;
+      if (kind === "context-menu-request") {
+        // 右键菜单请求：回传当前卡片的所有 Excel 列名
+        const p = msg.payload as { kind: string; selector: string; label: string };
+        const side = msg.side;
+        // 获取当前选中卡片的所有字段名
+        const currentSelected = selected;
+        if (!currentSelected) {
+          window.electronAPI?.viewCtxMenuResponse(side, [], "");
+          return;
+        }
+        const columns = Object.keys(currentSelected.fields).filter((k) => {
+          const v = currentSelected.fields[k];
+          return v && String(v).trim();
+        });
+        // 当前绑定的字段（查找该 selector 对应的 input mark）
+        const currentMark = pickedMarksRef.current.find(
+          (m) => m.action === "input" && m.inputTarget === p.selector && m.side === side
+        );
+        const currentField = currentMark?.variableField || currentMark?.excelField || "";
+        window.electronAPI?.viewCtxMenuResponse(side, columns, currentField);
+      } else if (kind === "context-menu-select") {
+        // 用户选择了某列：更新对应 input mark 的 variableField
+        const p = msg.payload as { kind: string; selector: string; field: string };
+        const side = msg.side;
+        // 更新 pickedMarks 中该 selector 的 input mark
+        setPickedMarks((prev) =>
+          prev.map((m) => {
+            if (m.action === "input" && m.inputTarget === p.selector && m.side === side) {
+              const newValue = selected?.fields?.[p.field] || m.value || "";
+              return {
+                ...m,
+                variableField: p.field,
+                excelField: p.field,
+                value: newValue,
+                label: `输入「${newValue.slice(0, 18)}${newValue.length > 18 ? "…" : ""}」← Excel「${p.field}」`,
+              };
+            }
+            return m;
+          })
+        );
+        // 同时更新 inputTarget 状态（如果该 mark 是当前目标）
+        if (inputTargetRef.current?.selector === p.selector && inputTargetRef.current?.side === side) {
+          setPendingInputField(p.field);
+          pendingInputFieldRef.current = p.field;
+          const newValue = selected?.fields?.[p.field] || "";
+          setPendingInputValue(newValue);
+          pendingInputValueRef.current = newValue;
+        }
+        // 如果该输入框已有内容，重新填入新值
+        if (selected?.fields?.[p.field]) {
+          performInputValue(side, p.selector, selected.fields[p.field]).catch(() => {});
+        }
+        setSuccessToast(`已切换输入源为「${p.field}」`);
+      }
+    });
+    return () => off?.();
+  }, [selected, performInputValue, setSuccessToast]);
+
   // === 元素屏蔽功能 ===
   // 应用屏蔽规则到指定 side（从 localStorage 读取该 host 的规则 + 自动侧边栏折叠规则，发送到主进程）
   const applyBlockRulesForUrl = useCallback((side: ViewSide, url: string) => {
@@ -5342,6 +6284,61 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     const currentBindInputSide = bindInputSideRef.current;
     const currentExcelCol = selectedExcelColumnRef.current;
     rlog("[onRightPicked]", { tag: info.tag, selector: info.selector, bindSide: currentBindInputSide, excelCol: currentExcelCol, pendingAction: currentPendingAction });
+    // 记录拾取来源（弹窗/主 view），addPickedMark 据此打 inPopup 标记
+    pickFromPopupRef.current.right = !!info.fromPopup;
+    // 绑定上传模式：优先于一切分支（点 file input/上传按钮 → 弹确认对话框）
+    if (uploadBindModeRef.current) {
+      handleUploadBindPick("right", info);
+      return;
+    }
+    // 自定义文本拾取模式：优先于其他分支（仅次于文件提取）
+    if (customTextModeRef.current && customTextPickingIdRef.current) {
+      const id = customTextPickingIdRef.current;
+      setCustomTextEntries((prev) => prev.map((e) =>
+        e.id === id
+          ? { ...e, selector: info.selector, label: info.label || info.tag || info.selector, side: "right", tag: info.tag, type: info.type }
+          : e
+      ));
+      setCustomTextPickingId(null);
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+      return;
+    }
+    // 控件提取：拾取触发框 → 自动快照（点击展开 → 识别面板 → 关闭）
+    if (widgetPickKindRef.current) {
+      const kind = widgetPickKindRef.current;
+      setWidgetPickKind(null);
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+      void runWidgetSnapshot(info.selector, info.label || info.tag || info.selector, kind);
+      return;
+    }
+    // 控件日历角色重选：把点到的元素记录为对应角色的选择器
+    if (widgetRolePickingKeyRef.current) {
+      const fullKey = widgetRolePickingKeyRef.current;
+      setWidgetRolePickingKey(null);
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+      const sep = fullKey.lastIndexOf(":");
+      const cardKey = fullKey.slice(0, sep);
+      const role = fullKey.slice(sep + 1);
+      const field = WIDGET_ROLE_TO_FIELD[role];
+      if (field) {
+        const sel = role === "dayCell" ? generalizeDayCellSelector(info.selector) : info.selector;
+        const applyRole = (w: WidgetDef): WidgetDef => ({
+          ...w,
+          calendar: { ...(w.calendar || {}), [field]: sel },
+        });
+        if (cardKey === "draft") {
+          setWidgetDraft((prev) => (prev ? applyRole(prev) : prev));
+        } else {
+          const rightSelector = cardKey.replace(/^saved:/, "");
+          setMappings((prev) => prev.map((m) => (m.right_selector === rightSelector && m.widget ? { ...m, widget: applyRole(m.widget) } : m)));
+          setPickedMarks((prev) => prev.map((mk) => (mk.selector === rightSelector && mk.widget ? { ...mk, widget: applyRole(mk.widget) } : mk)));
+        }
+      }
+      return;
+    }
     // 文件提取模式（步骤4）：优先于一切分支
     if (addingDocExtractModeRef.current) {
       if (docExtractSourceRef.current === "web") {
@@ -5461,21 +6458,23 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
 
     if (currentBindInputSide) {
       // 灵活绑定模式：右侧点输入框 = 绑定 Excel 列并真实填入第一行值；点其他元素 = 真实点击
-      if (currentExcelCol && isInputLike) {
-        rlog("[onRightPicked] ✅ 绑定右侧输入框, excelCol=", currentExcelCol, "previewValue=", selected?.fields?.[currentExcelCol]);
-        console.log("[onRightPicked] 绑定输入框:", { excelCol: currentExcelCol, selected, previewValue: selected?.fields?.[currentExcelCol] });
+      // 右侧网页可用「右侧取列」选择器指定同行其他列（如护照号），未设置时跟随 LOOP 列
+      const rightCol = rightBindColumnRef.current || currentExcelCol;
+      if (rightCol && isInputLike) {
+        rlog("[onRightPicked] ✅ 绑定右侧输入框, excelCol=", rightCol, "previewValue=", selected?.fields?.[rightCol]);
+        console.log("[onRightPicked] 绑定输入框:", { excelCol: rightCol, selected, previewValue: selected?.fields?.[rightCol] });
         addPickedMark({
           side: "right",
           source: "web",
           selector: info.selector,
-          label: `输入 · ${info.label || info.selector} ← Excel「${currentExcelCol}」`,
+          label: `输入 · ${info.label || info.selector} ← Excel「${rightCol}」`,
           value: info.value,
           workflow: activePhase || "data-source",
           action: "input",
           inputTarget: info.selector,
           inputTargetLabel: info.label || info.selector,
-          variableField: currentExcelCol,
-          excelField: currentExcelCol,
+          variableField: rightCol,
+          excelField: rightCol,
           recordId: selected?.record_id,
           rect: info.rect,
           tag: info.tag,
@@ -5483,18 +6482,18 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
         });
         // 只填入右侧被绑定的那个输入框（info.selector），而不是无差别塞两侧的第一个输入框。
         // 这样用户点哪个框，就只填那个框，之后用户继续点搜索/确认人物跳转页面。
-        const previewValue = (selected?.fields?.[currentExcelCol] || "").trim();
+        const previewValue = (selected?.fields?.[rightCol] || "").trim();
         if (previewValue) {
           console.log("[onRightPicked] 执行填入:", { side: "right", selector: info.selector, previewValue });
           setTimeout(() => {
             performInputValue("right", info.selector, previewValue).then((result) => {
               console.log("[onRightPicked] 填入结果:", result);
             }).catch((e) => {
-              console.error("[onRightPicked] 填入失败:", e);
+              console.error("[onRightPicked] 填入失败", e);
             });
           }, 350);
         } else {
-          console.warn("[onRightPicked] previewValue 为空，无法填入", { selected, currentExcelCol });
+          console.warn("[onRightPicked] previewValue 为空，无法填入", { selected, rightCol });
         }
         // 绑定完输入框后退出绑定模式，用户可继续点搜索/确认人物进行页面跳转
         setBindInputSide(null);
@@ -5563,19 +6562,21 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     }
 
     // 教学模式：点输入框 → 直接记录为“输入”动作并绑定选中的 Excel 列；其他元素 → 点击动作
-    if (activePhase && isInputLike && currentExcelCol) {
+    // 右侧网页同样优先使用「右侧取列」选择器指定的列（如护照号）
+    const rightTeachCol = rightBindColumnRef.current || currentExcelCol;
+    if (activePhase && isInputLike && rightTeachCol) {
       addPickedMark({
         side: "right",
         source: "web",
         selector: info.selector,
-        label: `输入 · ${info.label || info.selector} ← Excel「${currentExcelCol}」`,
+        label: `输入 · ${info.label || info.selector} ← Excel「${rightTeachCol}」`,
         value: info.value,
         workflow: activePhase,
         action: "input",
         inputTarget: info.selector,
         inputTargetLabel: info.label || info.selector,
-        variableField: currentExcelCol,
-        excelField: currentExcelCol,
+        variableField: rightTeachCol,
+        excelField: rightTeachCol,
         recordId: selected?.record_id,
         rect: info.rect,
         tag: info.tag,
@@ -5621,7 +6622,7 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
       });
     }
     // 自动进入下一步：选择左侧来源（默认提示用户选网页或 Excel）
-  }, [addPickedMark, selected, performRealClick, performInputValue, teachingPhase, recyclePickedMark]);
+  }, [addPickedMark, selected, performRealClick, performInputValue, teachingPhase, recyclePickedMark, handleUploadBindPick]);
 
   const onLeftPicked = useCallback(async (info: PickedElementInfo) => {
     // 用 ref 读取最新状态，避免 React 批量更新/闭包延迟
@@ -5630,6 +6631,44 @@ const [docExtractPanel, setDocExtractPanel] = useState<{
     const currentBindInputSide = bindInputSideRef.current;
     const currentExcelCol = selectedExcelColumnRef.current;
     rlog("[onLeftPicked]", { tag: info.tag, selector: info.selector, bindSide: currentBindInputSide, excelCol: currentExcelCol, pendingAction: currentPendingAction });
+    // 记录拾取来源（弹窗/主 view），addPickedMark 据此打 inPopup 标记
+    pickFromPopupRef.current.left = !!info.fromPopup;
+    // 绑定上传模式：优先于一切分支（点 file input/上传按钮 → 弹确认对话框）
+    if (uploadBindModeRef.current) {
+      handleUploadBindPick("left", info);
+      return;
+    }
+    // 自定义文本拾取模式：优先于其他分支（仅次于文件提取）
+    if (customTextModeRef.current && customTextPickingIdRef.current) {
+      const id = customTextPickingIdRef.current;
+      setCustomTextEntries((prev) => prev.map((e) =>
+        e.id === id
+          ? { ...e, selector: info.selector, label: info.label || info.tag || info.selector, side: "left", tag: info.tag, type: info.type }
+          : e
+      ));
+      setCustomTextPickingId(null);
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+      return;
+    }
+    // 控件来源拾取：把控件绑定到左侧网页元素（运行时从左网页读值）
+    if (widgetLeftPickingKeyRef.current) {
+      const key = widgetLeftPickingKeyRef.current;
+      setWidgetLeftPickingKey(null);
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+      const binding: WidgetBinding = {
+        leftSource: "database",
+        leftField: info.selector,
+        leftLabel: info.label || info.tag || info.selector,
+      };
+      if (key === "draft") {
+        setWidgetDraftBinding((prev) => ({ ...prev, ...binding }));
+      } else {
+        updateSavedWidgetBinding(key.replace(/^saved:/, ""), binding);
+      }
+      return;
+    }
     // 文件提取模式：优先于一切分支
     if (addingDocExtractModeRef.current) {
       if (docExtractSourceRef.current === "web") {
@@ -5873,7 +6912,7 @@ tag: info.tag,
 type: info.type,
 });
 }
-  }, [addPickedMark, selected, pendingAction, inputTarget, performRealClick, performInputValue, detectVariableField, teachingPhase, setSuccessToast, recyclePickedMark, runDocExtractFromUrl]);
+  }, [addPickedMark, selected, pendingAction, inputTarget, performRealClick, performInputValue, detectVariableField, teachingPhase, setSuccessToast, recyclePickedMark, runDocExtractFromUrl, handleUploadBindPick]);
 
   // 审查/录入模式下，点击「提取元素」面板中的字段卡片 → 注入为左侧来源（合成拾取值）
   // 提取值天然是「来源/真值」，因此始终填充 leftPicked，不区分当前 pickTarget
@@ -5937,9 +6976,13 @@ type: info.type,
         variableField: isEntry && (isExcelSource || isPassportSource) ? m.left_field : undefined,
         excelField: isExcelSource ? m.left_field : undefined,
         sourceSelector: isEntry ? leftWebSelector : undefined,
+        // 点击展开型控件：执行时走控件脚本（选项选择/日历设定）而非普通填值
+        widget: m.widget || undefined,
       });
       rlog(`[saveMapping] 添加${stepType}步骤: ${m.right_selector} ← ${sourceLabel}(${m.left_field}), isEntry=${isEntry}, variableField=${isEntry && isExcelSource ? m.left_field : "none"}`);
     }
+    // 控件映射从面板保存，不进入下一轮拾取（用户未处于拾取流程）
+    if (m.widget) return;
     // 重置一轮，继续拾取下一个（审查模式回到右侧核对元素，录入模式回到左侧来源）
     setRightPicked(null);
     setLeftPicked(null);
@@ -5966,6 +7009,226 @@ type: info.type,
   const removeMapping = (index: number) => {
     setMappings((prev) => prev.filter((_, i) => i !== index));
   };
+
+  // ============ 控件提取模式（点击展开型控件：选项 / 日历） ============
+  const toggleWidgetExtract = useCallback(() => {
+    setWidgetExtractMode((prev) => {
+      const next = !prev;
+      if (!next) {
+        // 退出时清理所有拾取状态（草稿与已保存映射保留）
+        setWidgetPickKind(null);
+        setWidgetRolePickingKey(null);
+        setWidgetLeftPickingKey(null);
+        setWidgetSnapshotError(null);
+        window.electronAPI?.viewStopPicking("left").catch(() => {});
+        window.electronAPI?.viewStopPicking("right").catch(() => {});
+      }
+      return next;
+    });
+  }, []);
+
+  /** 开始拾取控件触发框（右侧网页） */
+  const startWidgetPick = useCallback((kind: "option" | "calendar") => {
+    setWidgetSnapshotError(null);
+    setWidgetPickKind(kind);
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
+    window.electronAPI?.viewStartPicking("right").catch(() => {});
+  }, []);
+
+  const cancelWidgetPick = useCallback(() => {
+    setWidgetPickKind(null);
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+  }, []);
+
+  /** 拾取到触发框后：执行快照脚本（点击展开 → 识别面板结构 → 关闭） */
+  const runWidgetSnapshot = useCallback(async (triggerSelector: string, triggerLabel: string, kind: "option" | "calendar") => {
+    if (!window.electronAPI) return;
+    setWidgetSnapshotBusy(true);
+    setWidgetSnapshotError(null);
+    try {
+      const res = (await window.electronAPI.viewExecuteJS("right", buildWidgetSnapshotScript(triggerSelector, kind))) as WidgetSnapshotResult | null;
+      if (res && res.ok) {
+        setWidgetDraft({
+          id: `wg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          kind,
+          triggerSelector,
+          triggerLabel,
+          panelSelector: res.panelSelector,
+          options: kind === "option" ? res.options || [] : undefined,
+          calendar: kind === "calendar" ? res.calendar || {} : undefined,
+          createdAt: Date.now(),
+        });
+      } else {
+        const reason = res?.reason || "unknown";
+        setWidgetSnapshotError(WIDGET_SNAPSHOT_REASONS[reason] || `快照失败：${reason}`);
+      }
+    } catch (e) {
+      console.warn("[widget] snapshot failed", e);
+      setWidgetSnapshotError("快照脚本执行失败，请重试");
+    } finally {
+      setWidgetSnapshotBusy(false);
+    }
+  }, []);
+
+  /** 请求重选日历角色：先脚本打开面板，再进入拾取 */
+  const pickWidgetRole = useCallback((key: string, role: CalendarRole) => {
+    const widget = key === "draft"
+      ? widgetDraftRef.current
+      : mappings.find((m) => m.right_selector === key.replace(/^saved:/, ""))?.widget;
+    if (!widget) return;
+    setWidgetRolePickingKey(`${key}:${role}`);
+    // 拾取模式会拦截点击，所以用脚本打开面板
+    window.electronAPI?.viewExecuteJS("right", buildWidgetOpenScript(widget.triggerSelector)).catch(() => {});
+    setTimeout(() => {
+      if (widgetRolePickingKeyRef.current) {
+        window.electronAPI?.viewStartPicking("right").catch(() => {});
+      }
+    }, 450);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mappings]);
+
+  /** 请求从左侧网页拾取来源元素 */
+  const pickWidgetLeftWeb = useCallback((key: string) => {
+    setWidgetLeftPickingKey(key);
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+    window.electronAPI?.viewStartPicking("left").catch(() => {});
+  }, []);
+
+  /** 保存草稿控件为字段映射（走 saveMapping，自动生成 LOOP 步骤 mark） */
+  const saveWidgetDraft = useCallback(() => {
+    const draft = widgetDraftRef.current;
+    const binding = widgetDraftBindingRef.current;
+    if (!draft || !binding.leftField.trim()) return;
+    saveMapping({
+      right_selector: draft.triggerSelector,
+      right_label: draft.triggerLabel || draft.triggerSelector,
+      right_input_type: "widget",
+      left_source: binding.leftSource,
+      left_field: binding.leftField.trim(),
+      left_record_key: binding.leftLabel || null,
+      verify_method: "smart",
+      widget: draft,
+    });
+    setWidgetDraft(null);
+    setWidgetDraftBinding({ leftSource: "excel", leftField: "" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 更新已保存控件（角色重选/选项别名） */
+  const updateSavedWidget = useCallback((rightSelector: string, widget: WidgetDef) => {
+    setMappings((prev) => prev.map((m) => (m.right_selector === rightSelector ? { ...m, widget } : m)));
+    // 同步更新已生成的 pickedMark（LOOP 执行以 mark 为准）
+    setPickedMarks((prev) => prev.map((mk) => (mk.selector === rightSelector && mk.widget ? { ...mk, widget } : mk)));
+  }, []);
+
+  /** 更新已保存控件的左侧绑定 */
+  const updateSavedWidgetBinding = useCallback((rightSelector: string, binding: WidgetBinding) => {
+    setMappings((prev) => prev.map((m) => (m.right_selector === rightSelector
+      ? { ...m, left_source: binding.leftSource, left_field: binding.leftField, left_record_key: binding.leftLabel || null }
+      : m)));
+    // 同步 mark 的取值字段（与 saveMapping 的规则一致）
+    setPickedMarks((prev) => prev.map((mk) => {
+      if (mk.selector !== rightSelector || !mk.widget) return mk;
+      const isEntry = mk.action === "input";
+      const isExcel = binding.leftSource === "excel";
+      const isPassport = binding.leftSource === "passport";
+      const isManual = binding.leftSource === "manual";
+      return {
+        ...mk,
+        source: isExcel ? "excel" : isPassport ? "passport" : "web",
+        excelField: isExcel ? binding.leftField : undefined,
+        variableField: isEntry && (isExcel || isPassport) ? binding.leftField : undefined,
+        sourceSelector: isEntry && !isExcel && !isPassport && !isManual ? binding.leftField : undefined,
+        value: isManual ? binding.leftField : mk.value,
+      };
+    }));
+  }, []);
+
+  /** 删除已保存控件映射 */
+  const removeSavedWidget = useCallback((rightSelector: string) => {
+    setMappings((prev) => prev.filter((m) => m.right_selector !== rightSelector));
+    setPickedMarks((prev) => {
+      const filtered = prev.filter((mk) => !(mk.selector === rightSelector && mk.widget));
+      return filtered.map((m, i) => ({ ...m, order: i + 1 }));
+    });
+  }, []);
+
+  /** 试跑：用当前卡片的左侧值在右侧网页真实演练一遍 */
+  const testWidget = useCallback(async (testKey: string, widget: WidgetDef, binding: WidgetBinding) => {
+    if (!window.electronAPI) return;
+    setWidgetTestBusyKey(testKey);
+    const setResult = (r: WidgetTestResult) => setWidgetTestResults((prev) => ({ ...prev, [testKey]: r }));
+    try {
+      // 1. 解析左侧值
+      let value = "";
+      if (binding.leftSource === "excel") {
+        value = String(selected?.fields?.[binding.leftField] ?? "").trim();
+      } else if (binding.leftSource === "passport") {
+        const docFields = selected ? getRecordDocFields(selected.record_id) : {};
+        value = String(selected?.passport_fields?.[binding.leftField] || docFields[binding.leftField] || "").trim();
+      } else if (binding.leftSource === "manual") {
+        value = binding.leftField.trim();
+      } else {
+        // database：从左侧网页实时读取
+        const readScript = `
+          ${DEEP_QUERY_HELPER}
+          (function() {
+            var el = null;
+            try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(binding.leftField))}); } catch(e) { el = null; }
+            if (!el) return { ok: false, reason: 'not_found' };
+            var val = '';
+            try {
+              if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') val = el.value || '';
+              else val = (el.textContent || el.innerText || '').trim();
+            } catch(e) { val = el.textContent || ''; }
+            return { ok: true, value: String(val || '').trim() };
+          })();
+        `;
+        const r = (await window.electronAPI.viewExecuteJS("left", readScript)) as { ok: boolean; value?: string } | null;
+        if (r?.ok && r.value) value = r.value.trim();
+      }
+      if (!value) {
+        setResult({ ok: false, message: "左侧值为空：请先选中一张有数据的卡片，或检查绑定字段" });
+        return;
+      }
+      // 2. 执行控件脚本
+      if (widget.kind === "option") {
+        const res = (await window.electronAPI.viewExecuteJS("right", buildOptionSelectScript(widget, value))) as OptionSelectResult | null;
+        if (res?.ok) {
+          setResult({ ok: true, message: `已自动选择「${res.clickedText}」（左侧值：${value}）` });
+        } else {
+          const avail = res?.options?.length ? `；面板选项：${res.options.slice(0, 6).join(" / ")}${res.options.length > 6 ? "…" : ""}` : "";
+          setResult({ ok: false, message: `未匹配到「${value}」${avail}——可点击选项芯片标注别名` });
+        }
+      } else {
+        const cands = parseDateCandidates(value);
+        if (!cands.length) {
+          setResult({ ok: false, message: `「${value}」不是可识别的日期（支持 2026/3/11、2026-03-11、2026年3月11日）` });
+          return;
+        }
+        const [yy, mm, dd] = cands[0].split("-").map(Number);
+        const res = (await window.electronAPI.viewExecuteJS("right", buildCalendarSetScript(widget, yy, mm, dd))) as CalendarSetResult | null;
+        if (res?.ok) {
+          setResult({ ok: true, message: `已翻页并点选 ${cands[0]}${res.value ? `（框内显示：${res.value}）` : ""}` });
+        } else {
+          const reasonMap: Record<string, string> = {
+            panel_not_open: "日历面板未展开",
+            header_parse_fail: "年月显示读取失败，可用「重选」修正",
+            nav_button_missing: "翻页按钮失效，可用「重选」修正",
+            navigate_timeout: "翻页次数过多仍未到达目标年月",
+            day_not_found: "目标日格子未找到，可用「重选」修正日格子",
+          };
+          setResult({ ok: false, message: `日历设定失败：${reasonMap[res?.reason || ""] || res?.reason || "未知"}` });
+        }
+      }
+    } catch (e) {
+      console.warn("[widget] test failed", e);
+      setResult({ ok: false, message: "试跑脚本执行失败，请重试" });
+    } finally {
+      setWidgetTestBusyKey(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, getRecordDocFields]);
 
   // ============ 面板脱离 ============
   const detachPanel = async (side: "left" | "bottom" | "browser-left" | "browser-right" | "browser-excel") => {
@@ -6126,6 +7389,9 @@ type: info.type,
         case "start-bind-inputs":
           startBindBothInputs();
           break;
+        case "set-right-bind-column":
+          setRightBindColumn((payload as string | null) ?? null);
+          break;
         case "exit-bind-inputs":
           exitBindInputs();
           break;
@@ -6210,6 +7476,7 @@ type: info.type,
               mappingCount: mappings.length,
               pendingAction,
               selectedExcelColumn,
+              rightBindColumn,
               bindInputSide,
               nextClickLabel,
               addingStepMode,
@@ -6516,6 +7783,51 @@ type: info.type,
     if (!selected) return [];
     return Object.keys(selected.fields);
   }, [selected]);
+
+  // 已保存的控件映射（mappings 中带 widget 的）
+  const savedWidgets = useMemo(
+    () => mappings.filter((m) => m.widget).map((m) => ({ mapping: m, widget: m.widget as WidgetDef })),
+    [mappings]
+  );
+
+  // 控件提取面板内容（渲染在 ResultsPanel 的「提取元素」卡片设置模式中）
+  const widgetExtractContent = useMemo(() => {
+    if (!widgetExtractMode && !widgetDraft && savedWidgets.length === 0) return null;
+    return (
+      <WidgetExtractPanel
+        pickingKind={widgetPickKind}
+        snapshotBusy={widgetSnapshotBusy}
+        snapshotError={widgetSnapshotError}
+        draft={widgetDraft}
+        draftBinding={widgetDraftBinding}
+        savedWidgets={savedWidgets}
+        excelFields={excelFields}
+        recordFields={(selected?.fields || {}) as Record<string, string>}
+        rolePickingKey={widgetRolePickingKey}
+        leftPickingKey={widgetLeftPickingKey}
+        testResults={widgetTestResults}
+        testBusyKey={widgetTestBusyKey}
+        onStartPick={startWidgetPick}
+        onCancelPick={cancelWidgetPick}
+        onDraftChange={setWidgetDraft}
+        onDraftBindingChange={setWidgetDraftBinding}
+        onSaveDraft={saveWidgetDraft}
+        onDiscardDraft={() => setWidgetDraft(null)}
+        onUpdateSaved={updateSavedWidget}
+        onUpdateSavedBinding={updateSavedWidgetBinding}
+        onRemoveSaved={removeSavedWidget}
+        onPickRole={pickWidgetRole}
+        onPickLeftWeb={pickWidgetLeftWeb}
+        onTest={testWidget}
+      />
+    );
+  }, [
+    widgetExtractMode, widgetDraft, savedWidgets, widgetPickKind, widgetSnapshotBusy, widgetSnapshotError,
+    widgetDraftBinding, excelFields, selected, widgetRolePickingKey, widgetLeftPickingKey,
+    widgetTestResults, widgetTestBusyKey,
+    startWidgetPick, cancelWidgetPick, saveWidgetDraft, updateSavedWidget, updateSavedWidgetBinding,
+    removeSavedWidget, pickWidgetRole, pickWidgetLeftWeb, testWidget,
+  ]);
 
   // 脱离模式：根据 URL query param 渲染独立面板窗口
   const detachMode = getDetachMode();
@@ -7024,6 +8336,18 @@ type: info.type,
               onRunLoopsWithCursor={handleRunLoopsWithCursor}
               onClearCardLoop={handleClearCardLoop}
               onClearAllCardLoops={handleClearAllCardLoops}
+              cardImages={cardImages}
+              onSetCardImage={setCardImage}
+              onClearCardImage={clearCardImage}
+              fieldColumnMap={fieldColumnMap}
+              onFieldColumnMapChange={handleFieldColumnMapChange}
+              onExcelUploaded={(map) => {
+                setDetectedColumnMap(map);
+                const autoMap: Record<string, string> = {};
+                Object.entries(map).forEach(([origCol, stdField]) => { autoMap[stdField] = origCol; });
+                setFieldColumnMap((prev) => ({ ...autoMap, ...prev }));
+              }}
+              detectedColumnMap={detectedColumnMap}
               emptyHint={
                 records.length > 0 && cardPool.length === 0
                   ? "已在 Excel 载入数据\n请在 Excel 视图点行号框选 LOOP 行范围\n然后点击「一键生成卡片」\n可多次框选不同段/不同Excel追加卡片"
@@ -7131,7 +8455,7 @@ type: info.type,
                   onToggleSidebarCollapse={() => toggleSidebarAutoCollapse("left")}
                   onOpenCredentials={() => setShowCredentialsPanel(showCredentialsPanel === "left" ? null : "left")}
                   credentialCount={credentials.filter((c) => c.host === getHost(leftUrl)).length}
-                  picking={(selectMode && pickTarget === "left") || avatarMode || (pendingAction === "click" && (pickTarget === "left" || (teachingPhase !== "idle" && !!nextClickLabel) || addingClickMode)) || (pendingAction === "input" && pickTarget === "left") || !!bindInputSide || (teachingPhase !== "idle" && !!nextClickLabel && pickTarget === "left")}
+                  picking={(selectMode && pickTarget === "left") || avatarMode || (pendingAction === "click" && (pickTarget === "left" || (teachingPhase !== "idle" && !!nextClickLabel) || addingClickMode)) || (pendingAction === "input" && pickTarget === "left") || !!bindInputSide || (teachingPhase !== "idle" && !!nextClickLabel && pickTarget === "left") || !!customTextPickingId}
                   onPickedElement={avatarMode ? onAvatarPicked : onLeftPicked}
                   verifyStatus="idle"
                   disabled={running}
@@ -7193,6 +8517,9 @@ type: info.type,
                       cardsGenerated={cardsGenerated}
                       onGenerateCards={generateCards}
                       onResetCards={resetCards}
+                      fieldColumnMap={fieldColumnMap}
+                      onFieldColumnMapChange={handleFieldColumnMapChange}
+                      detectedColumnMap={detectedColumnMap}
                     />
                   )}
                 </BrowserPane>
@@ -7267,7 +8594,7 @@ type: info.type,
                   onToggleSidebarCollapse={() => toggleSidebarAutoCollapse("right")}
                   onOpenCredentials={() => setShowCredentialsPanel(showCredentialsPanel === "right" ? null : "right")}
                   credentialCount={credentials.filter((c) => c.host === getHost(rightUrl)).length}
-                  picking={(selectMode && pickTarget === "right") || (pendingAction === "click" && (pickTarget === "right" || (teachingPhase !== "idle" && !!nextClickLabel) || addingClickMode)) || (pendingAction === "input" && pickTarget === "right") || !!bindInputSide || (teachingPhase !== "idle" && !!nextClickLabel && pickTarget === "right")}
+                  picking={(selectMode && pickTarget === "right") || (pendingAction === "click" && (pickTarget === "right" || (teachingPhase !== "idle" && !!nextClickLabel) || addingClickMode)) || (pendingAction === "input" && pickTarget === "right") || !!bindInputSide || (teachingPhase !== "idle" && !!nextClickLabel && pickTarget === "right") || !!customTextPickingId}
                   onPickedElement={onRightPicked}
                   verifyStatus={verifyStatus}
                   disabled={running}
@@ -7449,6 +8776,8 @@ type: info.type,
                     onRequestSaveSkill={() => { setSaveSkillRunAfter(false); setShowSaveSkill(true); }}
                     onDirectRun={finishTeachingAndRunBatch}
                     selectedExcelColumn={selectedExcelColumn}
+                    rightBindColumn={rightBindColumn}
+                    onRightBindColumnChange={setRightBindColumn}
                     bindInputSide={bindInputSide}
                     nextClickLabel={nextClickLabel}
                     onStartBindInputs={startBindBothInputs}
@@ -7474,6 +8803,7 @@ type: info.type,
                     addingDocExtractMode={addingDocExtractMode}
                     docExtractSource={docExtractSource}
                     docExtractStepCount={pickedMarks.filter((m) => m.docExtract).length}
+                    docUploadStepCount={pickedMarks.filter((m) => m.docUpload).length}
                     onStartAddDocExtract={startAddDocExtract}
                     onExitAddDocExtractMode={exitAddDocExtractMode}
                     onChooseDocExtractWeb={chooseDocExtractWeb}
@@ -7495,6 +8825,18 @@ type: info.type,
                     onDocFileExtract={requestDocFileExtract}
                     cardsGenerated={cardsGenerated}
                     rowRange={rowRange}
+                    customTextMode={customTextMode}
+                    customTextEntries={customTextEntries}
+                    customTextPickingId={customTextPickingId}
+                    onToggleCustomText={toggleCustomText}
+                    onAddCustomText={addCustomTextEntry}
+                    onRemoveCustomText={removeCustomTextEntry}
+                    onUpdateCustomText={updateCustomTextEntry}
+                    onPickForCustomText={pickForCustomText}
+                    onSaveCustomTextSteps={saveCustomTextSteps}
+                    widgetExtractMode={widgetExtractMode}
+                    widgetCount={savedWidgets.length}
+                    onToggleWidgetExtract={toggleWidgetExtract}
                   />
                 </div>
               )}
@@ -7547,6 +8889,7 @@ type: info.type,
                       onExitChoose={exitAddDocExtractMode}
                       webStepCount={pickedMarks.filter((m) => m.docExtractClick).length}
                       onExitWebMode={exitAddDocExtractMode}
+                      webStatus={docExtractSource === "web" ? docWebStatus : undefined}
                       docLocalRootPath={docLocalRootPath}
                       docLocalDirFiles={docLocalDirFiles}
                       docLocalSamplePath={docLocalSamplePath}
@@ -7554,10 +8897,27 @@ type: info.type,
                       onPickLocalDirectory={pickLocalDirectory}
                       onSelectDocLocalSample={selectDocLocalSample}
                       onConfirm={confirmDocLocalExtract}
+                      // 网页模式内嵌提取结果（替代外部弹窗）
+                      webResult={docExtractSource === "web" ? docExtractPanel : null}
+                      onCloseWebResult={() => { setDocExtractPanel(null); setSameNameImages(null); }}
+                      webSameNameImages={sameNameImages}
+                      webFindingSameName={findingSameName}
+                      onFindSameName={findSameNameImages}
+                      onExtractFields={sendDocFieldsToExtractPanel}
+                      onExportDoc={() => setDocExportOpen(true)}
+                      onBindUploadDoc={startBindUpload}
+                      // 源文件预览（字段送「提取元素」后仍保留显示）
+                      sourcePreview={docSourcePreview}
+                      onCloseSourcePreview={() => setDocSourcePreview(null)}
+                      // 预览就绪后点击触发 OCR
+                      onTriggerWebExtract={triggerWebExtract}
                     />
                   ) : undefined}
                   focusPanel={
-                    addingDocExtractMode ? "doc" as const
+                    docExtractSplitView ? "doc-extract" as const
+                    : addingDocExtractMode ? "doc" as const
+                    : customTextMode ? null
+                    : widgetExtractMode ? null
                     : (addingStepMode || addingClickMode) ? "field" as const
                     : null
                   }
@@ -7580,6 +8940,17 @@ type: info.type,
                   }}
                   onSaveToBatch={handleSaveToBatch}
                   hasCheckedBatch={checkedIds.size > 0}
+                  customTextContent={customTextContent}
+                  customTextMode={customTextMode}
+                  widgetExtractContent={widgetExtractContent}
+                  widgetSetupSignal={widgetExtractMode}
+                  records={records}
+                  onSelectRecord={(id) => setSelectedId(id)}
+                  execPhase={execPhase}
+                  currentMarkOrder={batchMarkCursor?.markOrder ?? null}
+                  activeVerifyIdx={verifyFieldIdx}
+                  reviewFieldResults={reviewFieldResults}
+                  allPickedMarks={[...pickedMarks].sort((a, b) => a.order - b.order)}
                 />
               </div>
 
@@ -7631,6 +9002,8 @@ type: info.type,
                     onRequestSaveSkill={() => { setSaveSkillRunAfter(false); setShowSaveSkill(true); }}
                     onDirectRun={finishTeachingAndRunBatch}
                     selectedExcelColumn={selectedExcelColumn}
+                    rightBindColumn={rightBindColumn}
+                    onRightBindColumnChange={setRightBindColumn}
                     bindInputSide={bindInputSide}
                     nextClickLabel={nextClickLabel}
                     onStartBindInputs={startBindBothInputs}
@@ -7656,6 +9029,7 @@ type: info.type,
                     addingDocExtractMode={addingDocExtractMode}
                     docExtractSource={docExtractSource}
                     docExtractStepCount={pickedMarks.filter((m) => m.docExtract).length}
+                    docUploadStepCount={pickedMarks.filter((m) => m.docUpload).length}
                     onStartAddDocExtract={startAddDocExtract}
                     onExitAddDocExtractMode={exitAddDocExtractMode}
                     onChooseDocExtractWeb={chooseDocExtractWeb}
@@ -7677,6 +9051,18 @@ type: info.type,
                     onDocFileExtract={requestDocFileExtract}
                     cardsGenerated={cardsGenerated}
                     rowRange={rowRange}
+                    customTextMode={customTextMode}
+                    customTextEntries={customTextEntries}
+                    customTextPickingId={customTextPickingId}
+                    onToggleCustomText={toggleCustomText}
+                    onAddCustomText={addCustomTextEntry}
+                    onRemoveCustomText={removeCustomTextEntry}
+                    onUpdateCustomText={updateCustomTextEntry}
+                    onPickForCustomText={pickForCustomText}
+                    onSaveCustomTextSteps={saveCustomTextSteps}
+                    widgetExtractMode={widgetExtractMode}
+                    widgetCount={savedWidgets.length}
+                    onToggleWidgetExtract={toggleWidgetExtract}
                   />
                 </div>
               )}
@@ -7712,6 +9098,8 @@ type: info.type,
                 onRequestSaveSkill={() => { setSaveSkillRunAfter(false); setShowSaveSkill(true); }}
                 onDirectRun={finishTeachingAndRunBatch}
                 selectedExcelColumn={selectedExcelColumn}
+                rightBindColumn={rightBindColumn}
+                onRightBindColumnChange={setRightBindColumn}
                 bindInputSide={bindInputSide}
                 nextClickLabel={nextClickLabel}
                 onStartBindInputs={startBindBothInputs}
@@ -7736,11 +9124,24 @@ type: info.type,
                 canUndo={pickedMarks.length > 0}
                 addingDocExtractMode={addingDocExtractMode}
                 docExtractStepCount={pickedMarks.filter((m) => m.docExtract).length}
+                docUploadStepCount={pickedMarks.filter((m) => m.docUpload).length}
                 onStartAddDocExtract={startAddDocExtract}
                 onExitAddDocExtractMode={exitAddDocExtractMode}
                 onDocFileExtract={requestDocFileExtract}
                 cardsGenerated={cardsGenerated}
                 rowRange={rowRange}
+                customTextMode={customTextMode}
+                customTextEntries={customTextEntries}
+                customTextPickingId={customTextPickingId}
+                onToggleCustomText={toggleCustomText}
+                onAddCustomText={addCustomTextEntry}
+                onRemoveCustomText={removeCustomTextEntry}
+                onUpdateCustomText={updateCustomTextEntry}
+                onPickForCustomText={pickForCustomText}
+                onSaveCustomTextSteps={saveCustomTextSteps}
+                widgetExtractMode={widgetExtractMode}
+                widgetCount={savedWidgets.length}
+                onToggleWidgetExtract={toggleWidgetExtract}
               />
             </div>
           )}
@@ -7833,7 +9234,8 @@ type: info.type,
       )}
 
       {/* ============ 文件提取审查面板：原图 + 提取字段框 + 同名图片对比 ============ */}
-      {docExtractPanel && (
+      {/* 网页下载模式下结果内嵌在下方「文件提取配置」面板内，不再弹窗 */}
+      {docExtractPanel && !(addingDocExtractMode && docExtractSource === "web") && (
         <DocExtractReviewPanel
           panel={docExtractPanel}
           onClose={() => {
@@ -7843,6 +9245,43 @@ type: info.type,
           sameNameImages={sameNameImages}
           findingSameName={findingSameName}
           onFindSameName={findSameNameImages}
+          onExtractFields={sendDocFieldsToExtractPanel}
+          onExport={() => setDocExportOpen(true)}
+          onBindUpload={startBindUpload}
+        />
+      )}
+
+      {/* ============ 文件导出对话框：格式转换 + 压缩到指定大小 ============ */}
+      {docExportOpen && docExtractPanel && (
+        <DocExportDialog
+          dataUrl={docExtractPanel.imageUrl}
+          filename={docExtractPanel.filename}
+          onClose={() => setDocExportOpen(false)}
+          onToast={(msg) => setSuccessToast(msg)}
+          onError={(msg) => setError(msg)}
+        />
+      )}
+
+      {/* ============ 绑定上传：拾取中提示横幅 ============ */}
+      {uploadBindMode && !uploadBindDraft && (
+        <div className="fixed left-1/2 top-4 z-[9999] flex -translate-x-1/2 items-center gap-3 rounded-full bg-orange-500 px-4 py-2 text-xs font-medium text-white shadow-lg">
+          <Upload className="h-3.5 w-3.5" />
+          <span>绑定上传：点击网页上的文件上传框（或上传按钮）</span>
+          <button
+            onClick={cancelBindUpload}
+            className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] hover:bg-white/30"
+          >
+            取消
+          </button>
+        </div>
+      )}
+
+      {/* ============ 绑定上传确认对话框：格式 + 压缩设置 ============ */}
+      {uploadBindDraft && (
+        <UploadBindDialog
+          draft={uploadBindDraft}
+          onConfirm={confirmUploadBind}
+          onCancel={cancelBindUpload}
         />
       )}
 
@@ -8053,6 +9492,166 @@ function BlockRulesPanel({
   );
 }
 
+// ============ 绑定上传确认对话框组件 ============
+// 拾取到 file input 后弹出：显示来源文件槽位 + 目标上传框，可选格式转换 + 压缩到指定大小
+function UploadBindDialog({
+  draft,
+  onConfirm,
+  onCancel,
+}: {
+  draft: {
+    side: "left" | "right";
+    selector: string;
+    clickedSelector: string;
+    label: string;
+    accept: string;
+    sourceMarkId: string | null;
+    sourceLabel: string;
+  };
+  onConfirm: (opts: { compressKb: number; format: string }) => void;
+  onCancel: () => void;
+}) {
+  const [format, setFormat] = useState<string>("original");
+  const [compressOn, setCompressOn] = useState(false);
+  const [sizeVal, setSizeVal] = useState("500");
+  const [sizeUnit, setSizeUnit] = useState<"KB" | "MB">("KB");
+  const formats = [
+    { key: "original", label: "原格式" },
+    { key: "jpg", label: "JPG" },
+    { key: "png", label: "PNG" },
+    { key: "pdf", label: "PDF" },
+  ];
+  const handleConfirm = () => {
+    let kb = 0;
+    if (compressOn) {
+      const n = parseFloat(sizeVal);
+      if (isFinite(n) && n > 0) kb = Math.round(sizeUnit === "MB" ? n * 1024 : n);
+    }
+    onConfirm({ compressKb: kb, format });
+  };
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/30 backdrop-blur-[2px]" onClick={onCancel}>
+      <div
+        className="w-[360px] rounded-xl border border-orange-200 bg-white shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* 头部 */}
+        <div className="flex items-center gap-2 border-b border-orange-100 bg-gradient-to-r from-orange-50 to-amber-50 px-3 py-2">
+          <Upload className="h-3.5 w-3.5 text-orange-600" />
+          <span className="text-[11px] font-semibold text-orange-900">绑定文件上传</span>
+          <button
+            onClick={onCancel}
+            className="ml-auto rounded-md p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+            title="取消"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        <div className="space-y-3 p-3">
+          {/* 来源 → 目标 */}
+          <div className="space-y-1.5 rounded-lg bg-slate-50 px-2.5 py-2 text-[10px]">
+            <div className="flex items-center gap-1.5">
+              <span className="shrink-0 text-slate-400">文件来源</span>
+              <span className="min-w-0 flex-1 truncate font-medium text-teal-700" title={draft.sourceLabel}>
+                {draft.sourceLabel}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="shrink-0 text-slate-400">上传到</span>
+              <span className="min-w-0 flex-1 truncate font-medium text-orange-700" title={draft.selector}>
+                {draft.label}（{draft.side === "left" ? "左网页" : "右网页"}）
+              </span>
+            </div>
+            {draft.accept && (
+              <div className="flex items-center gap-1.5">
+                <span className="shrink-0 text-slate-400">接受格式</span>
+                <span className="min-w-0 flex-1 truncate text-slate-600" title={draft.accept}>{draft.accept}</span>
+              </div>
+            )}
+            {draft.clickedSelector !== draft.selector && (
+              <div className="text-[9px] text-slate-400">已自动定位隐藏的文件上传框</div>
+            )}
+          </div>
+
+          {/* 格式选择 */}
+          <div>
+            <div className="mb-1 text-[10px] font-medium text-slate-500">上传前转换格式</div>
+            <div className="grid grid-cols-4 gap-1">
+              {formats.map((opt) => (
+                <button
+                  key={opt.key}
+                  onClick={() => setFormat(opt.key)}
+                  className={`rounded-lg border px-1 py-1.5 text-[10px] font-medium transition-all ${
+                    format === opt.key
+                      ? "border-orange-400 bg-orange-50 text-orange-700 ring-1 ring-orange-200"
+                      : "border-slate-200 bg-white text-slate-500 hover:border-orange-200 hover:bg-orange-50/50"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 压缩设置 */}
+          <div>
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-[10px] font-medium text-slate-500">上传前压缩到指定大小</span>
+              <button
+                onClick={() => setCompressOn((v) => !v)}
+                className={`relative h-4 w-7 rounded-full transition-colors ${compressOn ? "bg-orange-500" : "bg-slate-300"}`}
+                title={compressOn ? "关闭压缩" : "开启压缩"}
+              >
+                <span
+                  className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition-all ${
+                    compressOn ? "left-3.5" : "left-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+            {compressOn && (
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="number"
+                  min={1}
+                  value={sizeVal}
+                  onChange={(e) => setSizeVal(e.target.value)}
+                  className="w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-[11px] text-slate-700 outline-none focus:border-orange-400"
+                  placeholder="目标大小"
+                />
+                <div className="flex overflow-hidden rounded-lg border border-slate-200">
+                  {(["KB", "MB"] as const).map((u) => (
+                    <button
+                      key={u}
+                      onClick={() => setSizeUnit(u)}
+                      className={`px-2 py-1.5 text-[10px] font-medium transition-colors ${
+                        sizeUnit === u ? "bg-orange-500 text-white" : "bg-white text-slate-500 hover:bg-slate-50"
+                      }`}
+                    >
+                      {u}
+                    </button>
+                  ))}
+                </div>
+                <span className="text-[9px] text-slate-400">自动降质量/缩尺寸</span>
+              </div>
+            )}
+          </div>
+
+          {/* 确认按钮 */}
+          <button
+            onClick={handleConfirm}
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-orange-500 px-2 py-2 text-[11px] font-semibold text-white transition-all hover:bg-orange-600"
+          >
+            <Check className="h-3.5 w-3.5" />
+            确认添加上传步骤
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ============ 文件提取审查面板组件 ============
 // 定位右侧（right-4），避免遮挡左侧 Excel/记录面板，方便左审查
 // 关键证件字段（姓/名/办证地点/护照号等）用带色边框卡片框出
@@ -8063,6 +9662,9 @@ function DocExtractReviewPanel({
   sameNameImages,
   findingSameName,
   onFindSameName,
+  onExtractFields,
+  onExport,
+  onBindUpload,
 }: {
   panel: {
     imageUrl: string;
@@ -8077,12 +9679,31 @@ function DocExtractReviewPanel({
   sameNameImages: { left: string[]; right: string[] } | null;
   findingSameName: boolean;
   onFindSameName: () => void;
+  /** 勾选字段送到「提取元素」面板 */
+  onExtractFields?: (fields: Record<string, string>) => void;
+  /** 打开导出对话框 */
+  onExport?: () => void;
+  /** 绑定上传：把该文件填入网页 file input（生成上传步骤） */
+  onBindUpload?: () => void;
 }) {
   const [showRawText, setShowRawText] = useState(false);
+  // 字段勾选：默认全部勾选（仅勾有值的字段）
+  const [checkedFields, setCheckedFields] = useState<Set<string>>(
+    () => new Set(Object.entries(panel.fields || {}).filter(([, v]) => v).map(([f]) => f))
+  );
   const isImage = /\.(png|jpe?g|webp|gif|bmp)(\?|#|$)/i.test(panel.imageUrl) || panel.method === "vision_ocr";
   const fieldEntries = Object.entries(panel.fields || {});
   const keyEntries = fieldEntries.filter(([f]) => DOC_KEY_FIELDS.includes(f));
   const otherEntries = fieldEntries.filter(([f]) => !DOC_KEY_FIELDS.includes(f));
+  const toggleField = (f: string) => {
+    setCheckedFields((prev) => {
+      const next = new Set(prev);
+      if (next.has(f)) next.delete(f);
+      else next.add(f);
+      return next;
+    });
+  };
+  const checkedCount = checkedFields.size;
   return (
     <div className="pointer-events-auto fixed right-4 top-16 z-50 w-[440px] max-h-[82vh] overflow-y-auto rounded-xl border border-teal-200 bg-white/97 shadow-2xl backdrop-blur-xl">
       {/* 头部 */}
@@ -8117,28 +9738,74 @@ function DocExtractReviewPanel({
           </div>
         )}
 
-        {/* 提取字段：关键字段用带色边框卡片框出 */}
+        {/* 提取字段：关键字段用带色边框卡片框出，可勾选后送到「提取元素」面板 */}
         {fieldEntries.length > 0 ? (
           <div>
-            <div className="mb-1 text-[10px] font-medium text-slate-500">提取信息（{fieldEntries.length} 个字段）</div>
+            <div className="mb-1 flex items-center gap-1.5 text-[10px] font-medium text-slate-500">
+              提取信息（{fieldEntries.length} 个字段）
+              <span className="text-[9px] font-normal text-slate-400">勾选后可送到「提取元素」面板</span>
+              <button
+                onClick={() =>
+                  setCheckedFields((prev) =>
+                    prev.size === fieldEntries.length ? new Set() : new Set(fieldEntries.map(([f]) => f))
+                  )
+                }
+                className="ml-auto rounded px-1 py-0.5 text-[9px] text-teal-600 hover:bg-teal-50"
+              >
+                {checkedFields.size === fieldEntries.length ? "全不选" : "全选"}
+              </button>
+            </div>
             <div className="grid grid-cols-2 gap-1.5">
               {keyEntries.map(([f, v]) => (
                 <div
                   key={f}
+                  onClick={() => v && toggleField(f)}
                   className={[
-                    "rounded-lg border-2 px-2 py-1",
-                    v ? "border-teal-400 bg-teal-50/60" : "border-dashed border-slate-200 bg-slate-50/50",
+                    "relative cursor-pointer rounded-lg border-2 px-2 py-1 transition-all",
+                    checkedFields.has(f)
+                      ? "border-teal-400 bg-teal-50/60"
+                      : v
+                      ? "border-slate-200 bg-white opacity-60"
+                      : "border-dashed border-slate-200 bg-slate-50/50 opacity-60",
                   ].join(" ")}
+                  title={v ? (checkedFields.has(f) ? "点击取消勾选" : "点击勾选") : "未提取到"}
                 >
-                  <div className="text-[9px] font-medium text-teal-700">{FIELD_LABELS[f] || f}</div>
+                  <div className="flex items-center gap-1 text-[9px] font-medium text-teal-700">
+                    <span
+                      className={`inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-sm border ${
+                        checkedFields.has(f) ? "border-teal-500 bg-teal-500 text-white" : "border-slate-300 bg-white"
+                      }`}
+                    >
+                      {checkedFields.has(f) && <Check className="h-2 w-2" />}
+                    </span>
+                    {FIELD_LABELS[f] || f}
+                  </div>
                   <div className={["truncate text-[11px] font-semibold", v ? "text-slate-800" : "text-slate-300"].join(" ")} title={v}>
                     {v || "未提取到"}
                   </div>
                 </div>
               ))}
               {otherEntries.map(([f, v]) => (
-                <div key={f} className="rounded-lg border border-slate-200 bg-white px-2 py-1">
-                  <div className="text-[9px] font-medium text-slate-500">{FIELD_LABELS[f] || f}</div>
+                <div
+                  key={f}
+                  onClick={() => v && toggleField(f)}
+                  className={[
+                    "relative cursor-pointer rounded-lg border px-2 py-1 transition-all",
+                    checkedFields.has(f) ? "border-teal-300 bg-teal-50/40" : "border-slate-200 bg-white",
+                    !v && "opacity-60",
+                  ].join(" ")}
+                  title={v ? (checkedFields.has(f) ? "点击取消勾选" : "点击勾选") : "未提取到"}
+                >
+                  <div className="flex items-center gap-1 text-[9px] font-medium text-slate-500">
+                    <span
+                      className={`inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-sm border ${
+                        checkedFields.has(f) ? "border-teal-500 bg-teal-500 text-white" : "border-slate-300 bg-white"
+                      }`}
+                    >
+                      {checkedFields.has(f) && <Check className="h-2 w-2" />}
+                    </span>
+                    {FIELD_LABELS[f] || f}
+                  </div>
                   <div className={["truncate text-[11px]", v ? "text-slate-700" : "text-slate-300"].join(" ")} title={v}>
                     {v || "—"}
                   </div>
@@ -8149,6 +9816,54 @@ function DocExtractReviewPanel({
         ) : (
           <div className="rounded-lg bg-amber-50 px-2 py-1.5 text-[10px] text-amber-700">
             未提取到结构化字段，可查看下方原始文字
+          </div>
+        )}
+
+        {/* 操作按钮：提取元素（勾选字段送「提取元素」面板）+ 导出（格式转换+压缩）+ 绑定上传（填入网页上传框） */}
+        {(onExtractFields || onExport || onBindUpload) && (
+          <div className="flex items-center gap-1.5">
+            {onExtractFields && (
+              <button
+                onClick={() => {
+                  const picked: Record<string, string> = {};
+                  for (const [f, v] of fieldEntries) {
+                    if (checkedFields.has(f) && v) picked[f] = v;
+                  }
+                  if (Object.keys(picked).length === 0) return;
+                  onExtractFields(picked);
+                }}
+                disabled={checkedCount === 0}
+                className={`flex flex-1 items-center justify-center gap-1 rounded-lg px-2 py-1.5 text-[11px] font-medium transition-all ${
+                  checkedCount === 0
+                    ? "cursor-not-allowed bg-slate-100 text-slate-400"
+                    : "bg-violet-600 text-white hover:bg-violet-700"
+                }`}
+                title={checkedCount === 0 ? "请先勾选字段" : `把勾选的 ${checkedCount} 个字段送到「提取元素」面板`}
+              >
+                <Database className="h-3 w-3" />
+                提取元素{checkedCount > 0 ? ` (${checkedCount})` : ""}
+              </button>
+            )}
+            {onExport && (
+              <button
+                onClick={onExport}
+                className="flex flex-1 items-center justify-center gap-1 rounded-lg bg-teal-600 px-2 py-1.5 text-[11px] font-medium text-white transition-all hover:bg-teal-700"
+                title="导出文件：可选格式转换 + 压缩到指定大小"
+              >
+                <FileDown className="h-3 w-3" />
+                导出
+              </button>
+            )}
+            {onBindUpload && (
+              <button
+                onClick={onBindUpload}
+                className="flex flex-1 items-center justify-center gap-1 rounded-lg bg-orange-500 px-2 py-1.5 text-[11px] font-medium text-white transition-all hover:bg-orange-600"
+                title="绑定上传：点击网页上的文件上传框，LOOP 执行时自动把该文件填入"
+              >
+                <Upload className="h-3 w-3" />
+                绑定上传
+              </button>
+            )}
           </div>
         )}
 
