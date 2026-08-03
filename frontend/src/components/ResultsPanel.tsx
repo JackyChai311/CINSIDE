@@ -118,6 +118,8 @@ interface Props {
   reviewFieldResults?: Record<number, FieldMatch>;
   /** 所有已选marks（按order升序），用于执行步骤进度条 */
   allPickedMarks?: PickedMark[];
+  /** 步骤选择模式：true时所有面板自动切到"设置"态 */
+  selectMode?: boolean;
 }
 
 export default function ResultsPanel({
@@ -158,6 +160,7 @@ export default function ResultsPanel({
   activeVerifyIdx = -1,
   reviewFieldResults,
   allPickedMarks = [],
+  selectMode = false,
 }: Props) {
   return (
     <div className="glass-strong relative flex h-full flex-col overflow-hidden rounded-2xl">
@@ -220,6 +223,7 @@ export default function ResultsPanel({
           activeVerifyIdx={activeVerifyIdx}
           reviewFieldResults={reviewFieldResults}
           allPickedMarks={allPickedMarks}
+          selectMode={selectMode}
         />
       </div>
     </div>
@@ -527,6 +531,7 @@ function ReportTab({
   activeVerifyIdx = -1,
   reviewFieldResults = {},
   allPickedMarks = [],
+  selectMode = false,
 }: {
   report: VerificationReport | null;
   reports: VerificationReport[];
@@ -585,6 +590,8 @@ function ReportTab({
   reviewFieldResults?: Record<number, FieldMatch>;
   /** 所有已选marks（按order升序），用于执行步骤进度条 */
   allPickedMarks?: PickedMark[];
+  /** 步骤选择模式：true时所有面板自动切到"设置"态 */
+  selectMode?: boolean;
 }) {
   const hasReports = reports && reports.length > 0;
   const hasCompare = resultPresent && comparisons.length > 0;
@@ -639,6 +646,15 @@ function ReportTab({
       setExtractSetupMode(false);
     }
   }, [running]);
+  // 步骤选择模式开启时，所有面板自动切到"设置"态，并展开提取元素面板
+  useEffect(() => {
+    if (selectMode) {
+      setFieldSetupMode(true);
+      setDocSetupMode(true);
+      setExtractSetupMode(true);
+      setShowExtractPanel(true);
+    }
+  }, [selectMode]);
 
   // ============ 执行步骤进度条：构建扁平步骤列表 + FLIP光标动画 ============
   // 步骤顺序：所有marks（按order升序，包含前置/中间/收尾的点击和输入）→ reviewMappings（审查字段）
