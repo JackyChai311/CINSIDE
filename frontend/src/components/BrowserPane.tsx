@@ -288,14 +288,19 @@ export default function BrowserPane({
   }, [activeTabId, enableTabs, isWebMode]);
 
   // 把 BrowserView 的位置同步给主进程，相同 bounds 不重复发送
+  // webFrame.setZoomFactor(z) 缩放渲染进程后：
+  //   - getBoundingClientRect() 返回 CSS 像素（缩放后的值）
+  //   - BrowserView.setBounds() 需要 DIP（物理像素）
+  //   - 换算关系：DIP = CSS像素 × z
   const sync = useCallback(() => {
     if (!window.electronAPI || !containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
-    const winH = window.innerHeight;
-    let x = Math.round(rect.x);
-    let y = Math.round(rect.y);
-    let w = Math.round(rect.width);
-    let h = Math.round(rect.height);
+    const z = window.cinsideZoom?.getFactor() ?? 1.0;
+    const winH = window.innerHeight * z;
+    let x = Math.round(rect.x * z);
+    let y = Math.round(rect.y * z);
+    let w = Math.round(rect.width * z);
+    let h = Math.round(rect.height * z);
     if (y < 0) {
       h += y;
       y = 0;
@@ -373,7 +378,20 @@ export default function BrowserPane({
   useEffect(() => {
     sync();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sync, inView, currentUrl, isWebMode, enableViewSwitch, searchTransition]);
+  }, [sync, inView, currentUrl, isWebMode, enableViewSwitch, searchTransition, loading]);
+
+  // 页面加载期间周期性 sync：加载过程中布局可能多次变化（滚动条出现/消失、reflow），
+  // 特别是 CSS zoom 下坐标需要持续更新。每 150ms 同步一次，加载结束后再补一次。
+  useEffect(() => {
+    if (!loading) return;
+    const interval = setInterval(() => sync(), 150);
+    return () => {
+      clearInterval(interval);
+      // 加载结束后延迟补一次 sync，捕获最终的布局状态
+      setTimeout(() => sync(), 100);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, sync]);
 
   // 显式加载 URL：当 url 变化且非 tab 直接加载时调用 viewLoad
   // 用 loadedUrlRef 跟踪上次加载的 URL，避免重复加载
