@@ -311,11 +311,11 @@ onRightBindColumnChange,
   const fullTitle =
     addingStepMode === "review" ? "添加审查步骤 · 选择映射"
     : addingStepMode === "entry" ? "添加录入步骤 · 选择映射"
-    : "步骤设置 · 元素选择";
+    : "步骤仪表";
   const shortTitle =
     addingStepMode === "review" ? "审查映射"
     : addingStepMode === "entry" ? "录入映射"
-    : "元素选择";
+    : "步骤仪表";
   const leftHeaderRef = useRef<HTMLDivElement>(null);
   const [compactTitle, setCompactTitle] = useState(false);
   useEffect(() => {
