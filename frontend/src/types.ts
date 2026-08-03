@@ -127,6 +127,9 @@ export interface AppSettings {
 
   // 防误关：开启后点关闭按钮会最小化到系统托盘，而非真正退出
   prevent_accidental_close?: boolean;
+
+  // 整体UI缩放比例（0.6~1.6）
+  ui_scale?: number;
 }
 
 // ========== 可配置工作流（新） ==========
