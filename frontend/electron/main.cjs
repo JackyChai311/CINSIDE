@@ -336,10 +336,15 @@ function attachViewMessageRelay(view, side) {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("view-message", { side, payload: { kind: "view-loading", loading: false } });
       // 页面加载完成后强制重绘 BrowserView，解决内容更新不显示的问题
+      // 使用版本号防止旧 setTimeout 的 bounds 覆盖渲染进程发送的新 bounds
       if (mainWindow.getBrowserViews().includes(view)) {
         const b = view.getBounds();
+        view._cinsideBoundsVer = (view._cinsideBoundsVer || 0) + 1;
+        const ver = view._cinsideBoundsVer;
         setTimeout(() => {
-          try { if (!view.webContents.isDestroyed()) view.setBounds(b); } catch (_) {}
+          if (ver === view._cinsideBoundsVer && !view.webContents.isDestroyed()) {
+            try { view.setBounds(b); } catch (_) {}
+          }
         }, 50);
       }
     }
@@ -1150,9 +1155,12 @@ function showView(side, bounds, _url) {
   try { mainWindow.setTopBrowserView(view); } catch (_) {}
   // 强制重绘：通过 setBounds 再次触发 Chromium 合成器刷新，解决后台
   // 加载/JS执行后 BrowserView 内容不更新直到重新切换tab才显示的问题
+  // 使用版本号防止旧 setTimeout 的 bounds 覆盖新的 setBounds（zoom变化/页面加载时布局频繁变化）
   if (bounds) {
+    view._cinsideBoundsVer = (view._cinsideBoundsVer || 0) + 1;
+    const ver = view._cinsideBoundsVer;
     setTimeout(() => {
-      if (!view.webContents.isDestroyed()) {
+      if (ver === view._cinsideBoundsVer && !view.webContents.isDestroyed()) {
         try { view.setBounds(bounds); } catch (_) {}
       }
     }, 100);
@@ -3110,9 +3118,12 @@ ipcMain.handle("detached-view-show", (_event, side, bounds, _url) => {
   }
   try { win.setTopBrowserView(view); } catch (_) {}
   // 强制重绘：与 showView 一致，通过 setBounds 再次触发 Chromium 合成器刷新
+  // 使用版本号防止旧 setTimeout 的 bounds 覆盖新的 setBounds
   if (bounds) {
+    view._cinsideBoundsVer = (view._cinsideBoundsVer || 0) + 1;
+    const ver = view._cinsideBoundsVer;
     setTimeout(() => {
-      if (!view.webContents.isDestroyed()) {
+      if (ver === view._cinsideBoundsVer && !view.webContents.isDestroyed()) {
         try { view.setBounds(bounds); } catch (_) {}
       }
     }, 100);
