@@ -220,7 +220,10 @@ async def ocr_image_bytes(content: bytes) -> str:
                     {
                         "type": "text",
                         "text": "请识别这张图片中的所有文字，并以纯文本形式返回。"
-                        "不要添加任何解释、翻译或格式标记，只输出识别到的原始文字内容。",
+                        "不要添加任何解释、翻译或格式标记，只输出识别到的原始文字内容。"
+                        "\n\n重要：如果图片是护照/证件，请特别注意识别底部MRZ区域（两行由大写字母、数字和'<', '<<'符号组成的行），"
+                        "必须准确识别所有'<'符号（单尖括号和连续尖括号'<<<'），这些符号用于分隔姓名等字段。"
+                        "MRZ行通常以字母'P'开头（护照），格式类似：P<COUNTRY<SURNAME<<GIVEN<NAME<<<<<<...",
                     },
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}},
                 ],
@@ -236,6 +239,219 @@ async def ocr_image_bytes(content: bytes) -> str:
         if not text:
             raise RuntimeError("OCR 未识别到文字")
         return text
+
+
+# ============ MRZ 解析（护照机器可读区） ============
+def _normalize_for_compare(s: str) -> str:
+    """归一化字符串用于比较：去空格、转大写、去除多余符号。"""
+    import re as _re_norm
+    s = s.upper().strip()
+    s = _re_norm.sub(r'[\s\-_/]+', '', s)
+    return s
+
+
+def _parse_mrz(text: str) -> dict[str, str]:
+    """从OCR文本中解析护照MRZ区，提取 surname/given_name/name/passport_no/birth_date/gender/nationality 等字段。
+
+    TD3（普通护照）MRZ格式：两行，每行44字符
+    第1行: P[类型补充]<国家码><SURNAME<<GIVEN<NAMES<<<<<
+           实际OCR中 < 常被识别为其他字符，格式可能不严格，需通过 << 定位
+    第2行: 护照号(9)检查位(1)国家码(3)出生年(2)月(2)日(2)检查位(1)性别(1)失效年(2)月(2)日(2)检查位(1)个人号(14)检查位(1)整体检查位(1)
+
+    如果识别成功返回 dict，未识别到返回空 dict。
+    """
+    import re as _re
+
+    # 清洗OCR文本：去除多余空格，统一行分隔符，统一大写
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n").upper()
+    # 去除OCR可能产生的空格
+    cleaned = _re.sub(r'[ \t]+', '', cleaned)
+
+    # 把所有连续的非字母数字<的字符作为行分隔
+    lines = [l.strip() for l in cleaned.split("\n") if l.strip()]
+
+    # 在所有行中找MRZ第一行：包含 << 且以P开头
+    mrz_line1 = None
+    mrz_line2 = None
+    for i, line in enumerate(lines):
+        if line.startswith("P") and "<<" in line and len(line) >= 20:
+            mrz_line1 = line
+            # 在接下来的1-2行中找MRZ第二行
+            for j in range(i + 1, min(i + 3, len(lines))):
+                cand = lines[j]
+                # MRZ第二行特征：全是大写字母/数字/<，长度>=30，包含F/M性别标记，有6位数字日期
+                if (len(cand) >= 30 and _re.match(r'^[A-Z0-9<]+$', cand)
+                        and ("F" in cand or "M" in cand)
+                        and _re.search(r'\d{6}', cand)):
+                    mrz_line2 = cand
+                    break
+            break
+
+    result: dict[str, str] = {}
+    if not mrz_line1:
+        return result
+
+    line1 = mrz_line1
+
+    # === 解析第一行 ===
+    # 找到 << 的位置（surname和given name的分隔符）
+    sep_idx = line1.find("<<")
+    if sep_idx < 3:
+        return result  # << 太靠前，无法解析
+
+    # 提取surname：<< 之前，去掉开头的文档类型（P）和国家码（3位）以及分隔<
+    surname_part = ""
+    country_code = ""
+
+    # 首先从第二行获取国家码（更可靠，位置固定在10-12位）
+    if mrz_line2 and len(mrz_line2) >= 13:
+        cc2 = mrz_line2[10:13]
+        if _re.match(r'^[A-Z]{3}$', cc2):
+            country_code = cc2
+
+    pre_sep = line1[1:sep_idx]  # 跳过开头P，得到P到<<之间的内容
+
+    if country_code:
+        # 已知国家码，在pre_sep中找到它的位置，后面的字母就是surname
+        cc_pos = pre_sep.find(country_code)
+        if cc_pos >= 0:
+            after_cc = pre_sep[cc_pos + 3:]
+            # after_cc可能以<开头（分隔符），也可能直接是surname（OCR丢失<）
+            # 去掉开头的非字母字符
+            sur_start = 0
+            while sur_start < len(after_cc) and not after_cc[sur_start].isalpha():
+                sur_start += 1
+            # 从sur_start开始取连续字母
+            sur_match = _re.match(r'[A-Z]+', after_cc[sur_start:])
+            if sur_match:
+                surname_part = sur_match.group(0)
+
+    if not surname_part:
+        # 回退策略1：在pre_sep中寻找最后一个<，<后面的字母就是surname
+        last_lt = pre_sep.rfind("<")
+        if last_lt >= 0:
+            after_lt = pre_sep[last_lt + 1:]
+            sur_match = _re.match(r'[A-Z]+', after_lt)
+            if sur_match:
+                surname_part = sur_match.group(0)
+
+    if not surname_part:
+        # 回退策略2：找最后一个连续大写字母序列
+        sur_matches = list(_re.finditer(r'[A-Z]{2,}', pre_sep))
+        if sur_matches:
+            # 如果有国家码，找国家码之后的字母序列
+            if country_code:
+                for m in sur_matches:
+                    if m.start() >= pre_sep.find(country_code) + 3 if country_code in pre_sep else True:
+                        surname_part = m.group(0)
+                        break
+            if not surname_part:
+                # 取最后一个足够长的字母序列
+                long_matches = [m for m in sur_matches if len(m.group(0)) >= 3]
+                if long_matches:
+                    surname_part = long_matches[-1].group(0)
+                else:
+                    surname_part = sur_matches[-1].group(0)
+
+    if not surname_part:
+        # 最终回退：跳过P和前3个字符（国家码位置），后面是surname直到<<或<
+        after_p = line1[1:]
+        if len(after_p) >= 3:
+            rest = after_p[3:]
+            # 跳过开头的非字母字符（可能是OCR错误识别的<变体）
+            sur_start = 0
+            while sur_start < len(rest) and not rest[sur_start].isalpha():
+                sur_start += 1
+            sur_match = _re.match(r'[A-Z]+', rest[sur_start:])
+            if sur_match:
+                surname_part = sur_match.group(0)
+            else:
+                surname_part = rest.lstrip("<").split("<")[0].split("<<")[0]
+
+    # 如果已知国家码但surname开头包含了国家码的尾字母，需要裁剪
+    if country_code and surname_part:
+        # 检查surname是否错误地包含了国家码前缀
+        # 常见情况：OCR把<RUS识别成NRUS，surname变成NRUSBYSTROVA
+        # 国家码是RUS，但N是误识别的<
+        if surname_part.startswith(country_code):
+            pass  # 正确，国家码不在surname中
+        elif country_code in surname_part:
+            idx = surname_part.find(country_code)
+            if idx > 0 and idx <= 2:
+                # 国家码出现在surname开头附近，前面的是误识别字符，裁剪掉
+                surname_part = surname_part[idx + 3:]
+
+    # 提取given names：第一个<<之后到行尾（或下一个<<<结束标记）
+    given_part = line1[sep_idx + 2:]
+    # 找到连续的<<<之后的填充部分并截断
+    fill_start = given_part.find("<<<")
+    if fill_start >= 0:
+        given_part = given_part[:fill_start]
+    given_part = given_part.rstrip("<")
+    given_name = given_part.replace("<", " ").strip()
+    surname = surname_part.strip()
+
+    if surname:
+        result["surname"] = surname
+    if given_name:
+        result["given_name"] = given_name
+    if surname or given_name:
+        result["name"] = f"{surname} {given_name}".strip()
+
+    # 国家码映射
+    _COUNTRY_MAP = {
+        "CHN": "CHINESE", "RUS": "RUSSIAN", "USA": "AMERICAN", "GBR": "BRITISH",
+        "JPN": "JAPANESE", "KOR": "KOREAN", "DEU": "GERMAN", "FRA": "FRENCH",
+        "CAN": "CANADIAN", "AUS": "AUSTRALIAN", "NLD": "DUTCH", "ESP": "SPANISH",
+        "ITA": "ITALIAN", "SGP": "SINGAPOREAN", "MYS": "MALAYSIAN", "THA": "THAI",
+        "VNM": "VIETNAMESE", "IDN": "INDONESIAN", "IND": "INDIAN", "UKR": "UKRAINIAN",
+        "BLR": "BELARUSIAN", "KAZ": "KAZAKH", "UZB": "UZBEK", "TUR": "TURKISH",
+        "PN": "RUSSIAN",  # 可能OCR把<RUS识别成NRUS
+    }
+    if country_code:
+        country_code_clean = country_code.rstrip("<")
+        if len(country_code_clean) >= 3:
+            country_code_clean = country_code_clean[-3:]  # 取最后3个字母作为国家码
+        if _re.match(r'^[A-Z]{3}$', country_code_clean):
+            result["nationality"] = _COUNTRY_MAP.get(country_code_clean, country_code_clean)
+
+    # === 解析第二行（如果存在）：护照号、出生日期、性别、有效期 ===
+    if mrz_line2:
+        line2 = mrz_line2
+        # 护照号：前9位（字母数字，去掉末尾<填充）
+        passport_no = line2[:9].rstrip("<")
+        if _re.match(r'^[A-Z0-9]{4,}$', passport_no):
+            result["passport_no"] = passport_no
+
+        # 出生日期：YYMMDD 格式（在性别F/M前面的6位数字）
+        # 找F或M的位置，前面6位是出生日期（中间隔1位检查位）
+        sex_match = _re.search(r'[FM]', line2)
+        if sex_match:
+            sex_pos = sex_match.start()
+            sex_char = sex_match.group(0)
+            result["gender"] = sex_char
+            # MRZ第二行格式：...出生日期(6位)检查位(1位)性别(1位)有效期(6位)检查位(1位)...
+            # 出生日期在性别前：向前数7个位置取6位（跳过检查位）
+            if sex_pos >= 7:
+                birth_str = line2[sex_pos - 7:sex_pos - 1]
+                if _re.match(r'^\d{6}$', birth_str):
+                    byy = birth_str[:2]
+                    bmm = birth_str[2:4]
+                    bdd = birth_str[4:6]
+                    byy_int = int(byy)
+                    year_prefix = 19 if byy_int > 30 else 20
+                    result["birth_date"] = f"{year_prefix}{byy}-{bmm}-{bdd}"
+
+            # 有效期：性别后面直接是6位YYMMDD（后面是检查位）
+            if sex_pos + 7 <= len(line2):
+                expiry_str = line2[sex_pos + 1:sex_pos + 7]
+                if _re.match(r'^\d{6}$', expiry_str):
+                    eyy = expiry_str[:2]
+                    emm = expiry_str[2:4]
+                    edd = expiry_str[4:6]
+                    result["passport_expiry"] = f"20{eyy}-{emm}-{edd}"
+
+    return result
 
 
 # ============ 字段结构化（从全文中提取目标字段） ============
@@ -256,6 +472,10 @@ def _build_fields_prompt(text: str, target_fields: list[str]) -> str:
 2. 文档中找不到的字段返回空字符串 ""
 3. 日期统一为 YYYY-MM-DD 格式
 4. 不要输出任何 JSON 以外的内容
+5. 如果是护照/证件，底部MRZ行（以P开头的那行，如 P<RUS<BYSTROVA<<ANNA<PAVLOVNA<<<...）中'<<'分隔的英文姓名也视为有效姓名来源：
+   - surname（姓）：第一个<<之前的字母，如BYSTROVA
+   - given_name（名）：第一个<<之后到行尾的字母，多个<分隔的部分都是名，如ANNA PAVLOVNA
+   - name：姓 + 名的完整组合
 """
 
 
@@ -402,13 +622,57 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
             raise RuntimeError("MarkItDown 未提取到文字")
 
     fields: dict[str, str] = {}
+    mrz_warnings: list[str] = []
+    mrz_fields: dict[str, str] = {}
+
+    # 策略：MRZ优先（护照图片）。先尝试MRZ解析，覆盖到的字段直接用MRZ值，
+    # 仅对MRZ未覆盖的目标字段才调用LLM字段提取，减少LLM调用次数、提升速度。
+    if target_fields and method in ("vision_ocr", "pdf_ocr"):
+        try:
+            mrz_fields = _parse_mrz(text)
+        except Exception:
+            mrz_fields = {}
+
     if target_fields:
-        fields = await extract_fields_from_text(text, target_fields)
+        # 计算MRZ已覆盖的字段（有值即算覆盖）
+        mrz_primary_fields = {"surname", "given_name", "name", "passport_no", "birth_date", "gender", "nationality", "passport_expiry"}
+        mrz_covered = {k for k in target_fields if mrz_fields.get(k, "").strip()}
+        fields_for_llm = [k for k in target_fields if k not in mrz_covered]
+
+        # MRZ主字段直接填入
+        for k in target_fields:
+            if k in mrz_primary_fields and mrz_fields.get(k, "").strip():
+                fields[k] = mrz_fields[k]
+
+        # 仅对MRZ未覆盖的字段调用LLM提取
+        if fields_for_llm:
+            llm_fields = await extract_fields_from_text(text, fields_for_llm)
+            for k, v in llm_fields.items():
+                if v.strip():
+                    # MRZ主字段已存在时以MRZ为准；非主字段或MRZ为空时用LLM值
+                    if k in mrz_primary_fields and fields.get(k, "").strip():
+                        # MRZ有值且LLM也有值但不一致，记录警告
+                        if _normalize_for_compare(v) != _normalize_for_compare(fields[k]):
+                            mrz_warnings.append(f"{k}: 上方识别为「{v}」，MRZ识别为「{fields[k]}」，已以MRZ为准")
+                    else:
+                        fields[k] = v
+
+        # MRZ非主字段（如passport_expiry等扩展字段）补充
+        for k, v in mrz_fields.items():
+            if v.strip() and not fields.get(k, "").strip():
+                fields[k] = v
+
+    elif not target_fields and method in ("vision_ocr", "pdf_ocr"):
+        # 没指定target_fields时也尝试MRZ，存入fields供参考
+        for k, v in mrz_fields.items():
+            if v.strip():
+                fields[k] = v
 
     return {
         "filename": filename,
         "method": method,
         "text": text,
         "fields": fields,
+        "mrz_warnings": mrz_warnings,
         "processed_image": processed_image,
     }

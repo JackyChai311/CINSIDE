@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   ArrowLeft,
   CheckCircle2,
   ChevronDown,
@@ -151,6 +152,7 @@ export default function ResultsPanel({
   widgetSetupSignal = false,
   records = [],
   onSelectRecord,
+  switchToDocSignal,
   execPhase = "idle",
   currentMarkOrder = null,
   activeVerifyIdx = -1,
@@ -212,6 +214,7 @@ export default function ResultsPanel({
           widgetSetupSignal={widgetSetupSignal}
           records={records}
           onSelectRecord={onSelectRecord}
+          switchToDocSignal={switchToDocSignal}
           execPhase={execPhase}
           currentMarkOrder={currentMarkOrder}
           activeVerifyIdx={activeVerifyIdx}
@@ -518,6 +521,7 @@ function ReportTab({
   widgetSetupSignal = false,
   records = [],
   onSelectRecord,
+  switchToDocSignal,
   execPhase = "idle",
   currentMarkOrder = null,
   activeVerifyIdx = -1,
@@ -568,6 +572,8 @@ function ReportTab({
   records?: ApplicantRecord[];
   /** 点击人物卡片跳转到该记录 */
   onSelectRecord?: (recordId: string) => void;
+  /** 外部信号：递增时切换到文件处理面板的结果模式（显示已提取文件） */
+  switchToDocSignal?: number;
   // ============ 执行时光标动画相关 ============
   /** 执行阶段：idle=未执行，marks=执行点击/输入，verify=逐字段审查，done=完成 */
   execPhase?: "idle" | "marks" | "verify" | "done";
@@ -618,6 +624,13 @@ function ReportTab({
   useEffect(() => {
     if (widgetSetupSignal) setExtractSetupMode(true);
   }, [widgetSetupSignal]);
+  // 外部信号：切换到文件处理面板的结果模式（点击学生卡片"查看"时触发）
+  useEffect(() => {
+    if (switchToDocSignal != null && switchToDocSignal > 0) {
+      setDocSetupMode(false);
+      setFieldSetupMode(false);
+    }
+  }, [switchToDocSignal]);
   // 运行开始时，自动将所有面板切到"结果"态
   useEffect(() => {
     if (running) {
@@ -1055,10 +1068,11 @@ function ReportTab({
     }));
     const mc = rows.filter((x) => x.match === "match").length;
     const mmc = rows.filter((x) => x.match === "mismatch" || x.match === "error").length;
-    const isPass = r.overall === "pass";
-    const isReview = r.overall === "review";
+    const hasMrzWarning = (r.mrz_warnings?.length ?? 0) > 0;
+    const isPass = r.overall === "pass" && !hasMrzWarning;
+    const isReview = r.overall === "review" || hasMrzWarning;
 
-    // 状态色系
+    // 状态色系（MRZ警告时强制amber黄色系）
     const accent = isPass
       ? { headerBg: "bg-emerald-50/60", badge: "bg-emerald-500", badgeSoft: "bg-emerald-100 text-emerald-700", footer: "bg-slate-50 text-emerald-700", border: "border-emerald-300/70 ring-1 ring-emerald-200/50" }
       : isReview
@@ -1100,6 +1114,15 @@ function ReportTab({
                 {studentId}
               </span>
             )}
+            {hasMrzWarning && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-700"
+                title="护照MRZ交叉验证发现不一致，已以MRZ为准，请人工复核"
+              >
+                <AlertTriangle className="h-3 w-3" />
+                MRZ
+              </span>
+            )}
             <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${accent.badgeSoft}`}>
               {mc}/{rows.length}
             </span>
@@ -1127,6 +1150,23 @@ function ReportTab({
         {/* 展开内容 */}
         {expanded && (
           <>
+            {/* MRZ交叉验证警告 */}
+            {hasMrzWarning && (
+              <div className="border-b border-amber-200/70 bg-amber-50/80 px-4 py-2.5">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                  <div className="flex-1">
+                    <div className="text-xs font-semibold text-amber-800">MRZ交叉验证提示</div>
+                    <div className="mt-1 space-y-0.5">
+                      {r.mrz_warnings?.map((w, wi) => (
+                        <div key={wi} className="text-[11px] leading-relaxed text-amber-700">• {w}</div>
+                      ))}
+                    </div>
+                    <div className="mt-1 text-[10px] text-amber-600/80">以上字段已以护照底部MRZ机器可读区为准修正，请点击「查看」按钮进入文件面板核对</div>
+                  </div>
+                </div>
+              </div>
+            )}
             <div className="overflow-x-auto">
               <table className="w-full">
                 {/* 表头 */}

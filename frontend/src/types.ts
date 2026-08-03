@@ -275,6 +275,8 @@ export interface PickedMark {
   docLocalSamplePath?: string;
   /** 文件提取序列中的导航点击步骤标记（配置阶段记录的多步点击） */
   docExtractClick?: boolean;
+  /** 文件提取点击阶段：pre=开头导航点击（下载前），post=收尾点击（所有人提取完成后），undefined=默认(pre) */
+  docExtractClickPhase?: "pre" | "post";
   /** 文件上传步骤标记：把文件槽位中的文件填入网页 file input（DataTransfer 方案） */
   docUpload?: boolean;
   /** 上传来源：绑定的文件提取步骤 mark id（执行时从该槽位取文件）；空=取最近一次提取的文件 */
@@ -406,6 +408,8 @@ export interface VerificationReport {
   started_at: string;
   finished_at?: string | null;
   error?: string | null;
+  /** MRZ交叉验证警告：该记录的护照文件中上方识别与MRZ不一致的提示 */
+  mrz_warnings?: string[];
 }
 
 // ========== 文档提取（功能1/2） ==========
@@ -421,6 +425,8 @@ export interface DocumentExtractResult {
   fields: Record<string, string>;
   /** 预处理后的图片预览（base64，仅图片文件有值）— 自动旋转到正面 + 裁剪白边后 */
   processed_image?: string | null;
+  /** MRZ交叉验证警告：上方文字识别与底部MRZ不一致的字段列表，已以MRZ为准修正 */
+  mrz_warnings?: string[];
 }
 
 /** 文档预览结果（仅预览图/文本预览，不跑 OCR） */
@@ -472,6 +478,8 @@ export interface DocExtractState {
   file_url?: string;
   /** 预处理后的图片预览（base64）— 自动旋转到正面 + 裁剪白边后 */
   processed_image?: string | null;
+  /** MRZ交叉验证警告：上方文字识别与底部MRZ不一致的字段列表，已以MRZ为准修正 */
+  mrz_warnings?: string[];
 }
 
 // ============ 外挂插件（体外循环） ============

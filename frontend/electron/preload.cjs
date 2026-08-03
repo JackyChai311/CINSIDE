@@ -64,6 +64,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // 元素选择模式
   viewStartPicking: (side) => ipcRenderer.invoke("view-start-picking", side),
   viewStopPicking: (side) => ipcRenderer.invoke("view-stop-picking", side),
+  // 浏览器回退（网页提取时点错撤销）
+  viewGoBack: (side) => ipcRenderer.invoke("view-go-back", side),
+
+  // 一键直传：把文件直接填入网页 file input
+  viewQuickUpload: (side, fileInputSelector, filename, mime, base64Data) =>
+    ipcRenderer.invoke("view-quick-upload", side, fileInputSelector, filename, mime, base64Data),
+  // 弹窗一键直传：把文件直接填入弹窗中的 file input
+  popupQuickUpload: (side, fileInputSelector, filename, mime, base64Data) =>
+    ipcRenderer.invoke("popup-quick-upload", side, fileInputSelector, filename, mime, base64Data),
 
   // 元素屏蔽规则
   viewSetBlockRules: (side, selectors) => ipcRenderer.invoke("view-set-block-rules", side, selectors),
@@ -82,6 +91,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // === 下载捕获（文件提取模式） ===
   setDownloadCapture: (side, enabled) => ipcRenderer.invoke("set-download-capture", side, enabled),
+
+  // === 文件提取保底机制 ===
+  viewGetDownloadableLinks: (side) => ipcRenderer.invoke("view-get-downloadable-links", side),
+  viewBatchDownloadUrls: (side, urls, timeoutMs) => ipcRenderer.invoke("view-batch-download-urls", side, urls, timeoutMs),
 
   // === 本地文件提取：选择目录 + 读取文件 ===
   pickLocalDirectory: () => ipcRenderer.invoke("pick-local-directory"),

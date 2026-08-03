@@ -3,6 +3,8 @@
 const { app, BrowserWindow, BrowserView, ipcMain, shell, Tray, Menu, nativeImage, session } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const http = require("http");
+const https = require("https");
 const { spawn } = require("child_process");
 const { autoUpdater } = require("electron-updater");
 
@@ -2107,6 +2109,219 @@ app.whenReady().then(() => {
     return { ok: true };
   });
 
+  // ============ 文件提取保底机制 ============
+  // IPC: 获取页面上所有可下载的文件链接（<a>标签指向pdf/jpg/png等文件，或带download属性）
+  ipcMain.handle("view-get-downloadable-links", async (_event, side) => {
+    const view = side === "left" ? leftBrowserView : rightBrowserView;
+    if (!view || !view.webContents) {
+      return { ok: false, error: `${side} view 不存在` };
+    }
+    try {
+      const script = `
+        (function() {
+          const fileExts = ['.pdf', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx'];
+          const links = [];
+          const seen = new Set();
+
+          function checkAndAdd(href, text, downloadAttr) {
+            if (!href || href.startsWith('javascript:') || href.startsWith('#') || seen.has(href)) return;
+            let hasExt = false;
+            let filename = '';
+            try {
+              const url = new URL(href, window.location.href);
+              const pathname = decodeURIComponent(url.pathname);
+              const lowerPath = pathname.toLowerCase();
+              for (const ext of fileExts) {
+                if (lowerPath.endsWith(ext)) {
+                  hasExt = true;
+                  filename = pathname.split('/').pop() || '';
+                  break;
+                }
+              }
+              // URL参数中包含download/file等关键词也尝试
+              if (!hasExt) {
+                const search = url.search.toLowerCase();
+                if (search.includes('download=') || search.includes('file=')) {
+                  hasExt = true;
+                  filename = downloadAttr || 'download';
+                }
+              }
+            } catch(e) {}
+            if (downloadAttr && !hasExt) {
+              hasExt = true;
+              filename = downloadAttr;
+            }
+            if (hasExt) {
+              seen.add(href);
+              links.push({ url: href, text: (text || '').trim().substring(0, 100), filename: filename });
+            }
+          }
+
+          // 1. 扫描所有 <a> 标签
+          document.querySelectorAll('a[href]').forEach(a => {
+            checkAndAdd(a.href, a.textContent, a.getAttribute('download'));
+          });
+
+          // 2. 扫描 <area> 标签（图片热区）
+          document.querySelectorAll('area[href]').forEach(area => {
+            checkAndAdd(area.href, area.alt, area.getAttribute('download'));
+          });
+
+          // 3. 扫描 onclick 中的 URL（JavaScript 触发的下载）
+          document.querySelectorAll('[onclick], [data-href], [data-url], [data-download]').forEach(el => {
+            const onclick = el.getAttribute('onclick') || '';
+            const dataHref = el.getAttribute('data-href') || el.getAttribute('data-url') || el.getAttribute('data-download') || '';
+            const combined = onclick + ' ' + dataHref;
+            // 提取 onclick 中的 URL
+            const urlMatches = combined.match(/https?:\\/\\/[^\\s'"<>]+/gi) || [];
+            urlMatches.forEach(u => {
+              checkAndAdd(u, el.textContent, el.getAttribute('download'));
+            });
+          });
+
+          return { ok: true, links: links };
+        })();
+      `;
+      const result = await view.webContents.executeJavaScript(script);
+      if (result && result.ok) {
+        debugLog(`[fallback] ${side} 找到 ${result.links.length} 个可下载链接`);
+        return { ok: true, links: result.links };
+      }
+      return { ok: false, error: "获取链接失败" };
+    } catch (e) {
+      debugLog(`[fallback] view-get-downloadable-links 失败: ${e.message}`);
+      return { ok: false, error: e.message };
+    }
+  });
+
+  // 辅助函数：下载单个URL并返回buffer（带BrowserView session的cookie）
+  async function downloadUrl(url, timeoutMs, side) {
+    // 从BrowserView对应session获取cookie
+    const view = side === "left" ? leftBrowserView : rightBrowserView;
+    const ses = view ? view.webContents.session : session.defaultSession;
+    let cookieHeader = "";
+    try {
+      const parsedUrl = new URL(url);
+      const cookies = await ses.cookies.get({ url: parsedUrl.origin });
+      if (cookies.length > 0) {
+        cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join("; ");
+      }
+    } catch (e) {
+      debugLog(`[fallback] 获取cookie失败: ${e.message}`);
+    }
+
+    return new Promise((resolve, reject) => {
+      try {
+        const parsedUrl = new URL(url);
+        const lib = parsedUrl.protocol === "https:" ? https : http;
+        const options = {
+          hostname: parsedUrl.hostname,
+          port: parsedUrl.port || (parsedUrl.protocol === "https:" ? 443 : 80),
+          path: parsedUrl.pathname + parsedUrl.search,
+          method: "GET",
+          timeout: timeoutMs || 15000,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            ...(cookieHeader ? { "Cookie": cookieHeader } : {}),
+          }
+        };
+
+        const req = lib.request(options, (res) => {
+          // 处理重定向
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            const redirectUrl = new URL(res.headers.location, url).toString();
+            res.resume();
+            downloadUrl(redirectUrl, timeoutMs, side).then(resolve).catch(reject);
+            return;
+          }
+          if (res.statusCode !== 200) {
+            res.resume();
+            reject(new Error(`HTTP ${res.statusCode}`));
+            return;
+          }
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () => {
+            const buffer = Buffer.concat(chunks);
+            const filename = (() => {
+              // 从Content-Disposition获取文件名
+              const cd = res.headers["content-disposition"];
+              if (cd) {
+                const match = cd.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+                if (match) {
+                  try { return decodeURIComponent(match[1].replace(/['"]/g, '')); } catch(e) {}
+                }
+              }
+              // 从URL获取文件名
+              try {
+                const p = decodeURIComponent(parsedUrl.pathname);
+                const n = p.split("/").filter(Boolean).pop() || "";
+                return n.includes(".") ? n : "download.bin";
+              } catch { return "download.bin"; }
+            })();
+            const ext = path.extname(filename).toLowerCase();
+            const mimeMap = {
+              ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+              ".png": "image/png", ".pdf": "application/pdf",
+              ".gif": "image/gif", ".bmp": "image/bmp",
+              ".webp": "image/webp",
+              ".doc": "application/msword",
+              ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            };
+            const mime = res.headers["content-type"] || mimeMap[ext] || "application/octet-stream";
+            resolve({ url, filename, buffer, size: buffer.length, mime });
+          });
+        });
+        req.on("error", reject);
+        req.on("timeout", () => {
+          req.destroy();
+          reject(new Error("下载超时"));
+        });
+        req.end();
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
+  // IPC: 批量下载URL列表并返回文件数据（base64 dataUrl）
+  ipcMain.handle("view-batch-download-urls", async (_event, side, urls, timeoutMs) => {
+    if (!Array.isArray(urls) || urls.length === 0) {
+      return { ok: false, error: "URL列表为空" };
+    }
+    const view = side === "left" ? leftBrowserView : rightBrowserView;
+    const timeout = timeoutMs || 20000;
+    const files = [];
+    const errors = [];
+
+    debugLog(`[fallback] 开始批量下载 ${urls.length} 个文件, timeout=${timeout}ms`);
+
+    // 并发下载，最多3个同时
+    const concurrency = 3;
+    for (let i = 0; i < urls.length; i += concurrency) {
+      const batch = urls.slice(i, i + concurrency);
+      const results = await Promise.allSettled(batch.map(url => downloadUrl(url, timeout, side)));
+      for (let j = 0; j < results.length; j++) {
+        const result = results[j];
+        if (result.status === "fulfilled") {
+          const { url, filename, buffer, size, mime } = result.value;
+          const dataUrl = `data:${mime};base64,${buffer.toString("base64")}`;
+          files.push({ url, filename, dataUrl, size, mime });
+          debugLog(`[fallback] 下载成功: ${filename} (${size} bytes)`);
+        } else {
+          errors.push({ url: batch[j], error: result.reason?.message || String(result.reason) });
+          debugLog(`[fallback] 下载失败: ${batch[j]} - ${result.reason?.message}`);
+        }
+      }
+    }
+
+    if (files.length === 0) {
+      return { ok: false, error: "所有文件下载失败", errors };
+    }
+    debugLog(`[fallback] 批量下载完成: 成功 ${files.length} 个, 失败 ${errors.length} 个`);
+    return { ok: true, files, errors: errors.length > 0 ? errors : undefined };
+  });
+
   // ============ 本地文件提取：选择目录 + 读取文件 ============
   // 选择本地文件夹，递归扫描所有文件，返回根目录绝对路径 + 文件相对路径列表
   ipcMain.handle("pick-local-directory", async () => {
@@ -2200,20 +2415,137 @@ app.whenReady().then(() => {
   // 参数: defaultName(默认文件名), base64(文件内容 base64，可带 data: 前缀)
   ipcMain.handle("save-exported-file", async (_event, defaultName, base64) => {
     const { dialog } = require("electron");
+    const path = require("path");
+
+    // 从默认文件名解析扩展名，用于构建文件类型过滤器
+    const parsedExt = (defaultName && defaultName.includes(".")
+      ? defaultName.slice(defaultName.lastIndexOf(".") + 1).toLowerCase()
+      : ""
+    );
+
+    // 根据扩展名构建过滤器（让对话框默认选中正确类型，Windows 会自动追加扩展名）
+    const filterMap = {
+      jpg: { name: "JPEG 图片", extensions: ["jpg", "jpeg"] },
+      jpeg: { name: "JPEG 图片", extensions: ["jpg", "jpeg"] },
+      png: { name: "PNG 图片", extensions: ["png"] },
+      pdf: { name: "PDF 文档", extensions: ["pdf"] },
+      webp: { name: "WebP 图片", extensions: ["webp"] },
+      bmp: { name: "BMP 图片", extensions: ["bmp"] },
+      gif: { name: "GIF 图片", extensions: ["gif"] },
+    };
+
+    const extFilters = [];
+    if (parsedExt && filterMap[parsedExt]) {
+      extFilters.push(filterMap[parsedExt]);
+    } else if (parsedExt) {
+      // 未知扩展名：以该扩展名自身作为过滤器
+      extFilters.push({ name: `${parsedExt.toUpperCase()} 文件`, extensions: [parsedExt] });
+    }
+    extFilters.push({ name: "所有文件", extensions: ["*"] });
+
     const result = await dialog.showSaveDialog(mainWindow, {
       title: "导出文件",
       defaultPath: defaultName || "export.bin",
+      filters: extFilters,
     });
     if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+
+    // 兜底：用户手动删了扩展名时，自动补回正确扩展名
+    let finalPath = result.filePath;
+    if (parsedExt) {
+      const userExt = path.extname(finalPath).slice(1).toLowerCase();
+      // 仅在用户完全没写扩展名时追加，不覆盖用户主动输入的扩展名
+      if (!userExt) {
+        finalPath = finalPath + "." + parsedExt;
+      }
+    }
+
     try {
       let raw = String(base64 || "");
       if (raw.startsWith("data:") && raw.indexOf(",") >= 0) raw = raw.slice(raw.indexOf(",") + 1);
       const buffer = Buffer.from(raw, "base64");
-      fs.writeFileSync(result.filePath, buffer);
-      debugLog(`[export] saved: ${result.filePath} (${buffer.length} bytes)`);
-      return { ok: true, path: result.filePath, size: buffer.length };
+      fs.writeFileSync(finalPath, buffer);
+      debugLog(`[export] saved: ${finalPath} (${buffer.length} bytes)`);
+      return { ok: true, path: finalPath, size: buffer.length };
     } catch (e) {
       debugLog(`[export] save failed: ${e.message}`);
+      return { ok: false, error: String(e) };
+    }
+  });
+
+  // ============ 一键直传：直接把文件填入网页 file input ============
+  // 参数: side, fileInputSelector, filename, mime, base64Data
+  // 流程：分块传输 base64 → 在 view 中解码为 File → DataTransfer 填入 input → 触发 input/change 事件
+  const DEEP_QUERY_FN = `function __cquickDeepQuery(sel) {
+    if (!sel) return null;
+    if (sel.indexOf('>>>') === -1) { try { return document.querySelector(sel); } catch (e) { return null; } }
+    var segs = sel.split('>>>');
+    var ctx = document;
+    var el = null;
+    for (var i = 0; i < segs.length; i++) {
+      var s = segs[i].trim();
+      if (!s) return null;
+      try { el = ctx.querySelector(s); } catch (e) { return null; }
+      if (!el) return null;
+      if (i < segs.length - 1) {
+        var next = null;
+        try { if (el.shadowRoot) next = el.shadowRoot; } catch (e) {}
+        if (!next) { try { if (el.contentDocument) next = el.contentDocument; } catch (e) {} }
+        if (!next) return null;
+        ctx = next;
+      }
+    }
+    return el;
+  }`;
+
+  ipcMain.handle("view-quick-upload", async (_event, side, fileInputSelector, filename, mime, base64Data) => {
+    const view = side === "left" ? leftBrowserView : rightBrowserView;
+    if (!view || view.webContents.isDestroyed()) {
+      return { ok: false, error: "浏览器视图不存在" };
+    }
+    try {
+      // 1. 分块传输 base64，避免单次 IPC 消息过大
+      await view.webContents.executeJavaScript(`window.__cquickUploadB64='';'init'`);
+      const CHUNK = 2 * 1024 * 1024;
+      for (let i = 0; i < base64Data.length; i += CHUNK) {
+        const part = base64Data.slice(i, i + CHUNK);
+        await view.webContents.executeJavaScript(`window.__cquickUploadB64+=${JSON.stringify(part)};'ok'`);
+      }
+      // 2. 在页面中解码并填入 file input
+      const fillScript = `
+        ${DEEP_QUERY_FN}
+        (function() {
+          var el = null;
+          try { el = __cquickDeepQuery(${JSON.stringify(fileInputSelector)}); } catch(e) { el = null; }
+          if (!el) return { ok: false, reason: 'file_input_not_found' };
+          var tag = (el.tagName || '').toLowerCase();
+          var type = (el.getAttribute && el.getAttribute('type') || '').toLowerCase();
+          if (tag !== 'input' || type !== 'file') return { ok: false, reason: 'not_file_input', tag: tag, type: type };
+          try {
+            var bstr = atob(window.__cquickUploadB64 || '');
+            var n = bstr.length;
+            var u8 = new Uint8Array(n);
+            for (var i = 0; i < n; i++) u8[i] = bstr.charCodeAt(i);
+            var file = new File([u8], ${JSON.stringify(filename)}, { type: ${JSON.stringify(mime)} });
+            var dt = new DataTransfer();
+            // 检查是否 multiple
+            var isMultiple = el.hasAttribute('multiple');
+            dt.items.add(file);
+            el.files = dt.files;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            window.__cquickUploadB64 = '';
+            return { ok: true, name: file.name, size: file.size, multiple: isMultiple };
+          } catch (e) {
+            return { ok: false, reason: 'fill_error:' + String(e) };
+          }
+        })();
+      `;
+      const result = await view.webContents.executeJavaScript(fillScript);
+      debugLog(`[quick-upload] side=${side}, sel=${fileInputSelector}, result=${JSON.stringify(result)}`);
+      return result || { ok: false, reason: "no_result" };
+    } catch (e) {
+      debugLog(`[quick-upload] error: ${e.message}`);
       return { ok: false, error: String(e) };
     }
   });
@@ -2401,6 +2733,18 @@ ipcMain.handle("view-stop-picking", (_event, side) => {
   pickingActive[side] = false;
   debugLog(`[main] view-stop-picking side=${side}`);
   return executeInView(side, ELEMENT_PICKER_DEACTIVATE_SCRIPT);
+});
+
+// 浏览器回退（用于网页提取时点错元素撤销）
+ipcMain.handle("view-go-back", (_event, side) => {
+  debugLog(`[main] view-go-back side=${side}`);
+  const view = side === "left" ? leftBrowserView : rightBrowserView;
+  if (view && view.webContents.canGoBack()) {
+    // 回退前保持picking状态，did-navigate/did-finish-load后会自动重注入picker
+    view.webContents.goBack();
+    return { ok: true };
+  }
+  return { ok: false, reason: "cannot-go-back" };
 });
 
 // 设置元素屏蔽规则（side, rules[{selector, mode}]）—— 立即注入 CSS/JS，导航后自动重注入
@@ -2921,6 +3265,56 @@ ipcMain.handle("popup-execute-js", (_event, side, script) => {
     console.error(`[popup-js:${side}]`, e);
     return undefined;
   });
+});
+
+// 弹窗一键直传：把文件直接填入弹窗中的 file input
+ipcMain.handle("popup-quick-upload", async (_event, side, fileInputSelector, filename, mime, base64Data) => {
+  const popup = popupViews[side];
+  if (!popup || !popup.view || popup.view.webContents.isDestroyed()) {
+    return { ok: false, error: "弹窗视图不存在" };
+  }
+  try {
+    await popup.view.webContents.executeJavaScript(`window.__cquickUploadB64='';'init'`);
+    const CHUNK = 2 * 1024 * 1024;
+    for (let i = 0; i < base64Data.length; i += CHUNK) {
+      const part = base64Data.slice(i, i + CHUNK);
+      await popup.view.webContents.executeJavaScript(`window.__cquickUploadB64+=${JSON.stringify(part)};'ok'`);
+    }
+    const fillScript = `
+      ${DEEP_QUERY_FN}
+      (function() {
+        var el = null;
+        try { el = __cquickDeepQuery(${JSON.stringify(fileInputSelector)}); } catch(e) { el = null; }
+        if (!el) return { ok: false, reason: 'file_input_not_found' };
+        var tag = (el.tagName || '').toLowerCase();
+        var type = (el.getAttribute && el.getAttribute('type') || '').toLowerCase();
+        if (tag !== 'input' || type !== 'file') return { ok: false, reason: 'not_file_input', tag: tag, type: type };
+        try {
+          var bstr = atob(window.__cquickUploadB64 || '');
+          var n = bstr.length;
+          var u8 = new Uint8Array(n);
+          for (var i = 0; i < n; i++) u8[i] = bstr.charCodeAt(i);
+          var file = new File([u8], ${JSON.stringify(filename)}, { type: ${JSON.stringify(mime)} });
+          var dt = new DataTransfer();
+          var isMultiple = el.hasAttribute('multiple');
+          dt.items.add(file);
+          el.files = dt.files;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          window.__cquickUploadB64 = '';
+          return { ok: true, name: file.name, size: file.size, multiple: isMultiple };
+        } catch (e) {
+          return { ok: false, reason: 'fill_error:' + String(e) };
+        }
+      })();
+    `;
+    const result = await popup.view.webContents.executeJavaScript(fillScript);
+    debugLog(`[popup-quick-upload] side=${side}, sel=${fileInputSelector}, result=${JSON.stringify(result)}`);
+    return result || { ok: false, reason: "no_result" };
+  } catch (e) {
+    debugLog(`[popup-quick-upload] error: ${e.message}`);
+    return { ok: false, error: String(e) };
+  }
 });
 
 // 主窗口 → 脱离窗口：广播状态

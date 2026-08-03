@@ -90,6 +90,25 @@ export interface ElectronAPI {
   // 元素选择模式
   viewStartPicking: (side: ViewSide) => Promise<unknown>;
   viewStopPicking: (side: ViewSide) => Promise<unknown>;
+  // 浏览器回退（网页提取时点错撤销）
+  viewGoBack: (side: ViewSide) => Promise<{ ok: boolean; reason?: string }>;
+
+  // 一键直传：把文件直接填入网页 file input
+  viewQuickUpload: (
+    side: ViewSide,
+    fileInputSelector: string,
+    filename: string,
+    mime: string,
+    base64Data: string
+  ) => Promise<{ ok: boolean; name?: string; size?: number; multiple?: boolean; reason?: string; error?: string }>;
+  // 弹窗一键直传：把文件直接填入弹窗中的 file input
+  popupQuickUpload: (
+    side: ViewSide,
+    fileInputSelector: string,
+    filename: string,
+    mime: string,
+    base64Data: string
+  ) => Promise<{ ok: boolean; name?: string; size?: number; multiple?: boolean; reason?: string; error?: string }>;
 
   // 元素屏蔽规则（注入 display:none 或折叠 CSS，导航后自动重注入）
   viewSetBlockRules: (side: ViewSide, rules: { selector: string; mode?: "hide" | "collapse" }[]) => Promise<{ ok: boolean }>;
@@ -112,6 +131,12 @@ export interface ElectronAPI {
   onDownloadStarted: (callback: (data: { side: string; filename: string }) => void) => () => void;
   onDownloadProgress: (callback: (data: { side: string; filename: string; received: number; total: number; percent: number }) => void) => () => void;
   onDownloadFailed: (callback: (data: { side: string; filename: string; error?: string; state?: string }) => void) => () => void;
+
+  // === 文件提取保底机制 ===
+  // 获取页面上所有可下载链接（<a href> 指向文件的链接）
+  viewGetDownloadableLinks: (side: ViewSide) => Promise<{ ok: boolean; links?: Array<{ url: string; text: string; filename?: string }>; error?: string }>;
+  // 批量下载URL列表并返回文件数据
+  viewBatchDownloadUrls: (side: ViewSide, urls: string[], timeoutMs?: number) => Promise<{ ok: boolean; files?: Array<{ url: string; filename: string; dataUrl: string; size: number; mime: string }>; error?: string }>;
 
   // === 本地文件提取：选择目录 + 读取文件 ===
   pickLocalDirectory: () => Promise<{ canceled: boolean; rootPath: string; files: Array<{ relativePath: string; name: string; size: number; ext: string }> }>;

@@ -921,17 +921,29 @@ useEffect(() => {
     setDocSourcePreview(null);
   }
 }, [addingDocExtractMode]);
-// 网页下载提取过程的反馈状态（idle=等待, downloading=下载中, preview=预览就绪, ocr=OCR中, success=提取成功, error=失败）
+// 网页下载提取过程的反馈状态（idle=等待, downloading=下载中, preview=预览就绪, ocr=OCR中, success=提取成功, post-click=添加收尾点击中, error=失败）
 type DocWebStatus =
   | { phase: "idle" }
   | { phase: "downloading"; filename: string; received: number; total: number; percent: number }
   | { phase: "preview"; filename: string; size: number }
   | { phase: "ocr"; filename: string }
   | { phase: "success"; filename: string; size: number }
-  | { phase: "error"; message: string; filename?: string };
+  | { phase: "post-click"; filename: string }
+  | { phase: "error"; message: string; filename?: string }
+  | { phase: "fallback-scanning"; message?: string }
+  | { phase: "fallback-downloading"; total: number; current: number; currentFile?: string }
+  | { phase: "fallback-review"; files: Array<{ filename: string; dataUrl: string; size: number; mime: string; matched: boolean; selected?: boolean }>; side: "left" | "right"; recordKey?: string; recordName?: string };
 const [docWebStatus, setDocWebStatus] = useState<DocWebStatus>({ phase: "idle" });
+const docWebStatusRef = useRef<DocWebStatus>(docWebStatus);
+docWebStatusRef.current = docWebStatus;
 // 暂存已下载但尚未触发 OCR 的文件数据（预览后点击「录入提取」才消费）
 const pendingWebFileRef = useRef<{ dataUrl: string; filename: string; size: number; side: "left" | "right" } | null>(null);
+// 后台OCR预提取结果缓存（LOOP模式下下载后立即开OCR，结果缓存供triggerWebExtract复用）
+const bgOcrResultRef = useRef<{ dataUrl: string; result: Awaited<ReturnType<typeof api.extractDocumentFile>> } | null>(null);
+// 保底机制：等待人工确认文件的 Promise resolve
+const fallbackWaitResolveRef = useRef<((file: { filename: string; dataUrl: string; size: number; mime: string } | null) => void) | null>(null);
+// LOOP执行时当前记录的开头点击步骤数（供保底机制回退页面用）
+const currentPreClickCountRef = useRef(0);
 // 本地文件提取：已上传的文件列表
 const [docLocalFiles, setDocLocalFiles] = useState<File[]>([]);
 // 本地文件提取：用于匹配文件名的字段（绑定的 Excel 字段）
@@ -1033,6 +1045,13 @@ const [uploadBindDraft, setUploadBindDraft] = useState<{
 // LOOP 执行时：文件提取步骤产出文件的运行时槽位（markId → 文件），供上传步骤取文件
 // dataUrl=本地文件/下载捕获的内容；url=网页 URL 直提模式（上传时由后端下载）
 const docRuntimeFileSlotsRef = useRef<Record<string, { dataUrl?: string; url?: string; filename: string }>>({});
+
+// ===== 一键直传模式 =====
+const [quickUploadMode, setQuickUploadMode] = useState(false);
+const quickUploadModeRef = useRef(false);
+quickUploadModeRef.current = quickUploadMode;
+// 待上传的文件数据（点击按钮时存入 ref，拾取到元素后使用）
+const quickUploadFileRef = useRef<{ dataUrl: string; filename: string } | null>(null);
 // LOOP 执行时：最近一次提取的文件（上传步骤未绑定来源时的兜底）
 const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename: string; markId: string } | null>(null);
   // 完成教学后自动开始 LOOP 批量执行
@@ -2236,11 +2255,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       if (!addingDocExtractModeRef.current) return;
       rlog(`[download-captured] side=${data.side}, filename=${data.filename}, size=${data.size}`);
 
-      // 将最后一个 docExtractClick 标记升级为下载触发步骤
+      // 将最后一个 开头点击(docExtractClick, phase=pre, 且尚未升级为docExtract) 标记升级为下载触发步骤
       setPickedMarks((prev) => {
         const marks = [...prev];
         for (let i = marks.length - 1; i >= 0; i--) {
-          if (marks[i].docExtractClick) {
+          if (marks[i].docExtractClick && marks[i].docExtractClickPhase !== "post" && !marks[i].docExtract) {
             marks[i] = {
               ...marks[i],
               docExtract: true,
@@ -2672,12 +2691,54 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setSuccessToast(`已送 ${entries.length} 个字段到「提取元素」面板，请逐个拾取关联网页元素后保存为步骤`);
   }, [setSuccessToast]);
 
-  /** 网页模式：预览就绪后用户点击「录入提取」触发 OCR 识别 */
+  /** 网页模式：预览就绪后用户点击「录入提取」触发 OCR 识别（若后台已预提取则直接复用） */
   const triggerWebExtract = useCallback(() => {
     const pending = pendingWebFileRef.current;
     if (!pending) return;
     // 进入 OCR 阶段
     setDocWebStatus({ phase: "ocr", filename: pending.filename });
+
+    // 检查是否有后台预提取的OCR结果可以直接复用
+    const cached = bgOcrResultRef.current;
+    if (cached && cached.dataUrl === pending.dataUrl) {
+      rlog(`[triggerWebExtract] 复用后台OCR缓存结果: ${pending.filename}`);
+      const result = cached.result;
+      const newExtract: DocExtractState = {
+        filename: result.filename,
+        method: result.method,
+        text: result.text,
+        fields: result.fields,
+        entries: [],
+        source: pending.dataUrl,
+        file_url: pending.dataUrl,
+        processed_image: result.processed_image,
+        mrz_warnings: result.mrz_warnings,
+      };
+      const rid = selected?.record_id || "_default";
+      setDocExtractsByRecord((prev) => {
+        const arr = prev[rid] || [];
+        const filtered = arr.filter((e) => e.file_url !== newExtract.file_url);
+        return { ...prev, [rid]: [...filtered, newExtract] };
+      });
+      setActiveDocIndex(999);
+      setDocSignal((s) => s + 1);
+      setDocExtractPanel({
+        imageUrl: toPreviewImageUrl(pending.dataUrl, result.processed_image),
+        filename: result.filename,
+        method: result.method,
+        text: result.text,
+        fields: result.fields,
+        side: pending.side,
+        workflow: pending.side === "left" ? "entry" : "review",
+      });
+      setDocWebStatus({ phase: "success", filename: result.filename, size: pending.size });
+      setSuccessToast(`文件提取完成：${result.filename}`);
+      pendingWebFileRef.current = null;
+      bgOcrResultRef.current = null;
+      return;
+    }
+
+    // 没有缓存，正常执行OCR
     const file = dataUrlToFile(pending.dataUrl, pending.filename);
     const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
     const targetFields = mappedFields.length > 0
@@ -2694,6 +2755,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           source: pending.dataUrl,
           file_url: pending.dataUrl,
           processed_image: result.processed_image,
+          mrz_warnings: result.mrz_warnings,
         };
         const rid = selected?.record_id || "_default";
         setDocExtractsByRecord((prev) => {
@@ -3184,10 +3246,152 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     pendingWebFileRef.current = null;
     window.electronAPI?.viewStopPicking("left").catch(() => {});
     window.electronAPI?.viewStopPicking("right").catch(() => {});
+    window.electronAPI?.popupStopPicking("left").catch(() => {});
+    window.electronAPI?.popupStopPicking("right").catch(() => {});
     // 关闭下载捕获
     window.electronAPI?.setDownloadCapture("left", false).catch(() => {});
     window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
   }, []);
+
+  /** 网页提取成功后，开始添加收尾点击（所有人处理完后闭环） */
+  const startDocExtractPostClicks = useCallback(() => {
+    const lastStatus = docWebStatusRef.current;
+    if (lastStatus.phase !== "success") return;
+    setDocWebStatus({ phase: "post-click", filename: lastStatus.filename || "" });
+    // 收尾点击阶段关闭下载捕获，避免误触发下载
+    window.electronAPI?.setDownloadCapture("left", false).catch(() => {});
+    window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
+    setSuccessToast("收尾点击模式：请点击网页上的元素作为所有记录处理完后的闭环操作（如关闭弹窗、返回列表），ESC 退出");
+    setTimeout(() => {
+      if (addingDocExtractModeRef.current && docExtractSourceRef.current === "web" && docWebStatusRef.current.phase === "post-click") {
+        window.electronAPI?.viewStartPicking("right");
+        window.electronAPI?.viewStartPicking("left");
+      }
+    }, 300);
+  }, [setSuccessToast]);
+
+  /** 从收尾点击模式切回开头点击模式（补添导航步骤） */
+  const startDocExtractPreClicks = useCallback(() => {
+    setDocWebStatus((prev) => prev.phase === "post-click" ? { phase: "idle" } : prev);
+    window.electronAPI?.setDownloadCapture("left", true).catch(() => {});
+    window.electronAPI?.setDownloadCapture("right", true).catch(() => {});
+    setSuccessToast("开头点击模式：继续点击网页元素导航到下载按钮");
+    setTimeout(() => {
+      if (addingDocExtractModeRef.current && docExtractSourceRef.current === "web") {
+        window.electronAPI?.viewStartPicking("right");
+        window.electronAPI?.viewStartPicking("left");
+      }
+    }, 300);
+  }, [setSuccessToast]);
+
+  /** 在指定side上多次延迟重启picking，解决页面导航/慢加载后光标消失的问题 */
+  const ensureDocExtractPicking = useCallback((side: "left" | "right") => {
+    const delays = [400, 1000, 2000, 3500];
+    delays.forEach((delay) => {
+      setTimeout(() => {
+        if (!addingDocExtractModeRef.current || docExtractSourceRef.current !== "web") return;
+        const phase = docWebStatusRef.current?.phase;
+        // 在开头点击(idle/downloading)或收尾点击(post-click)阶段保持picking
+        if (phase !== "idle" && phase !== "downloading" && phase !== "post-click") return;
+        // 重新注入picking脚本（主进程did-finish-load也会重注入，这里是保险）
+        window.electronAPI?.viewStartPicking(side).catch(() => {});
+      }, delay);
+    });
+  }, []);
+
+  /** 撤销最后一次网页提取点击：删除该步骤mark + 浏览器回退 + 保持picking光标 */
+  const undoDocExtractClick = useCallback(async () => {
+    if (!addingDocExtractModeRef.current || docExtractSourceRef.current !== "web") return;
+    // 从后往前找最后一个 docExtractClick 标记（优先撤销当前阶段的点击）
+    const marks = pickedMarksRef.current;
+    const curPhase = docWebStatusRef.current?.phase;
+    const wantPhase = curPhase === "post-click" ? "post" : "pre";
+    let targetMark = [...marks].reverse().find(
+      (m) => m.docExtractClick && m.docExtractClickPhase === wantPhase && !m.docExtract
+    );
+    // 如果当前阶段没有可撤销的，尝试撤销任意阶段的docExtractClick
+    if (!targetMark) {
+      targetMark = [...marks].reverse().find((m) => m.docExtractClick && !m.docExtract);
+    }
+    if (!targetMark) {
+      setSuccessToast("没有可撤销的点击步骤");
+      return;
+    }
+    rlog(`[docExtract] 撤销点击: ${targetMark.label} (${targetMark.selector}), phase=${targetMark.docExtractClickPhase}`);
+    // 1. 删除该步骤
+    removePickedMark(targetMark.id);
+    // 2. 浏览器回退（不关闭picking，让did-navigate自动重注入picker脚本）
+    try {
+      const side = targetMark.side;
+      const res = await window.electronAPI?.viewGoBack(side);
+      if (!res?.ok) {
+        rlog(`[docExtract] 无法回退: ${res?.reason || "未知原因"}，仅删除步骤记录`);
+      }
+    } catch (e) {
+      rlog(`[docExtract] 回退失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // 3. 如果撤销的是最后一步（触发了下载的那步），重置状态回idle
+    setDocWebStatus((prev) => {
+      if (prev.phase === "downloading" || prev.phase === "preview" || prev.phase === "ocr") {
+        return { phase: "idle" };
+      }
+      return prev;
+    });
+    // 4. 延迟重启picking（回退需要时间加载页面）
+    ensureDocExtractPicking(targetMark.side);
+    setSuccessToast(`已撤销：${targetMark.label}`);
+  }, [removePickedMark, setSuccessToast, ensureDocExtractPicking]);
+
+  /** 纯浏览器回退（不撤销步骤），用于点错元素页面导航了但想返回继续 */
+  const docExtractGoBack = useCallback(async () => {
+    if (!addingDocExtractModeRef.current || docExtractSourceRef.current !== "web") return;
+    // 回退双侧（点击可能发生在任意一侧）
+    const sides: ("left" | "right")[] = ["left", "right"];
+    for (const side of sides) {
+      try {
+        const res = await window.electronAPI?.viewGoBack(side);
+        if (res?.ok) {
+          rlog(`[docExtract] 浏览器回退 side=${side}`);
+          ensureDocExtractPicking(side);
+        }
+      } catch (e) {
+        rlog(`[docExtract] 回退失败 side=${side}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    setSuccessToast("已返回上一页，可继续点击");
+  }, [setSuccessToast, ensureDocExtractPicking]);
+
+  /** 强制恢复拾取光标：恢复光标、同步下载捕获状态，确保与当前点击阶段(开头/收尾)完全连贯 */
+  const forceResumeDocPicking = useCallback(() => {
+    if (!addingDocExtractModeRef.current || docExtractSourceRef.current !== "web") return;
+    const phase = docWebStatusRef.current?.phase;
+    const isPostPhase = phase === "post-click";
+    rlog(`[docExtract] 强制恢复拾取光标, phase=${phase}`);
+    // 根据当前阶段同步下载捕获状态：开头点击阶段开启下载捕获，收尾点击阶段关闭
+    const enableCapture = !isPostPhase && (phase === "idle" || phase === "downloading");
+    window.electronAPI?.setDownloadCapture("left", enableCapture).catch(() => {});
+    window.electronAPI?.setDownloadCapture("right", enableCapture).catch(() => {});
+    // 双侧 + 弹窗都重启 picking
+    window.electronAPI?.viewStartPicking("left").catch(() => {});
+    window.electronAPI?.viewStartPicking("right").catch(() => {});
+    window.electronAPI?.popupStartPicking("left").catch(() => {});
+    window.electronAPI?.popupStartPicking("right").catch(() => {});
+    // 延迟再重试，确保慢页面/导航中页面也能恢复
+    [400, 1200, 2500].forEach((delay) => {
+      setTimeout(() => {
+        if (!addingDocExtractModeRef.current || docExtractSourceRef.current !== "web") return;
+        const latestPhase = docWebStatusRef.current?.phase;
+        if (latestPhase !== "idle" && latestPhase !== "downloading" && latestPhase !== "post-click") return;
+        window.electronAPI?.viewStartPicking("left").catch(() => {});
+        window.electronAPI?.viewStartPicking("right").catch(() => {});
+      }, delay);
+    });
+    setSuccessToast(
+      isPostPhase
+        ? "已恢复拾取光标（收尾点击模式），继续点击网页元素作为闭环操作"
+        : "已恢复拾取光标（开头点击模式），继续点击网页元素导航到下载按钮"
+    );
+  }, [setSuccessToast]);
 
   // ============ 绑定上传：把文件槽位的文件填入网页 file input ============
   /** 从文件提取预览面板点「绑定上传」：记录来源槽位 → 关闭面板 → 激活双侧拾取 */
@@ -3216,6 +3420,82 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     window.electronAPI?.viewStopPicking("left").catch(() => {});
     window.electronAPI?.viewStopPicking("right").catch(() => {});
   }, []);
+
+  /** 取消一键直传模式 */
+  const cancelQuickUpload = useCallback(() => {
+    setQuickUploadMode(false);
+    quickUploadFileRef.current = null;
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+    window.electronAPI?.popupStopPicking("left").catch(() => {});
+    window.electronAPI?.popupStopPicking("right").catch(() => {});
+  }, []);
+
+  /** 开始一键直传：保存文件数据 → 开启拾取模式 → 等待点击网页上传框 */
+  const startQuickUpload = useCallback((fileData: { dataUrl: string; filename: string }) => {
+    quickUploadFileRef.current = fileData;
+    setQuickUploadMode(true);
+    setDocExtractPanel(null);
+    setSameNameImages(null);
+    // 取消其他拾取模式
+    setUploadBindMode(false);
+    setUploadBindDraft(null);
+    setSuccessToast("一键直传：请点击网页上的文件上传框或上传按钮，ESC 取消");
+    setTimeout(() => {
+      if (quickUploadModeRef.current) {
+        window.electronAPI?.viewStartPicking("left");
+        window.electronAPI?.viewStartPicking("right");
+      }
+    }, 200);
+  }, [setSuccessToast]);
+
+  /** 一键直传模式下拾取到元素：识别 file input → 立即填入文件 */
+  const handleQuickUploadPick = useCallback(async (side: "left" | "right", info: PickedElementInfo) => {
+    const fileData = quickUploadFileRef.current;
+    if (!fileData) {
+      cancelQuickUpload();
+      return;
+    }
+    const isFileInput = info.tag === "input" && (info.type || "").toLowerCase() === "file";
+    const fileSel = isFileInput ? info.selector : (info.fileInputSelector || "");
+    const fromPopup = !!info.fromPopup;
+    rlog(`[quickUpload] picked side=${side}, isFileInput=${isFileInput}, fileSel=${fileSel}, fromPopup=${fromPopup}`);
+    if (!fileSel) {
+      setError("未识别到文件上传框（input[type=file]），请点击上传按钮或上传区域");
+      setTimeout(() => {
+        if (quickUploadModeRef.current) {
+          window.electronAPI?.viewStartPicking(side);
+        }
+      }, 200);
+      return;
+    }
+    // 停止拾取
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+    window.electronAPI?.popupStopPicking("left").catch(() => {});
+    window.electronAPI?.popupStopPicking("right").catch(() => {});
+
+    // 解析 base64 和 mime
+    const commaIdx = fileData.dataUrl.indexOf(",");
+    const mime = (commaIdx >= 0 ? fileData.dataUrl.slice(5, commaIdx).split(";")[0] : "") || "application/octet-stream";
+    const b64 = commaIdx >= 0 ? fileData.dataUrl.slice(commaIdx + 1) : "";
+
+    try {
+      const result = fromPopup
+        ? await window.electronAPI?.popupQuickUpload(side, fileSel, fileData.filename, mime, b64)
+        : await window.electronAPI?.viewQuickUpload(side, fileSel, fileData.filename, mime, b64);
+      if (result?.ok) {
+        setSuccessToast(`已上传：${result.name}（${(result.size || 0) / 1024 >= 1 ? ((result.size || 0) / 1024).toFixed(1) + " KB" : (result.size || 0) + " B"}）`);
+      } else {
+        setError(`直传失败：${result?.reason || result?.error || "未知原因"}`);
+      }
+    } catch (e) {
+      setError(`直传失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setQuickUploadMode(false);
+      quickUploadFileRef.current = null;
+    }
+  }, [cancelQuickUpload, setError, setSuccessToast]);
 
   /** 绑定上传模式下拾取到元素：识别 file input → 弹确认对话框 */
   const handleUploadBindPick = useCallback((side: "left" | "right", info: PickedElementInfo) => {
@@ -3275,15 +3555,19 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setUploadBindDraft(null);
   }, [uploadBindDraft, selected, addPickedMark, setSuccessToast]);
 
-  /** 网页提取点击处理：记录导航点击步骤，重新激活下载捕获，继续拾取 */
+  /** 网页提取点击处理：记录导航点击步骤，区分开头(pre)和收尾(post)点击 */
   const handleDocExtractClick = useCallback((side: "left" | "right", info: PickedElementInfo) => {
-    rlog(`[docExtractClick] side=${side}, tag=${info.tag}, selector=${info.selector}`);
+    const curPhase = docWebStatusRef.current?.phase;
+    const isPostPhase = curPhase === "post-click";
+    rlog(`[docExtractClick] side=${side}, tag=${info.tag}, selector=${info.selector}, phase=${isPostPhase ? "post" : "pre"}`);
     const workflow: "entry" | "review" = side === "left" ? "entry" : "review";
     addPickedMark({
       side,
       source: "web",
       selector: info.selector,
-      label: `文件提取点击 · ${info.label || info.tag || "元素"}`,
+      label: isPostPhase
+        ? `文件提取收尾 · ${info.label || info.tag || "元素"}`
+        : `文件提取点击 · ${info.label || info.tag || "元素"}`,
       workflow,
       action: "click",
       recordId: selected?.record_id,
@@ -3291,18 +3575,31 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       tag: info.tag,
       type: info.type,
       docExtractClick: true,
+      docExtractClickPhase: isPostPhase ? "post" : "pre",
+      inPopup: !!info.fromPopup,
     });
     // 真实点击该元素（让网页导航/响应）
-    performRealClick(side, info.selector);
-    // 重新激活下载捕获（上一次点击可能未触发下载，保持捕获状态）
-    window.electronAPI?.setDownloadCapture(side, true).catch(() => {});
-    // 继续拾取，允许用户点击下一个元素
-    setTimeout(() => {
-      if (addingDocExtractModeRef.current && docExtractSourceRef.current === "web") {
-        window.electronAPI?.viewStartPicking(side);
-      }
-    }, 500);
-  }, [selected, addPickedMark, performRealClick]);
+    performRealClick(side, info.selector, !!info.fromPopup);
+    if (!isPostPhase) {
+      // 开头点击阶段：重新激活下载捕获（上一次点击可能未触发下载，保持捕获状态）
+      window.electronAPI?.setDownloadCapture(side, true).catch(() => {});
+    }
+    // 多次延迟重启picking，覆盖页面导航/慢加载场景，避免光标消失
+    ensureDocExtractPicking(side);
+    // 弹窗内点击也要保持picking
+    if (info.fromPopup) {
+      [400, 1000, 2000].forEach((delay) => {
+        setTimeout(() => {
+          if (addingDocExtractModeRef.current && docExtractSourceRef.current === "web") {
+            const phase = docWebStatusRef.current?.phase;
+            if (phase === "post-click" || phase === "idle" || phase === "downloading") {
+              window.electronAPI?.popupStartPicking(side).catch(() => {});
+            }
+          }
+        }, delay);
+      });
+    }
+  }, [selected, addPickedMark, performRealClick, ensureDocExtractPicking]);
 
   /** 文件提取拾取处理：拿到图片/PDF URL → 记录步骤 → 调后端 OCR → 弹审查面板 */
   const handleDocExtractPick = useCallback(async (side: "left" | "right", info: PickedElementInfo) => {
@@ -3374,6 +3671,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           source: url,
           file_url: url,
           processed_image: result.processed_image,
+          mrz_warnings: result.mrz_warnings,
         };
         const rid = selected?.record_id || "_default";
         setDocExtractsByRecord((prev) => {
@@ -4023,6 +4321,234 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     });
   }, []);
 
+  /** ============ 文件提取保底机制 ============ */
+  // 从记录中提取用于匹配的关键词（姓名、护照号、学号等）
+  const getRecordMatchKeywords = useCallback((record: ApplicantRecord): string[] => {
+    const keywords: string[] = [];
+    const add = (v: unknown) => {
+      if (v == null) return;
+      const s = String(v).trim().toLowerCase();
+      if (s.length >= 2) keywords.push(s);
+    };
+    // 优先匹配的字段
+    add(record.fields["name"]);
+    add(record.fields["passport_no"]);
+    add(record.fields["student_id"]);
+    add(record.fields["surname"]);
+    add(record.fields["given_name"]);
+    add(record.fields["id_number"]);
+    // 添加护照号的无空格版本
+    const passport = String(record.fields["passport_no"] || "").replace(/\s/g, "");
+    if (passport.length >= 4) keywords.push(passport.toLowerCase());
+    // 姓名拼音（如果有）
+    const name = String(record.fields["name"] || "");
+    if (/[a-zA-Z]/.test(name)) {
+      keywords.push(name.replace(/\s+/g, "").toLowerCase());
+    }
+    return Array.from(new Set(keywords));
+  }, []);
+
+  // 检查文件名是否匹配记录关键词
+  const filenameMatchesRecord = useCallback((filename: string, keywords: string[]): boolean => {
+    const lower = filename.toLowerCase();
+    for (const kw of keywords) {
+      if (lower.includes(kw)) return true;
+    }
+    return false;
+  }, []);
+
+  // 对下载的文件进行快速OCR预览，用于匹配（只提取前几页文字，不做完整字段提取）
+  const quickPreviewForMatch = useCallback(async (dataUrl: string, filename: string, keywords: string[]): Promise<boolean> => {
+    try {
+      const file = dataUrlToFile(dataUrl, filename);
+      const result = await api.previewDocumentFile(file);
+      const text = (result.text_preview || "").toLowerCase();
+      if (text) {
+        for (const kw of keywords) {
+          if (text.includes(kw)) return true;
+        }
+      }
+      return false;
+    } catch (e) {
+      rlog(`[fallback] 快速预览匹配失败: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+  }, []);
+
+  // 保底下载：回退到前置页面，扫描所有可下载链接，批量下载，尝试匹配
+  const runDocExtractFallback = useCallback(async (
+    side: "left" | "right",
+    record: ApplicantRecord,
+    preClickCount: number
+  ): Promise<{ filename: string; dataUrl: string; size: number; mime: string } | "manual-review"> => {
+    rlog(`[fallback] 启动文件提取保底机制, side=${side}, preClickCount=${preClickCount}`);
+    
+    // 步骤1：更新UI状态为扫描中
+    setDocWebStatus({ phase: "fallback-scanning", message: "保底机制：回退页面并扫描可下载文件..." });
+
+    // 步骤2：回退页面（回到开头点击之前的页面）
+    // 注意：不是所有click都会导致页面跳转，所以回退步数是近似值
+    // 采用策略：先回退preClickCount步，然后逐步额外回退直到找到下载链接或到上限
+    let goBackSteps = Math.min(Math.max(preClickCount, 1), 8);
+    for (let i = 0; i < goBackSteps; i++) {
+      try {
+        const res = await window.electronAPI?.viewGoBack(side);
+        if (!res?.ok) break;
+        await new Promise(r => setTimeout(r, 500));
+      } catch (e) {
+        break;
+      }
+    }
+    // 等待页面稳定
+    await new Promise(r => setTimeout(r, 1500));
+
+    // 步骤3：获取页面上所有可下载链接
+    let allLinks: Array<{ url: string; text: string; filename?: string }> = [];
+    try {
+      // 先在当前回退后的页面扫描
+      let linksResult = await window.electronAPI?.viewGetDownloadableLinks(side);
+      if (linksResult?.ok && linksResult.links) {
+        allLinks = allLinks.concat(linksResult.links);
+      }
+      // 如果链接太少，继续往前回退扫描（最多额外回退4页）
+      let extraBack = 0;
+      while (allLinks.length < 2 && extraBack < 4) {
+        const backRes = await window.electronAPI?.viewGoBack(side);
+        if (!backRes?.ok) break;
+        await new Promise(r => setTimeout(r, 800));
+        linksResult = await window.electronAPI?.viewGetDownloadableLinks(side);
+        if (linksResult?.ok && linksResult.links) {
+          allLinks = allLinks.concat(linksResult.links);
+        }
+        extraBack++;
+        if (allLinks.length >= 3) break;
+      }
+    } catch (e) {
+      rlog(`[fallback] 获取下载链接失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // 去重链接
+    const seenUrls = new Set<string>();
+    const uniqueLinks = allLinks.filter(l => {
+      if (seenUrls.has(l.url)) return false;
+      seenUrls.add(l.url);
+      return true;
+    });
+
+    rlog(`[fallback] 找到 ${uniqueLinks.length} 个可下载链接`);
+
+    if (uniqueLinks.length === 0) {
+      setDocWebStatus({ phase: "error", message: "保底机制：未找到任何可下载文件" });
+      throw new Error("保底机制失败：未找到任何可下载文件");
+    }
+
+    // 步骤4：批量下载所有文件
+    setDocWebStatus({ phase: "fallback-downloading", total: uniqueLinks.length, current: 0 });
+    
+    const downloadResult = await window.electronAPI?.viewBatchDownloadUrls(side, uniqueLinks.map(l => l.url), 30000);
+    
+    if (!downloadResult?.ok || !downloadResult.files || downloadResult.files.length === 0) {
+      setDocWebStatus({ phase: "error", message: "保底机制：所有文件下载失败" });
+      throw new Error("保底机制失败：所有文件下载失败");
+    }
+
+    const files = downloadResult.files;
+    rlog(`[fallback] 成功下载 ${files.length} 个文件`);
+
+    // 步骤5：获取记录关键词并尝试匹配
+    const recordKey = record.fields["name"] || record.fields["student_id"] || record.record_id;
+    const keywords = getRecordMatchKeywords(record);
+    rlog(`[fallback] 记录关键词: ${keywords.join(", ")}`);
+
+    // 5.1 首先尝试文件名匹配
+    const filesWithMatch = files.map(f => ({
+      ...f,
+      matched: filenameMatchesRecord(f.filename, keywords),
+    }));
+
+    // 文件名匹配的文件
+    const filenameMatches = filesWithMatch.filter(f => f.matched);
+    
+    if (filenameMatches.length === 1) {
+      // 精确匹配到一个文件，直接使用（不设置success状态，由后续OCR流程设置）
+      rlog(`[fallback] 文件名精确匹配: ${filenameMatches[0].filename}`);
+      return filenameMatches[0];
+    } else if (filenameMatches.length > 1) {
+      // 多个文件名匹配，无法确定哪个是正确的，进入人工审查
+      rlog(`[fallback] 找到 ${filenameMatches.length} 个文件名匹配，进入人工审查`);
+      // 不直接返回，落入下方人工审查逻辑
+    }
+
+    // 5.2 文件名没匹配到，尝试快速OCR内容匹配（前几个文件）
+    setDocWebStatus({ phase: "fallback-downloading", total: files.length, current: files.length, currentFile: "正在OCR匹配文件内容..." });
+    
+    const filesToPreview = files.slice(0, Math.min(files.length, 8)); // 最多预览前8个
+    for (let i = 0; i < filesToPreview.length; i++) {
+      const f = filesToPreview[i];
+      const isMatch = await quickPreviewForMatch(f.dataUrl, f.filename, keywords);
+      if (isMatch) {
+        rlog(`[fallback] OCR内容匹配: ${f.filename}`);
+        filesWithMatch.find(fwm => fwm.filename === f.filename)!.matched = true;
+        return f;
+      }
+    }
+
+    // 步骤6：所有自动匹配都失败，进入人工审查模式
+    rlog(`[fallback] 自动匹配失败，进入人工审查模式，共 ${files.length} 个文件`);
+    const reviewFiles = filesWithMatch.map((f, idx) => ({ ...f, selected: idx === 0 }));
+    setDocWebStatus({
+      phase: "fallback-review",
+      files: reviewFiles,
+      side,
+      recordKey,
+      recordName: record.fields["name"] || record.record_id,
+    });
+
+    // 返回特殊标记，表示需要人工选择
+    return "manual-review";
+  }, [getRecordMatchKeywords, filenameMatchesRecord, quickPreviewForMatch]);
+
+  // 保底人工审查：选择一个文件继续
+  const selectFallbackFile = useCallback((filename: string) => {
+    const status = docWebStatusRef.current;
+    if (status.phase !== "fallback-review") return;
+    const file = status.files.find(f => f.filename === filename);
+    if (!file) return;
+    
+    // 更新选中状态
+    setDocWebStatus({
+      ...status,
+      files: status.files.map(f => ({ ...f, selected: f.filename === filename })),
+    });
+  }, []);
+
+  // 保底人工审查：确认选择的文件，继续流程
+  const confirmFallbackFile = useCallback((): { filename: string; dataUrl: string; size: number; mime: string } | null => {
+    const status = docWebStatusRef.current;
+    if (status.phase !== "fallback-review") return null;
+    const selected = status.files.find(f => f.selected);
+    if (!selected) return null;
+    
+    rlog(`[fallback] 人工选择文件: ${selected.filename}`);
+    setDocWebStatus({ phase: "success", filename: selected.filename, size: selected.size });
+    
+    const fileData = {
+      filename: selected.filename,
+      dataUrl: selected.dataUrl,
+      size: selected.size,
+      mime: selected.mime,
+    };
+    
+    // 如果有等待中的LOOP执行Promise，resolve它
+    if (fallbackWaitResolveRef.current) {
+      const resolve = fallbackWaitResolveRef.current;
+      fallbackWaitResolveRef.current = null;
+      resolve(fileData);
+    }
+    
+    return fileData;
+  }, []);
+
   // ============ 在单个 view 上执行一个 mark（带变量替换） ============
   const executeMark = useCallback(async (
     mark: PickedMark,
@@ -4297,22 +4823,51 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             await waitElementAppear(side, mark.selector, 6000, inPopup);
             clickResult = await performRealClick(side, mark.selector, inPopup);
           }
-          // 3. 等待下载完成
-          try {
-            const downloadData = await waitForDownload(side, 30000);
-            rlog(`[executeMark] 下载完成: ${downloadData.filename} (${downloadData.size} bytes)`);
-            // 3.5 存入运行时文件槽位（供后续上传步骤取文件）
-            docRuntimeFileSlotsRef.current[mark.id] = { dataUrl: downloadData.dataUrl, filename: downloadData.filename };
-            lastDocRuntimeFileRef.current = { dataUrl: downloadData.dataUrl, filename: downloadData.filename, markId: mark.id };
-            // 4. OCR 提取
-            const file = dataUrlToFile(downloadData.dataUrl, downloadData.filename);
+          
+          // 下载完成后：先开预览，后台同时OCR提取
+          // showPreviewAndBgOcr: 立即开预览（轻量）+ 后台启动OCR（重量），返回OCR文字供校验
+          const showPreviewAndBgOcr = async (fileData: { filename: string; dataUrl: string; size: number }): Promise<string> => {
+            // 存入运行时文件槽位
+            docRuntimeFileSlotsRef.current[mark.id] = { dataUrl: fileData.dataUrl, filename: fileData.filename };
+            lastDocRuntimeFileRef.current = { dataUrl: fileData.dataUrl, filename: fileData.filename, markId: mark.id };
+
+            // 暂存原始文件数据（供后续triggerWebExtract复用）
+            pendingWebFileRef.current = { dataUrl: fileData.dataUrl, filename: fileData.filename, size: fileData.size, side };
+
+            const file = dataUrlToFile(fileData.dataUrl, fileData.filename);
+
+            // 1. 轻量预览 + 完整OCR 同时启动（并行，互不阻塞）
             const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
             const targetFields = mappedFields.length > 0
               ? mappedFields
               : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender"];
+
+            // 先启动轻量预览（快速显示文件内容给用户看）
+            setDocWebStatus({ phase: "preview", filename: fileData.filename, size: fileData.size });
+            api.previewDocumentFile(file)
+              .then((previewResult) => {
+                // 显示源文件预览（不影响后台OCR进行中）
+                setDocSourcePreview({
+                  imageUrl: `data:image/jpeg;base64,${previewResult.processed_image}`,
+                  filename: previewResult.filename,
+                  method: previewResult.method,
+                });
+              })
+              .catch((e) => {
+                rlog(`[executeMark] 轻量预览失败（不影响OCR）: ${e instanceof Error ? e.message : String(e)}`);
+              });
+
+            // 2. 后台启动完整OCR提取（同时进行）
+            setDocWebStatus({ phase: "ocr", filename: fileData.filename });
+            rlog(`[executeMark] 预览已开启，后台开始OCR: ${fileData.filename}`);
             const result = await api.extractDocumentFile(file, targetFields);
+
+            // 3. 缓存OCR结果（供triggerWebExtract复用，避免重复提取）
+            bgOcrResultRef.current = { dataUrl: fileData.dataUrl, result };
+
+            // 4. 设置提取面板（OCR结果就绪）
             setDocExtractPanel({
-              imageUrl: toPreviewImageUrl(downloadData.dataUrl, result.processed_image),
+              imageUrl: toPreviewImageUrl(fileData.dataUrl, result.processed_image),
               filename: result.filename,
               method: result.method,
               text: result.text,
@@ -4320,9 +4875,83 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               side,
               workflow: side === "left" ? "entry" : "review",
             });
+            setDocWebStatus({ phase: "success", filename: result.filename, size: fileData.size });
+            return result.text || "";
+          };
+
+          // 文件一致性校验：检查OCR提取的文字是否包含该学生的关键信息
+          const verifyFileMatchesRecord = (ocrText: string, record: ApplicantRecord): boolean => {
+            const keywords = getRecordMatchKeywords(record);
+            if (keywords.length === 0) return true; // 没有关键词可匹配，默认通过
+            const text = ocrText.toLowerCase();
+            for (const kw of keywords) {
+              if (text.includes(kw)) return true;
+            }
+            return false;
+          };
+
+          // 保底机制执行函数（提取出来避免重复代码）
+          const runFallbackAndWait = async (): Promise<boolean> => {
+            try {
+              const preClickCount = currentPreClickCountRef.current;
+              const fallbackResult = await runDocExtractFallback(side, record, preClickCount);
+              
+              if (fallbackResult === "manual-review") {
+                // 需要人工审查，等待用户选择
+                rlog(`[executeMark] 等待人工选择文件...`);
+                const manualFile = await new Promise<{ filename: string; dataUrl: string; size: number; mime: string } | null>((resolve) => {
+                  fallbackWaitResolveRef.current = resolve;
+                  // 超时保护：10分钟后自动超时
+                  setTimeout(() => {
+                    if (fallbackWaitResolveRef.current === resolve) {
+                      fallbackWaitResolveRef.current = null;
+                      resolve(null);
+                    }
+                  }, 10 * 60 * 1000);
+                });
+                
+                if (manualFile) {
+                  rlog(`[executeMark] 人工选择文件: ${manualFile.filename}`);
+                  await showPreviewAndBgOcr(manualFile);
+                  return true;
+                } else {
+                  rlog(`[executeMark] 人工取消保底，跳过该文件`);
+                  return false;
+                }
+              } else {
+                // 自动匹配成功
+                rlog(`[executeMark] 保底自动匹配文件: ${fallbackResult.filename}`);
+                await showPreviewAndBgOcr(fallbackResult);
+                return true;
+              }
+            } catch (fallbackErr) {
+              rlog(`[executeMark] 保底机制失败: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`);
+              return false;
+            }
+          };
+
+          // 3. 等待下载完成
+          let downloadData: { filename: string; dataUrl: string; size: number; mime: string } | null = null;
+          try {
+            downloadData = await waitForDownload(side, 30000);
+            rlog(`[executeMark] 下载完成: ${downloadData.filename} (${downloadData.size} bytes)`);
+            // 4. 立即开预览 + 后台OCR提取
+            const ocrText = await showPreviewAndBgOcr(downloadData);
+            
+            // 5. 校验：下载的文件是否真的是该学生的（防止下错文件）
+            if (!verifyFileMatchesRecord(ocrText, record)) {
+              rlog(`[executeMark] 文件内容与该记录不匹配，触发保底机制`);
+              setDocWebStatus({ phase: "fallback-scanning", message: "下载的文件与该学生不匹配，启动保底机制..." });
+              await runFallbackAndWait();
+            }
           } catch (e) {
-            rlog(`[executeMark] 下载提取失败: ${e instanceof Error ? e.message : String(e)}`);
+            rlog(`[executeMark] 下载捕获失败: ${e instanceof Error ? e.message : String(e)}，触发保底机制`);
             // 关闭下载捕获
+            window.electronAPI?.setDownloadCapture(side, false).catch(() => {});
+            // === 保底机制 ===
+            await runFallbackAndWait();
+          } finally {
+            // 确保关闭下载捕获
             window.electronAPI?.setDownloadCapture(side, false).catch(() => {});
           }
           return;
@@ -4694,6 +5323,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         (m) => !(m.action === "click" && /提交|保存|submit|save/i.test(m.label || ""))
       );
     }
+    // 过滤掉文件提取的收尾点击(docExtractClickPhase==="post")，这些在所有记录处理完后统一执行
+    allMarks = allMarks.filter(
+      (m) => !(m.docExtractClick && m.docExtractClickPhase === "post")
+    );
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
     // 通用recordKey查找：优先name字段，再找第一个非空字段，最后用record_id
@@ -4720,6 +5353,28 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       const mark = allMarks[mi];
       const markSide: ViewSide = mark.side === "left" ? "left" : "right";
       try {
+        // 计算当前mark之前已经执行了多少个pre-click步骤（供保底机制回退页面用）
+        // 统计从0到mi之间，action==="click"且不是docExtractClick的pre-click数量
+        let executedPreClicks = 0;
+        for (let pi = 0; pi < mi; pi++) {
+          const pm = allMarks[pi];
+          if (pm.action === "click" && pm.clickPhase === "pre" && !pm.docExtractClick) {
+            executedPreClicks++;
+          }
+          // 数据源输入也会导致页面变化，额外+1
+          if (pm.action === "input" && pm.workflow === "data-source") {
+            executedPreClicks++;
+          }
+        }
+        // 如果当前mark是doc web-download，额外加上开头点击步骤数（docExtractClickPhase !== "post"的）
+        if (mark.docSource === "web-download") {
+          const docPreClicks = allMarks.filter(
+            (m, idx) => idx < mi && m.docExtractClick && m.docExtractClickPhase !== "post"
+          ).length;
+          executedPreClicks += docPreClicks;
+        }
+        currentPreClickCountRef.current = executedPreClicks;
+
         // 断网容错：步骤执行前检测网络，断网则等待恢复（最多30s）
         if (!(await checkViewOnline(markSide))) {
           rlog(`[batch] 第 ${recordIndex + 1} 行检测到断网，等待网络恢复...`);
@@ -5054,25 +5709,32 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         // 构建本条记录的按人物报告并累加到 loopReports
         {
           const hasMismatch = currentRecordEntries.some((e) => e.match === "mismatch" || e.match === "error");
-          const personOverall: Overall = !result.success
+          // 聚合该记录所有文档的MRZ警告
+          const recordDocExtracts = docExtractsByRecordRef.current[record.record_id] || [];
+          const allMrzWarnings = recordDocExtracts.flatMap((d) => d.mrz_warnings || []);
+          // 如果有MRZ警告，将overall从pass提升为review（需要人工检查）
+          const effectiveOverall: Overall = !result.success
             ? "fail"
             : hasReviewSteps
-            ? (hasMismatch ? "fail" : "pass")
-            : "pass";
+            ? (hasMismatch ? "fail" : allMrzWarnings.length > 0 ? "review" : "pass")
+            : (allMrzWarnings.length > 0 ? "review" : "pass");
           const personReport: VerificationReport = {
             task_id: `loop-${record.record_id}-${Date.now()}`,
             record_id: record.record_id,
             record_name: recordName,
             university_url: rightUrl,
             entries: currentRecordEntries,
-            overall: personOverall,
+            overall: effectiveOverall,
             summary: !result.success
               ? `执行失败：${result.error || "未知错误"}`
+              : allMrzWarnings.length > 0
+              ? `MRZ交叉验证发现${allMrzWarnings.length}处姓名等字段不一致，已以MRZ为准，请人工复核`
               : hasReviewSteps
               ? (hasMismatch ? "存在不一致" : "全部一致")
               : "录入完成",
             started_at: startedAt,
             finished_at: new Date().toISOString(),
+            mrz_warnings: allMrzWarnings.length > 0 ? allMrzWarnings : undefined,
           };
           setLoopReports((prev) => [...prev, personReport]);
         }
@@ -5101,6 +5763,43 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         // 行之间等待，让用户能看清结果
         if (i < targets.length - 1) {
           await sleep(1500);
+        }
+      }
+
+      // 所有记录处理完后，执行文件提取的收尾点击（闭环操作）
+      if (!batchStopRef.current) {
+        const docPostClicks = pickedMarksRef.current.filter(
+          (m) => m.docExtractClick && m.docExtractClickPhase === "post"
+        ).sort((a, b) => a.order - b.order);
+        if (docPostClicks.length > 0) {
+          rlog(`[batch] 开始执行文件提取收尾点击，共 ${docPostClicks.length} 步`);
+          setSteps((prev) => [
+            ...prev,
+            {
+              step: prev.length + 1,
+              action: "final",
+              description: `执行收尾点击（${docPostClicks.length} 步）...`,
+              success: true,
+              timestamp: new Date().toISOString(),
+            },
+          ]);
+          for (const pm of docPostClicks) {
+            if (batchStopRef.current) break;
+            try {
+              const side = pm.side;
+              rlog(`[batch] 收尾点击: ${pm.label} (${pm.selector})`);
+              let clickRes = await performRealClick(side, pm.selector, pm.inPopup);
+              if (clickRes && typeof clickRes === "object" && "ok" in clickRes && clickRes.ok === false) {
+                // 元素可能还没出现，等待后重试
+                await sleep(1500);
+                clickRes = await performRealClick(side, pm.selector, pm.inPopup);
+              }
+              await sleep(800);
+            } catch (e) {
+              rlog(`[batch] 收尾点击失败: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+          await sleep(500);
         }
       }
     } finally {
@@ -5351,6 +6050,42 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           }
         }
 
+        // 所有记录处理完后，执行文件提取的收尾点击（闭环操作）
+        if (!queueStopRef.current && !batchStopRef.current) {
+          const docPostClicks = pickedMarksRef.current.filter(
+            (m) => m.docExtractClick && m.docExtractClickPhase === "post"
+          ).sort((a, b) => a.order - b.order);
+          if (docPostClicks.length > 0) {
+            rlog(`[runQueue] 开始执行文件提取收尾点击，共 ${docPostClicks.length} 步`);
+            setSteps((prev) => [
+              ...prev,
+              {
+                step: prev.length + 1,
+                action: "final",
+                description: `执行收尾点击（${docPostClicks.length} 步）...`,
+                success: true,
+                timestamp: new Date().toISOString(),
+              },
+            ]);
+            for (const pm of docPostClicks) {
+              if (queueStopRef.current || batchStopRef.current) break;
+              try {
+                const side = pm.side;
+                rlog(`[runQueue] 收尾点击: ${pm.label} (${pm.selector})`);
+                let clickRes = await performRealClick(side, pm.selector, pm.inPopup);
+                if (clickRes && typeof clickRes === "object" && "ok" in clickRes && clickRes.ok === false) {
+                  await sleep(1500);
+                  clickRes = await performRealClick(side, pm.selector, pm.inPopup);
+                }
+                await sleep(800);
+              } catch (e) {
+                rlog(`[runQueue] 收尾点击失败: ${e instanceof Error ? e.message : String(e)}`);
+              }
+            }
+            await sleep(500);
+          }
+        }
+
         // 任务完成
         setTaskQueue((prev) => prev.map((t, i) => (i === ti ? { ...t, status: "success", successCount, failCount } : t)));
         setSteps((prev) => [
@@ -5446,6 +6181,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           source: url,
           file_url: url,
           processed_image: result.processed_image,
+          mrz_warnings: result.mrz_warnings,
         };
         const rid = selected?.record_id || "_default";
         setDocExtractsByRecord((prev) => {
@@ -5887,6 +6623,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setDocLocalFiles: (_v: any) => {}, setDocFileBindField: (_v: any) => {},
     setRightPicked: (_v: any) => {}, setLeftPicked: (_v: any) => {},
     commitInput, undoLastStep: () => {},
+    undoDocExtractClick: async () => {}, docExtractGoBack: async () => {},
   });
   kbStateRef.current = {
     pickedMarks, avatarMode, selectMode, pendingAction,
@@ -5899,6 +6636,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setAddingDocExtractMode, setDocExtractSource, setDocLocalFiles, setDocFileBindField,
     setRightPicked, setLeftPicked,
     commitInput, undoLastStep,
+    undoDocExtractClick, docExtractGoBack,
   };
 
   useEffect(() => {
@@ -5951,7 +6689,29 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       } else if (key === "r" || key === "R") {
         e.preventDefault();
         s.undoLastStep();
-      } else if (key === "Escape") {
+      } else if (s.addingDocExtractMode && docExtractSourceRef.current === "web") {
+        // 文件提取网页模式专用快捷键（Ctrl+Z撤销/Backspace返回/任意键恢复光标）
+        const curPhase = docWebStatusRef.current?.phase;
+        let handled = false;
+        if ((e.ctrlKey || e.metaKey) && (key === "z" || key === "Z")) {
+          e.preventDefault();
+          s.undoDocExtractClick();
+          handled = true;
+        } else if (key === "Backspace" || (e.altKey && key === "ArrowLeft")) {
+          e.preventDefault();
+          s.docExtractGoBack();
+          handled = true;
+        } else if (key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey &&
+                   (curPhase === "idle" || curPhase === "post-click")) {
+          // 光标消失时按任意普通键尝试恢复picking
+          window.electronAPI?.viewStartPicking("left").catch(() => {});
+          window.electronAPI?.viewStartPicking("right").catch(() => {});
+          handled = true;
+        }
+        if (handled) return;
+        // 未处理的键（如Escape）继续往下走
+      }
+      if (key === "Escape") {
         // 两级退出（与 Enter 等价）：
         // 1. 文件提取配置模式 → 退出文件提取配置
         // 2. S 输入模式 → 完成填入并回到"搭建节点"状态（保持 selectMode）
@@ -5960,16 +6720,35 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         // 5. 绑定输入框子模式 → 退出绑定模式
         // 6. selectMode/avatarMode → 完全退出
         if (s.addingDocExtractMode) {
+          // 如果当前在收尾点击阶段，ESC 先退回到提取成功状态（而非直接退出配置）
+          if (docWebStatusRef.current?.phase === "post-click") {
+            const lastFilename = docWebStatusRef.current.filename || "";
+            // 查找最近一个成功的提取结果大小（通过 pendingWebFileRef 或 docSourcePreview 获取）
+            setDocWebStatus({ phase: "success", filename: lastFilename, size: 0 });
+            window.electronAPI?.viewStopPicking("left").catch(() => {});
+            window.electronAPI?.viewStopPicking("right").catch(() => {});
+            window.electronAPI?.popupStopPicking("left").catch(() => {});
+            window.electronAPI?.popupStopPicking("right").catch(() => {});
+            setSuccessToast("已结束收尾点击添加，可继续添加开头点击或完成提取");
+            return;
+          }
           s.setAddingDocExtractMode(false);
           s.setDocExtractSource(null);
           s.setDocLocalFiles([]);
           s.setDocFileBindField(null);
           window.electronAPI?.viewStopPicking("left").catch(() => {});
           window.electronAPI?.viewStopPicking("right").catch(() => {});
+          window.electronAPI?.popupStopPicking("left").catch(() => {});
+          window.electronAPI?.popupStopPicking("right").catch(() => {});
           window.electronAPI?.viewClearHighlight("left").catch(() => {});
           window.electronAPI?.viewClearHighlight("right").catch(() => {});
           window.electronAPI?.setDownloadCapture("left", false).catch(() => {});
           window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
+          return;
+        }
+        // ESC 退出一键直传模式
+        if (quickUploadModeRef.current) {
+          cancelQuickUpload();
           return;
         }
         if (s.bindInputSide) {
@@ -6286,6 +7065,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     rlog("[onRightPicked]", { tag: info.tag, selector: info.selector, bindSide: currentBindInputSide, excelCol: currentExcelCol, pendingAction: currentPendingAction });
     // 记录拾取来源（弹窗/主 view），addPickedMark 据此打 inPopup 标记
     pickFromPopupRef.current.right = !!info.fromPopup;
+    // 一键直传模式：优先级最高（点 file input/上传按钮 → 立即填入文件）
+    if (quickUploadModeRef.current) {
+      handleQuickUploadPick("right", info);
+      return;
+    }
     // 绑定上传模式：优先于一切分支（点 file input/上传按钮 → 弹确认对话框）
     if (uploadBindModeRef.current) {
       handleUploadBindPick("right", info);
@@ -6633,6 +7417,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     rlog("[onLeftPicked]", { tag: info.tag, selector: info.selector, bindSide: currentBindInputSide, excelCol: currentExcelCol, pendingAction: currentPendingAction });
     // 记录拾取来源（弹窗/主 view），addPickedMark 据此打 inPopup 标记
     pickFromPopupRef.current.left = !!info.fromPopup;
+    // 一键直传模式：优先级最高（点 file input/上传按钮 → 立即填入文件）
+    if (quickUploadModeRef.current) {
+      handleQuickUploadPick("left", info);
+      return;
+    }
     // 绑定上传模式：优先于一切分支（点 file input/上传按钮 → 弹确认对话框）
     if (uploadBindModeRef.current) {
       handleUploadBindPick("left", info);
@@ -8887,8 +9676,14 @@ type: info.type,
                       onChooseWeb={chooseDocExtractWeb}
                       onChooseLocal={chooseDocExtractLocal}
                       onExitChoose={exitAddDocExtractMode}
-                      webStepCount={pickedMarks.filter((m) => m.docExtractClick).length}
+                      webStepCount={pickedMarks.filter((m) => m.docExtractClick && m.docExtractClickPhase !== "post").length}
+                      webPostStepCount={pickedMarks.filter((m) => m.docExtractClick && m.docExtractClickPhase === "post").length}
+                      onStartAddPostClicks={startDocExtractPostClicks}
+                      onStartAddPreClicks={startDocExtractPreClicks}
                       onExitWebMode={exitAddDocExtractMode}
+                      onUndoClick={undoDocExtractClick}
+                      onGoBack={docExtractGoBack}
+                      onResumePicking={forceResumeDocPicking}
                       webStatus={docExtractSource === "web" ? docWebStatus : undefined}
                       docLocalRootPath={docLocalRootPath}
                       docLocalDirFiles={docLocalDirFiles}
@@ -8906,11 +9701,50 @@ type: info.type,
                       onExtractFields={sendDocFieldsToExtractPanel}
                       onExportDoc={() => setDocExportOpen(true)}
                       onBindUploadDoc={startBindUpload}
+                      onQuickUploadDoc={(fileData) => startQuickUpload(fileData)}
+                      onToast={(msg) => setSuccessToast(msg)}
+                      onError={(msg) => setError(msg)}
                       // 源文件预览（字段送「提取元素」后仍保留显示）
                       sourcePreview={docSourcePreview}
                       onCloseSourcePreview={() => setDocSourcePreview(null)}
                       // 预览就绪后点击触发 OCR
                       onTriggerWebExtract={triggerWebExtract}
+                      // 保底机制人工审查
+                      onSelectFallbackFile={selectFallbackFile}
+                      onConfirmFallbackFile={() => {
+                        const file = confirmFallbackFile();
+                        if (file) {
+                          // LOOP模式：confirmFallbackFile内部已resolve Promise，doOcrExtract会被调用
+                          // 非LOOP模式（手动触发保底）：设置pendingWebFileRef并触发triggerWebExtract
+                          const status = docWebStatusRef.current;
+                          const fallbackSide = status.phase === "fallback-review" ? status.side : "right";
+                          if (!fallbackWaitResolveRef.current && !batchRunning) {
+                            // 非LOOP模式，走手动提取流程
+                            pendingWebFileRef.current = {
+                              dataUrl: file.dataUrl,
+                              filename: file.filename,
+                              size: file.size,
+                              side: fallbackSide,
+                            };
+                            triggerWebExtract();
+                          }
+                        }
+                      }}
+                      onCancelFallback={() => {
+                        setDocWebStatus({ phase: "error", message: "保底机制：已跳过该记录" });
+                        // 如果有等待中的LOOP执行Promise，resolve null表示跳过
+                        if (fallbackWaitResolveRef.current) {
+                          const resolve = fallbackWaitResolveRef.current;
+                          fallbackWaitResolveRef.current = null;
+                          resolve(null);
+                        }
+                        // 保底取消，如果在批量执行中，2秒后重置状态继续
+                        if (batchRunning) {
+                          setTimeout(() => {
+                            setDocWebStatus({ phase: "idle" });
+                          }, 2000);
+                        }
+                      }}
                     />
                   ) : undefined}
                   focusPanel={
@@ -8945,7 +9779,13 @@ type: info.type,
                   widgetExtractContent={widgetExtractContent}
                   widgetSetupSignal={widgetExtractMode}
                   records={records}
-                  onSelectRecord={(id) => setSelectedId(id)}
+                  onSelectRecord={(id) => {
+                    setSelectedId(id);
+                    setBottomPanelOpen(true);
+                    exitAddingStepMode();
+                    setDocExtractSplitView(false);
+                    setDocSignal((s) => s + 1);
+                  }}
                   execPhase={execPhase}
                   currentMarkOrder={batchMarkCursor?.markOrder ?? null}
                   activeVerifyIdx={verifyFieldIdx}
@@ -9269,6 +10109,20 @@ type: info.type,
           <span>绑定上传：点击网页上的文件上传框（或上传按钮）</span>
           <button
             onClick={cancelBindUpload}
+            className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] hover:bg-white/30"
+          >
+            取消
+          </button>
+        </div>
+      )}
+
+      {/* ============ 一键直传：拾取中提示横幅 ============ */}
+      {quickUploadMode && (
+        <div className="fixed left-1/2 top-4 z-[9999] flex -translate-x-1/2 items-center gap-3 rounded-full bg-emerald-500 px-4 py-2 text-xs font-medium text-white shadow-lg">
+          <Upload className="h-3.5 w-3.5" />
+          <span>一键直传：点击网页上的文件上传框（或上传按钮）</span>
+          <button
+            onClick={cancelQuickUpload}
             className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] hover:bg-white/30"
           >
             取消
