@@ -208,6 +208,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   browser_use_llm_key: "",
   browser_use_llm_model: "",
   prevent_accidental_close: false,
+  ui_scale: 1.0,
 };
 
 type VerifyStatus = "idle" | "scanning" | "match" | "mismatch";
@@ -218,8 +219,80 @@ function getDetachMode(): string | null {
   return d || null;
 }
 
+// ============ UI缩放共享Hook：Ctrl+滚轮调整整体UI比例（供所有窗口/面板使用） ============
+// 使用Electron原生 webFrame.setZoomFactor() 在Chromium底层缩放整个渲染进程，
+// 所有坐标系统自动保持一致，getBoundingClientRect()返回的值与BrowserView.setBounds()需要的DIP坐标完全匹配。
+function useApplyUiScale() {
+  useEffect(() => {
+    const applyZoom = (z: number) => {
+      window.cinsideZoom?.setFactor(z);
+      // 延迟触发 resize，确保 zoom 已生效再让 BrowserPane 重新计算坐标
+      setTimeout(() => window.dispatchEvent(new Event("resize")), 16);
+      setTimeout(() => window.dispatchEvent(new Event("resize")), 100);
+    };
+
+    // 初始化：读取localStorage中的缩放值并立即应用
+    let current = 1.0;
+    try {
+      const saved = localStorage.getItem("cinside-ui-scale");
+      const val = saved ? parseFloat(saved) : 1.0;
+      if (!isNaN(val)) current = Math.max(0.6, Math.min(1.6, val));
+    } catch {}
+    applyZoom(current);
+
+    let ctrlPressed = false;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Control" || e.key === "Ctrl" || e.ctrlKey) ctrlPressed = true;
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Control" || e.key === "Ctrl" || !e.ctrlKey) ctrlPressed = false;
+    };
+    const handleBlur = () => { ctrlPressed = false; };
+    const handleWheel = (e: WheelEvent) => {
+      if (!ctrlPressed) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      const delta = e.deltaY < 0 ? 0.05 : -0.05;
+      const next = Math.max(0.6, Math.min(1.6, Math.round((current + delta) * 20) / 20));
+      if (next !== current) {
+        current = next;
+        applyZoom(current);
+        try { localStorage.setItem("cinside-ui-scale", next.toString()); } catch {}
+      }
+    };
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === "cinside-ui-scale" && e.newValue) {
+        const val = parseFloat(e.newValue);
+        if (!isNaN(val)) {
+          const clamped = Math.max(0.6, Math.min(1.6, val));
+          if (clamped !== current) {
+            current = clamped;
+            applyZoom(current);
+          }
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("keyup", handleKeyUp, true);
+    window.addEventListener("blur", handleBlur);
+    window.addEventListener("wheel", handleWheel, { capture: true, passive: false });
+    window.addEventListener("storage", handleStorage);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("keyup", handleKeyUp, true);
+      window.removeEventListener("blur", handleBlur);
+      window.removeEventListener("wheel", handleWheel, { capture: true } as EventListenerOptions);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, []);
+}
+
 // ============ 脱离模式：左侧数据源面板 ============
 function DetachedLeftPanel() {
+  useApplyUiScale();
   const [records, setRecords] = useState<ApplicantRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -289,6 +362,7 @@ function DetachedLeftPanel() {
 
 // ============ 脱离模式：底部核验结果面板 ============
 function DetachedBottomPanel() {
+  useApplyUiScale();
   const [record, setRecord] = useState<ApplicantRecord | null>(null);
   const [mappings, setMappings] = useState<FieldMapping[]>([]);
   const [comparisons, setComparisons] = useState<FieldComparison[]>([]);
@@ -558,6 +632,7 @@ function DetachedBottomPanel() {
               hasCheckedBatch={hasCheckedBatch}
               records={record ? [record] : []}
               onSelectRecord={(id) => window.electronAPI?.panelSendAction("select-record", id)}
+              selectMode={selectMode}
             />
             {/* 步骤设置面板：下面板分离后，TeachingGuide 在此渲染（而非主窗口） */}
             {teachingPhase !== "idle" && !selectMode && (
@@ -585,6 +660,7 @@ function DetachedBottomPanel() {
 
 // ============ 脱离模式：浏览器面板 ============
 function DetachedBrowserPanel({ detachSide }: { detachSide: "browser-left" | "browser-right" }) {
+  useApplyUiScale();
   const [url, setUrl] = useState<string>("");
   const [picking, setPicking] = useState(false);
   const [popupActive, setPopupActive] = useState(false);
@@ -656,6 +732,7 @@ function DetachedBrowserPanel({ detachSide }: { detachSide: "browser-left" | "br
 
 // ============ 脱离模式：Excel 视图面板 ============
 function DetachedExcelPanel() {
+  useApplyUiScale();
   const [records, setRecords] = useState<ApplicantRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pickedMarks, setPickedMarks] = useState<PickedMark[]>([]);
@@ -721,6 +798,19 @@ export default function App() {
   const [cardsGenerated, setCardsGenerated] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  // 整体UI缩放（Ctrl+滚轮调控，范围0.6~1.6，步长0.05）
+  const [uiScale, setUiScale] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem("cinside-ui-scale");
+      const val = saved ? parseFloat(saved) : 1.0;
+      return isNaN(val) ? 1.0 : Math.max(0.6, Math.min(1.6, val));
+    } catch {
+      return 1.0;
+    }
+  });
+  const uiScaleRef = useRef(uiScale);
+  uiScaleRef.current = uiScale;
+  const ctrlPressedRef = useRef(false);
   const [loadingRecords, setLoadingRecords] = useState(false);
   const [backendReady, setBackendReady] = useState(!window.electronAPI);
   const [showSettings, setShowSettings] = useState(false);
@@ -2136,6 +2226,86 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   useEffect(() => {
     window.electronAPI?.setPreventClose(!!settings.prevent_accidental_close);
   }, [settings.prevent_accidental_close]);
+
+  // ============ 整体UI缩放：Ctrl+滚轮调控 ============
+  useEffect(() => {
+    // 跟踪Ctrl键状态
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Control" || e.key === "Ctrl" || e.ctrlKey) {
+        ctrlPressedRef.current = true;
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Control" || e.key === "Ctrl" || !e.ctrlKey) {
+        ctrlPressedRef.current = false;
+      }
+    };
+    // 窗口失焦时重置Ctrl状态
+    const handleBlur = () => {
+      ctrlPressedRef.current = false;
+    };
+    // 滚轮事件：Ctrl按下时调整整体UI缩放
+    const handleWheel = (e: WheelEvent) => {
+      if (!ctrlPressedRef.current) return;
+      // 阻止默认的页面缩放/滚动行为
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      
+      const current = uiScaleRef.current;
+      // 向上滚动放大，向下滚动缩小，步长0.05
+      const delta = e.deltaY < 0 ? 0.05 : -0.05;
+      const next = Math.max(0.6, Math.min(1.6, Math.round((current + delta) * 20) / 20));
+      
+      if (next !== current) {
+        setUiScale(next);
+        uiScaleRef.current = next;
+        try {
+          localStorage.setItem("cinside-ui-scale", next.toString());
+        } catch {}
+        // zoom改变后触发resize，让BrowserView等组件重新计算bounds
+        window.dispatchEvent(new Event("resize"));
+      }
+    };
+    // 监听detached窗口的zoom变化
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === "cinside-ui-scale" && e.newValue) {
+        const val = parseFloat(e.newValue);
+        if (!isNaN(val)) {
+          const clamped = Math.max(0.6, Math.min(1.6, val));
+          if (clamped !== uiScaleRef.current) {
+            uiScaleRef.current = clamped;
+            setUiScale(clamped);
+            window.dispatchEvent(new Event("resize"));
+          }
+        }
+      }
+    };
+
+    // capture=true 确保在事件冒泡到BrowserPane之前优先处理
+    window.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("keyup", handleKeyUp, true);
+    window.addEventListener("blur", handleBlur);
+    window.addEventListener("wheel", handleWheel, { capture: true, passive: false });
+    window.addEventListener("storage", handleStorage);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("keyup", handleKeyUp, true);
+      window.removeEventListener("blur", handleBlur);
+      window.removeEventListener("wheel", handleWheel, { capture: true } as EventListenerOptions);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, []);
+
+  // 使用 webFrame.setZoomFactor 缩放整个渲染进程
+  // webFrame.setZoomFactor 后需要延迟触发 resize，确保 zoom 已生效再让 BrowserPane 重新计算坐标
+  useEffect(() => {
+    window.cinsideZoom?.setFactor(uiScale);
+    const t1 = setTimeout(() => window.dispatchEvent(new Event("resize")), 16);
+    const t2 = setTimeout(() => window.dispatchEvent(new Event("resize")), 100);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, [uiScale]);
 
   // 切换记录时重置 URL 和状态
   useEffect(() => {
@@ -9791,6 +9961,7 @@ type: info.type,
                   activeVerifyIdx={verifyFieldIdx}
                   reviewFieldResults={reviewFieldResults}
                   allPickedMarks={[...pickedMarks].sort((a, b) => a.order - b.order)}
+                  selectMode={selectMode}
                 />
               </div>
 
@@ -9991,10 +10162,22 @@ type: info.type,
       {/* 设置弹窗 */}
       {showSettings && (
         <SettingsModal
-          initial={settings}
+          initial={{ ...settings, ui_scale: uiScale }}
           onClose={() => setShowSettings(false)}
+          onScaleChange={(scale) => {
+            setUiScale(scale);
+            uiScaleRef.current = scale;
+            try { localStorage.setItem("cinside-ui-scale", scale.toString()); } catch {}
+            window.dispatchEvent(new Event("resize"));
+          }}
           onSaved={(s) => {
             setSettings(s);
+            if (typeof s.ui_scale === "number") {
+              setUiScale(s.ui_scale);
+              uiScaleRef.current = s.ui_scale;
+              try { localStorage.setItem("cinside-ui-scale", s.ui_scale.toString()); } catch {}
+              window.dispatchEvent(new Event("resize"));
+            }
             setConfig((c) =>
               c
                 ? {
