@@ -1,6 +1,18 @@
 "use strict";
 
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webFrame } = require("electron");
+
+// UI缩放：使用Electron原生的webFrame.setZoomFactor，而非CSS zoom。
+// webFrame在Chromium底层缩放整个渲染进程，所有坐标系统自动保持一致，
+// getBoundingClientRect()返回的值与BrowserView.setBounds()需要的DIP坐标完全匹配。
+contextBridge.exposeInMainWorld("cinsideZoom", {
+  setFactor: (factor) => {
+    try { webFrame.setZoomFactor(factor); } catch (_) {}
+  },
+  getFactor: () => {
+    try { return webFrame.getZoomFactor(); } catch (_) { return 1.0; }
+  },
+});
 
 contextBridge.exposeInMainWorld("electronAPI", {
   backendStatus: () => ipcRenderer.invoke("backend-status"),
