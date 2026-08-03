@@ -201,9 +201,15 @@ export interface ElectronAPI {
   onTwoStepPasteProgress: (callback: (data: { side: ViewSide | null; step: 0 | 1; done: boolean }) => void) => () => void;
 }
 
+interface CinsideZoom {
+  setFactor: (factor: number) => void;
+  getFactor: () => number;
+}
+
 declare global {
   interface Window {
     electronAPI?: ElectronAPI;
+    cinsideZoom?: CinsideZoom;
   }
 }
 
