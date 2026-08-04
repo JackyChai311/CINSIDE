@@ -61,6 +61,8 @@ interface Props {
   recordFields: Record<string, string>;
   /** 正在重选角色的 key（"draft:prevMonth" 或 "saved:<selector>:prevMonth"） */
   rolePickingKey: string | null;
+  /** 正在重选单个选项的 key（"draft:option:0" 或 "saved:<selector>:option:2"） */
+  optionPickingKey: string | null;
   /** 正在从左侧网页拾取来源的 key（"draft" 或 "saved:<selector>"） */
   leftPickingKey: string | null;
   /** 试跑结果（key：草稿="draft"，已保存="saved:<selector>"） */
@@ -78,6 +80,8 @@ interface Props {
   onRemoveSaved: (rightSelector: string) => void;
   /** 请求重选角色（App 端打开面板并进入拾取） */
   onPickRole: (key: string, role: CalendarRole) => void;
+  /** 请求重选单个选项元素 */
+  onPickOption: (key: string, optionIndex: number) => void;
   /** 请求从左侧网页拾取来源元素 */
   onPickLeftWeb: (key: string) => void;
   /** 试跑（App 端解析左侧值并执行控件脚本） */
@@ -349,20 +353,149 @@ function MockTriggerBox({ label, icon }: { label: string; icon?: React.ReactNode
   );
 }
 
-/** 模拟选项控件（下拉展开式） */
+/** 模拟选项控件（下拉展开式 或 直接显示按钮组） */
 function MockOptionWidget({
   widget,
   cardKey,
+  optionPickingKey,
   onWidgetChange,
+  onPickOption,
 }: {
   widget: WidgetDef;
   cardKey: string;
+  optionPickingKey: string | null;
   onWidgetChange: (w: WidgetDef) => void;
+  onPickOption: (key: string, idx: number) => void;
 }) {
   const options = widget.options || [];
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
+  const [newOptionText, setNewOptionText] = useState("");
   const triggerLabel = widget.triggerLabel || "请选择";
+  const isInline = widget.inline;
 
+  const addOption = () => {
+    const text = newOptionText.trim();
+    if (!text) return;
+    onWidgetChange({ ...widget, options: [...options, { text, selector: "" }] });
+    setNewOptionText("");
+  };
+
+  const removeOption = (idx: number) => {
+    onWidgetChange({ ...widget, options: options.filter((_, i) => i !== idx) });
+  };
+
+  // inline 模式：直接显示选项按钮组
+  if (isInline) {
+    return (
+      <div className="flex flex-col gap-1.5">
+        <div className="text-[9px] text-slate-400">
+          直接选项组（{options.length} 个选项，匹配左侧值自动点击）
+        </div>
+        {/* 选项按钮行 */}
+        <div className="flex flex-wrap gap-1.5">
+          {options.map((opt, i) => {
+            const isPicking = optionPickingKey === `${cardKey}:option:${i}`;
+            return (
+              <div key={`${opt.text}-${i}`} className="group relative">
+                <button
+                  onClick={() => setSelectedIdx(i === selectedIdx ? null : i)}
+                  className={`relative inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] transition-all ${
+                    selectedIdx === i
+                      ? "border-violet-400 bg-violet-100 text-violet-700 font-medium shadow-sm"
+                      : isPicking
+                      ? "animate-pulse border-violet-500 bg-violet-500 text-white"
+                      : "border-slate-200 bg-white text-slate-600 hover:border-violet-300 hover:bg-violet-50"
+                  }`}
+                >
+                  {opt.text}
+                  {/* 选项拾取按钮 */}
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onPickOption(cardKey, i);
+                    }}
+                    className={`inline-flex h-4 w-4 items-center justify-center rounded-full transition-colors ${
+                      opt.selector
+                        ? "text-emerald-500 hover:bg-emerald-100"
+                        : "text-amber-500 hover:bg-amber-100"
+                    }`}
+                    title={opt.selector ? "重选网页元素" : "拾取网页按钮元素"}
+                  >
+                    <Crosshair className="h-2.5 w-2.5" />
+                  </span>
+                  {/* 删除按钮 */}
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      removeOption(i);
+                    }}
+                    className="inline-flex h-4 w-4 items-center justify-center rounded-full text-rose-400 opacity-0 transition-all hover:bg-rose-100 group-hover:opacity-100"
+                    title="删除选项"
+                  >
+                    <X className="h-2.5 w-2.5" />
+                  </span>
+                </button>
+              </div>
+            );
+          })}
+        </div>
+        {/* 添加新选项 */}
+        <div className="flex items-center gap-1">
+          <input
+            value={newOptionText}
+            onChange={(e) => setNewOptionText(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addOption()}
+            placeholder="输入选项文字（如：男）"
+            className="h-6 flex-1 rounded border border-slate-200 bg-white px-2 text-[9px] text-slate-600 outline-none focus:border-violet-400"
+          />
+          <button
+            onClick={addOption}
+            disabled={!newOptionText.trim()}
+            className="inline-flex h-6 items-center gap-0.5 rounded bg-violet-500 px-2 text-[9px] font-medium text-white transition-colors hover:bg-violet-600 disabled:opacity-40"
+          >
+            <Plus className="h-3 w-3" />
+            添加
+          </button>
+        </div>
+        {/* 选中选项的别名/重选编辑 */}
+        {selectedIdx !== null && options[selectedIdx] && (
+          <div className="rounded bg-slate-50 p-1.5">
+            <div className="mb-1 flex items-center gap-1">
+              <span className="text-[9px] text-slate-500">选项「{options[selectedIdx].text}」：</span>
+              <button
+                onClick={() => onPickOption(cardKey, selectedIdx)}
+                className={`inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[8px] ${
+                  optionPickingKey === `${cardKey}:option:${selectedIdx}`
+                    ? "animate-pulse bg-violet-500 text-white"
+                    : options[selectedIdx].selector
+                    ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                    : "bg-amber-100 text-amber-700 hover:bg-amber-200"
+                }`}
+              >
+                <Crosshair className="h-2.5 w-2.5" />
+                {optionPickingKey === `${cardKey}:option:${selectedIdx}` ? "点击网页按钮…" : options[selectedIdx].selector ? "重选按钮" : "拾取按钮"}
+              </button>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-[8px] text-slate-400">别名（左侧值与此不同时填）：</span>
+              <input
+                value={options[selectedIdx].alias || ""}
+                onChange={(e) => {
+                  const alias = e.target.value || undefined;
+                  const next = options.map((o, j) => (j === selectedIdx ? { ...o, alias } : o));
+                  onWidgetChange({ ...widget, options: next });
+                }}
+                placeholder="如：M / 男性"
+                className="h-5 flex-1 rounded border border-slate-200 bg-white px-1 text-[9px] text-slate-600 outline-none"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // 下拉展开模式
   return (
     <div className="flex flex-col gap-1">
       <div className="text-[9px] text-slate-400">模拟预览（点击选项标注别名）</div>
@@ -596,17 +729,21 @@ function WidgetCardBody({
   widget,
   cardKey,
   rolePickingKey,
+  optionPickingKey,
   onWidgetChange,
   onPickRole,
+  onPickOption,
 }: {
   widget: WidgetDef;
   cardKey: string;
   rolePickingKey: string | null;
+  optionPickingKey: string | null;
   onWidgetChange: (w: WidgetDef) => void;
   onPickRole: (key: string, role: CalendarRole) => void;
+  onPickOption: (key: string, idx: number) => void;
 }) {
   if (widget.kind === "option") {
-    return <MockOptionWidget widget={widget} cardKey={cardKey} onWidgetChange={onWidgetChange} />;
+    return <MockOptionWidget widget={widget} cardKey={cardKey} optionPickingKey={optionPickingKey} onWidgetChange={onWidgetChange} onPickOption={onPickOption} />;
   }
   // 日历控件
   return <MockCalendarWidget widget={widget} cardKey={cardKey} rolePickingKey={rolePickingKey} onPickRole={onPickRole} />;
@@ -623,6 +760,7 @@ export default function WidgetExtractPanel(props: Props) {
     excelFields,
     recordFields,
     rolePickingKey,
+    optionPickingKey,
     leftPickingKey,
     testResults,
     testBusyKey,
@@ -636,6 +774,7 @@ export default function WidgetExtractPanel(props: Props) {
     onUpdateSavedBinding,
     onRemoveSaved,
     onPickRole,
+    onPickOption,
     onPickLeftWeb,
     onTest,
   } = props;
@@ -697,6 +836,12 @@ export default function WidgetExtractPanel(props: Props) {
       {draft && (
         <div className="flex flex-col gap-1.5 rounded-lg border-2 border-violet-300 bg-violet-50/60 px-2 py-1.5 ring-1 ring-violet-200">
           <div className="flex items-center gap-1">
+            <span
+              className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-violet-500 text-[8px] font-bold text-white animate-pulse"
+              title={`正在提取第 ${savedWidgets.length + 1} 个控件`}
+            >
+              {savedWidgets.length + 1}
+            </span>
             {draft.kind === "option" ? (
               <List className="h-3 w-3 shrink-0 text-violet-600" />
             ) : (
@@ -720,8 +865,10 @@ export default function WidgetExtractPanel(props: Props) {
             widget={draft}
             cardKey="draft"
             rolePickingKey={rolePickingKey}
+            optionPickingKey={optionPickingKey}
             onWidgetChange={onDraftChange}
             onPickRole={onPickRole}
+            onPickOption={onPickOption}
           />
           <BindingRow
             binding={draftBinding}
@@ -767,8 +914,8 @@ export default function WidgetExtractPanel(props: Props) {
         </div>
       )}
 
-      {/* 已保存控件卡片 */}
-      {savedWidgets.map(({ mapping, widget }) => {
+      {/* 已保存控件卡片（按保存顺序编号 1,2,3…，先设置的先执行） */}
+      {savedWidgets.map(({ mapping, widget }, widgetIdx) => {
         const key = `saved:${mapping.right_selector}`;
         const binding: WidgetBinding = {
           leftSource: mapping.left_source,
@@ -782,6 +929,12 @@ export default function WidgetExtractPanel(props: Props) {
             className="flex flex-col gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50/40 px-2 py-1.5"
           >
             <div className="flex items-center gap-1">
+              <span
+                className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-[8px] font-bold text-white"
+                title={`第 ${widgetIdx + 1} 个提取的控件（先设置先执行）`}
+              >
+                {widgetIdx + 1}
+              </span>
               {widget.kind === "option" ? (
                 <List className="h-3 w-3 shrink-0 text-emerald-600" />
               ) : (
@@ -805,8 +958,10 @@ export default function WidgetExtractPanel(props: Props) {
               widget={widget}
               cardKey={key}
               rolePickingKey={rolePickingKey}
+              optionPickingKey={optionPickingKey}
               onWidgetChange={(w) => onUpdateSaved(mapping.right_selector, w)}
               onPickRole={onPickRole}
+              onPickOption={onPickOption}
             />
             <BindingRow
               binding={binding}
