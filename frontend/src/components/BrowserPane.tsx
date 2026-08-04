@@ -94,6 +94,8 @@ interface Props {
   onOpenCredentials?: () => void;
   /** 该网站是否有保存的凭证（用于按钮角标） */
   credentialCount?: number;
+  /** 是否有覆盖面板激活（此时需要保持 BrowserView 隐藏，显示毛玻璃背景） */
+  overlayActive?: boolean;
 }
 
 interface BrowserTab {
@@ -180,6 +182,7 @@ export default function BrowserPane({
   onToggleSidebarCollapse,
   onOpenCredentials,
   credentialCount = 0,
+  overlayActive = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -202,7 +205,7 @@ export default function BrowserPane({
   const loadedUrlRef = useRef<string>("");
 
   // 多标签页状态（web模式和excel模式各自独立tabs）
-  const [webTabs, setWebTabs] = useState<BrowserTab[]>(() => [{ id: "tab-0", url: url || "" }]);
+  const [webTabs, setWebTabs] = useState<BrowserTab[]>(() => [{ id: "tab-0", url: "" }]);
   const [activeTabId, setActiveTabId] = useState<string>("tab-0");
   const [isAddingTab, setIsAddingTab] = useState(false);
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
@@ -216,9 +219,9 @@ export default function BrowserPane({
   // 当前模式下的tabs
   const isWebMode = viewMode === "web";
   const tabs = isWebMode ? webTabs : excelTabs;
-  // 已加载URL的tab（Web模式过滤空url，Excel模式全部算已加载）
+  // 已加载URL的tab（Web模式：空URL的新标签页也显示，Excel模式全部算已加载）
   const loadedTabs = isWebMode
-    ? tabs.filter((t) => t.url && t.url.trim() !== "")
+    ? tabs
     : tabs;
   // 当前激活的tab
   const activeTab = tabs.find((t) => t.id === activeTabId) || (tabs.length > 0 ? tabs[0] : null);
@@ -524,7 +527,19 @@ export default function BrowserPane({
     const trimmed = raw.trim();
     if (!trimmed) return "";
     if (/^https?:\/\//i.test(trimmed)) return trimmed;
-    if (/^localhost(:\d+)?(\/|$)/i.test(trimmed) || /^127\.0\.0\.1(:\d+)?(\/|$)/.test(trimmed)) {
+    // localhost/127.0.0.1 无端口时默认使用后端 8000 端口
+    if (/^localhost(\/|$)/i.test(trimmed)) {
+      const rest = trimmed.slice("localhost".length);
+      if (!rest || rest === "/") return "http://localhost:8000/";
+      return "http://localhost" + (rest.startsWith(":") ? "" : ":8000") + rest;
+    }
+    if (/^127\.0\.0\.1(\/|$)/.test(trimmed)) {
+      const rest = trimmed.slice("127.0.0.1".length);
+      if (!rest || rest === "/") return "http://127.0.0.1:8000/";
+      return "http://127.0.0.1" + (rest.startsWith(":") ? "" : ":8000") + rest;
+    }
+    // 已有端口号的 localhost
+    if (/^localhost:\d+(\/|$)/i.test(trimmed) || /^127\.0\.0\.1:\d+(\/|$)/.test(trimmed)) {
       return "http://" + trimmed;
     }
     if (/^[\w.-]+(:\d+)?(\/|$)/.test(trimmed) && !trimmed.includes(" ")) {
@@ -569,12 +584,8 @@ export default function BrowserPane({
         setActiveTabId(editingTabId);
         setEditingTabId(null);
       } else {
-        setWebTabs((prev) => {
-          if (prev.length === 0 || (prev.length === 1 && !prev[0].url)) {
-            return [{ id: activeTabId || "tab-0", url: targetUrl }];
-          }
-          return prev.map((t) => (t.id === activeTabId ? { ...t, url: targetUrl } : t));
-        });
+        // 更新当前激活的标签页URL（适用于在 CINSIDE SEARCH 页面输入URL的情况）
+        setWebTabs((prev) => prev.map((t) => (t.id === activeTabId ? { ...t, url: targetUrl } : t)));
       }
     }
     onUrlChange(targetUrl);
@@ -605,9 +616,15 @@ export default function BrowserPane({
       onRequestAddExcel?.();
       return;
     }
-    setIsAddingTab(true);
+    // 直接创建新的空标签页，显示 CINSIDE SEARCH
+    const newId = `tab-${tabIdCounter.current++}`;
+    setWebTabs((prev) => [...prev, { id: newId, url: "" }]);
+    setActiveTabId(newId);
+    setIsAddingTab(false);
     setEditingTabId(null);
     setInputUrl("");
+    onUrlChange("");
+    loadedUrlRef.current = "";
   };
 
   const switchTab = (tabId: string) => {
@@ -616,18 +633,30 @@ export default function BrowserPane({
     setEditingTabId(null);
     setActiveTabId(tabId);
     const targetTab = tabs.find((t) => t.id === tabId);
-    if (isWebMode && targetTab?.url && window.electronAPI) {
-      // 切换 tab 时显示过渡动画，避免旧页面闪现
-      setSearchTransition("showing");
-      if (detachedSide) window.electronAPI.detachedViewHide(detachedSide);
-      else window.electronAPI.viewHide(side);
-      loadedUrlRef.current = targetTab.url;
-      urlRef.current = targetTab.url;
-      onUrlChange(targetTab.url);
-      setLoading(true);
-      if (detachedSide) window.electronAPI.detachedViewLoad(detachedSide, targetTab.url);
-      else window.electronAPI.viewLoad(side, targetTab.url);
-      sync();
+    if (isWebMode && targetTab) {
+      if (targetTab.url && window.electronAPI) {
+        // 切换到有URL的tab时显示过渡动画，加载页面
+        setSearchTransition("showing");
+        if (detachedSide) window.electronAPI.detachedViewHide(detachedSide);
+        else window.electronAPI.viewHide(side);
+        loadedUrlRef.current = targetTab.url;
+        urlRef.current = targetTab.url;
+        onUrlChange(targetTab.url);
+        setLoading(true);
+        if (detachedSide) window.electronAPI.detachedViewLoad(detachedSide, targetTab.url);
+        else window.electronAPI.viewLoad(side, targetTab.url);
+        sync();
+      } else if (!targetTab.url) {
+        // 切换到空标签页，显示 CINSIDE SEARCH
+        urlRef.current = "";
+        loadedUrlRef.current = "";
+        onUrlChange("");
+        setInputUrl("");
+        setLoading(false);
+        setSearchTransition("idle");
+        if (detachedSide && window.electronAPI) window.electronAPI.detachedViewHide(detachedSide);
+        else if (window.electronAPI) window.electronAPI.viewHide(side);
+      }
     }
   };
 
@@ -645,17 +674,19 @@ export default function BrowserPane({
     e.stopPropagation();
     if (!isWebMode) return; // Excel tabs 不通过UI关闭
     setWebTabs((prev) => {
-      if (prev.length <= 1) {
-        setActiveTabId("tab-0");
+      const idx = prev.findIndex((t) => t.id === tabId);
+      const next = prev.filter((t) => t.id !== tabId);
+      if (next.length === 0) {
+        // 关闭最后一个标签页时，创建一个新的空标签页显示 CINSIDE SEARCH
+        const newId = `tab-${tabIdCounter.current++}`;
+        setActiveTabId(newId);
         setInputUrl("");
         setIsAddingTab(false);
         setEditingTabId(null);
         loadedUrlRef.current = "";
         onUrlChange("");
-        return [{ id: "tab-0", url: "" }];
+        return [{ id: newId, url: "" }];
       }
-      const idx = prev.findIndex((t) => t.id === tabId);
-      const next = prev.filter((t) => t.id !== tabId);
       if (tabId === activeTabId || tabId === editingTabId) {
         const newActive = next[Math.max(0, idx - 1)] || next[0];
         setActiveTabId(newActive.id);
@@ -674,6 +705,7 @@ export default function BrowserPane({
           else window.electronAPI.viewLoad(side, newActive.url);
           sync();
         } else if (!newActive.url) {
+          // 切换到空标签页，显示 CINSIDE SEARCH
           loadedUrlRef.current = "";
           onUrlChange("");
         }
@@ -698,7 +730,7 @@ export default function BrowserPane({
 
   // 从URL推导tab标题
   const getTabTitle = (tabUrl: string): string => {
-    if (!tabUrl) return "新标签页";
+    if (!tabUrl) return newTabTitle || "新标签页";
     try {
       const u = new URL(tabUrl);
       return u.hostname.replace(/^www\./, "") || tabUrl;
@@ -786,6 +818,7 @@ export default function BrowserPane({
                 {loadedTabs.length > 0 ? (
                   <>
                     {loadedTabs.map((tab) => {
+                      const isEmpty = !tab.url;
                       const isActive = tab.id === activeTabId && !isAddingTab && editingTabId !== tab.id;
                       const isDimmed = isAddingTab || (editingTabId && editingTabId !== tab.id);
                       return (
@@ -814,7 +847,12 @@ export default function BrowserPane({
                             <button
                               onClick={(e) => {
                                 if ((e.target as HTMLElement).closest("[data-close-btn]")) return;
+                                // 空标签页点击直接切换，不进入编辑
                                 switchTab(tab.id);
+                              }}
+                              onDoubleClick={(e) => {
+                                if ((e.target as HTMLElement).closest("[data-close-btn]")) return;
+                                startEditTab(tab.id);
                               }}
                               className={[
                                 "group flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all max-w-[160px]",
@@ -823,44 +861,28 @@ export default function BrowserPane({
                                   : "bg-white/30 text-slate-500 hover:bg-white/50 hover:text-slate-600",
                                 isDimmed ? "opacity-40 pointer-events-none" : "",
                               ].join(" ")}
-                              title={tab.url}
+                              title={isEmpty ? (newTabTitle || "新标签页") : tab.url}
                             >
-                              <Globe className={`h-2.5 w-2.5 shrink-0 ${isActive ? "text-brand-500" : "text-slate-400"}`} />
+                              {isEmpty ? (
+                                <Search className={`h-2.5 w-2.5 shrink-0 ${isActive ? "text-brand-500" : "text-slate-400"}`} />
+                              ) : (
+                                <Globe className={`h-2.5 w-2.5 shrink-0 ${isActive ? "text-brand-500" : "text-slate-400"}`} />
+                              )}
                               <span className="truncate">{getTabTitle(tab.url)}</span>
-                              <span
-                                data-close-btn
-                                onClick={(e) => closeTab(tab.id, e)}
-                                className="ml-0.5 rounded p-0.5 opacity-0 pointer-events-none transition-opacity hover:bg-slate-200 group-hover:opacity-100 group-hover:pointer-events-auto"
-                              >
-                                <X className="h-2.5 w-2.5" />
-                              </span>
+                              {!isEmpty && (
+                                <span
+                                  data-close-btn
+                                  onClick={(e) => closeTab(tab.id, e)}
+                                  className="ml-0.5 rounded p-0.5 opacity-0 pointer-events-none transition-opacity hover:bg-slate-200 group-hover:opacity-100 group-hover:pointer-events-auto"
+                                >
+                                  <X className="h-2.5 w-2.5" />
+                                </span>
+                              )}
                             </button>
                           )}
                         </div>
                       );
                     })}
-                    {isAddingTab ? (
-                      <div className="flex items-center gap-0.5 rounded-md border border-brand-300 bg-white px-1.5 py-0.5 shadow-sm ring-1 ring-brand-200">
-                        <Globe className="h-2.5 w-2.5 shrink-0 text-brand-400" />
-                        <input
-                          autoFocus
-                          value={inputUrl}
-                          onChange={(e) => setInputUrl(e.target.value)}
-                          disabled={disabled}
-                          placeholder="输入URL，Enter打开"
-                          className="w-[160px] bg-transparent text-[11px] text-slate-700 outline-none placeholder:text-slate-400"
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") openPage();
-                            if (e.key === "Escape") cancelTabInput();
-                          }}
-                          onBlur={() => {
-                            if (inputUrl) openPage();
-                            else cancelTabInput();
-                          }}
-                        />
-                        {loading && <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin text-brand-500" />}
-                      </div>
-                    ) : (
                       <button
                         onClick={startAddTab}
                         className="shrink-0 rounded-md p-0.5 text-slate-400 transition-colors hover:bg-white/60 hover:text-brand-600"
@@ -869,7 +891,6 @@ export default function BrowserPane({
                       >
                         <Plus className="h-3.5 w-3.5" />
                       </button>
-                    )}
                   </>
                 ) : (
                   <div className="flex min-w-0 flex-1 items-center gap-1 rounded-md border border-white/60 bg-white/50 px-1.5 py-0.5">
@@ -1247,6 +1268,22 @@ export default function BrowserPane({
             ))
           )}
         </div>
+
+        {/* 面板打开时的毛玻璃遮罩层（替代原来的纯白屏） */}
+        {overlayActive && (
+          <div
+            className="pointer-events-none absolute inset-0 z-20"
+            style={{
+              background: `
+                linear-gradient(135deg, rgba(255,255,255,0.90) 0%, rgba(248,250,252,0.78) 40%, rgba(241,245,249,0.85) 60%, rgba(255,255,255,0.90) 100%),
+                radial-gradient(ellipse at 20% 20%, rgba(255,255,255,0.6) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(226,232,240,0.5) 0%, transparent 50%)
+              `,
+              backdropFilter: "blur(24px) saturate(1.3)",
+              WebkitBackdropFilter: "blur(24px) saturate(1.3)",
+            }}
+          />
+        )}
 
         {/* 搜索过渡动画覆盖层 */}
         {searchTransition !== "idle" && (
