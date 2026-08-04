@@ -40,6 +40,10 @@ export interface CustomTextEntry {
   type?: string;
   /** 是否已保存为映射步骤 */
   saved?: boolean;
+  /** 来源：doc=文件提取送来的字段，manual=手动添加（旧数据无此字段按 manual 处理） */
+  source?: "doc" | "manual";
+  /** 创建时间戳：提取元素面板内按设置先后排序编号（FIFO） */
+  createdAt?: number;
 }
 
 interface Props {
