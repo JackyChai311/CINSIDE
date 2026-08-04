@@ -93,7 +93,7 @@ if _MOCK_DIR:
     print(f"[init] mock dir: {_MOCK_DIR}")
     app.mount("/mock", StaticFiles(directory=str(_MOCK_DIR), html=True), name="mock")
 
-# DEMO 页面：左侧数据源 admin / 右侧审查流 review / 右侧录入流 entry
+# DEMO 页面：左侧数据源 admin / 右侧审查流 review / 右侧录入流 entry / 新录入系统 fill-demo
 _DEMO_DIR = None
 for _candidate in [
     get_resource_path("demo-pages"),
@@ -109,12 +109,15 @@ if _DEMO_DIR:
     _admin_dir = _DEMO_DIR / "admin"
     _review_dir = _DEMO_DIR / "review"
     _entry_dir = _DEMO_DIR / "entry"
+    _fill_demo_dir = _DEMO_DIR / "fill-demo"
     if _admin_dir.exists():
         app.mount("/demo-admin", StaticFiles(directory=str(_admin_dir), html=True), name="demo-admin")
     if _review_dir.exists():
         app.mount("/demo-review", StaticFiles(directory=str(_review_dir), html=True), name="demo-review")
     if _entry_dir.exists():
         app.mount("/demo-entry", StaticFiles(directory=str(_entry_dir), html=True), name="demo-entry")
+    if _fill_demo_dir.exists():
+        app.mount("/demo-fill", StaticFiles(directory=str(_fill_demo_dir), html=True), name="demo-fill")
 
 
 @app.get("/")
