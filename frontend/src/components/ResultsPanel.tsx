@@ -41,6 +41,30 @@ import {
   OVERALL_LABELS,
 } from "../types";
 
+/** 提取元素面板 TAB 元信息（doc=文件提取 / custom=自定义文本 / widget=控件提取） */
+const EXTRACT_TAB_META: Record<"doc" | "custom" | "widget", { label: string; icon: typeof FileText }> = {
+  doc: { label: "文件提取", icon: FileText },
+  custom: { label: "自定义文本", icon: Type },
+  widget: { label: "控件提取", icon: MousePointerClick },
+};
+
+/** 提取元素汇总项：字段对比设置态「提取元素」小卡片（文件提取步骤 + 自定义文本 + 控件，按设置时间 FIFO） */
+export interface ExtractSummaryItem {
+  id: string;
+  kind: "doc" | "custom" | "widget";
+  /** 类别名：本地文件 / 网页下载 / 文件字段 / 自定义文本 / 选项控件 / 日历控件 */
+  name: string;
+  /** 详情描述（标签/内容预览） */
+  detail: string;
+  /** 是否已保存为 LOOP 步骤 */
+  saved: boolean;
+  /** 设置时间戳（FIFO 排序用） */
+  ts: number;
+  /** 关联的网页元素选择器（点击卡片定位预览用，可空） */
+  selector?: string;
+  side?: "left" | "right";
+}
+
 /** 执行步骤项：统一表达前置点击/输入/审查字段/收尾点击 */
 export interface ExecStepItem {
   /** 唯一id，用于DOM定位 */
@@ -99,6 +123,16 @@ interface Props {
   customTextContent?: React.ReactNode;
   /** 外部信号：当为 true 时，自动切换"提取元素"面板到设置模式 */
   customTextMode?: boolean;
+  /** 文件提取字段内容（从文件/图片识别出来送到面板的字段） */
+  docFieldsContent?: React.ReactNode;
+  /** 提取元素面板 TAB 切换请求：ts 变化时自动切到对应 TAB */
+  extractTabRequest?: { tab: "doc" | "custom" | "widget"; ts: number } | null;
+  /** 提取元素面板 TAB 顺序（FIFO：先设置的功能排前面） */
+  extractTabOrder?: Array<"doc" | "custom" | "widget">;
+  /** 各 TAB 条目数量角标 */
+  extractCounts?: { doc: number; custom: number; widget: number };
+  /** 提取元素汇总（字段对比设置态「提取元素」小卡片，按设置时间 FIFO） */
+  extractStepSummary?: ExtractSummaryItem[];
   /** 控件提取面板内容（点击展开选项/日历控件，有值时优先于自定义文本显示） */
   widgetExtractContent?: React.ReactNode;
   /** 外部信号：当为 true 时，自动切换"提取元素"面板到设置模式（控件提取） */
@@ -150,6 +184,11 @@ export default function ResultsPanel({
   hasCheckedBatch = false,
   customTextContent,
   customTextMode = false,
+  docFieldsContent,
+  extractTabRequest = null,
+  extractTabOrder = [],
+  extractCounts,
+  extractStepSummary = [],
   widgetExtractContent,
   widgetSetupSignal = false,
   records = [],
@@ -213,6 +252,11 @@ export default function ResultsPanel({
           hasCheckedBatch={hasCheckedBatch}
           customTextContent={customTextContent}
           customTextMode={customTextMode}
+          docFieldsContent={docFieldsContent}
+          extractTabRequest={extractTabRequest}
+          extractTabOrder={extractTabOrder}
+          extractCounts={extractCounts}
+          extractStepSummary={extractStepSummary}
           widgetExtractContent={widgetExtractContent}
           widgetSetupSignal={widgetSetupSignal}
           records={records}
@@ -521,6 +565,11 @@ function ReportTab({
   hasCheckedBatch = false,
   customTextContent,
   customTextMode = false,
+  docFieldsContent,
+  extractTabRequest = null,
+  extractTabOrder = [],
+  extractCounts,
+  extractStepSummary = [],
   widgetExtractContent,
   widgetSetupSignal = false,
   records = [],
@@ -569,6 +618,16 @@ function ReportTab({
   customTextContent?: React.ReactNode;
   /** 外部信号：当为 true 时，自动切换"提取元素"面板到设置模式 */
   customTextMode?: boolean;
+  /** 文件提取字段内容（从文件/图片识别出来送到面板的字段） */
+  docFieldsContent?: React.ReactNode;
+  /** 提取元素面板 TAB 切换请求：ts 变化时自动切到对应 TAB */
+  extractTabRequest?: { tab: "doc" | "custom" | "widget"; ts: number } | null;
+  /** 提取元素面板 TAB 顺序（FIFO：先设置的功能排前面） */
+  extractTabOrder?: Array<"doc" | "custom" | "widget">;
+  /** 各 TAB 条目数量角标 */
+  extractCounts?: { doc: number; custom: number; widget: number };
+  /** 提取元素汇总（字段对比设置态「提取元素」小卡片，按设置时间 FIFO） */
+  extractStepSummary?: ExtractSummaryItem[];
   /** 控件提取面板内容（点击展开选项/日历控件，有值时优先于自定义文本显示） */
   widgetExtractContent?: React.ReactNode;
   /** 外部信号：当为 true 时，自动切换"提取元素"面板到设置模式（控件提取） */
@@ -607,6 +666,22 @@ function ReportTab({
   const [docSetupMode, setDocSetupMode] = useState(false);
   /** 提取元素面板模式开关：true=设置（自定义字段），false=结果（提取内容/DEMO） */
   const [extractSetupMode, setExtractSetupMode] = useState(false);
+  /** 提取元素面板当前选中的 TAB：doc=文件提取 / custom=自定义文本 / widget=控件提取 */
+  const [extractTab, setExtractTab] = useState<"doc" | "custom" | "widget">("custom");
+
+  // 提取元素面板 TAB 顺序：FIFO（先设置的功能排前面）；顺序为空时按已有内容兜底
+  const orderedExtractTabs = useMemo<Array<"doc" | "custom" | "widget">>(() => {
+    if (extractTabOrder.length > 0) return extractTabOrder;
+    const tabs: Array<"doc" | "custom" | "widget"> = [];
+    if (docFieldsContent) tabs.push("doc");
+    if (customTextContent) tabs.push("custom");
+    if (widgetExtractContent) tabs.push("widget");
+    return tabs;
+  }, [extractTabOrder, docFieldsContent, customTextContent, widgetExtractContent]);
+  // 当前激活的 TAB：优先用户选择，不在顺序中时回退到第一个
+  const activeExtractTab = orderedExtractTabs.includes(extractTab)
+    ? extractTab
+    : orderedExtractTabs[0] ?? "custom";
 
   // 聚焦字段对比面板时（用户正在添加前置/收尾点击或审查步骤），自动切换到设置模式
   useEffect(() => {
@@ -631,6 +706,13 @@ function ReportTab({
   useEffect(() => {
     if (widgetSetupSignal) setExtractSetupMode(true);
   }, [widgetSetupSignal]);
+  // 外部请求切换提取元素 TAB：配置哪个功能就自动切到对应 TAB，并展开面板到设置态
+  useEffect(() => {
+    if (!extractTabRequest) return;
+    setExtractTab(extractTabRequest.tab);
+    setShowExtractPanel(true);
+    setExtractSetupMode(true);
+  }, [extractTabRequest]);
   // 外部信号：切换到文件处理面板的结果模式（点击学生卡片"查看"时触发）
   useEffect(() => {
     if (switchToDocSignal != null && switchToDocSignal > 0) {
@@ -1791,6 +1873,8 @@ function ReportTab({
   const isDocFocus = focusPanel === "doc";
   const isDocExtractFocus = focusPanel === "doc-extract";
   const isAll = !focusPanel;
+  // 控件提取模式：有 widgetExtractContent 时隐藏文件处理面板，只显示字段对比+提取元素两栏
+  const isWidgetMode = !!widgetExtractContent;
   // 提取元素面板显示逻辑：
   // - 非步骤设置模式（结果查看）：始终显示（三栏布局）
   // - 步骤设置模式：按用户手动开关控制（默认隐藏，给步骤卡片更多空间，可手动展开）
@@ -1798,7 +1882,7 @@ function ReportTab({
   // - doc-extract 聚焦模式：强制显示（文件处理+提取元素两栏）
   const isSetupMode = fieldSetupMode || docSetupMode || extractSetupMode;
   const showExtract = isAll
-    ? (!isSetupMode || showExtractPanel || !!customTextContent || !!widgetExtractContent || extractSetupMode)
+    ? (!isSetupMode || showExtractPanel || !!customTextContent || !!widgetExtractContent || !!docFieldsContent || extractSetupMode)
     : isDocExtractFocus;
 
   // 横向滚动容器的滚轮处理：垂直滚轮 → 水平滚动
@@ -1959,6 +2043,85 @@ function ReportTab({
                     </div>
                     <div className="line-clamp-2 py-0.5 text-[10px] font-medium leading-tight text-slate-700">{mp.right_label || mp.right_selector}</div>
                   </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* 提取元素分组 —— 文件提取/自定义文本/控件小卡片，按设置先后 FIFO 排列（全局观察） */}
+      <div className="shrink-0">
+        <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold text-violet-700">
+          <Eye className="h-3.5 w-3.5" />
+          提取元素
+          <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-semibold text-violet-600">{extractStepSummary.length}</span>
+        </div>
+        {extractStepSummary.length === 0 ? (
+          <div className="flex gap-2 pt-1.5">
+            <div className="flex shrink-0 min-w-[80px] max-w-[150px] items-start gap-1.5 rounded-xl border-2 border-dashed border-violet-200/60 bg-violet-50/20 pl-2 pr-7 py-1.5 opacity-50">
+              <div className="flex shrink-0 flex-col items-center gap-0.5">
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-slate-200/60 text-[11px] font-black text-slate-400">?</span>
+                <span className="flex h-4 w-4 items-center justify-center rounded-full bg-slate-200/60">
+                  <Eye className="h-2.5 w-2.5 text-slate-400" />
+                </span>
+              </div>
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className="text-[9px] font-bold uppercase tracking-wide text-slate-300">提取</span>
+                <span className="text-[10px] font-medium leading-tight text-slate-300">文件提取/自定义文本/控件…</span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
+            {extractStepSummary.map((item, idx) => {
+              const KindIcon = item.kind === "doc" ? FileText : item.kind === "custom" ? Type : MousePointerClick;
+              return (
+                <div
+                  key={item.id}
+                  onClick={() => {
+                    if (item.selector) {
+                      onPreviewMark?.({
+                        id: item.id,
+                        order: idx + 1,
+                        side: item.side || "right",
+                        source: "web",
+                        selector: item.selector,
+                        label: item.detail,
+                        workflow: "review",
+                        createdAt: 0,
+                      });
+                    }
+                  }}
+                  className={[
+                    "group relative flex shrink-0 min-w-[80px] max-w-[150px] items-start gap-1.5 rounded-xl pl-2 pr-2 py-1.5 transition-all",
+                    item.selector ? "cursor-pointer hover:-translate-y-0.5 hover:shadow-lg" : "",
+                    "border-2 border-violet-200 bg-gradient-to-br from-violet-50 to-white hover:border-violet-300 hover:from-violet-100/80",
+                  ].join(" ")}
+                  title={`${item.name} · ${item.detail}${item.selector ? "（点击在网页定位）" : ""}`}
+                >
+                  {/* FIFO 序号 + 类别图标 */}
+                  <div className="flex shrink-0 flex-col items-center gap-0.5">
+                    <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-purple-600 text-[11px] font-black text-white shadow-md">
+                      {idx + 1}
+                    </span>
+                    <span className="flex h-4 w-4 items-center justify-center rounded-full bg-violet-400 text-white shadow-sm">
+                      <KindIcon className="h-2.5 w-2.5" />
+                    </span>
+                  </div>
+                  {/* 文字内容 */}
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="text-[9px] font-bold uppercase tracking-wide text-violet-600">{item.name}</span>
+                    <span className="line-clamp-2 text-[10px] font-medium leading-tight text-slate-700">{item.detail}</span>
+                  </div>
+                  {/* 保存状态角标 */}
+                  <span
+                    className={`absolute right-1 top-1 rounded-full px-1 py-px text-[8px] font-bold ${
+                      item.saved ? "bg-emerald-100 text-emerald-600" : "bg-amber-100 text-amber-600"
+                    }`}
+                  >
+                    {item.saved ? "已存" : "待存"}
+                  </span>
                 </div>
               );
             })}
@@ -2185,29 +2348,29 @@ function ReportTab({
           )}
         </div>
 
-        {/* 左/中 拖拽分隔条 —— 聚焦模式下隐藏 */}
+        {/* 左/中 拖拽分隔条 —— 聚焦模式或控件提取模式下隐藏 */}
         <div
           className={[
             "group relative hidden shrink-0 cursor-col-resize items-center justify-center lg:flex",
             "transition-opacity duration-300",
-            isAll ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
+            (isAll && !isWidgetMode) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
           ].join(" ")}
-          style={{ width: isAll ? 6 : 0 }}
+          style={{ width: (isAll && !isWidgetMode) ? 6 : 0 }}
           onMouseDown={onMouseDown("left")}
         >
           <div className="h-full w-px bg-slate-200 transition-colors group-hover:bg-brand-400" />
           <div className="absolute h-8 w-1 rounded-full bg-slate-300 opacity-0 transition-opacity group-hover:opacity-100" />
         </div>
 
-        {/* 文件处理卡片 —— 2面板时在右半向左展开/向右回收；3面板时在中间左右展开/向中心回收 */}
+        {/* 文件处理卡片 —— 2面板时在右半向左展开/向右回收；3面板时在中间左右展开/向中心回收；控件提取模式下隐藏 */}
         <div
           className={[
             "relative flex max-h-[55vh] flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full",
             "transition-all duration-500 ease-in-out",
-            (isDocFocus || isDocExtractFocus) ? "flex-1" : isAll ? "" : "lg:border-0 lg:px-0 lg:mx-0",
+            (isDocFocus || isDocExtractFocus) ? "flex-1" : (isAll && !isWidgetMode) ? "" : "lg:border-0 lg:px-0 lg:mx-0",
           ].join(" ")}
           style={{
-            flexBasis: isFieldFocus
+            flexBasis: isFieldFocus || isWidgetMode
               ? "0%"
               : isDocFocus
                 ? undefined
@@ -2217,7 +2380,10 @@ function ReportTab({
                     ? (showExtract ? `${midWidth}%` : undefined)
                     : "0%",
             flexShrink: 0,
-            flexGrow: (isDocFocus || isDocExtractFocus || (isAll && !showExtract)) ? 1 : 0,
+            flexGrow: (isDocFocus || isDocExtractFocus || (isAll && !isWidgetMode && !showExtract)) ? 1 : 0,
+            opacity: isWidgetMode ? 0 : 1,
+            maxWidth: isWidgetMode ? 0 : undefined,
+            pointerEvents: isWidgetMode ? "none" : undefined,
           }}
         >
           {/* 展开/收起「提取元素」面板按钮 —— 仅步骤设置模式下显示（结果模式始终展开三栏），贴在文件处理面板右边缘外侧 */}
@@ -2296,21 +2462,21 @@ function ReportTab({
           )}
         </div>
 
-        {/* 中/右 拖拽分隔条 —— 仅三栏模式（showExtract且非doc-extract聚焦）下显示 */}
+        {/* 中/右 拖拽分隔条 —— 仅三栏模式（showExtract且非doc-extract聚焦、非控件提取模式）下显示 */}
         <div
           className={[
             "group relative hidden shrink-0 cursor-col-resize items-center justify-center lg:flex",
             "transition-opacity duration-300",
-            (showExtract && isAll) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
+            (showExtract && isAll && !isWidgetMode) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
           ].join(" ")}
-          style={{ width: (showExtract && isAll) ? 6 : 0 }}
+          style={{ width: (showExtract && isAll && !isWidgetMode) ? 6 : 0 }}
           onMouseDown={onMouseDown("right")}
         >
           <div className="h-full w-px bg-slate-200 transition-colors group-hover:bg-brand-400" />
           <div className="absolute h-8 w-1 rounded-full bg-slate-300 opacity-0 transition-opacity group-hover:opacity-100" />
         </div>
 
-        {/* 提取元素卡片 —— 最右侧，向左展开/向右回收（默认隐藏，通过文件处理面板左侧按钮开启） */}
+        {/* 提取元素卡片 —— 最右侧，向左展开/向右回收（默认隐藏，通过文件处理面板左侧按钮开启）；控件提取模式下和字段对比平分空间 */}
         <div
           className={[
             "flex max-h-[55vh] min-w-0 flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full",
@@ -2324,7 +2490,9 @@ function ReportTab({
                 ? "0%"
                 : isDocExtractFocus
                   ? "50%"
-                  : showExtract ? "30%" : "0%",
+                  : isWidgetMode
+                    ? (showExtract ? "50%" : "0%")
+                    : showExtract ? "30%" : "0%",
             flexShrink: 0,
             flexGrow: showExtract ? 1 : 0,
           }}
@@ -2351,14 +2519,87 @@ function ReportTab({
               {extractSetupMode ? "设置" : "结果"}
             </button>
           </div>
+          {/* 三 TAB 栏：文件提取 / 自定义文本 / 控件提取 —— 按设置先后排序（FIFO，先设置的功能排前面） */}
+          {extractSetupMode && orderedExtractTabs.length > 0 && (
+            <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-violet-100 bg-white/70 px-1.5 py-1">
+              {orderedExtractTabs.map((tab, tabIdx) => {
+                const meta = EXTRACT_TAB_META[tab];
+                const TabIcon = meta.icon;
+                const count = extractCounts?.[tab] ?? 0;
+                const active = activeExtractTab === tab;
+                return (
+                  <button
+                    key={tab}
+                    onClick={() => setExtractTab(tab)}
+                    className={[
+                      "flex min-w-0 shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium transition-colors",
+                      active
+                        ? "bg-violet-600 text-white shadow-sm"
+                        : "bg-violet-50 text-violet-600 hover:bg-violet-100",
+                    ].join(" ")}
+                    title={`${meta.label} — 第 ${tabIdx + 1} 个设置的功能（先设置先执行）`}
+                  >
+                    <span
+                      className={`inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full text-[8px] font-bold ${
+                        active ? "bg-white/25 text-white" : "bg-violet-200 text-violet-700"
+                      }`}
+                    >
+                      {tabIdx + 1}
+                    </span>
+                    <TabIcon className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{meta.label}</span>
+                    {count > 0 && (
+                      <span
+                        className={`ml-0.5 inline-flex h-3.5 min-w-3.5 shrink-0 items-center justify-center rounded-full px-0.5 text-[8px] font-bold ${
+                          active ? "bg-white text-violet-700" : "bg-violet-500 text-white"
+                        }`}
+                      >
+                        {count}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
           <div className="min-h-0 flex-1 min-w-[200px] overflow-y-auto overflow-x-hidden p-1.5">
-            {extractSetupMode ? (widgetExtractContent || customTextContent || (
-              <div className="flex h-full min-h-[140px] flex-col items-center justify-center gap-2 text-center text-[11px] text-slate-400">
-                <Type className="h-8 w-8 text-violet-200" />
-                <div className="text-violet-500">点击「自定义文本」添加临时字段</div>
-                <div className="text-[10px] text-slate-400">补充 Excel 和网页上都没有的信息</div>
-              </div>
-            )) : extractedContent}
+            {extractSetupMode ? (
+              orderedExtractTabs.length > 0 ? (
+                activeExtractTab === "doc" ? (
+                  docFieldsContent || (
+                    <div className="flex h-full min-h-[140px] flex-col items-center justify-center gap-2 text-center text-[11px] text-slate-400">
+                      <FileText className="h-8 w-8 text-violet-200" />
+                      <div className="text-violet-500">暂无文件提取字段</div>
+                      <div className="text-[10px] text-slate-400">在文件处理面板识别文件后，勾选字段送到这里</div>
+                    </div>
+                  )
+                ) : activeExtractTab === "custom" ? (
+                  customTextContent || (
+                    <div className="flex h-full min-h-[140px] flex-col items-center justify-center gap-2 text-center text-[11px] text-slate-400">
+                      <Type className="h-8 w-8 text-violet-200" />
+                      <div className="text-violet-500">点击「自定义文本」添加临时字段</div>
+                      <div className="text-[10px] text-slate-400">补充 Excel 和网页上都没有的信息</div>
+                    </div>
+                  )
+                ) : (
+                  widgetExtractContent || (
+                    <div className="flex h-full min-h-[140px] flex-col items-center justify-center gap-2 text-center text-[11px] text-slate-400">
+                      <MousePointerClick className="h-8 w-8 text-violet-200" />
+                      <div className="text-violet-500">暂无提取的控件</div>
+                      <div className="text-[10px] text-slate-400">点击「控件提取」快照下拉选项 / 日历控件</div>
+                    </div>
+                  )
+                )
+              ) : (
+                widgetExtractContent || customTextContent || docFieldsContent || (
+                  <div className="flex h-full min-h-[140px] flex-col items-center justify-center gap-2 text-center text-[11px] text-slate-400">
+                    <Type className="h-8 w-8 text-violet-200" />
+                    <div className="text-violet-500">点击「自定义文本」添加临时字段</div>
+                    <div className="text-[10px] text-slate-400">补充 Excel 和网页上都没有的信息</div>
+                  </div>
+                )
+              )
+            ) : extractedContent}
           </div>
         </div>
       </div>
