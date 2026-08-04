@@ -147,6 +147,34 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
                   placeholder="sensenova-6.7-flash-lite"
                 />
                 <p className="mt-1 text-[10px] text-slate-400">必须支持 image_url 输入，否则 OCR/视觉任务不可用。</p>
+                {/* 常用模型快捷切换：方便证件/OCR 场景避开内容审核 */}
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {[
+                    { tag: "免费", m: "sensenova-6.7-flash-lite", warn: "证件/人脸会被内容审核拦截" },
+                    { tag: "推荐", m: "glm-4v-plus", warn: "智谱 GLM-4V，对证件照较宽松" },
+                    { tag: "推荐", m: "glm-4v-flash", warn: "智谱 GLM-4V Flash 免费版" },
+                    { tag: "备选", m: "qwen-vl-max", warn: "通义千问 VL" },
+                    { tag: "备选", m: "qwen-vl-plus", warn: "通义千问 VL Plus" },
+                  ].map(({ tag, m, warn }) => (
+                    <button
+                      key={m}
+                      type="button"
+                      title={warn}
+                      onClick={() => update({ vision_model: m })}
+                      className={[
+                        "rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors",
+                        settings.vision_model === m
+                          ? tag === "免费"
+                            ? "bg-amber-100 text-amber-700 ring-1 ring-amber-300"
+                            : "bg-emerald-100 text-emerald-700 ring-1 ring-emerald-300"
+                          : "bg-slate-100 text-slate-500 hover:bg-slate-200",
+                      ].join(" ")}
+                    >
+                      {m}
+                      <span className={`ml-1 ${tag === "免费" ? "text-amber-500" : "text-emerald-500"}`}>{tag}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
               <button
                 type="button"
