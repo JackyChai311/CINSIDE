@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>大学申请录入系统 DEMO</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f4f8;color:#1e293b;min-height:100vh}
+.hidden{display:none!important}
+
+/* 首页 */
+.dashboard{max-width:1200px;margin:0 auto;padding:24px}
+.dash-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;padding-bottom:20px;border-bottom:2px solid #e2e8f0}
+.dash-head h1{font-size:28px;color:#0f172a;display:flex;align-items:center;gap:12px}
+.dash-head h1 .logo{width:44px;height:44px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);border-radius:12px;display:flex;align-items:center;justify-content:center;color:white;font-size:22px;font-weight:800}
+.btn-primary{background:linear-gradient(135deg,#3b82f6,#6366f1);color:white;border:none;padding:12px 28px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:8px;transition:all .2s}
+.btn-primary:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(59,130,246,.3)}
+.btn-secondary{background:white;color:#475569;border:1px solid #cbd5e1;padding:10px 20px;border-radius:8px;font-size:14px;cursor:pointer;transition:all .15s}
+.btn-secondary:hover{background:#f8fafc;border-color:#94a3b8}
+.btn-danger{background:#fef2f2;color:#dc2626;border:1px solid #fecaca}
+.btn-danger:hover{background:#fee2e2}
+.btn-sm{padding:6px 14px;font-size:13px;border-radius:6px}
+.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:28px}
+.stat-card{background:white;border-radius:14px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.stat-card .label{font-size:13px;color:#64748b;margin-bottom:6px}
+.stat-card .value{font-size:32px;font-weight:800;color:#0f172a}
+.stat-card.blue .value{color:#3b82f6}
+.stat-card.green .value{color:#10b981}
+.stat-card.amber .value{color:#f59e0b}
+.stat-card.purple .value{color:#8b5cf6}
+.section-title{font-size:18px;font-weight:700;margin:24px 0 14px;color:#0f172a;display:flex;align-items:center;gap:8px}
+.draft-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-bottom:28px}
+.draft-card{background:white;border-radius:12px;padding:18px;border:1px solid #e2e8f0;cursor:pointer;transition:all .2s}
+.draft-card:hover{border-color:#3b82f6;box-shadow:0 4px 16px rgba(59,130,246,.12);transform:translateY(-2px)}
+.draft-card .name{font-weight:700;font-size:16px;margin-bottom:4px}
+.draft-card .meta{font-size:13px;color:#64748b;display:flex;gap:12px;margin-bottom:8px}
+.draft-card .bar{height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden}
+.draft-card .bar-fill{height:100%;background:linear-gradient(90deg,#3b82f6,#8b5cf6);border-radius:3px}
+.draft-card .bar-text{font-size:11px;color:#94a3b8;margin-top:4px}
+.empty-state{text-align:center;padding:48px 24px;color:#94a3b8}
+.empty-state .ico{font-size:48px;margin-bottom:12px;opacity:.5}
+
+/* 录入向导 */
+.wizard{display:flex;height:calc(100vh - 0px);background:#f8fafc}
+.wiz-sidebar{width:260px;background:white;border-right:1px solid #e2e8f0;padding:24px 0;flex-shrink:0;display:flex;flex-direction:column}
+.wiz-sidebar .back{padding:0 20px;margin-bottom:20px;display:flex;align-items:center;gap:6px;color:#64748b;cursor:pointer;font-size:14px}
+.wiz-sidebar .back:hover{color:#3b82f6}
+.step-nav{flex:1;list-style:none;padding:0 12px}
+.step-nav li{display:flex;align-items:center;gap:12px;padding:12px 14px;margin-bottom:4px;border-radius:10px;cursor:pointer;font-size:14px;color:#64748b;transition:all .15s}
+.step-nav li:hover{background:#f1f5f9}
+.step-nav li.active{background:linear-gradient(135deg,rgba(59,130,246,.1),rgba(99,102,241,.1));color:#3b82f6;font-weight:600}
+.step-nav li.done{color:#10b981}
+.step-nav li .num{width:28px;height:28px;border-radius:50%;background:#e2e8f0;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0}
+.step-nav li.active .num{background:#3b82f6;color:white}
+.step-nav li.done .num{background:#10b981;color:white}
+.wiz-content{flex:1;overflow-y:auto;padding:32px 48px}
+.wiz-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:28px}
+.wiz-head h2{font-size:24px;font-weight:700}
+.wiz-body{background:white;border-radius:16px;padding:32px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.form-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}
+.form-group{display:flex;flex-direction:column;gap:6px}
+.form-group.full{grid-column:1/-1}
+.form-group label{font-size:13px;font-weight:600;color:#334155}
+.form-group label .req{color:#ef4444;margin-left:2px}
+.form-group input,.form-group textarea{border:1px solid #cbd5e1;border-radius:8px;padding:10px 14px;font-size:14px;transition:all .15s;outline:none;font-family:inherit}
+.form-group input:focus,.form-group textarea:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)}
+.form-group textarea{resize:vertical;min-height:80px}
+
+/* 自定义控件 */
+.radio-group,.checkbox-group{display:flex;gap:10px;flex-wrap:wrap}
+.radio-item,.checkbox-item{display:flex;align-items:center;gap:8px;padding:10px 18px;border:1px solid #cbd5e1;border-radius:8px;cursor:pointer;font-size:14px;transition:all .15s;background:white}
+.radio-item:hover,.checkbox-item:hover{border-color:#3b82f6;background:#f8fafc}
+.radio-item.sel,.checkbox-item.sel{border-color:#3b82f6;background:#eff6ff;color:#1d4ed8;font-weight:600}
+.radio-item input,.checkbox-item input{display:none}
+.select-box{border:1px solid #cbd5e1;border-radius:8px;padding:10px 14px;font-size:14px;cursor:pointer;background:white;display:flex;justify-content:space-between;align-items:center;transition:all .15s}
+.select-box:hover{border-color:#94a3b8}
+.select-box.open,.select-box:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)}
+.select-dropdown{position:absolute;z-index:50;background:white;border:1px solid #e2e8f0;border-radius:10px;margin-top:4px;box-shadow:0 10px 40px rgba(0,0,0,.12);max-height:240px;overflow-y:auto;min-width:180px}
+.select-dropdown div{padding:10px 14px;cursor:pointer;font-size:14px;transition:background .1s}
+.select-dropdown div:hover{background:#f1f5f9}
+.select-dropdown div.sel{background:#eff6ff;color:#3b82f6;font-weight:600}
+.pos-rel{position:relative}
+.date-box{border:1px solid #cbd5e1;border-radius:8px;padding:10px 14px;font-size:14px;cursor:pointer;background:white;display:flex;justify-content:space-between;align-items:center}
+.date-box:hover{border-color:#94a3b8}
+.cal-pop{position:absolute;z-index:50;background:white;border:1px solid #e2e8f0;border-radius:12px;margin-top:6px;padding:16px;box-shadow:0 10px 40px rgba(0,0,0,.12);width:300px}
+.cal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.cal-head button{background:none;border:none;font-size:18px;cursor:pointer;padding:4px 10px;border-radius:6px;color:#64748b}
+.cal-head button:hover{background:#f1f5f9;color:#334155}
+.cal-head .title{font-weight:700;font-size:15px}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;text-align:center}
+.cal-grid .dow{font-size:11px;color:#94a3b8;font-weight:600;padding:6px 0}
+.cal-grid .day{padding:8px 0;font-size:13px;border-radius:6px;cursor:pointer;transition:all .1s}
+.cal-grid .day:hover{background:#f1f5f9}
+.cal-grid .day.sel{background:#3b82f6;color:white;font-weight:600}
+.cal-grid .day.other{color:#cbd5e1}
+.cal-grid .day.today{border:2px solid #3b82f6}
+.upload-zone{border:2px dashed #cbd5e1;border-radius:12px;padding:28px;text-align:center;cursor:pointer;transition:all .2s;background:#fafbfc}
+.upload-zone:hover{border-color:#3b82f6;background:#eff6ff}
+.upload-zone.drag{border-color:#3b82f6;background:#dbeafe}
+.upload-zone .ico{font-size:40px;margin-bottom:8px}
+.upload-zone .txt{font-size:14px;color:#475569}
+.upload-zone .sub{font-size:12px;color:#94a3b8;margin-top:4px}
+.file-list{margin-top:12px}
+.file-item{display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8fafc;border-radius:8px;margin-bottom:6px;font-size:13px}
+.file-item .name{flex:1}
+.file-item .rm{color:#ef4444;cursor:pointer;padding:2px 6px;border-radius:4px}
+.file-item .rm:hover{background:#fee2e2}
+
+/* 按钮 */
+.wiz-foot{display:flex;justify-content:space-between;margin-top:28px;padding-top:24px;border-top:1px solid #e2e8f0}
+.wiz-foot .left{display:flex;gap:10px}
+.wiz-foot .right{display:flex;gap:10px}
+
+/* 弹窗 */
+.modal-overlay{position:fixed;inset:0;background:rgba(15,23,42,.5);backdrop-filter:blur(4px);z-index:100;display:flex;align-items:center;justify-content:center;animation:fadeIn .2s}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.modal{background:white;border-radius:16px;width:90%;max-width:560px;max-height:85vh;overflow:hidden;box-shadow:0 25px 80px rgba(0,0,0,.25);animation:slideUp .25s}
+@keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+.modal-head{padding:20px 24px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center}
+.modal-head h3{font-size:18px;font-weight:700;display:flex;align-items:center;gap:8px}
+.modal-close{background:none;border:none;font-size:20px;cursor:pointer;color:#94a3b8;width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center}
+.modal-close:hover{background:#f1f5f9;color:#334155}
+.modal-body{padding:24px;overflow-y:auto;max-height:55vh}
+.modal-foot{padding:16px 24px;border-top:1px solid #e2e8f0;display:flex;justify-content:flex-end;gap:10px}
+.draft-preview .row{display:flex;gap:16px;padding:10px 0;border-bottom:1px solid #f1f5f9}
+.draft-preview .row:last-child{border:none}
+.draft-preview .row .k{width:100px;color:#64748b;font-size:13px;flex-shrink:0}
+.draft-preview .row .v{flex:1;font-weight:500;font-size:14px}
+.progress-ring{width:80px;height:80px;margin:0 auto 16px}
+.progress-text{text-align:center;font-size:28px;font-weight:800;color:#3b82f6}
+.help-list{list-style:none}
+.help-list li{padding:12px 0;border-bottom:1px solid #f1f5f9;display:flex;gap:12px}
+.help-list li:last-child{border:none}
+.help-list .num{width:28px;height:28px;background:#eff6ff;color:#3b82f6;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0}
+
+/* Toast */
+.toast{position:fixed;bottom:24px;right:24px;background:#0f172a;color:white;padding:12px 20px;border-radius:10px;font-size:14px;z-index:200;animation:toastIn .3s;box-shadow:0 8px 24px rgba(0,0,0,.2)}
+@keyframes toastIn{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+</style>
+</head>
+<body>
+
+<!-- 首页 -->
+<div class="dashboard" id="homeView">
+  <div class="dash-head">
+    <h1><span class="logo">🎓</span>大学申请录入系统</h1>
+    <button class="btn-primary" onclick="openHelp()">❓ 使用帮助</button>
+  </div>
+  <div class="stats-row">
+    <div class="stat-card blue"><div class="label">总申请数</div><div class="value" id="statTotal">0</div></div>
+    <div class="stat-card green"><div class="label">已提交</div><div class="value" id="statSubmit">0</div></div>
+    <div class="stat-card amber"><div class="label">待处理</div><div class="value" id="statPending">0</div></div>
+    <div class="stat-card purple"><div class="label">草稿箱</div><div class="value" id="statDraft">0</div></div>
+  </div>
+  <div style="text-align:center;margin:40px 0">
+    <button class="btn-primary" style="font-size:18px;padding:18px 48px;border-radius:14px" onclick="startNew()">✨ 开始新的录入</button>
+    <p style="margin-top:12px;color:#94a3b8;font-size:13px">点击上方按钮开始新的申请录入流程</p>
+  </div>
+  <div class="section-title">📝 草稿箱 <span style="font-size:13px;color:#94a3b8;font-weight:400">（点击查看详情）</span></div>
+  <div class="draft-list" id="draftList"></div>
+</div>
+
+<!-- 录入向导 -->
+<div class="wizard hidden" id="wizardView">
+  <div class="wiz-sidebar">
+    <div class="back" onclick="goHome()">← 返回首页</div>
+    <ul class="step-nav" id="stepNav"></ul>
+    <div style="padding:0 20px;margin-top:12px">
+      <button class="btn-secondary btn-sm" style="width:100%" onclick="saveDraftBtn()">💾 保存草稿</button>
+    </div>
+  </div>
+  <div class="wiz-content">
+    <div class="wiz-head">
+      <h2 id="stepTitle"></h2>
+      <button class="btn-secondary btn-sm" onclick="openHelp()">❓ 帮助</button>
+    </div>
+    <div class="wiz-body" id="wizBody"></div>
+    <div class="wiz-foot">
+      <div class="left"><button class="btn-secondary" id="btnPrev" onclick="prevStep()">← 上一步</button></div>
+      <div class="right">
+        <button class="btn-secondary" onclick="saveDraftBtn()">保存草稿</button>
+        <button class="btn-primary" id="btnNext" onclick="nextStep()">下一步 →</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 弹窗 -->
+<div class="modal-overlay hidden" id="modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3><span id="modalIcon"></span><span id="modalTitle"></span></h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot" id="modalFoot"></div>
+  </div>
+</div>
+
+<div class="toast hidden" id="toast"></div>
+
+<script>
+const STEPS=[
+  {id:1,title:'基本信息',icon:'📋'},
+  {id:2,title:'护照信息',icon:'📘'},
+  {id:3,title:'申请信息',icon:'🎓'},
+  {id:4,title:'附加服务',icon:'⚙️'},
+  {id:5,title:'材料上传',icon:'📎'},
+  {id:6,title:'确认提交',icon:'✅'}
+];
+let curStep=1,formData={},editId=null,autoTimer=null;
+
+// 工具函数
+function $(id){return document.getElementById(id)}
+function toast(msg){const t=$('toast');t.textContent=msg;t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),2500)}
+function getDrafts(){try{return JSON.parse(localStorage.getItem('fill_drafts')||'[]')}catch{return[]}}
+function setDrafts(d){localStorage.setItem('fill_drafts',JSON.stringify(d))}
+function getSubmitted(){try{return JSON.parse(localStorage.getItem('fill_submitted')||'[]')}catch{return[]}}
+
+// 首页
+function goHome(){$('wizardView').classList.add('hidden');$('homeView').classList.remove('hidden');clearInterval(autoTimer);renderHome()}
+function renderHome(){
+  const drafts=getDrafts(),subs=getSubmitted();
+  $('statTotal').textContent=subs.length+drafts.length;
+  $('statSubmit').textContent=subs.length;
+  $('statDraft').textContent=drafts.length;
+  const dh=$('draftList');
+  if(drafts.length===0){
+    dh.innerHTML='<div class="empty-state" style="grid-column:1/-1"><div class="ico">📭</div><p>暂无草稿，点击上方按钮开始录入</p></div>';
+  }else{
+    dh.innerHTML=drafts.map(d=>`
+      <div class="draft-card" onclick="viewDraft('${d.id}')">
+        <div class="name">${d.data.name||'未命名'}</div>
+        <div class="meta"><span>步骤 ${d.step}/6</span><span>${new Date(d.savedAt).toLocaleString('zh-CN')}</span></div>
+        <div class="bar"><div class="bar-fill" style="width:${Math.round(d.step/6*100)}%"></div></div>
+        <div class="bar-text">${Math.round(d.step/6*100)}% 完成</div>
+      </div>`).join('');
+  }
+}
+
+function viewDraft(id){
+  const drafts=getDrafts(),d=drafts.find(x=>x.id===id);if(!d)return;
+  const pct=Math.round(d.step/6*100);
+  $('modalIcon').textContent='📝';
+  $('modalTitle').textContent='草稿详情';
+  $('modalBody').innerHTML=`
+    <div style="text-align:center;margin-bottom:20px">
+      <div class="progress-ring"><svg viewBox="0 0 36 36" style="width:80px;height:80px">
+        <path d="M18 2 a 16 16 0 0 1 0 32 a 16 16 0 0 1 0 -32" fill="none" stroke="#e2e8f0" stroke-width="3"/>
+        <path d="M18 2 a 16 16 0 0 1 0 32 a 16 16 0 0 1 0 -32" fill="none" stroke="#3b82f6" stroke-width="3" stroke-dasharray="${pct},100" stroke-linecap="round" transform="rotate(-90 18 18)"/>
+      </svg></div>
+      <div class="progress-text">${pct}%</div>
+      <div style="color:#64748b;font-size:13px;margin-top:4px">已完成 ${d.step}/6 步</div>
+    </div>
+    <div class="draft-preview">
+      <div class="row"><span class="k">学生姓名</span><span class="v">${d.data.name||'未填写'}</span></div>
+      <div class="row"><span class="k">护照号</span><span class="v">${d.data.passportNo||'未填写'}</span></div>
+      <div class="row"><span class="k">当前步骤</span><span class="v">${STEPS[d.step-1].icon} ${STEPS[d.step-1].title}</span></div>
+      <div class="row"><span class="k">保存时间</span><span class="v">${new Date(d.savedAt).toLocaleString('zh-CN')}</span></div>
+      ${d.data.university?`<div class="row"><span class="k">目标院校</span><span class="v">${d.data.university}</span></div>`:''}
+      ${d.data.program?`<div class="row"><span class="k">申请专业</span><span class="v">${d.data.program}</span></div>`:''}
+    </div>`;
+  $('modalFoot').innerHTML=`
+    <button class="btn-secondary btn-danger btn-sm" onclick="delDraft('${d.id}')">🗑 删除</button>
+    <button class="btn-primary btn-sm" onclick="closeModal();editDraft('${d.id}')">✏️ 继续编辑</button>`;
+  $('modal').classList.remove('hidden');
+}
+function delDraft(id){const d=getDrafts().filter(x=>x.id!==id);setDrafts(d);closeModal();renderHome();toast('草稿已删除')}
+function editDraft(id){const drafts=getDrafts(),d=drafts.find(x=>x.id===id);if(!d)return;formData=JSON.parse(JSON.stringify(d.data));curStep=d.step;editId=id;$('homeView').classList.add('hidden');$('wizardView').classList.remove('hidden');renderWizard();startAutoSave()}
+function startNew(){editId=null;curStep=1;formData={};$('homeView').classList.add('hidden');$('wizardView').classList.remove('hidden');renderWizard();startAutoSave()}
+
+// 自动保存
+function startAutoSave(){clearInterval(autoTimer);autoTimer=setInterval(()=>{if(!$('wizardView').classList.contains('hidden')){autoSaveDraft()}},30000)}
+function autoSaveDraft(){const drafts=getDrafts(),now=Date.now();if(editId){let d=drafts.find(x=>x.id===editId);if(d){d.data=JSON.parse(JSON.stringify(formData));d.step=curStep;d.savedAt=now}}else{editId='draft_'+now;drafts.push({id:editId,data:JSON.parse(JSON.stringify(formData)),step:curStep,savedAt:now})}setDrafts(drafts)}
+function saveDraftBtn(){autoSaveDraft();toast('💾 草稿已保存')}
+
+// 向导渲染
+function renderWizard(){renderStepNav();renderStepContent()}
+function renderStepNav(){
+  $('stepNav').innerHTML=STEPS.map(s=>{
+    let cls='';if(s.id===curStep)cls='active';else if(s.id<curStep)cls='done';
+    const ck=s.id<curStep?'✓':s.id;
+    return `<li class="${cls}" onclick="goStep(${s.id})"><span class="num">${ck}</span><span>${s.icon} ${s.title}</span></li>`
+  }).join('');
+}
+function goStep(s){if(s<=curStep){curStep=s;renderWizard()}}
+function renderStepContent(){$('stepTitle').textContent=STEPS[curStep-1].icon+' '+STEPS[curStep-1].title;$('btnPrev').style.visibility=curStep===1?'hidden':'visible';$('btnNext').textContent=curStep===6?'✅ 提交申请':'下一步 →';const fn='renderStep'+curStep;if(window[fn])window[fn]()}
+
+// 步骤1：基本信息
+function renderStep1(){
+  $('wizBody').innerHTML=`
+    <div class="form-grid">
+      <div class="form-group"><label>姓名<span class="req">*</span></label><input type="text" id="f_name" value="${formData.name||''}" placeholder="请输入姓名" oninput="formData.name=this.value"></div>
+      <div class="form-group"><label>英文名</label><input type="text" id="f_ename" value="${formData.englishName||''}" placeholder="如：Zhang San" oninput="formData.englishName=this.value"></div>
+      <div class="form-group"><label>性别<span class="req">*</span></label>
+        <div class="radio-group" id="f_gender">
+          <label class="radio-item ${formData.gender==='男'?'sel':''}" onclick="pickRadio(this,'f_gender','gender','男')">♂ 男</label>
+          <label class="radio-item ${formData.gender==='女'?'sel':''}" onclick="pickRadio(this,'f_gender','gender','女')">♀ 女</label>
+        </div>
+      </div>
+      <div class="form-group"><label>出生日期<span class="req">*</span></label>
+        <div class="pos-rel">
+          <div class="date-box" onclick="toggleCal('f_birth')"><span id="f_birth_v">${formData.birth||'请选择日期'}</span>📅</div>
+          <div class="cal-pop hidden" id="f_birth_cal"></div>
+        </div>
+      </div>
+      <div class="form-group"><label>联系电话<span class="req">*</span></label><input type="tel" id="f_phone" value="${formData.phone||''}" placeholder="请输入手机号" oninput="formData.phone=this.value"></div>
+      <div class="form-group"><label>电子邮箱<span class="req">*</span></label><input type="email" id="f_email" value="${formData.email||''}" placeholder="请输入邮箱" oninput="formData.email=this.value"></div>
+      <div class="form-group full"><label>通讯地址</label><textarea id="f_addr" placeholder="请输入详细地址" oninput="formData.address=this.value">${formData.address||''}</textarea></div>
+    </div>`;
+  if(formData.birth){setTimeout(()=>showCal('f_birth',formData.birth,true),50)}
+}
+
+// 步骤2：护照信息
+function renderStep2(){
+  $('wizBody').innerHTML=`
+    <div class="form-grid">
+      <div class="form-group"><label>护照号码<span class="req">*</span></label><input type="text" id="f_pno" value="${formData.passportNo||''}" placeholder="如：E12345678" oninput="formData.passportNo=this.value"></div>
+      <div class="form-group"><label>签发国家<span class="req">*</span></label>
+        <div class="pos-rel">
+          <div class="select-box" id="f_nat_box" onclick="toggleSel('f_nat')"><span id="f_nat_v">${formData.nationality||'请选择'}</span>▾</div>
+          <div class="select-dropdown hidden" id="f_nat_dd"></div>
+        </div>
+      </div>
+      <div class="form-group"><label>护照签发日期<span class="req">*</span></label>
+        <div class="pos-rel"><div class="date-box" onclick="toggleCal('f_pissue')"><span id="f_pissue_v">${formData.passportIssue||'请选择'}</span>📅</div><div class="cal-pop hidden" id="f_pissue_cal"></div></div>
+      </div>
+      <div class="form-group"><label>护照有效期至<span class="req">*</span></label>
+        <div class="pos-rel"><div class="date-box" onclick="toggleCal('f_pexp')"><span id="f_pexp_v">${formData.passportExpiry||'请选择'}</span>📅</div><div class="cal-pop hidden" id="f_pexp_cal"></div></div>
+      </div>
+      <div class="form-group"><label>护照类型</label>
+        <div class="radio-group">
+          <label class="radio-item ${formData.passportType==='普通护照'?'sel':''}" onclick="pickRadio(this,null,'passportType','普通护照')">普通护照</label>
+          <label class="radio-item ${formData.passportType==='公务护照'?'sel':''}" onclick="pickRadio(this,null,'passportType','公务护照')">公务护照</label>
+          <label class="radio-item ${formData.passportType==='外交护照'?'sel':''}" onclick="pickRadio(this,null,'passportType','外交护照')">外交护照</label>
+        </div>
+      </div>
+    </div>`;
+  buildSel('f_nat',['中国','日本','韩国','新加坡','马来西亚','泰国','美国','英国','加拿大','澳大利亚'],'nationality');
+}
+
+// 步骤3：申请信息
+function renderStep3(){
+  $('wizBody').innerHTML=`
+    <div class="form-grid">
+      <div class="form-group"><label>目标院校<span class="req">*</span></label>
+        <div class="pos-rel">
+          <div class="select-box" id="f_uni_box" onclick="toggleSel('f_uni')"><span id="f_uni_v">${formData.university||'请选择大学'}</span>▾</div>
+          <div class="select-dropdown hidden" id="f_uni_dd"></div>
+        </div>
+      </div>
+      <div class="form-group"><label>申请专业<span class="req">*</span></label>
+        <div class="pos-rel">
+          <div class="select-box" id="f_prog_box" onclick="toggleSel('f_prog')"><span id="f_prog_v">${formData.program||'请选择专业'}</span>▾</div>
+          <div class="select-dropdown hidden" id="f_prog_dd"></div>
+        </div>
+      </div>
+      <div class="form-group"><label>入学学期<span class="req">*</span></label>
+        <div class="radio-group">
+          <label class="radio-item ${formData.semester==='2027春季'?'sel':''}" onclick="pickRadio(this,null,'semester','2027春季')">2027年春季</label>
+          <label class="radio-item ${formData.semester==='2027秋季'?'sel':''}" onclick="pickRadio(this,null,'semester','2027秋季')">2027年秋季</label>
+          <label class="radio-item ${formData.semester==='2028春季'?'sel':''}" onclick="pickRadio(this,null,'semester','2028春季')">2028年春季</label>
+        </div>
+      </div>
+      <div class="form-group"><label>学位类型<span class="req">*</span></label>
+        <div class="radio-group">
+          <label class="radio-item ${formData.degree==='本科'?'sel':''}" onclick="pickRadio(this,null,'degree','本科')">本科</label>
+          <label class="radio-item ${formData.degree==='硕士'?'sel':''}" onclick="pickRadio(this,null,'degree','硕士')">硕士</label>
+          <label class="radio-item ${formData.degree==='博士'?'sel':''}" onclick="pickRadio(this,null,'degree','博士')">博士</label>
+        </div>
+      </div>
+      <div class="form-group full"><label>申请陈述</label><textarea id="f_ps" placeholder="请输入个人陈述..." oninput="formData.personalStatement=this.value">${formData.personalStatement||''}</textarea></div>
+    </div>`;
+  buildSel('f_uni',['东京大学','京都大学','大阪大学','早稻田大学','庆应义塾大学','首尔大学','延世大学','高丽大学'],'university');
+  buildSel('f_prog',['计算机科学','电子工程','机械工程','经济学','管理学','医学','法学','文学'],'program');
+}
+
+// 步骤4：附加服务
+function renderStep4(){
+  $('wizBody').innerHTML=`
+    <p style="color:#64748b;margin-bottom:20px">请选择需要的附加服务（可多选）</p>
+    <div class="checkbox-group" style="flex-direction:column;gap:10px">
+      ${[
+        {v:'接机',d:'机场接机服务（¥300）',i:'✈️'},
+        {v:'住宿',d:'住宿安排（¥500）',i:'🏠'},
+        {v:'保险',d:'医疗保险代购（¥800/年）',i:'🏥'},
+        {v:'手机卡',d:'手机卡办理（¥100）',i:'📱'},
+        {v:'银行卡',d:'银行卡开户协助（¥200）',i:'💳'},
+        {v:'签证',d:'签证续签辅导（¥400）',i:'📋'}
+      ].map(s=>`
+        <label class="checkbox-item ${(formData.services||[]).includes(s.v)?'sel':''}" style="width:100%;justify-content:flex-start" onclick="toggleCk(this,'${s.v}')">
+          <span style="font-size:20px">${s.i}</span>
+          <div><div style="font-weight:600">${s.v}</div><div style="font-size:12px;color:#94a3b8">${s.d}</div></div>
+        </label>`).join('')}
+    </div>
+    <div class="form-group full" style="margin-top:20px"><label>特殊要求/备注</label><textarea placeholder="如有其他需求请在此说明..." oninput="formData.notes=this.value">${formData.notes||''}</textarea></div>`;
+}
+function toggleCk(el,v){
+  if(!formData.services)formData.services=[];
+  const i=formData.services.indexOf(v);
+  if(i>=0)formData.services.splice(i,1);else formData.services.push(v);
+  el.classList.toggle('sel');
+}
+
+// 步骤5：材料上传
+function renderStep5(){
+  $('wizBody').innerHTML=`
+    <p style="color:#64748b;margin-bottom:20px">请上传所需申请材料（支持PDF、JPG、PNG格式）</p>
+    <div class="form-grid">
+      <div class="form-group full"><label>护照首页扫描件<span class="req">*</span></label>
+        <div class="upload-zone" onclick="this.querySelector('input').click()" ondragover="event.preventDefault();this.classList.add('drag')" ondragleave="this.classList.remove('drag')" ondrop="event.preventDefault();this.classList.remove('drag');handleDrop(event,'passport')">
+          <div class="ico">📄</div><div class="txt">点击或拖拽上传护照首页</div><div class="sub">支持 PDF/JPG/PNG，最大 10MB</div>
+          <input type="file" accept=".pdf,.jpg,.jpeg,.png" hidden onchange="handleFile(this,'passport')">
+        </div>
+        <div class="file-list" id="fl_passport"></div>
+      </div>
+      <div class="form-group"><label>成绩单<span class="req">*</span></label>
+        <div class="upload-zone" onclick="this.querySelector('input').click()" ondragover="event.preventDefault();this.classList.add('drag')" ondragleave="this.classList.remove('drag')" ondrop="event.preventDefault();this.classList.remove('drag');handleDrop(event,'transcript')">
+          <div class="ico">📊</div><div class="txt">上传成绩单</div><input type="file" accept=".pdf,.jpg,.jpeg,.png" hidden onchange="handleFile(this,'transcript')">
+        </div>
+        <div class="file-list" id="fl_transcript"></div>
+      </div>
+      <div class="form-group"><label>语言能力证明</label>
+        <div class="upload-zone" onclick="this.querySelector('input').click()" ondragover="event.preventDefault();this.classList.add('drag')" ondragleave="this.classList.remove('drag')" ondrop="event.preventDefault();this.classList.remove('drag');handleDrop(event,'lang')">
+          <div class="ico">🌐</div><div class="txt">上传语言成绩</div><input type="file" accept=".pdf,.jpg,.jpeg,.png" hidden onchange="handleFile(this,'lang')">
+        </div>
+        <div class="file-list" id="fl_lang"></div>
+      </div>
+      <div class="form-group full"><label>其他补充材料</label>
+        <div class="upload-zone" onclick="this.querySelector('input').click()" ondragover="event.preventDefault();this.classList.add('drag')" ondragleave="this.classList.remove('drag')" ondrop="event.preventDefault();this.classList.remove('drag');handleDrop(event,'other')">
+          <div class="ico">📎</div><div class="txt">点击或拖拽上传其他材料</div><div class="sub">可上传多个文件</div>
+          <input type="file" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" multiple hidden onchange="handleFile(this,'other')">
+        </div>
+        <div class="file-list" id="fl_other"></div>
+      </div>
+    </div>`;
+  ['passport','transcript','lang','other'].forEach(k=>{if(formData[k+'_files']){renderFileList(k)}});
+}
+function handleFile(inp,key){if(inp.files.length>0){const files=Array.from(inp.files);if(!formData[key+'_files'])formData[key+'_files']=[];files.forEach(f=>formData[key+'_files'].push({name:f.name,size:f.size}));renderFileList(key);toast('✅ 已添加 '+files.length+' 个文件')}}
+function handleDrop(e,key){const files=Array.from(e.dataTransfer.files);handleFile({files:files},key)}
+function renderFileList(key){
+  const files=formData[key+'_files']||[];
+  $('fl_'+key).innerHTML=files.map((f,i)=>`<div class="file-item"><span>📄</span><span class="name">${f.name}</span><span style="color:#94a3b8;font-size:12px">${(f.size/1024).toFixed(1)}KB</span><span class="rm" onclick="rmFile('${key}',${i})">✕</span></div>`).join('');
+}
+function rmFile(key,i){formData[key+'_files'].splice(i,1);renderFileList(key)}
+
+// 步骤6：确认提交
+function renderStep6(){
+  const svc=(formData.services||[]).join('、')||'无';
+  $('wizBody').innerHTML=`
+    <div style="text-align:center;margin-bottom:24px"><div style="font-size:48px">📋</div><h3 style="font-size:20px;margin-top:8px">请确认申请信息</h3><p style="color:#64748b;font-size:14px">核对无误后点击提交</p></div>
+    <div style="background:#f8fafc;border-radius:12px;padding:24px">
+      <h4 style="font-size:15px;font-weight:700;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid #e2e8f0">👤 学生信息</h4>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:14px">
+        <div><span style="color:#64748b">姓名：</span>${formData.name||'-'}</div>
+        <div><span style="color:#64748b">性别：</span>${formData.gender||'-'}</div>
+        <div><span style="color:#64748b">出生日期：</span>${formData.birth||'-'}</div>
+        <div><span style="color:#64748b">护照号：</span>${formData.passportNo||'-'}</div>
+        <div><span style="color:#64748b">电话：</span>${formData.phone||'-'}</div>
+        <div><span style="color:#64748b">邮箱：</span>${formData.email||'-'}</div>
+      </div>
+      <h4 style="font-size:15px;font-weight:700;margin:20px 0 16px;padding-bottom:8px;border-bottom:1px solid #e2e8f0">🎓 申请信息</h4>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:14px">
+        <div><span style="color:#64748b">目标院校：</span>${formData.university||'-'}</div>
+        <div><span style="color:#64748b">申请专业：</span>${formData.program||'-'}</div>
+        <div><span style="color:#64748b">入学学期：</span>${formData.semester||'-'}</div>
+        <div><span style="color:#64748b">学位类型：</span>${formData.degree||'-'}</div>
+      </div>
+      <h4 style="font-size:15px;font-weight:700;margin:20px 0 16px;padding-bottom:8px;border-bottom:1px solid #e2e8f0">⚙️ 附加服务</h4>
+      <div style="font-size:14px">${svc}</div>
+    </div>
+    <div style="margin-top:20px;padding:16px;background:#fef3c7;border-radius:10px;font-size:13px;color:#92400e;display:flex;gap:10px;align-items:flex-start">
+      <span style="font-size:18px">⚠️</span>
+      <div><strong>注意：</strong>提交后信息不可修改，请确保所有材料已正确上传。提交后可在首页查看处理进度。</div>
+    </div>`;
+}
+
+// 步骤导航
+function prevStep(){if(curStep>1){curStep--;renderWizard()}}
+function nextStep(){
+  if(!validateStep())return;
+  if(curStep===6){submitApp();return}
+  curStep++;renderWizard();
+}
+function validateStep(){
+  const errs={
+    1:(!formData.name||!formData.gender||!formData.birth||!formData.phone||!formData.email)&&'请填写所有必填项',
+    2:(!formData.passportNo||!formData.nationality||!formData.passportIssue||!formData.passportExpiry)&&'请填写所有护照信息',
+    3:(!formData.university||!formData.program||!formData.semester||!formData.degree)&&'请填写所有申请信息',
+    5:(!formData.passport_files||formData.passport_files.length===0)&&'请上传护照首页扫描件'
+  };
+  if(errs[curStep]){toast('⚠️ '+errs[curStep]);return false}
+  return true;
+}
+function submitApp(){
+  autoSaveDraft();
+  const subs=getSubmitted();
+  subs.push({...formData,submittedAt:Date.now()});
+  localStorage.setItem('fill_submitted',JSON.stringify(subs));
+  if(editId){const d=getDrafts().filter(x=>x.id!==editId);setDrafts(d);editId=null}
+  formData={};curStep=1;
+  $('modalIcon').textContent='🎉';$('modalTitle').textContent='提交成功';
+  $('modalBody').innerHTML=`<div style="text-align:center;padding:20px"><div style="font-size:64px;margin-bottom:16px">🎉</div><h3 style="font-size:20px;margin-bottom:8px">申请提交成功！</h3><p style="color:#64748b">您的申请已成功提交，我们将尽快处理。</p></div>`;
+  $('modalFoot').innerHTML=`<button class="btn-primary" onclick="closeModal();goHome()">返回首页</button>`;
+  $('modal').classList.remove('hidden');
+}
+
+// === 自定义控件逻辑 ===
+function pickRadio(el,groupId,field,val){
+  formData[field]=val;
+  const p=el.parentElement;
+  p.querySelectorAll('.radio-item').forEach(x=>x.classList.remove('sel'));
+  el.classList.add('sel');
+}
+function buildSel(id,options,field){
+  const dd=$(id+'_dd');
+  dd.innerHTML=options.map(o=>`<div class="${formData[field]===o?'sel':''}" onclick="selOpt('${id}','${field}','${o}')">${o}</div>`).join('');
+}
+function toggleSel(id){
+  closeAllPop(id);
+  $(id+'_dd').classList.toggle('hidden');
+  $(id+'_box').classList.toggle('open');
+}
+function selOpt(id,field,val){
+  formData[field]=val;$(id+'_v').textContent=val;
+  $(id+'_dd').querySelectorAll('div').forEach(d=>d.classList.toggle('sel',d.textContent===val));
+  $(id+'_dd').classList.add('hidden');$(id+'_box').classList.remove('open');
+}
+// 日历
+let calState={};
+function toggleCal(field){
+  closeAllPop(field);
+  const el=$(field+'_cal');
+  el.classList.toggle('hidden');
+  if(!el.classList.contains('hidden'))showCal(field,formData[field]||null);
+}
+function showCal(field,def,initOnly){
+  let d=def?new Date(def):new Date();
+  if(!calState[field])calState[field]={y:d.getFullYear(),m:d.getMonth()};
+  renderCal(field);
+  if(initOnly)setTimeout(()=>{const el=$(field+'_cal');if(el)el.classList.add('hidden')},0);
+}
+function renderCal(field){
+  const{y,m}=calState[field],sel=formData[field];
+  const first=new Date(y,m,1),last=new Date(y,m+1,0);
+  const startDow=first.getDay(),days=last.getDate();
+  const prevLast=new Date(y,m,0).getDate();
+  const months=['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+  const dows=['日','一','二','三','四','五','六'];
+  let html=`<div class="cal-head"><button onclick="calNav('${field}',-1)">‹</button><span class="title">${y}年 ${months[m]}</span><button onclick="calNav('${field}',1)">›</button></div><div class="cal-grid">`;
+  dows.forEach(d=>html+=`<div class="dow">${d}</div>`);
+  for(let i=startDow-1;i>=0;i--)html+=`<div class="day other">${prevLast-i}</div>`;
+  const today=new Date();
+  for(let i=1;i<=days;i++){
+    const ds=`${y}-${String(m+1).padStart(2,'0')}-${String(i).padStart(2,'0')}`;
+    let cls='day';
+    if(sel===ds)cls+=' sel';
+    if(i===today.getDate()&&m===today.getMonth()&&y===today.getFullYear()&&!sel)cls+=' today';
+    html+=`<div class="${cls}" onclick="pickDate('${field}','${ds}')">${i}</div>`;
+  }
+  const total=startDow+days;const rem=(7-total%7)%7;
+  for(let i=1;i<=rem;i++)html+=`<div class="day other">${i}</div>`;
+  html+='</div>';$(field+'_cal').innerHTML=html;
+}
+function calNav(field,dir){calState[field].m+=dir;if(calState[field].m<0){calState[field].m=11;calState[field].y--}if(calState[field].m>11){calState[field].m=0;calState[field].y++}renderCal(field)}
+function pickDate(field,ds){
+  formData[field]=ds;$(field+'_v').textContent=ds;$(field+'_cal').classList.add('hidden');
+}
+function closeAllPop(except){
+  document.querySelectorAll('.select-dropdown,.cal-pop').forEach(el=>{
+    const fid=el.id.replace(/_dd|_cal/g,'');
+    if(fid!==except){el.classList.add('hidden');const box=$(fid+'_box');if(box)box.classList.remove('open')}
+  });
+}
+document.addEventListener('click',e=>{
+  if(!e.target.closest('.pos-rel')&&!e.target.closest('.select-dropdown')&&!e.target.closest('.cal-pop')){closeAllPop()}
+});
+
+// 帮助弹窗
+function openHelp(){
+  $('modalIcon').textContent='❓';$('modalTitle').textContent='使用帮助';
+  $('modalBody').innerHTML=`
+    <p style="margin-bottom:16px;color:#475569">本系统用于大学申请信息录入，包含以下步骤：</p>
+    <ul class="help-list">
+      <li><span class="num">1</span><div><strong>基本信息</strong> — 填写学生个人基本信息（姓名、联系方式等）</div></li>
+      <li><span class="num">2</span><div><strong>护照信息</strong> — 填写护照相关信息，使用日历选择日期</div></li>
+      <li><span class="num">3</span><div><strong>申请信息</strong> — 选择目标院校、专业、学期等</div></li>
+      <li><span class="num">4</span><div><strong>附加服务</strong> — 勾选需要的附加服务项目</div></li>
+      <li><span class="num">5</span><div><strong>材料上传</strong> — 上传护照、成绩单等申请材料</div></li>
+      <li><span class="num">6</span><div><strong>确认提交</strong> — 核对信息无误后提交申请</div></li>
+    </ul>
+    <div style="margin-top:16px;padding:12px;background:#eff6ff;border-radius:8px;font-size:13px;color:#1d4ed8">
+      💡 系统每30秒自动保存草稿，您也可以随时点击"保存草稿"按钮手动保存。草稿可在首页查看和继续编辑。
+    </div>`;
+  $('modalFoot').innerHTML=`<button class="btn-primary" onclick="closeModal()">我知道了</button>`;
+  $('modal').classList.remove('hidden');
+}
+function closeModal(){$('modal').classList.add('hidden')}
+
+// 点击弹窗外部关闭
+$('modal').addEventListener('click',e=>{if(e.target===$('modal'))closeModal()});
+
+// 初始化
+// 版本迁移：旧版是7步流程（含选择学生），新版是6步，清除旧数据
+const DEMO_VER='v2';
+if(localStorage.getItem('fill_ver')!==DEMO_VER){
+  localStorage.removeItem('fill_drafts');
+  localStorage.removeItem('fill_submitted');
+  localStorage.setItem('fill_ver',DEMO_VER);
+}
+renderHome();
+</script>
+</body>
+</html>
