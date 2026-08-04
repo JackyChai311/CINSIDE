@@ -77,8 +77,17 @@ async def preview_from_url(body: PreviewUrlBody):
             "image/webp": ".webp",
             "image/gif": ".gif",
             "image/bmp": ".bmp",
+            "image/tiff": ".tiff",
+            "image/avif": ".avif",
+            "image/heic": ".heic",
+            "image/heif": ".heif",
         }
-        filename = f"download{ext_map.get(ctype, '.pdf')}"
+        # image/* 兜底为 .jpg（后端会按魔数重新识别真实类型，扩展名不重要）
+        if ctype.startswith("image/"):
+            ext = ext_map.get(ctype, ".jpg")
+        else:
+            ext = ext_map.get(ctype, ".bin")
+        filename = f"download{ext}"
     try:
         result = await preview_document(content, filename)
     except Exception as e:
@@ -147,9 +156,18 @@ async def extract_from_url(body: ExtractUrlBody):
             "image/webp": ".webp",
             "image/gif": ".gif",
             "image/bmp": ".bmp",
+            "image/tiff": ".tiff",
+            "image/avif": ".avif",
+            "image/heic": ".heic",
+            "image/heif": ".heif",
             "text/html": ".html",
         }
-        filename = f"download{ext_map.get(ctype, '.pdf')}"
+        # image/* 兜底为 .jpg（后端会按魔数重新识别真实类型）
+        if ctype.startswith("image/"):
+            ext = ext_map.get(ctype, ".jpg")
+        else:
+            ext = ext_map.get(ctype, ".bin")
+        filename = f"download{ext}"
 
     try:
         result = await extract_document(content, filename, _parse_fields(body.fields))
