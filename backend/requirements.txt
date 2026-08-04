@@ -9,6 +9,7 @@ pydantic>=2.6
 markitdown[pdf]>=0.1.0
 PyMuPDF>=1.24
 Pillow>=10.0
+pillow-heif>=0.16  # HEIC/HEIF（iPhone 拍摄照片）解码，供文件提取 OCR
 
 # 真实跑 Browser Use 时再装（依赖较重）
 # browser-use>=0.1.30
