@@ -184,11 +184,13 @@ export interface CalendarControls {
 export interface WidgetDef {
   id: string;
   kind: "option" | "calendar";
-  /** 触发框选择器（点击后展开面板的元素） */
+  /** 是否是直接显示型（不需要点击触发，选项直接在页面上可见，如男/女单选按钮组） */
+  inline?: boolean;
+  /** 触发框选择器（点击后展开面板的元素；inline 模式下这是选项组容器） */
   triggerSelector: string;
   /** 触发框标签（显示用） */
   triggerLabel?: string;
-  /** 展开面板容器选择器 */
+  /** 展开面板容器选择器（inline 模式下不需要） */
   panelSelector?: string;
   /** 选项控件：可选项列表 */
   options?: WidgetOption[];
@@ -342,6 +344,8 @@ export interface WorkflowTemplate {
   reviewMarks: PickedMark[];
   /** 录入流操作阶段的节点 */
   entryMarks: PickedMark[];
+  /** 字段映射（审查字段/控件/固定值等）：随模板保存，复用模板时比对不丢失 */
+  mappings?: FieldMapping[];
   /** 是否包含搜索步骤（自动检测，审查流用） */
   hasSearchSteps: boolean;
   /** 是否包含提交步骤（自动检测，录入流用：点保存/提交按钮） */
