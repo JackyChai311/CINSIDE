@@ -75,6 +75,8 @@ import { normalizeText, parseDateCandidates, valuesEquivalent } from "./utils/fo
 import WidgetExtractPanel, { type WidgetBinding, type WidgetTestResult } from "./components/WidgetExtractPanel";
 import {
   buildCalendarSetScript,
+  buildInlineOptionSelectScript,
+  buildInlineOptionSnapshotScript,
   buildOptionSelectScript,
   buildWidgetCloseScript,
   buildWidgetOpenScript,
@@ -90,6 +92,7 @@ import BrowserPane, { type PickedElementInfo } from "./components/BrowserPane";
 import ExcelView, { type ExcelPickedField } from "./components/ExcelView";
 import ElementSelectBar, { type PickTarget, type CustomTextEntry } from "./components/ElementSelectBar";
 import ResultsPanel from "./components/ResultsPanel";
+import type { ExtractSummaryItem } from "./components/ResultsPanel";
 import SettingsModal from "./components/SettingsModal";
 import DocFillDialog from "./components/DocFillDialog";
 import SkillPanel from "./components/SkillPanel";
@@ -175,6 +178,9 @@ const WIDGET_SNAPSHOT_REASONS: Record<string, string> = {
   calendar_header_not_found: "未识别到日历的年月显示，请确认点的是日历控件",
   calendar_nav_not_found: "未识别到日历的翻页按钮（上一月/下一月）",
   calendar_days_not_found: "未识别到日历的日期格子",
+  container_not_found: "未在网页中找到该元素，请重新拾取",
+  inline_options_not_found: "未识别到选项按钮组：请直接点选「男/女」这类选项区域中的某一个选项",
+  collect_error: "选项收集失败，请尝试点选更靠近选项按钮的位置",
 };
 
 /**
@@ -900,7 +906,7 @@ rightBindColumnRef.current = rightBindColumn;
   // 数据源网页默认 DEMO 地址（模拟原 admin 数据源站点）
   // 左侧默认打开 DEMO 数据源管理页面（后端静态服务）
   const [leftUrl, setLeftUrl] = useState<string>("");
-  const [rightUrl, setRightUrl] = useState<string>("");
+  const [rightUrl, setRightUrl] = useState<string>("http://localhost:8000/demo-fill/");
 
   // 元素屏蔽功能
   const [blockPickingSide, setBlockPickingSide] = useState<ViewSide | null>(null);
@@ -924,6 +930,8 @@ rightBindColumnRef.current = rightBindColumn;
   const rightPickedRef = useRef<PickedElementInfo | null>(null);
   rightPickedRef.current = rightPicked;
   const [mappings, setMappings] = useState<FieldMapping[]>([]);
+  const mappingsRef = useRef<FieldMapping[]>([]);
+  mappingsRef.current = mappings;
 
   // 头像提取模式（左侧浏览器拾取头像元素）
   const [avatarMode, setAvatarMode] = useState(false);
@@ -1056,6 +1064,15 @@ const [customTextEntries, setCustomTextEntries] = useState<CustomTextEntry[]>([]
 const [customTextPickingId, setCustomTextPickingId] = useState<string | null>(null);
 const customTextPickingIdRef = useRef<string | null>(null);
 customTextPickingIdRef.current = customTextPickingId;
+// 提取元素面板 TAB 切换请求：配置哪个功能就自动切到对应 TAB（doc=文件提取 / custom=自定义文本 / widget=控件提取）
+const [extractTabRequest, setExtractTabRequest] = useState<{ tab: "doc" | "custom" | "widget"; ts: number } | null>(null);
+// 提取元素面板 TAB 顺序：谁先设置谁排前（FIFO），保存 LOOP 后顺序随步骤保留
+const [extractTabOrder, setExtractTabOrder] = useState<Array<"doc" | "custom" | "widget">>([]);
+// 统一入口：请求切换 TAB 的同时把该 TAB 追加到 FIFO 顺序末尾（已在顺序中则不动）
+const requestExtractTab = useCallback((tab: "doc" | "custom" | "widget") => {
+  setExtractTabRequest({ tab, ts: Date.now() });
+  setExtractTabOrder((prev) => (prev.includes(tab) ? prev : [...prev, tab]));
+}, []);
 // 控件提取模式：点击展开型控件（选项控件/日历控件）的提取、标注与绑定
 const [widgetExtractMode, setWidgetExtractMode] = useState(false);
 const widgetExtractModeRef = useRef(false);
@@ -1078,6 +1095,10 @@ widgetDraftBindingRef.current = widgetDraftBinding;
 const [widgetRolePickingKey, setWidgetRolePickingKey] = useState<string | null>(null);
 const widgetRolePickingKeyRef = useRef<string | null>(null);
 widgetRolePickingKeyRef.current = widgetRolePickingKey;
+// 正在重选单个选项的 key（"draft:option:0" 或 "saved:<selector>:option:2"）
+const [widgetOptionPickingKey, setWidgetOptionPickingKey] = useState<string | null>(null);
+const widgetOptionPickingKeyRef = useRef<string | null>(null);
+widgetOptionPickingKeyRef.current = widgetOptionPickingKey;
 // 正在从左侧网页拾取来源的 key（"draft" 或 "saved:<selector>"）
 const [widgetLeftPickingKey, setWidgetLeftPickingKey] = useState<string | null>(null);
 const widgetLeftPickingKeyRef = useRef<string | null>(null);
@@ -2330,15 +2351,6 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     taskIdRef.current = "";
   }, [selected?.record_id]);
 
-  // 设置弹窗打开时隐藏 BrowserView，避免原生视图盖住弹窗
-  useEffect(() => {
-    if (!window.electronAPI) return;
-    if (showSettings) {
-      window.electronAPI.viewHide("left");
-      window.electronAPI.viewHide("right");
-    }
-  }, [showSettings]);
-
   // pickedMarks 变化时，在网页视图上画带顺序编号的高亮框
   useEffect(() => {
     if (!window.electronAPI) return;
@@ -2794,6 +2806,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setInputTarget(null);
     setNextClickLabel(null);
     setAddingClickMode(false);
+    // 提取元素面板：清空 FIFO TAB 顺序（新一轮步骤设置重新排队）
+    setExtractTabOrder([]);
     // 同时退出文件提取模式（审查子步骤），停止右侧拾取
     if (addingDocExtractModeRef.current) {
       setAddingDocExtractMode(false);
@@ -2827,7 +2841,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const toggleCustomText = useCallback(() => {
     setCustomTextMode((prev) => {
       const next = !prev;
-      if (!next) {
+      if (next) {
+        // 提取元素面板自动切到「自定义文本」TAB
+        requestExtractTab("custom");
+      } else {
         setCustomTextPickingId(null);
         window.electronAPI?.viewStopPicking("left").catch(() => {});
         window.electronAPI?.viewStopPicking("right").catch(() => {});
@@ -2838,21 +2855,26 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
   const addCustomTextEntry = useCallback(() => {
     const id = `ct-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    setCustomTextEntries((prev) => [...prev, { id, name: "", text: "" }]);
+    setCustomTextEntries((prev) => [...prev, { id, name: "", text: "", source: "manual", createdAt: Date.now() }]);
   }, []);
 
   /** 文件提取预览面板：勾选字段送到「提取元素」面板（转为自定义文本条目，沿用拾取关联/保存步骤机制） */
   const sendDocFieldsToExtractPanel = useCallback((fields: Record<string, string>) => {
+    const baseTs = Date.now();
     const entries = Object.entries(fields)
       .filter(([, v]) => v)
-      .map(([f, v]) => ({
-        id: `ct-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-${f}`,
+      .map(([f, v], idx) => ({
+        id: `ct-${baseTs}-${Math.random().toString(36).slice(2, 7)}-${f}`,
         name: FIELD_LABELS[f] || f,
         text: v,
+        source: "doc" as const,
+        createdAt: baseTs + idx,
       }));
     if (entries.length === 0) return;
     setCustomTextEntries((prev) => [...prev, ...entries]);
     setCustomTextMode(true);
+    // 提取元素面板自动切到「文件提取」TAB
+    requestExtractTab("doc");
     setDocExtractPanel(null);
     setSameNameImages(null);
     // 关闭内联结果视图，切换到「文件处理+提取元素」两栏分屏模式
@@ -3009,114 +3031,123 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customTextEntries]);
 
-  // 自定义文本面板内容（渲染在 ResultsPanel 的「提取元素」卡片中）
-  const customTextContent = useMemo(() => {
-    // 有条目时始终可渲染（由 ResultsPanel 的 设置/结果 开关控制显隐）
-    if (!customTextMode && customTextEntries.length === 0) return null;
-    return (
-      <div className="flex h-full flex-col gap-2 overflow-y-auto px-2 py-1.5">
-        <div className="mb-0.5 flex items-center gap-1 text-[10px] font-bold text-violet-800">
-          <Type className="h-3 w-3 text-violet-700" />
-          自定义文本 — 补充 Excel 和数据源网页上都没有的信息
-        </div>
-        {customTextEntries.length === 0 && (
-          <p className="text-[9px] text-slate-500">
-            点击下方「添加」创建文本框：上方输入框是框框名字（仅显示），下方是实际内容（参与审查/录入）
-          </p>
-        )}
-        {customTextEntries.map((entry) => (
-          <div
-            key={entry.id}
-            className={`relative w-full rounded-lg border-2 px-2.5 py-2 transition-all ${
-              customTextPickingId === entry.id
-                ? "border-violet-400 bg-violet-100/80 ring-1 ring-violet-300 animate-pulse"
-                : entry.selector
-                ? "border-indigo-200 bg-indigo-50/60"
-                : "border-indigo-100 bg-indigo-50/30"
-            }`}
-          >
-            {/* 右上角徽章：已拾取 / 拾取中 */}
-            <div className="absolute right-1.5 top-1.5 flex shrink-0 items-center gap-1">
-              {entry.saved && !customTextPickingId && (
-                <span
-                  className="inline-flex items-center rounded-md bg-emerald-100 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700 ring-1 ring-emerald-200 max-w-[130px] truncate"
-                  title="已保存为步骤"
-                >
-                  已保存
-                </span>
-              )}
-              {entry.selector && !entry.saved && customTextPickingId !== entry.id && (
-                <span
-                  className="inline-flex items-center rounded-md bg-indigo-100 px-1.5 py-0.5 text-[9px] font-medium text-indigo-700 ring-1 ring-indigo-200 max-w-[130px] truncate"
-                  title={`${entry.side === "left" ? "左" : "右"}侧：${entry.label || entry.selector}`}
-                >
-                  关联
-                </span>
-              )}
-            </div>
-            {/* 第一行：框框名字（仅用于理解，不参与数据） */}
-            <div className="mb-1 flex items-center gap-1 pr-16">
-              <input
-                value={entry.name}
-                onChange={(e) => renameCustomTextEntry(entry.id, e.target.value)}
-                placeholder="框框名字…（仅显示，不参与录入/审查）"
-                className="w-full bg-transparent px-0.5 py-0.5 text-[11px] font-bold text-indigo-500 outline-none placeholder:text-indigo-300"
-              />
-            </div>
-            {/* 分隔线：名字与内容之间的细横线（模仿截图） */}
-            <div className="mb-1 h-px w-full bg-indigo-100/80" />
-            {/* 第二行：实际内容值（参与审查/录入） */}
-            <textarea
-              value={entry.text}
-              onChange={(e) => updateCustomTextEntry(entry.id, e.target.value)}
-              placeholder="输入实际内容…（用于审查对比或录入填入）"
-              rows={2}
-              className="w-full resize-none bg-transparent px-0.5 py-0.5 text-[11px] leading-snug text-slate-700 outline-none placeholder:text-slate-300"
-            />
-            {/* 拾取提示 / 关联详情 */}
-            <div className="mt-0.5">
-              {customTextPickingId === entry.id ? (
-                <span className="text-[9px] text-violet-600 animate-pulse">
-                  请在网页中点击目标元素…
-                </span>
-              ) : entry.selector ? (
-                <span
-                  className="text-[9px] text-indigo-500/80 truncate block"
-                  title={`${entry.side === "left" ? "左" : "右"}侧网页：${entry.label || entry.selector}`}
-                >
-                  {entry.side === "left" ? "左" : "右"}侧元素：{entry.label || entry.selector}
-                </span>
-              ) : null}
-            </div>
-            {/* 底部一排操作按钮：拾取 / 删除 */}
-            <div className="mt-1.5 flex items-center gap-1">
-              <button
-                onClick={() => pickForCustomText(entry.id)}
-                disabled={!!customTextPickingId && customTextPickingId !== entry.id}
-                className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors ${
-                  customTextPickingId === entry.id
-                    ? "bg-violet-500 text-white"
-                    : entry.selector
-                    ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
-                    : "bg-slate-200 text-slate-600 hover:bg-slate-300"
-                } disabled:opacity-40`}
-                title={entry.selector ? "重新选择关联元素" : "点击后在网页中拾取目标元素"}
+  // 提取元素面板的条目按来源分两类：doc=文件提取送来的字段，manual=手动添加的自定义文本
+  const docEntries = useMemo(() => customTextEntries.filter((e) => e.source === "doc"), [customTextEntries]);
+  const manualEntries = useMemo(() => customTextEntries.filter((e) => e.source !== "doc"), [customTextEntries]);
+
+  // 自定义文本/文件提取条目共用渲染器（「提取元素」面板的两个 TAB 共用；序号 = 该类别内设置顺序 FIFO）
+  const renderExtractEntries = useCallback((
+    list: CustomTextEntry[],
+    opts: { headerText: string; showAdd: boolean; emptyHint?: string }
+  ) => (
+    <div className="flex h-full flex-col gap-2 overflow-y-auto px-2 py-1.5">
+      <div className="mb-0.5 flex items-center gap-1 text-[10px] font-bold text-violet-800">
+        <Type className="h-3 w-3 text-violet-700" />
+        {opts.headerText}
+      </div>
+      {list.length === 0 && opts.emptyHint && (
+        <p className="text-[9px] text-slate-500">{opts.emptyHint}</p>
+      )}
+      {list.map((entry, seqIdx) => (
+        <div
+          key={entry.id}
+          className={`relative w-full rounded-lg border-2 px-2.5 py-2 transition-all ${
+            customTextPickingId === entry.id
+              ? "border-violet-400 bg-violet-100/80 ring-1 ring-violet-300 animate-pulse"
+              : entry.selector
+              ? "border-indigo-200 bg-indigo-50/60"
+              : "border-indigo-100 bg-indigo-50/30"
+          }`}
+        >
+          {/* 右上角徽章：已拾取 / 拾取中 */}
+          <div className="absolute right-1.5 top-1.5 flex shrink-0 items-center gap-1">
+            {entry.saved && !customTextPickingId && (
+              <span
+                className="inline-flex items-center rounded-md bg-emerald-100 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700 ring-1 ring-emerald-200 max-w-[130px] truncate"
+                title="已保存为步骤"
               >
-                <MousePointerClick className="h-2.5 w-2.5" />
-                {entry.selector ? "重选" : "拾取"}
-              </button>
-              <button
-                onClick={() => removeCustomTextEntry(entry.id)}
-                className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium text-slate-400 transition-colors hover:bg-rose-100 hover:text-rose-600"
-                title="删除此文本框"
+                已保存
+              </span>
+            )}
+            {entry.selector && !entry.saved && customTextPickingId !== entry.id && (
+              <span
+                className="inline-flex items-center rounded-md bg-indigo-100 px-1.5 py-0.5 text-[9px] font-medium text-indigo-700 ring-1 ring-indigo-200 max-w-[130px] truncate"
+                title={`${entry.side === "left" ? "左" : "右"}侧：${entry.label || entry.selector}`}
               >
-                <Trash2 className="h-2.5 w-2.5" />
-                删除
-              </button>
-            </div>
+                关联
+              </span>
+            )}
           </div>
-        ))}
-        <div className="mt-auto flex shrink-0 items-center gap-1.5 pt-1">
+          {/* 第一行：FIFO 序号 + 框框名字（仅用于理解，不参与数据） */}
+          <div className="mb-1 flex items-center gap-1 pr-16">
+            <span
+              className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-violet-500 text-[8px] font-bold text-white"
+              title={`第 ${seqIdx + 1} 个设置（先设置先执行）`}
+            >
+              {seqIdx + 1}
+            </span>
+            <input
+              value={entry.name}
+              onChange={(e) => renameCustomTextEntry(entry.id, e.target.value)}
+              placeholder="框框名字…（仅显示，不参与录入/审查）"
+              className="w-full bg-transparent px-0.5 py-0.5 text-[11px] font-bold text-indigo-500 outline-none placeholder:text-indigo-300"
+            />
+          </div>
+          {/* 分隔线：名字与内容之间的细横线（模仿截图） */}
+          <div className="mb-1 h-px w-full bg-indigo-100/80" />
+          {/* 第二行：实际内容值（参与审查/录入） */}
+          <textarea
+            value={entry.text}
+            onChange={(e) => updateCustomTextEntry(entry.id, e.target.value)}
+            placeholder="输入实际内容…（用于审查对比或录入填入）"
+            rows={2}
+            className="w-full resize-none bg-transparent px-0.5 py-0.5 text-[11px] leading-snug text-slate-700 outline-none placeholder:text-slate-300"
+          />
+          {/* 拾取提示 / 关联详情 */}
+          <div className="mt-0.5">
+            {customTextPickingId === entry.id ? (
+              <span className="text-[9px] text-violet-600 animate-pulse">
+                请在网页中点击目标元素…
+              </span>
+            ) : entry.selector ? (
+              <span
+                className="text-[9px] text-indigo-500/80 truncate block"
+                title={`${entry.side === "left" ? "左" : "右"}侧网页：${entry.label || entry.selector}`}
+              >
+                {entry.side === "left" ? "左" : "右"}侧元素：{entry.label || entry.selector}
+              </span>
+            ) : null}
+          </div>
+          {/* 底部一排操作按钮：拾取 / 删除 */}
+          <div className="mt-1.5 flex items-center gap-1">
+            <button
+              onClick={() => pickForCustomText(entry.id)}
+              disabled={!!customTextPickingId && customTextPickingId !== entry.id}
+              className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors ${
+                customTextPickingId === entry.id
+                  ? "bg-violet-500 text-white"
+                  : entry.selector
+                  ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                  : "bg-slate-200 text-slate-600 hover:bg-slate-300"
+              } disabled:opacity-40`}
+              title={entry.selector ? "重新选择关联元素" : "点击后在网页中拾取目标元素"}
+            >
+              <MousePointerClick className="h-2.5 w-2.5" />
+              {entry.selector ? "重选" : "拾取"}
+            </button>
+            <button
+              onClick={() => removeCustomTextEntry(entry.id)}
+              className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium text-slate-400 transition-colors hover:bg-rose-100 hover:text-rose-600"
+              title="删除此文本框"
+            >
+              <Trash2 className="h-2.5 w-2.5" />
+              删除
+            </button>
+          </div>
+        </div>
+      ))}
+      <div className="mt-auto flex shrink-0 items-center gap-1.5 pt-1">
+        {opts.showAdd && (
           <button
             onClick={addCustomTextEntry}
             className="inline-flex items-center gap-0.5 rounded-md bg-violet-600 px-2 py-0.5 text-[10px] font-medium text-white transition-all hover:bg-violet-700"
@@ -3124,22 +3155,105 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             <Plus className="h-2.5 w-2.5" />
             添加
           </button>
-          {customTextEntries.some((e) => e.text && e.selector && !e.saved) && (
-            <button
-              onClick={saveCustomTextSteps}
-              className="inline-flex items-center gap-0.5 rounded-md bg-brand-600 px-2 py-0.5 text-[10px] font-medium text-white transition-all hover:bg-brand-700"
-            >
-              <Save className="h-2.5 w-2.5" />
-              保存为{addingStepMode === "review" ? "审查" : "录入"}步骤
-            </button>
-          )}
-          <span className="ml-auto text-[9px] text-slate-400">
-            {customTextEntries.filter((e) => e.text && e.selector && !e.saved).length}/{customTextEntries.length} 已就绪
-          </span>
-        </div>
+        )}
+        {list.some((e) => e.text && e.selector && !e.saved) && (
+          <button
+            onClick={saveCustomTextSteps}
+            className="inline-flex items-center gap-0.5 rounded-md bg-brand-600 px-2 py-0.5 text-[10px] font-medium text-white transition-all hover:bg-brand-700"
+          >
+            <Save className="h-2.5 w-2.5" />
+            保存为{addingStepMode === "review" ? "审查" : "录入"}步骤
+          </button>
+        )}
+        <span className="ml-auto text-[9px] text-slate-400">
+          {list.filter((e) => e.text && e.selector && !e.saved).length}/{list.length} 已就绪
+        </span>
       </div>
-    );
-  }, [customTextMode, customTextEntries, customTextPickingId, addingStepMode, renameCustomTextEntry, updateCustomTextEntry, pickForCustomText, removeCustomTextEntry, addCustomTextEntry, saveCustomTextSteps]);
+    </div>
+  ), [customTextPickingId, addingStepMode, renameCustomTextEntry, updateCustomTextEntry, pickForCustomText, removeCustomTextEntry, addCustomTextEntry, saveCustomTextSteps]);
+
+  // 自定义文本 TAB 内容（渲染在 ResultsPanel 的「提取元素」卡片中）
+  const customTextContent = useMemo(() => {
+    // 有条目时始终可渲染（由 ResultsPanel 的 设置/结果 开关控制显隐）
+    if (!customTextMode && manualEntries.length === 0) return null;
+    return renderExtractEntries(manualEntries, {
+      headerText: "自定义文本 — 补充 Excel 和数据源网页上都没有的信息",
+      showAdd: true,
+      emptyHint: "点击下方「添加」创建文本框：上方输入框是框框名字（仅显示），下方是实际内容（参与审查/录入）",
+    });
+  }, [customTextMode, manualEntries, renderExtractEntries]);
+
+  // 文件提取 TAB 内容（从文件/图片识别出来并送到面板的字段）
+  const docFieldsContent = useMemo(() => {
+    if (docEntries.length === 0) return null;
+    return renderExtractEntries(docEntries, {
+      headerText: "文件提取字段 — 来自文件/图片识别，拾取关联网页元素后保存为步骤",
+      showAdd: false,
+    });
+  }, [docEntries, renderExtractEntries]);
+
+  // 提取元素汇总（字段对比设置态「提取元素」小卡片）：文件提取步骤 + 面板条目 + 控件，按设置时间 FIFO
+  const extractStepSummary = useMemo<ExtractSummaryItem[]>(() => {
+    const items: ExtractSummaryItem[] = [];
+    // 1. 文件提取步骤（pickedMarks 中带 docExtract 标记：网页提取/网页下载/本地文件）
+    for (const m of pickedMarks) {
+      if (!m.docExtract) continue;
+      const srcLabel = m.docSource === "local" ? "本地文件" : m.docSource === "web-download" ? "网页下载" : "网页提取";
+      items.push({
+        id: m.id || `doc-step-${m.order}`,
+        kind: "doc",
+        name: srcLabel,
+        detail: m.label || m.selector,
+        saved: true,
+        ts: m.createdAt ?? Number.MAX_SAFE_INTEGER,
+        selector: m.selector,
+        side: m.side,
+      });
+    }
+    // 2. 提取元素面板条目（文件提取字段 + 自定义文本，含未保存的）
+    for (const e of customTextEntries) {
+      items.push({
+        id: e.id,
+        kind: e.source === "doc" ? "doc" : "custom",
+        name: e.source === "doc" ? "文件字段" : "自定义文本",
+        detail: e.name ? `${e.name}：${e.text}` : e.text || "（空）",
+        saved: !!e.saved,
+        ts: e.createdAt ?? Number.MAX_SAFE_INTEGER,
+        selector: e.selector,
+        side: e.side,
+      });
+    }
+    // 3. 控件（已保存 + 草稿）
+    for (const m of mappings) {
+      if (!m.widget) continue;
+      const w = m.widget;
+      const mark = pickedMarks.find((mk) => mk.widget && mk.selector === m.right_selector);
+      items.push({
+        id: `widget-${m.right_selector}`,
+        kind: "widget",
+        name: w.kind === "calendar" ? "日历控件" : "选项控件",
+        detail: w.triggerLabel || m.right_label || m.right_selector,
+        saved: true,
+        ts: mark?.createdAt ?? Number.MAX_SAFE_INTEGER,
+        selector: w.triggerSelector || m.right_selector,
+        side: "right",
+      });
+    }
+    if (widgetDraft) {
+      items.push({
+        id: "widget-draft",
+        kind: "widget",
+        name: widgetDraft.kind === "calendar" ? "日历控件" : "选项控件",
+        detail: `${widgetDraft.triggerLabel || "未命名"}（配置中）`,
+        saved: false,
+        ts: Date.now(),
+        selector: widgetDraft.triggerSelector,
+        side: "right",
+      });
+    }
+    // FIFO：谁先设置谁排前（无时间戳的排最后）
+    return items.sort((a, b) => a.ts - b.ts);
+  }, [pickedMarks, customTextEntries, mappings, widgetDraft]);
 
   // 重置当前映射选择轮次：根据当前步骤模式回到初始拾取侧
   // 审查模式（先右后左）：回到 right；录入模式（先左后右）：回到 left
@@ -4042,6 +4156,84 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   }, [finishTeaching, checkedIds]);
 
   /**
+   * 收集「提取元素」面板中已配置（内容+关联元素齐全）但未点「保存为步骤」的条目，转为步骤 marks
+   * 按创建时间 FIFO 排序，保证先设置的先执行；保存 LOOP / 保存到批次时自动收纳，同一网站只需手动记录一次
+   * 注意：新步骤一律插在收尾点击之前，收尾点击重新编号排最后，保证 LOOP 始终以收尾点击闭环
+   */
+  const collectPendingExtractMarks = useCallback((): {
+    extraMarks: PickedMark[];
+    pendingEntries: CustomTextEntry[];
+    /** 收纳后用于构建模板/同步状态的完整 marks（新步骤插在收尾点击前） */
+    marksWithExtras: PickedMark[];
+    /** 收纳条目对应的字段映射（模板自包含 mappings 用） */
+    pendingMappings: FieldMapping[];
+  } => {
+    const pendingEntries = customTextEntries
+      .filter((e) => !e.saved && e.text && e.selector)
+      .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+    if (pendingEntries.length === 0) {
+      return { extraMarks: [], pendingEntries, marksWithExtras: pickedMarks, pendingMappings: [] };
+    }
+    const stepType = currentLoopStepTypeRef.current;
+    const isEntryStep = stepType === "entry";
+    const nowTs = Date.now();
+    // 收尾点击必须保持最后：新步骤排在非收尾步骤之后、收尾点击之前
+    const isPostClick = (m: PickedMark) => m.action === "click" && m.clickPhase === "post";
+    const nonPost = pickedMarks.filter((m) => !isPostClick(m));
+    const postMarks = pickedMarks.filter(isPostClick);
+    const baseOrder = nonPost.reduce((max, m) => Math.max(max, m.order ?? 0), 0);
+    const extraMarks: PickedMark[] = pendingEntries.map((entry, i) => ({
+      id: `mk-${nowTs}-auto-${i}-${Math.random().toString(36).slice(2, 7)}`,
+      order: baseOrder + i + 1,
+      createdAt: nowTs,
+      side: "right" as const,
+      source: "web" as const,
+      selector: entry.selector!,
+      label: `${isEntryStep ? "录入" : "审查"} · ${entry.label || entry.selector} ← 固定值「${entry.text}」`,
+      value: entry.text,
+      workflow: stepType,
+      action: (isEntryStep ? "input" : "pick") as "input" | "pick",
+      recordId: selected?.record_id,
+      tag: "",
+      type: "",
+      inputTarget: isEntryStep ? entry.selector : undefined,
+      inputTargetLabel: isEntryStep ? (entry.label || entry.selector) : undefined,
+    }));
+    // 收尾点击重新编号到新步骤之后（保持彼此相对顺序）
+    const renumberedPosts = postMarks.map((m, j) => ({ ...m, order: baseOrder + extraMarks.length + j + 1 }));
+    const marksWithExtras = [...nonPost, ...extraMarks, ...renumberedPosts];
+    const pendingMappings: FieldMapping[] = pendingEntries.map((entry) => ({
+      right_selector: entry.selector!,
+      right_label: entry.label || entry.selector!,
+      right_input_type: entry.type || null,
+      left_source: "manual",
+      left_field: entry.text,
+      verify_method: "smart",
+    }));
+    return { extraMarks, pendingEntries, marksWithExtras, pendingMappings };
+  }, [customTextEntries, pickedMarks, selected]);
+
+  /** 映射合并：按 right_selector 去重（后者覆盖前者） */
+  const mergeMappings = (base: FieldMapping[], extra: FieldMapping[]): FieldMapping[] => {
+    if (extra.length === 0) return base;
+    const next = [...base];
+    for (const m of extra) {
+      const idx = next.findIndex((x) => x.right_selector === m.right_selector);
+      if (idx >= 0) next[idx] = m;
+      else next.push(m);
+    }
+    return next;
+  };
+
+  /** 把自动收纳的提取元素条目同步到映射列表，并标记为已保存（面板中保留显示） */
+  const markPendingEntriesSaved = useCallback((pendingEntries: CustomTextEntry[], pendingMappings: FieldMapping[]) => {
+    if (pendingEntries.length === 0) return;
+    setMappings((prev) => mergeMappings(prev, pendingMappings));
+    const savedIds = new Set(pendingEntries.map((e) => e.id));
+    setCustomTextEntries((prev) => prev.map((e) => (savedIds.has(e.id) ? { ...e, saved: true } : e)));
+  }, []);
+
+  /**
    * 保存当前步骤配置到这批勾选的卡片（分割批次用）
    * - 构建当前 pickedMarks 为 tpl 并持久化到 skills 列表
    * - 把 tpl 关联到勾选的卡片（cardLoopMap），触发自动聚拢排序
@@ -4052,18 +4244,21 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       setError("请先勾选一批卡片再保存");
       return;
     }
-    if (pickedMarks.length === 0) {
+    // 自动收纳「提取元素」面板中未保存的条目（FIFO，插在收尾点击之前）
+    const { pendingEntries, marksWithExtras, pendingMappings } = collectPendingExtractMarks();
+    const allMarks = marksWithExtras;
+    if (allMarks.length === 0) {
       setError("请先配置至少一个步骤再保存");
       return;
     }
     // 构建模板（复用 buildTemplateFromMarks 的分类逻辑）
-    const dataSourceMarks = pickedMarks.filter((m) =>
+    const dataSourceMarks = allMarks.filter((m) =>
       (m.action === "click" || m.action === "input") &&
       (m.clickPhase === "pre" || m.clickPhase === "post" || m.workflow === "data-source")
     );
-    const reviewMarks = pickedMarks.filter((m) => !m.clickPhase && m.workflow === "review");
-    const entryMarks = pickedMarks.filter((m) => !m.clickPhase && m.workflow === "entry");
-    const hasSearchSteps = pickedMarks.some((m) => m.action === "input" && !!m.variableField);
+    const reviewMarks = allMarks.filter((m) => !m.clickPhase && m.workflow === "review");
+    const entryMarks = allMarks.filter((m) => !m.clickPhase && m.workflow === "entry");
+    const hasSearchSteps = allMarks.some((m) => m.action === "input" && !!m.variableField);
     const hasSubmitStep = entryMarks.some((m) => m.action === "click");
     const tpl: WorkflowTemplate = {
       id: `tpl-${Date.now()}`,
@@ -4074,12 +4269,18 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       dataSourceMarks,
       reviewMarks,
       entryMarks,
+      mappings: (() => {
+        const merged = mergeMappings(mappings, pendingMappings);
+        return merged.length > 0 ? merged : undefined;
+      })(),
       hasSearchSteps,
       hasSubmitStep,
     };
     // 持久化保存 tpl（确保游标运行时 getSkillById 能找到）
     saveSkill(tpl);
     setSkillVersion((v) => v + 1);
+    // 提取元素条目：同步映射 + 标记已保存
+    markPendingEntriesSaved(pendingEntries, pendingMappings);
     // 关联到勾选的卡片
     const now = Date.now();
     setCardLoopMap((prev) => {
@@ -4109,18 +4310,24 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setAddingClickMode(false);
     setAddingClickPhase(null);
     setAddingDocExtractMode(false);
-  }, [checkedIds, pickedMarks, cardLoopMap, selected, appMode, setError, setSuccessToast]);
+  }, [checkedIds, pickedMarks, cardLoopMap, selected, appMode, mappings, setError, setSuccessToast, collectPendingExtractMarks, markPendingEntriesSaved]);
 
   // ============ SKILL 保存与执行 ============
-  const buildTemplateFromMarks = useCallback((name: string, icon?: string): WorkflowTemplate => {
+  const buildTemplateFromMarks = useCallback((
+    name: string,
+    icon?: string,
+    opts?: { marks?: PickedMark[]; mappings?: FieldMapping[] }
+  ): WorkflowTemplate => {
     // 智能分类：带clickPhase(pre/post)的点击归入dataSource，其余按workflow字段分类
-    const dataSourceMarks = pickedMarks.filter((m) =>
+    const allMarks = opts?.marks ?? pickedMarks;
+    const tplMappings = opts?.mappings ?? mappings;
+    const dataSourceMarks = allMarks.filter((m) =>
       (m.action === "click" || m.action === "input") &&
       (m.clickPhase === "pre" || m.clickPhase === "post" || m.workflow === "data-source")
     );
-    const reviewMarks = pickedMarks.filter((m) => !m.clickPhase && m.workflow === "review");
-    const entryMarks = pickedMarks.filter((m) => !m.clickPhase && m.workflow === "entry");
-    const hasSearchSteps = pickedMarks.some((m) => m.action === "input" && !!m.variableField);
+    const reviewMarks = allMarks.filter((m) => !m.clickPhase && m.workflow === "review");
+    const entryMarks = allMarks.filter((m) => !m.clickPhase && m.workflow === "entry");
+    const hasSearchSteps = allMarks.some((m) => m.action === "input" && !!m.variableField);
     const hasSubmitStep = entryMarks.some((m) => m.action === "click");
     return {
       id: `skill-${Date.now()}`,
@@ -4133,14 +4340,23 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       dataSourceMarks,
       reviewMarks,
       entryMarks,
+      mappings: tplMappings.length > 0 ? tplMappings : undefined,
       hasSearchSteps,
       hasSubmitStep,
     };
-  }, [pickedMarks, selected, appMode]);
+  }, [pickedMarks, selected, appMode, mappings]);
 
   const handleSaveSkill = useCallback((name: string, icon: string, runAfter?: boolean) => {
-    const tpl = buildTemplateFromMarks(name, icon);
+    // 自动收纳「提取元素」面板中已配置但未保存的条目（FIFO，插在收尾点击之前），确保保存的 LOOP 模板包含全部步骤
+    const { extraMarks, pendingEntries, marksWithExtras, pendingMappings } = collectPendingExtractMarks();
+    const mergedMappings = mergeMappings(mappings, pendingMappings);
+    const tpl = buildTemplateFromMarks(name, icon, { marks: marksWithExtras, mappings: mergedMappings });
     const saved = saveSkill(tpl);
+    // 同步状态：marks 入库（含收尾点击重新编号）+ 条目标记已保存
+    if (extraMarks.length > 0) {
+      setPickedMarks(marksWithExtras);
+      markPendingEntriesSaved(pendingEntries, pendingMappings);
+    }
     setWorkflowTemplate(saved);
     workflowTemplateRef.current = saved; // 同步更新 ref
     lastTemplateRef.current = saved; // 持久化保存
@@ -4166,7 +4382,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       runBatchRef.current(saved);
     }
     setSaveSkillRunAfter(false);
-  }, [buildTemplateFromMarks, selectMode, avatarMode, exitSelectMode, exitAvatarMode, saveSkillRunAfter]);
+  }, [buildTemplateFromMarks, selectMode, avatarMode, exitSelectMode, exitAvatarMode, saveSkillRunAfter, collectPendingExtractMarks, markPendingEntriesSaved]);
 
   /** 快速保存 Loop：自动命名，不弹窗 */
   const handleQuickSaveLoop = useCallback(() => {
@@ -4794,7 +5010,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           throw new Error(`控件触发框未出现: ${w.triggerSelector}`);
         }
         if (w.kind === "option") {
-          const wres = (await execJS(buildOptionSelectScript(w, resolvedValue))) as OptionSelectResult | null;
+          let wres: OptionSelectResult | null;
+          if (w.inline) {
+            wres = (await execJS(buildInlineOptionSelectScript(w, resolvedValue))) as OptionSelectResult | null;
+          } else {
+            wres = (await execJS(buildOptionSelectScript(w, resolvedValue))) as OptionSelectResult | null;
+          }
           rlog(`[executeMark] 选项控件结果:`, wres);
           if (!wres?.ok) {
             throw new Error(`选项控件未匹配「${resolvedValue}」: ${wres?.reason || "未知"}${wres?.options?.length ? `（可选项：${wres.options.slice(0, 8).join("/")}）` : ""}`);
@@ -5228,9 +5449,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const compareFieldsForRecord = useCallback(async (
     record: ApplicantRecord,
     recordIndex: number,
+    mappingsOverride?: FieldMapping[],
   ): Promise<{ comparisons: FieldComparison[]; overall: "match" | "mismatch" }> => {
     const comparisons: FieldComparison[] = [];
-    if (!window.electronAPI || mappings.length === 0) {
+    // 优先使用模板自带的 mappings（复用已保存 LOOP 模板时，会话 mappings 可能为空或不匹配）
+    const effectiveMappings = mappingsOverride && mappingsOverride.length > 0 ? mappingsOverride : mappings;
+    if (!window.electronAPI || effectiveMappings.length === 0) {
       return { comparisons, overall: "match" };
     }
 
@@ -5267,9 +5491,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     window.electronAPI?.viewClearHighlight("right").catch(() => {});
     window.electronAPI?.viewClearHighlight("left").catch(() => {});
 
-    for (let fi = 0; fi < mappings.length; fi++) {
+    for (let fi = 0; fi < effectiveMappings.length; fi++) {
       if (batchStopRef.current) break;
-      const mp = mappings[fi];
+      const mp = effectiveMappings[fi];
       // 更新当前审查字段索引（触发UI光标移动）
       setVerifyFieldIdx(fi);
 
@@ -5596,7 +5820,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     let comparisons: FieldComparison[] = [];
     let verifyOverall: "match" | "mismatch" = "match";
     if (options?.wrapWithVerify) {
-      const cmp = await compareFieldsForRecord(record, recordIndex);
+      const cmp = await compareFieldsForRecord(record, recordIndex, tpl.mappings);
       comparisons = cmp.comparisons;
       verifyOverall = cmp.overall;
     }
@@ -7293,6 +7517,34 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       }
       return;
     }
+    // 控件选项按钮重选：把点到的元素记录为对应选项的选择器
+    if (widgetOptionPickingKeyRef.current) {
+      const fullKey = widgetOptionPickingKeyRef.current;
+      setWidgetOptionPickingKey(null);
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+      // 格式: "{cardKey}:option:{idx}"
+      const optionSep = fullKey.lastIndexOf(":option:");
+      if (optionSep >= 0) {
+        const cardKey = fullKey.slice(0, optionSep);
+        const optIdx = parseInt(fullKey.slice(optionSep + 8), 10);
+        const applyOption = (w: WidgetDef): WidgetDef => {
+          const opts = [...(w.options || [])];
+          if (opts[optIdx]) {
+            opts[optIdx] = { ...opts[optIdx], selector: info.selector };
+          }
+          return { ...w, options: opts };
+        };
+        if (cardKey === "draft") {
+          setWidgetDraft((prev) => (prev ? applyOption(prev) : prev));
+        } else {
+          const rightSelector = cardKey.replace(/^saved:/, "");
+          setMappings((prev) => prev.map((m) => (m.right_selector === rightSelector && m.widget ? { ...m, widget: applyOption(m.widget) } : m)));
+          setPickedMarks((prev) => prev.map((mk) => (mk.selector === rightSelector && mk.widget ? { ...mk, widget: applyOption(mk.widget) } : mk)));
+        }
+      }
+      return;
+    }
     // 文件提取模式（步骤4）：优先于一切分支
     if (addingDocExtractModeRef.current) {
       if (docExtractSourceRef.current === "web") {
@@ -7626,6 +7878,18 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       } else {
         updateSavedWidgetBinding(key.replace(/^saved:/, ""), binding);
       }
+      // 拾取完成后自动试跑，延迟一小段时间等待状态更新
+      setTimeout(() => {
+        if (key === "draft" && widgetDraftRef.current) {
+          testWidget("draft", widgetDraftRef.current, binding);
+        } else {
+          const savedKey = key.replace(/^saved:/, "");
+          const found = mappingsRef.current.find(m => m.right_selector === savedKey && m.widget);
+          if (found?.widget) {
+            testWidget(key, found.widget, binding);
+          }
+        }
+      }, 200);
       return;
     }
     // 文件提取模式：优先于一切分支
@@ -7973,7 +8237,10 @@ type: info.type,
   const toggleWidgetExtract = useCallback(() => {
     setWidgetExtractMode((prev) => {
       const next = !prev;
-      if (!next) {
+      if (next) {
+        // 提取元素面板自动切到「控件提取」TAB
+        requestExtractTab("widget");
+      } else {
         // 退出时清理所有拾取状态（草稿与已保存映射保留）
         setWidgetPickKind(null);
         setWidgetRolePickingKey(null);
@@ -8005,11 +8272,26 @@ type: info.type,
     setWidgetSnapshotBusy(true);
     setWidgetSnapshotError(null);
     try {
-      const res = (await window.electronAPI.viewExecuteJS("right", buildWidgetSnapshotScript(triggerSelector, kind))) as WidgetSnapshotResult | null;
+      let res: WidgetSnapshotResult | null = null;
+      if (kind === "option") {
+        // 选项控件：先尝试下拉展开模式，失败则尝试 inline 直接选项组模式
+        res = (await window.electronAPI.viewExecuteJS("right", buildWidgetSnapshotScript(triggerSelector, kind))) as WidgetSnapshotResult | null;
+        if (!res?.ok) {
+          // 下拉模式失败，尝试 inline 模式（直接在页面上的选项组，如男/女按钮）
+          const inlineRes = (await window.electronAPI.viewExecuteJS("right", buildInlineOptionSnapshotScript(triggerSelector))) as (WidgetSnapshotResult & { inline?: boolean }) | null;
+          if (inlineRes?.ok) {
+            res = inlineRes;
+          }
+        }
+      } else {
+        res = (await window.electronAPI.viewExecuteJS("right", buildWidgetSnapshotScript(triggerSelector, kind))) as WidgetSnapshotResult | null;
+      }
       if (res && res.ok) {
+        const isInline = (res as { inline?: boolean }).inline;
         setWidgetDraft({
           id: `wg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
           kind,
+          inline: isInline,
           triggerSelector,
           triggerLabel,
           panelSelector: res.panelSelector,
@@ -8051,6 +8333,13 @@ type: info.type,
     setWidgetLeftPickingKey(key);
     window.electronAPI?.viewStopPicking("right").catch(() => {});
     window.electronAPI?.viewStartPicking("left").catch(() => {});
+  }, []);
+
+  /** 请求重选单个选项按钮（inline 选项用）：直接在右侧网页拾取对应按钮元素 */
+  const pickWidgetOption = useCallback((key: string, optionIndex: number) => {
+    setWidgetOptionPickingKey(`${key}:option:${optionIndex}`);
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
+    window.electronAPI?.viewStartPicking("right").catch(() => {});
   }, []);
 
   /** 保存草稿控件为字段映射（走 saveMapping，自动生成 LOOP 步骤 mark） */
@@ -8152,12 +8441,17 @@ type: info.type,
       }
       // 2. 执行控件脚本
       if (widget.kind === "option") {
-        const res = (await window.electronAPI.viewExecuteJS("right", buildOptionSelectScript(widget, value))) as OptionSelectResult | null;
+        let res: OptionSelectResult | null;
+        if (widget.inline) {
+          res = (await window.electronAPI.viewExecuteJS("right", buildInlineOptionSelectScript(widget, value))) as OptionSelectResult | null;
+        } else {
+          res = (await window.electronAPI.viewExecuteJS("right", buildOptionSelectScript(widget, value))) as OptionSelectResult | null;
+        }
         if (res?.ok) {
           setResult({ ok: true, message: `已自动选择「${res.clickedText}」（左侧值：${value}）` });
         } else {
-          const avail = res?.options?.length ? `；面板选项：${res.options.slice(0, 6).join(" / ")}${res.options.length > 6 ? "…" : ""}` : "";
-          setResult({ ok: false, message: `未匹配到「${value}」${avail}——可点击选项芯片标注别名` });
+          const avail = res?.options?.length ? `；可选项：${res.options.slice(0, 6).join(" / ")}${res.options.length > 6 ? "…" : ""}` : "";
+          setResult({ ok: false, message: `未匹配到「${value}」${avail}${widget.inline ? "" : "——可点击选项芯片标注别名"}` });
         }
       } else {
         const cands = parseDateCandidates(value);
@@ -8581,10 +8875,27 @@ type: info.type,
   // 模态弹窗打开时隐藏主窗口 BrowserView，避免原生视图覆盖 HTML 弹窗
   useEffect(() => {
     if (!window.electronAPI) return;
-    const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel;
+    // 检查是否有任何面板打开：设置、文档填充、保存技能、技能面板、执行进度(LOOP/站外循环)、账号密码、屏蔽规则
+    const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel || executionPanelOpen || !!showCredentialsPanel || !!showBlockPanel;
     if (anyModalOpen) {
-      if (!browserLeftDetached && leftViewMode === "web") window.electronAPI.viewHide("left");
-      if (!browserRightDetached) window.electronAPI.viewHide("right");
+      const api = window.electronAPI;
+      // 立即隐藏
+      const hideViews = () => {
+        if (!browserLeftDetached && leftViewMode === "web") api.viewHide("left");
+        if (!browserRightDetached) api.viewHide("right");
+      };
+      hideViews();
+      // 监听 resize 事件：BrowserPane 的 sync 可能在 resize 后重新显示 BrowserView，
+      // 用 rAF 确保在 sync 执行后再次隐藏，防止原生视图覆盖弹窗
+      const onResize = () => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(hideViews);
+        });
+      };
+      window.addEventListener("resize", onResize);
+      return () => {
+        window.removeEventListener("resize", onResize);
+      };
     } else {
       // 弹窗关闭后不要直接把 BrowserView 设成全屏，否则一旦同步延迟，
       // 原生视图会盖住整个窗口导致所有按钮无法点击。交给 BrowserPane 的
@@ -8592,7 +8903,7 @@ type: info.type,
       const timer = setTimeout(() => window.dispatchEvent(new Event("resize")), 50);
       return () => clearTimeout(timer);
     }
-  }, [showSettings, docFillData, showSaveSkill, showSkillPanel, browserLeftDetached, browserRightDetached, leftViewMode]);
+  }, [showSettings, docFillData, showSaveSkill, showSkillPanel, executionPanelOpen, showCredentialsPanel, showBlockPanel, browserLeftDetached, browserRightDetached, leftViewMode]);
 
   // ============ 核验 ============
   const start = async () => {
@@ -8763,6 +9074,7 @@ type: info.type,
         excelFields={excelFields}
         recordFields={(selected?.fields || {}) as Record<string, string>}
         rolePickingKey={widgetRolePickingKey}
+        optionPickingKey={widgetOptionPickingKey}
         leftPickingKey={widgetLeftPickingKey}
         testResults={widgetTestResults}
         testBusyKey={widgetTestBusyKey}
@@ -8776,16 +9088,17 @@ type: info.type,
         onUpdateSavedBinding={updateSavedWidgetBinding}
         onRemoveSaved={removeSavedWidget}
         onPickRole={pickWidgetRole}
+        onPickOption={pickWidgetOption}
         onPickLeftWeb={pickWidgetLeftWeb}
         onTest={testWidget}
       />
     );
   }, [
     widgetExtractMode, widgetDraft, savedWidgets, widgetPickKind, widgetSnapshotBusy, widgetSnapshotError,
-    widgetDraftBinding, excelFields, selected, widgetRolePickingKey, widgetLeftPickingKey,
+    widgetDraftBinding, excelFields, selected, widgetRolePickingKey, widgetOptionPickingKey, widgetLeftPickingKey,
     widgetTestResults, widgetTestBusyKey,
     startWidgetPick, cancelWidgetPick, saveWidgetDraft, updateSavedWidget, updateSavedWidgetBinding,
-    removeSavedWidget, pickWidgetRole, pickWidgetLeftWeb, testWidget,
+    removeSavedWidget, pickWidgetRole, pickWidgetOption, pickWidgetLeftWeb, testWidget,
   ]);
 
   // 脱离模式：根据 URL query param 渲染独立面板窗口
@@ -8795,6 +9108,9 @@ type: info.type,
   if (detachMode === "browser-left") return <DetachedBrowserPanel detachSide="browser-left" />;
   if (detachMode === "browser-right") return <DetachedBrowserPanel detachSide="browser-right" />;
   if (detachMode === "browser-excel") return <DetachedExcelPanel />;
+
+  // 是否有模态/覆盖面板打开（此时需要隐藏 BrowserView，显示毛玻璃背景）
+  const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel || executionPanelOpen || !!showCredentialsPanel || !!showBlockPanel;
 
   return (
     <div className="flex h-full flex-col">
@@ -9380,6 +9696,7 @@ type: info.type,
                   title="数据源"
                   url={leftUrl}
                   onUrlChange={setLeftUrl}
+                  overlayActive={anyModalOpen}
                   enableTabs={true}
                   enableViewSwitch={true}
                   viewMode={leftViewMode}
@@ -9520,6 +9837,7 @@ type: info.type,
                   subtitle="待核验页面"
                   url={rightUrl}
                   onUrlChange={setRightUrl}
+                  overlayActive={anyModalOpen}
                   enableTabs={true}
                   enableViewSwitch={true}
                   viewMode={rightViewMode}
@@ -9946,6 +10264,15 @@ type: info.type,
                   hasCheckedBatch={checkedIds.size > 0}
                   customTextContent={customTextContent}
                   customTextMode={customTextMode}
+                  docFieldsContent={docFieldsContent}
+                  extractTabRequest={extractTabRequest}
+                  extractTabOrder={extractTabOrder}
+                  extractCounts={{
+                    doc: docEntries.length,
+                    custom: manualEntries.length,
+                    widget: savedWidgets.length + (widgetDraft ? 1 : 0),
+                  }}
+                  extractStepSummary={extractStepSummary}
                   widgetExtractContent={widgetExtractContent}
                   widgetSetupSignal={widgetExtractMode}
                   records={records}
