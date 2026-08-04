@@ -876,3 +876,178 @@ export interface WidgetReadResult {
   found: boolean;
   value: string;
 }
+
+/**
+ * 直接显示型选项组快照脚本：点击的元素所在的容器内收集可点击选项（不需要弹出面板）
+ * 适用于：男/女单选按钮组、标签选择组等直接在页面上可见的选项
+ * 返回 { ok, options?, reason? }
+ */
+export function buildInlineOptionSnapshotScript(containerSelector: string): string {
+  return `
+  ${DEEP_QUERY}
+  ${COMMON}
+  (function () {
+    var container = null;
+    try { container = __cinsideDeepQuery(${JSON.stringify(sanitize(containerSelector))}); } catch (e) { container = null; }
+    if (!container) return { ok: false, reason: 'container_not_found' };
+
+    // 向上查找合理的选项组容器（包含多个相似子元素的父级）
+    var groupContainer = container;
+    // 最多向上找 5 层，找包含 2 个以上可点击元素的容器
+    for (var up = 0; up < 5; up++) {
+      var clickable = [];
+      try {
+        var els = groupContainer.querySelectorAll('button, a, [role="button"], [role="radio"], [role="option"], label, input[type="radio"], input[type="checkbox"], li, div, span');
+        for (var i = 0; i < els.length; i++) {
+          var el = els[i];
+          if (!__wsVisible(el)) continue;
+          var t = (el.textContent || el.innerText || '').trim().replace(/\\s+/g, ' ');
+          if (t && t.length <= 20 && t.length >= 1) {
+            // 检查是否是叶子级或带文本的按钮
+            var hasBlockChild = false;
+            try {
+              var kids = el.children;
+              for (var k = 0; k < kids.length; k++) {
+                var kt = (kids[k].textContent || '').trim();
+                if (kt && kt.length > 5) { hasBlockChild = true; break; }
+              }
+            } catch(e) {}
+            if (!hasBlockChild) clickable.push(el);
+          }
+        }
+      } catch(e) {}
+      if (clickable.length >= 2) break;
+      if (groupContainer.parentElement) groupContainer = groupContainer.parentElement;
+      else break;
+    }
+
+    // 收集选项：在找到的容器内找所有可见的、带短文本的可点击元素
+    var items = [];
+    var seen = {};
+    try {
+      var all = groupContainer.querySelectorAll('button, a, [role="button"], [role="radio"], [role="option"], [role="tab"], label, input[type="radio"] + *, input[type="checkbox"] + *, li, [class*="item"], [class*="option"], [class*="choice"], [class*="btn"], [class*="radio"], [class*="checkbox"]');
+      // 如果上面的选择器找不到足够的元素，直接用 div/span
+      if (all.length < 2) {
+        all = groupContainer.querySelectorAll('*');
+      }
+      for (var j = 0; j < all.length; j++) {
+        var el = all[j];
+        if (!__wsVisible(el)) continue;
+        var text = (el.textContent || el.innerText || '').trim().replace(/\\s+/g, ' ');
+        if (!text || text.length > 10 || text.length < 1) continue;
+        // 过滤掉容器本身和纯图标元素
+        if (el === groupContainer) continue;
+        if (seen[text]) continue;
+        // 检查是否包含其他候选（避免选到父容器）
+        var containsOther = false;
+        for (var c = 0; c < all.length; c++) {
+          if (all[c] !== el && el.contains(all[c])) {
+            var ct = (all[c].textContent || '').trim().replace(/\\s+/g, ' ');
+            if (ct && ct.length >= 1 && ct.length <= 10 && ct !== text) { containsOther = true; break; }
+          }
+        }
+        if (containsOther) continue;
+        // 构建选择器
+        var sel = __wsBuildSelector(el);
+        if (!sel) {
+          // 用容器相对路径
+          sel = __wsChildSelector(__wsBuildSelector(groupContainer) || 'body', groupContainer, el);
+        }
+        items.push({ text: text, selector: sel });
+        seen[text] = 1;
+        if (items.length >= 20) break;
+      }
+    } catch (e) { return { ok: false, reason: 'collect_error: ' + e.message }; }
+
+    if (items.length < 2) return { ok: false, reason: 'inline_options_not_found', containerSelector: __wsBuildSelector(groupContainer) };
+    return { ok: true, inline: true, panelSelector: __wsBuildSelector(groupContainer), options: items };
+  })();`;
+}
+
+/**
+ * inline 选项控件选择脚本：直接点击匹配的选项元素（不需要展开面板）
+ * 返回 { ok, clickedText?, reason?, options? }
+ */
+export function buildInlineOptionSelectScript(widget: WidgetDef, targetValue: string): string {
+  const w = {
+    triggerSelector: sanitize(widget.triggerSelector),
+    panelSelector: sanitize(widget.panelSelector || ""),
+    options: (widget.options || []).map((o) => ({
+      text: o.text,
+      selector: sanitize(o.selector),
+      alias: o.alias || "",
+    })),
+  };
+  return `
+  ${DEEP_QUERY}
+  ${COMMON}
+  (function () {
+    var W = ${JSON.stringify(w)};
+    var TARGET = ${JSON.stringify(targetValue)};
+
+    // 收集候选项：优先用存储的选择器，失效则在容器内重新收集
+    var container = null;
+    if (W.panelSelector) { try { container = __cinsideDeepQuery(W.panelSelector); } catch (e) {} }
+    if (!container) { try { container = __cinsideDeepQuery(W.triggerSelector); } catch (e) {} }
+    if (!container) return { ok: false, reason: 'container_not_found' };
+
+    var items = [];
+    if (W.options && W.options.length) {
+      for (var i = 0; i < W.options.length; i++) {
+        var o = W.options[i];
+        var el = null;
+        if (o.selector) { try { el = __cinsideDeepQuery(o.selector); } catch (e) {} }
+        // 如果存储的选择器失效，在容器内按文本找
+        if (!el || !__wsVisible(el)) {
+          try {
+            var allInContainer = container.querySelectorAll('*');
+            for (var k = 0; k < allInContainer.length; k++) {
+              var cel = allInContainer[k];
+              var ct = (cel.textContent || '').trim().replace(/\\s+/g, ' ');
+              if (ct === o.text && __wsVisible(cel)) { el = cel; break; }
+            }
+          } catch(e) {}
+        }
+        if (el && __wsVisible(el)) items.push({ el: el, text: o.text, alias: o.alias || '' });
+      }
+    }
+    if (!items.length) {
+      // 兜底：在容器内重新收集
+      try {
+        var all = container.querySelectorAll('button, a, [role="button"], [role="radio"], [role="option"], label, li, span, div');
+        var seen = {};
+        for (var j = 0; j < all.length; j++) {
+          var el2 = all[j];
+          if (!__wsVisible(el2)) continue;
+          var t = (el2.textContent || '').trim().replace(/\\s+/g, ' ');
+          if (!t || t.length > 10 || seen[t]) continue;
+          items.push({ el: el2, text: t, alias: '' });
+          seen[t] = 1;
+        }
+      } catch(e) {}
+    }
+    if (!items.length) return { ok: false, reason: 'options_empty' };
+
+    var tn = __wsNorm(TARGET);
+    var best = null;
+    var i2;
+    // 1) 别名精确
+    for (i2 = 0; i2 < items.length; i2++) { if (items[i2].alias && __wsNorm(items[i2].alias) === tn) { best = items[i2]; break; } }
+    // 2) 文本精确
+    if (!best) { for (i2 = 0; i2 < items.length; i2++) { if (__wsNorm(items[i2].text) === tn) { best = items[i2]; break; } } }
+    // 3) 智能包含
+    if (!best && tn.length >= 1) {
+      for (i2 = 0; i2 < items.length; i2++) {
+        var on = __wsNorm(items[i2].text);
+        if (on && (on.indexOf(tn) >= 0 || tn.indexOf(on) >= 0)) { best = items[i2]; break; }
+      }
+    }
+    if (!best) {
+      var avail = [];
+      for (i2 = 0; i2 < items.length; i2++) avail.push(items[i2].text);
+      return { ok: false, reason: 'no_match', options: avail };
+    }
+    __wsRealClick(best.el);
+    return { ok: true, clickedText: best.text };
+  })();`;
+}
