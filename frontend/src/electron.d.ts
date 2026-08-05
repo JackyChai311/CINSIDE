@@ -119,6 +119,8 @@ export interface ElectronAPI {
 
   // 绑定输入模式右键菜单：开启/关闭
   viewSetBindInputMode: (side: ViewSide, enabled: boolean) => Promise<unknown>;
+  // 框选模式（日格子多选）：true=拖拽框选，false=单点选择
+  viewSetMarqueeMode: (side: ViewSide, enabled: boolean) => Promise<unknown>;
   // 回传 Excel 列列表到 picker 脚本（右键菜单响应）
   viewCtxMenuResponse: (side: ViewSide, columns: string[], currentField: string) => Promise<unknown>;
 
@@ -199,6 +201,11 @@ export interface ElectronAPI {
   getTwoStepPasteState: () => Promise<{ active: boolean; step: 0 | 1; side: ViewSide | null }>;
   /** 当两段式粘贴步骤变化时通知前端（step 0→1→完成） */
   onTwoStepPasteProgress: (callback: (data: { side: ViewSide | null; step: 0 | 1; done: boolean }) => void) => () => void;
+
+  // === 模态覆盖层：临时隐藏所有原生 BrowserView 防止穿模 ===
+  modalOverlayEnter: () => Promise<void>;
+  modalOverlayExit: () => Promise<void>;
+  onModalOverlayExited: (callback: () => void) => () => void;
 }
 
 interface CinsideZoom {
