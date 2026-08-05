@@ -18,6 +18,7 @@ import {
   Globe,
   List,
   Loader2,
+  Lock,
   Play,
   Plus,
   Save,
@@ -27,6 +28,7 @@ import {
   X,
 } from "lucide-react";
 import type { CalendarRole, FieldMapping, LeftSource, WidgetDef } from "../types";
+import type { CalendarMirrorAction } from "../lib/widgetScripts";
 
 /** 试跑结果 */
 export interface WidgetTestResult {
@@ -69,6 +71,24 @@ interface Props {
   testResults: Record<string, WidgetTestResult>;
   /** 试跑执行中 */
   testBusyKey: string | null;
+  /** 日历引导式拾取状态（null=未在引导中） */
+  calGuide: { stepIdx: number; total: number; role: CalendarRole; label: string; required: boolean } | null;
+  /** 日格子多选：当前已点选的日格子数量 */
+  calDayCellCount: number;
+  /** 日格子多选：完成点选（统一收集全部日格子并推进引导） */
+  onFinishDayCells: () => void;
+  /** 跳过当前可选步骤 */
+  onSkipGuideStep: () => void;
+  /** 取消引导式拾取 */
+  onCancelGuide: () => void;
+  /** 日历快照未检测到面板（可手动点选面板兜底） */
+  calPanelPickFailed: boolean;
+  /** 手动面板点选模式：idle=未启用 / await-open=等待用户手动点开日历 / picking=点选面板中 */
+  calPanelPickMode: "idle" | "await-open" | "picking";
+  /** 用户已手动点开日历 → 开始点选面板 */
+  onCalPanelPickArm: () => void;
+  /** 取消手动面板点选 */
+  onCalPanelPickCancel: () => void;
   onStartPick: (kind: "option" | "calendar") => void;
   onCancelPick: () => void;
   onDraftChange: (widget: WidgetDef) => void;
@@ -86,6 +106,12 @@ interface Props {
   onPickLeftWeb: (key: string) => void;
   /** 试跑（App 端解析左侧值并执行控件脚本） */
   onTest: (testKey: string, widget: WidgetDef, binding: WidgetBinding) => void;
+  /** 日历镜像：每个卡片当前显示的年月（与网页真实日历同步） */
+  calendarState: Record<string, { year: number; month: number } | null>;
+  /** 日历镜像操作执行中 */
+  calendarBusyKey: string | null;
+  /** 日历镜像操作：点击面板按钮 → 真实点网页对应按钮 → 刷新年月 */
+  onCalendarMirror: (mirrorKey: string, widget: WidgetDef, action: CalendarMirrorAction) => void;
 }
 
 /** 日历角色显示名 */
@@ -316,13 +342,13 @@ function CalendarRoleRow({
     <div className="flex items-center gap-1">
       <span className="w-12 shrink-0 text-[9px] text-slate-500">{ROLE_LABELS[role]}</span>
       {displayText ? (
-        <span className="inline-flex max-w-[90px] items-center gap-0.5 truncate rounded bg-emerald-50 px-1 py-0.5 text-[8px] text-emerald-700 ring-1 ring-emerald-100" title="已自动识别">
+        <span className="inline-flex max-w-[90px] items-center gap-0.5 truncate rounded bg-emerald-50 px-1 py-0.5 text-[8px] text-emerald-700 ring-1 ring-emerald-100" title="已标注">
           <Check className="h-2 w-2 shrink-0" />
           <span className="truncate">{displayText}</span>
         </span>
       ) : (
         <span className={`rounded px-1 py-0.5 text-[8px] ${missing ? "bg-amber-50 text-amber-600 ring-1 ring-amber-100" : "text-slate-300"}`}>
-          {missing ? "未识别·需重选" : "无"}
+          {missing ? "未标注·需点选" : "无"}
         </span>
       )}
       <button
@@ -370,6 +396,7 @@ function MockOptionWidget({
   const options = widget.options || [];
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [newOptionText, setNewOptionText] = useState("");
+  const [showAddInput, setShowAddInput] = useState(false);
   const triggerLabel = widget.triggerLabel || "请选择";
   const isInline = widget.inline;
 
@@ -391,8 +418,8 @@ function MockOptionWidget({
         <div className="text-[9px] text-slate-400">
           直接选项组（{options.length} 个选项，匹配左侧值自动点击）
         </div>
-        {/* 选项按钮行 */}
-        <div className="flex flex-wrap gap-1.5">
+        {/* 选项按钮行 + 内联添加按钮/输入框 */}
+        <div className="flex flex-wrap items-center gap-1.5">
           {options.map((opt, i) => {
             const isPicking = optionPickingKey === `${cardKey}:option:${i}`;
             return (
@@ -438,24 +465,35 @@ function MockOptionWidget({
               </div>
             );
           })}
-        </div>
-        {/* 添加新选项 */}
-        <div className="flex items-center gap-1">
-          <input
-            value={newOptionText}
-            onChange={(e) => setNewOptionText(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && addOption()}
-            placeholder="输入选项文字（如：男）"
-            className="h-6 flex-1 rounded border border-slate-200 bg-white px-2 text-[9px] text-slate-600 outline-none focus:border-violet-400"
-          />
-          <button
-            onClick={addOption}
-            disabled={!newOptionText.trim()}
-            className="inline-flex h-6 items-center gap-0.5 rounded bg-violet-500 px-2 text-[9px] font-medium text-white transition-colors hover:bg-violet-600 disabled:opacity-40"
-          >
-            <Plus className="h-3 w-3" />
-            添加
-          </button>
+          {/* 内联添加：显示 + 按钮或输入框 */}
+          {showAddInput ? (
+            <div className="inline-flex items-center gap-1">
+              <input
+                autoFocus
+                value={newOptionText}
+                onChange={(e) => setNewOptionText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { addOption(); setShowAddInput(false); }
+                  else if (e.key === "Escape") { setNewOptionText(""); setShowAddInput(false); }
+                }}
+                onBlur={() => {
+                  if (newOptionText.trim()) addOption();
+                  setShowAddInput(false);
+                }}
+                placeholder="新选项..."
+                className="h-8 w-20 rounded-lg border border-violet-300 bg-white px-2 text-[10px] text-slate-700 outline-none ring-2 ring-violet-100 focus:w-28 focus:border-violet-400"
+              />
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowAddInput(true)}
+              className="inline-flex h-8 items-center gap-1 rounded-lg border-2 border-dashed border-violet-300 px-2.5 text-[10px] font-medium text-violet-500 transition-colors hover:border-violet-400 hover:bg-violet-50 hover:text-violet-600"
+              title="添加新选项"
+            >
+              <Plus className="h-3 w-3" />
+              添加
+            </button>
+          )}
         </div>
         {/* 选中选项的别名/重选编辑 */}
         {selectedIdx !== null && options[selectedIdx] && (
@@ -549,21 +587,56 @@ function MockOptionWidget({
   );
 }
 
+/** localStorage key for saving calendar role template */
+const CALENDAR_TEMPLATE_KEY = "cinside-calendar-role-template";
+
+/** 读取已保存的日历角色模板 */
+function loadCalendarTemplate(): Record<string, string> | null {
+  try {
+    const raw = localStorage.getItem(CALENDAR_TEMPLATE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch { return null; }
+}
+
+/** 保存日历角色模板（只保存有 selector 的角色） */
+function saveCalendarTemplate(cal: Record<string, string | undefined>): Record<string, string> {
+  const tpl: Record<string, string> = {};
+  for (const key of Object.keys(ROLE_FIELD)) {
+    const sel = cal[ROLE_FIELD[key]];
+    if (sel) tpl[key] = sel;
+  }
+  localStorage.setItem(CALENDAR_TEMPLATE_KEY, JSON.stringify(tpl));
+  return tpl;
+}
+
 /** 模拟日历控件 */
 function MockCalendarWidget({
   widget,
   cardKey,
   rolePickingKey,
   onPickRole,
+  onWidgetChange,
+  calendarState,
+  calendarBusy,
+  onCalendarMirror,
 }: {
   widget: WidgetDef;
   cardKey: string;
   rolePickingKey: string | null;
   onPickRole: (key: string, role: CalendarRole) => void;
+  onWidgetChange: (w: WidgetDef) => void;
+  /** 日历镜像：当前显示的年月（与网页真实日历同步） */
+  calendarState: { year: number; month: number } | null;
+  /** 日历镜像操作执行中 */
+  calendarBusy: boolean;
+  /** 日历镜像操作：点击面板按钮 → 真实点网页对应按钮 → 刷新年月 */
+  onCalendarMirror: (action: CalendarMirrorAction) => void;
 }) {
   const cal = widget.calendar || {};
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
   const triggerLabel = widget.triggerLabel || "选择日期";
+  const savedTpl = loadCalendarTemplate();
 
   // 检查角色是否已识别
   const getRole = (role: string) => (cal as unknown as Record<string, string | undefined>)[ROLE_FIELD[role]];
@@ -575,16 +648,55 @@ function MockCalendarWidget({
   const hasPrevMonth = !!getRole("prevMonth");
   const hasNextMonth = !!getRole("nextMonth");
   const hasDayCell = !!getRole("dayCell");
+  // 检查是否有投影坐标（说明支持镜像点击）
+  // 镜像可用判定与执行脚本一致：选择器 或 投影坐标 任一存在即可点（脚本先选择器、失败后坐标兜底）
+  const mirrorArmed = !!(
+    cal.prevMonthSelector || cal.prevMonthRect || cal.nextMonthSelector || cal.nextMonthRect ||
+    cal.prevYearSelector || cal.prevYearRect || cal.nextYearSelector || cal.nextYearRect ||
+    cal.dayCellSelector || (cal.dayCells && cal.dayCells.length > 0)
+  );
+
+  const roleStatus = [
+    { role: "header" as CalendarRole, label: "年月显示", has: hasHeader || hasYear || hasMonth, required: true },
+    { role: "prevMonth" as CalendarRole, label: "上一月 ◀", has: hasPrevMonth, required: true },
+    { role: "nextMonth" as CalendarRole, label: "下一月 ▶", has: hasNextMonth, required: true },
+    { role: "dayCell" as CalendarRole, label: "日格子", has: hasDayCell, required: true },
+    { role: "prevYear" as CalendarRole, label: "上一年 ◀◀", has: hasPrevYear, required: false },
+    { role: "nextYear" as CalendarRole, label: "下一年 ▶▶", has: hasNextYear, required: false },
+  ];
+  const allSet = roleStatus.filter((r) => r.required).every((r) => r.has);
+  const identifiedCount = roleStatus.filter((r) => r.has).length;
+  const requiredCount = roleStatus.filter((r) => r.required).length;
 
   // 角色高亮状态
   const isPicking = (role: CalendarRole) => rolePickingKey === `${cardKey}:${role}`;
 
-  // 模拟日历数据（用当前月份）
+  /** 应用已保存模板（只填补空缺的 selector） */
+  const applyTemplate = () => {
+    if (!savedTpl) return;
+    const next = { ...cal };
+    for (const [role, sel] of Object.entries(savedTpl)) {
+      const field = ROLE_FIELD[role];
+      if (field && !next[field as keyof typeof next]) {
+        (next as Record<string, string>)[field] = sel;
+      }
+    }
+    onWidgetChange({ ...widget, calendar: next });
+  };
+
+  /** 保存当前配置为模板 */
+  const pinAsTemplate = () => {
+    saveCalendarTemplate(cal as unknown as Record<string, string | undefined>);
+    // 触发重渲染
+    onWidgetChange({ ...widget });
+  };
+
+  // 使用镜像状态的年月，若无则用当前时间
   const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth();
-  const firstDay = new Date(year, month, 1).getDay();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const displayYear = calendarState?.year ?? now.getFullYear();
+  const displayMonth = calendarState?.month ?? now.getMonth();
+  const firstDay = new Date(displayYear, displayMonth, 1).getDay();
+  const daysInMonth = new Date(displayYear, displayMonth + 1, 0).getDate();
   const monthNames = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'];
 
   // 生成日历格子
@@ -592,41 +704,73 @@ function MockCalendarWidget({
   for (let i = 0; i < firstDay; i++) cells.push(null);
   for (let i = 1; i <= daysInMonth; i++) cells.push(i);
 
+  // 是否可镜像点击：有选择器或投影坐标，且当前不忙
+  const canMirrorNav = (role: "prevYear" | "nextYear" | "prevMonth" | "nextMonth") => {
+    if (calendarBusy) return false;
+    const selKey = `${role}Selector` as keyof typeof cal;
+    const rectKey = `${role}Rect` as keyof typeof cal;
+    return !!(cal[selKey] || cal[rectKey]);
+  };
+  const canMirrorDay = () => {
+    return !calendarBusy && !!(cal.dayCellSelector || (cal.dayCells && cal.dayCells.length > 0));
+  };
+
   return (
     <div className="flex flex-col gap-1">
-      <div className="text-[9px] text-slate-400">模拟预览（点击角色「重选」可重新指定）</div>
       {/* 触发框 */}
-      <MockTriggerBox label={selectedDay ? `${year}-${String(month + 1).padStart(2, '0')}-${String(selectedDay).padStart(2, '0')}` : triggerLabel} icon={<CalendarDays className="h-3 w-3" />} />
+      <MockTriggerBox label={selectedDay ? `${displayYear}-${String(displayMonth + 1).padStart(2, '0')}-${String(selectedDay).padStart(2, '0')}` : triggerLabel} icon={<CalendarDays className="h-3 w-3" />} />
       {/* 日历面板 */}
       <div className="rounded border border-slate-200 bg-white p-2 shadow-lg">
         {/* 头部：年月 + 翻页 */}
         <div className="mb-2 flex items-center justify-between">
-          <button
-            onClick={() => onPickRole(cardKey, "prevYear")}
-            className={`rounded p-1 text-[10px] transition-colors ${
-              isPicking("prevYear")
-                ? "animate-pulse bg-violet-500 text-white"
-                : hasPrevYear
-                ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
-                : "bg-amber-100 text-amber-600 hover:bg-amber-200"
-            }`}
-            title={hasPrevYear ? "已识别·上一年" : "未识别·点击重选"}
-          >
-            «
-          </button>
-          <button
-            onClick={() => onPickRole(cardKey, "prevMonth")}
-            className={`rounded p-1 text-[10px] transition-colors ${
-              isPicking("prevMonth")
-                ? "animate-pulse bg-violet-500 text-white"
-                : hasPrevMonth
-                ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
-                : "bg-amber-100 text-amber-600 hover:bg-amber-200"
-            }`}
-            title={hasPrevMonth ? "已识别·上一月" : "未识别·点击重选"}
-          >
-            ‹
-          </button>
+          {hasPrevYear ? (
+            <button
+              onClick={() => (canMirrorNav("prevYear") ? onCalendarMirror({ type: "nav", role: "prevYear" }) : onPickRole(cardKey, "prevYear"))}
+              disabled={calendarBusy}
+              className={`rounded p-1 text-[10px] transition-colors ${
+                calendarBusy ? "opacity-50 cursor-not-allowed" : canMirrorNav("prevYear") ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200" : "bg-amber-100 text-amber-600 hover:bg-amber-200"
+              }`}
+              title={canMirrorNav("prevYear") ? "点击→网页上一年" : "无坐标·点击重新标注"}
+            >
+              «
+            </button>
+          ) : (
+            <button
+              onClick={() => onPickRole(cardKey, "prevYear")}
+              className={`rounded p-1 text-[10px] transition-colors ${
+                isPicking("prevYear")
+                  ? "animate-pulse bg-violet-500 text-white"
+                  : "bg-amber-100 text-amber-600 hover:bg-amber-200"
+              }`}
+              title="未标注·点击点选"
+            >
+              «
+            </button>
+          )}
+          {hasPrevMonth ? (
+            <button
+              onClick={() => (canMirrorNav("prevMonth") ? onCalendarMirror({ type: "nav", role: "prevMonth" }) : onPickRole(cardKey, "prevMonth"))}
+              disabled={calendarBusy}
+              className={`rounded p-1 text-[10px] transition-colors ${
+                calendarBusy ? "opacity-50 cursor-not-allowed" : canMirrorNav("prevMonth") ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200" : "bg-amber-100 text-amber-600 hover:bg-amber-200"
+              }`}
+              title={canMirrorNav("prevMonth") ? "点击→网页上一月" : "无坐标·点击重新标注"}
+            >
+              ‹
+            </button>
+          ) : (
+            <button
+              onClick={() => onPickRole(cardKey, "prevMonth")}
+              className={`rounded p-1 text-[10px] transition-colors ${
+                isPicking("prevMonth")
+                  ? "animate-pulse bg-violet-500 text-white"
+                  : "bg-amber-100 text-amber-600 hover:bg-amber-200"
+              }`}
+              title="未标注·点击点选"
+            >
+              ‹
+            </button>
+          )}
           <button
             onClick={() => onPickRole(cardKey, hasHeader ? "header" : hasYear ? "year" : "month")}
             className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
@@ -636,36 +780,59 @@ function MockCalendarWidget({
                 ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
                 : "bg-amber-100 text-amber-600 hover:bg-amber-200"
             }`}
-            title={hasHeader ? `已识别·年月：${getRole("header")}` : "未识别·点击重选"}
+            title={hasHeader ? `已标注·年月：${getRole("header")}` : "未标注·点击重选"}
           >
-            {year}年 {monthNames[month]}
+            {displayYear}年 {monthNames[displayMonth]}
+            {calendarBusy && <span className="ml-1 inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />}
           </button>
-          <button
-            onClick={() => onPickRole(cardKey, "nextMonth")}
-            className={`rounded p-1 text-[10px] transition-colors ${
-              isPicking("nextMonth")
-                ? "animate-pulse bg-violet-500 text-white"
-                : hasNextMonth
-                ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
-                : "bg-amber-100 text-amber-600 hover:bg-amber-200"
-            }`}
-            title={hasNextMonth ? "已识别·下一月" : "未识别·点击重选"}
-          >
-            ›
-          </button>
-          <button
-            onClick={() => onPickRole(cardKey, "nextYear")}
-            className={`rounded p-1 text-[10px] transition-colors ${
-              isPicking("nextYear")
-                ? "animate-pulse bg-violet-500 text-white"
-                : hasNextYear
-                ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
-                : "bg-amber-100 text-amber-600 hover:bg-amber-200"
-            }`}
-            title={hasNextYear ? "已识别·下一年" : "未识别·点击重选"}
-          >
-            »
-          </button>
+          {hasNextMonth ? (
+            <button
+              onClick={() => (canMirrorNav("nextMonth") ? onCalendarMirror({ type: "nav", role: "nextMonth" }) : onPickRole(cardKey, "nextMonth"))}
+              disabled={calendarBusy}
+              className={`rounded p-1 text-[10px] transition-colors ${
+                calendarBusy ? "opacity-50 cursor-not-allowed" : canMirrorNav("nextMonth") ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200" : "bg-amber-100 text-amber-600 hover:bg-amber-200"
+              }`}
+              title={canMirrorNav("nextMonth") ? "点击→网页下一月" : "无坐标·点击重新标注"}
+            >
+              ›
+            </button>
+          ) : (
+            <button
+              onClick={() => onPickRole(cardKey, "nextMonth")}
+              className={`rounded p-1 text-[10px] transition-colors ${
+                isPicking("nextMonth")
+                  ? "animate-pulse bg-violet-500 text-white"
+                  : "bg-amber-100 text-amber-600 hover:bg-amber-200"
+              }`}
+              title="未标注·点击点选"
+            >
+              ›
+            </button>
+          )}
+          {hasNextYear ? (
+            <button
+              onClick={() => (canMirrorNav("nextYear") ? onCalendarMirror({ type: "nav", role: "nextYear" }) : onPickRole(cardKey, "nextYear"))}
+              disabled={calendarBusy}
+              className={`rounded p-1 text-[10px] transition-colors ${
+                calendarBusy ? "opacity-50 cursor-not-allowed" : canMirrorNav("nextYear") ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200" : "bg-amber-100 text-amber-600 hover:bg-amber-200"
+              }`}
+              title={canMirrorNav("nextYear") ? "点击→网页下一年" : "无坐标·点击重新标注"}
+            >
+              »
+            </button>
+          ) : (
+            <button
+              onClick={() => onPickRole(cardKey, "nextYear")}
+              className={`rounded p-1 text-[10px] transition-colors ${
+                isPicking("nextYear")
+                  ? "animate-pulse bg-violet-500 text-white"
+                  : "bg-amber-100 text-amber-600 hover:bg-amber-200"
+              }`}
+              title="未标注·点击点选"
+            >
+              »
+            </button>
+          )}
         </div>
         {/* 星期标题 */}
         <div className="mb-1 grid grid-cols-7 gap-0.5 text-center text-[8px] text-slate-400">
@@ -678,41 +845,86 @@ function MockCalendarWidget({
           {cells.map((day, i) => (
             <div
               key={i}
-              onClick={() => day && setSelectedDay(day)}
+              onClick={() => {
+                if (day && canMirrorDay()) {
+                  setSelectedDay(day);
+                  onCalendarMirror({ type: "day", day });
+                } else if (day) {
+                  setSelectedDay(day);
+                }
+              }}
               className={`flex h-6 items-center justify-center rounded text-[9px] transition-colors ${
                 day === null
                   ? "text-slate-300"
                   : selectedDay === day
                   ? "bg-violet-500 text-white font-medium cursor-pointer"
-                  : hasDayCell
+                  : canMirrorDay()
                   ? "bg-emerald-50 text-slate-600 hover:bg-emerald-100 cursor-pointer"
-                  : "bg-amber-50 text-amber-600 hover:bg-amber-100 cursor-pointer"
+                  : hasDayCell
+                  ? "bg-amber-50 text-amber-600 hover:bg-amber-100 cursor-pointer"
+                  : "bg-slate-50 text-slate-400"
               }`}
-              title={day ? (hasDayCell ? "已识别·日格子" : "未识别·需重选") : ""}
+              title={day ? (canMirrorDay() ? "点击→网页选择该日" : hasDayCell ? "无坐标·日格子需重新标注" : "未标注·需点选") : ""}
             >
               {day}
             </div>
           ))}
         </div>
       </div>
-      {/* 角色识别状态 */}
-      <div className="mt-1 flex flex-col gap-0.5 rounded bg-slate-50 p-1.5">
-        <div className="text-[8px] text-slate-400">角色识别状态（点击「重选」可修正）：</div>
-        <div className="grid grid-cols-2 gap-0.5 text-[8px]">
-          {[
-            { role: "header" as CalendarRole, label: "年月", has: hasHeader },
-            { role: "prevMonth" as CalendarRole, label: "上一月", has: hasPrevMonth },
-            { role: "nextMonth" as CalendarRole, label: "下一月", has: hasNextMonth },
-            { role: "prevYear" as CalendarRole, label: "上一年", has: hasPrevYear },
-            { role: "nextYear" as CalendarRole, label: "下一年", has: hasNextYear },
-            { role: "dayCell" as CalendarRole, label: "日格子", has: hasDayCell },
-          ].map(({ role, label, has }) => (
-            <div key={role} className="flex items-center gap-1">
-              <span className={`inline-flex h-2 w-2 rounded-full ${has ? "bg-emerald-500" : "bg-amber-400"}`} />
-              <span className={has ? "text-slate-600" : "text-amber-600"}>{label}</span>
+      {/* 角色标注状态 - 加大加粗，更显眼 */}
+      <div className="mt-1.5 flex flex-col gap-1.5 rounded-lg bg-gradient-to-br from-slate-50 to-violet-50/30 p-2.5 ring-1 ring-slate-200">
+        <div className="flex items-center gap-1.5">
+          <span className={`inline-flex h-2 w-2 rounded-full ${identifiedCount >= 5 ? "bg-emerald-500" : identifiedCount >= 3 ? "bg-amber-400" : "bg-rose-400"}`} />
+          <span className="text-[11px] font-semibold text-slate-700">
+            角色标注 <span className="text-violet-600">{identifiedCount}/{roleStatus.length}</span>
+            {allSet && <span className="ml-1 text-emerald-600">✓</span>}
+          </span>
+          <span className="text-[9px] text-slate-400">（必选{requiredCount}项；点「重选」修正，固定模板后下次自动套用）</span>
+          {mirrorArmed && (
+            <span className="ml-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[8px] text-emerald-700 ring-1 ring-emerald-200">
+              镜像已激活 ✓
+            </span>
+          )}
+          {/* 模板操作按钮 */}
+          <div className="ml-auto flex items-center gap-1">
+            {savedTpl && !allSet && (
+              <button
+                onClick={applyTemplate}
+                className="inline-flex items-center gap-0.5 rounded-md bg-violet-100 px-1.5 py-0.5 text-[9px] font-medium text-violet-700 transition-colors hover:bg-violet-200"
+                title="用上次固定的日历结构自动填补缺失角色"
+              >
+                <Save className="h-2.5 w-2.5" />
+                应用固定模板
+              </button>
+            )}
+            <button
+              onClick={pinAsTemplate}
+              className="inline-flex items-center gap-0.5 rounded-md bg-amber-100 px-1.5 py-0.5 text-[9px] font-medium text-amber-700 transition-colors hover:bg-amber-200"
+              title="将当前日历的角色选择器固定为模板，下次提取日历时自动套用"
+            >
+              <Lock className="h-2.5 w-2.5" />
+              {savedTpl ? "更新固定模板" : "固定为模板"}
+            </button>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-x-2 gap-y-1">
+          {roleStatus.map(({ role, label, has }) => (
+            <div key={role} className="flex items-center gap-1.5">
+              <span className={`inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-full text-[7px] font-bold text-white ${
+                has ? "bg-emerald-500" : "bg-amber-400"
+              }`}>
+                {has ? "✓" : "!"}
+              </span>
+              <span className={`text-[10px] font-medium ${has ? "text-slate-700" : "text-amber-700"}`}>{label}</span>
               <button
                 onClick={() => onPickRole(cardKey, role)}
-                className={`ml-auto text-[7px] ${isPicking(role) ? "animate-pulse text-violet-600 font-medium" : "text-slate-400 hover:text-violet-600"}`}
+                className={`ml-auto rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors ${
+                  isPicking(role)
+                    ? "animate-pulse bg-violet-500 text-white"
+                    : has
+                    ? "bg-white text-slate-500 ring-1 ring-slate-200 hover:bg-violet-50 hover:text-violet-600 hover:ring-violet-200"
+                    : "bg-amber-100 text-amber-700 ring-1 ring-amber-200 hover:bg-amber-200"
+                }`}
               >
                 {isPicking(role) ? "点网页…" : "重选"}
               </button>
@@ -733,6 +945,9 @@ function WidgetCardBody({
   onWidgetChange,
   onPickRole,
   onPickOption,
+  calendarState,
+  calendarBusyKey,
+  onCalendarMirror,
 }: {
   widget: WidgetDef;
   cardKey: string;
@@ -741,12 +956,29 @@ function WidgetCardBody({
   onWidgetChange: (w: WidgetDef) => void;
   onPickRole: (key: string, role: CalendarRole) => void;
   onPickOption: (key: string, idx: number) => void;
+  /** 日历镜像：当前显示的年月（与网页真实日历同步） */
+  calendarState: Record<string, { year: number; month: number } | null>;
+  /** 日历镜像操作执行中 */
+  calendarBusyKey: string | null;
+  /** 日历镜像操作：点击面板按钮 → 真实点网页对应按钮 → 刷新年月 */
+  onCalendarMirror: (key: string, widget: WidgetDef, action: CalendarMirrorAction) => void;
 }) {
   if (widget.kind === "option") {
     return <MockOptionWidget widget={widget} cardKey={cardKey} optionPickingKey={optionPickingKey} onWidgetChange={onWidgetChange} onPickOption={onPickOption} />;
   }
   // 日历控件
-  return <MockCalendarWidget widget={widget} cardKey={cardKey} rolePickingKey={rolePickingKey} onPickRole={onPickRole} />;
+  return (
+    <MockCalendarWidget
+      widget={widget}
+      cardKey={cardKey}
+      rolePickingKey={rolePickingKey}
+      onPickRole={onPickRole}
+      onWidgetChange={onWidgetChange}
+      calendarState={calendarState[cardKey] || null}
+      calendarBusy={calendarBusyKey === cardKey}
+      onCalendarMirror={(action) => onCalendarMirror(cardKey, widget, action)}
+    />
+  );
 }
 
 export default function WidgetExtractPanel(props: Props) {
@@ -777,17 +1009,78 @@ export default function WidgetExtractPanel(props: Props) {
     onPickOption,
     onPickLeftWeb,
     onTest,
+    calendarState,
+    calendarBusyKey,
+    onCalendarMirror,
+    calGuide,
+    calDayCellCount,
+    onFinishDayCells,
+    onSkipGuideStep,
+    onCancelGuide,
+    calPanelPickFailed,
+    calPanelPickMode,
+    onCalPanelPickArm,
+    onCalPanelPickCancel,
   } = props;
 
   const draftReady = draftBinding.leftField.trim().length > 0;
 
   return (
-    <div className="flex flex-col gap-2 px-2 py-1.5">
-      {/* 标题 + 提取入口 */}
-      <div className="flex items-center gap-1 text-[10px] font-bold text-violet-800">
-        <List className="h-3 w-3 text-violet-700" />
-        控件提取 — 点击展开型的框框（选项卡 / 日历）
-      </div>
+    <div className="flex flex-col gap-2 px-1 py-1">
+      {/* 日历引导式拾取提示条 */}
+      {calGuide && (
+        <div className="flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 ring-1 ring-amber-200">
+          <span className="inline-flex h-5 shrink-0 items-center justify-center rounded-full bg-amber-500 px-1.5 text-[9px] font-semibold text-white">
+            {calGuide.stepIdx + 1}/{calGuide.total}
+          </span>
+          <div className="flex min-w-0 flex-1 flex-col">
+            <span className="text-[9px] font-medium text-amber-800">
+              请点选：{calGuide.label}
+            </span>
+            <span className="truncate text-[8px] text-amber-600/80">
+              {calGuide.role === "dayCell"
+                ? `已选 ${calDayCellCount} 个 · 鼠标拖拽框选一片日格子，或逐个点选，至少 1 个后点「完成」`
+                : calGuide.required
+                ? "必选 · 在右侧网页日历上点选对应元素"
+                : "可选 · 无该按钮时点「跳过」"}
+            </span>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            {calGuide.role === "dayCell" && (
+              <button
+                onClick={onFinishDayCells}
+                className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium ring-1 transition-colors ${
+                  calDayCellCount > 0
+                    ? "bg-emerald-500 text-white ring-emerald-500 hover:bg-emerald-600"
+                    : "bg-white text-slate-400 ring-slate-200"
+                }`}
+                title={calDayCellCount > 0 ? `完成日格子点选（已选 ${calDayCellCount} 个种子，将自动收集全部日格子）` : "请先在网页日历上点选至少一个日格子"}
+              >
+                <Check className="h-2.5 w-2.5" />
+                完成{calDayCellCount > 0 ? ` (${calDayCellCount})` : ""}
+              </button>
+            )}
+            {!calGuide.required && (
+              <button
+                onClick={onSkipGuideStep}
+                className="inline-flex items-center gap-0.5 rounded bg-white px-1.5 py-0.5 text-[9px] font-medium text-amber-700 ring-1 ring-amber-300 transition-colors hover:bg-amber-100"
+                title="跳过当前可选步骤"
+              >
+                跳过
+              </button>
+            )}
+            <button
+              onClick={onCancelGuide}
+              className="inline-flex items-center gap-0.5 rounded bg-white px-1.5 py-0.5 text-[9px] font-medium text-rose-600 ring-1 ring-rose-200 transition-colors hover:bg-rose-50"
+              title="放弃本次引导式拾取"
+            >
+              <X className="h-2.5 w-2.5" />
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+      {/* 提取入口（TAB 栏已作为标题，这里不再重复标题） */}
       <div className="flex items-center gap-1.5">
         {pickingKind ? (
           <button
@@ -802,7 +1095,7 @@ export default function WidgetExtractPanel(props: Props) {
             <button
               onClick={() => onStartPick("option")}
               disabled={snapshotBusy}
-              className="inline-flex flex-1 items-center justify-center gap-1 rounded-md bg-violet-600 px-2 py-1 text-[10px] font-medium text-white transition-colors hover:bg-violet-700 disabled:opacity-40"
+              className="inline-flex flex-1 items-center justify-center gap-1 rounded-md bg-emerald-500 px-2 py-1 text-[10px] font-medium text-white transition-colors hover:bg-emerald-600 disabled:opacity-40"
               title="提取点击后展开选项列表的控件（下拉框/展开卡片）"
             >
               <Plus className="h-3 w-3" />
@@ -811,7 +1104,7 @@ export default function WidgetExtractPanel(props: Props) {
             <button
               onClick={() => onStartPick("calendar")}
               disabled={snapshotBusy}
-              className="inline-flex flex-1 items-center justify-center gap-1 rounded-md bg-violet-600 px-2 py-1 text-[10px] font-medium text-white transition-colors hover:bg-violet-700 disabled:opacity-40"
+              className="inline-flex flex-1 items-center justify-center gap-1 rounded-md bg-amber-500 px-2 py-1 text-[10px] font-medium text-white transition-colors hover:bg-amber-600 disabled:opacity-40"
               title="提取点击后展开日历的日期控件"
             >
               <CalendarDays className="h-3 w-3" />
@@ -826,15 +1119,72 @@ export default function WidgetExtractPanel(props: Props) {
           正在打开控件并识别面板结构…
         </div>
       )}
-      {snapshotError && (
+      {snapshotError && calPanelPickMode === "idle" && (
         <div className="rounded bg-rose-50 px-2 py-1 text-[9px] leading-snug text-rose-600 ring-1 ring-rose-100">
           {snapshotError}
+        </div>
+      )}
+      {/* 日历手动面板点选兜底：自动检测失败 → 引导用户手动点开日历并点选面板 */}
+      {calPanelPickFailed && calPanelPickMode === "await-open" && (
+        <div className="flex flex-col gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 ring-1 ring-amber-200">
+          <div className="flex items-start gap-1.5">
+            <CalendarDays className="mt-0.5 h-3 w-3 shrink-0 text-amber-600" />
+            <div className="flex-1">
+              <div className="text-[9px] font-medium text-amber-800">未检测到展开的日历，请手动指定面板：</div>
+              <ol className="mt-0.5 list-decimal pl-3.5 text-[8px] leading-relaxed text-amber-700">
+                <li>在右侧网页点击日期框框，手动点开日历</li>
+                <li>日历展开后，点下方「开始点选面板」</li>
+                <li>再点日历面板上的任意位置（日格子/年月区均可）</li>
+              </ol>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={onCalPanelPickArm}
+              className="inline-flex flex-1 items-center justify-center gap-1 rounded bg-amber-500 px-2 py-1 text-[9px] font-medium text-white transition-colors hover:bg-amber-600"
+            >
+              <Crosshair className="h-2.5 w-2.5" />
+              我已点开日历，开始点选面板
+            </button>
+            <button
+              onClick={onCalPanelPickCancel}
+              className="inline-flex items-center gap-0.5 rounded bg-white px-1.5 py-1 text-[9px] font-medium text-slate-500 ring-1 ring-slate-200 transition-colors hover:bg-slate-50"
+            >
+              <X className="h-2.5 w-2.5" />
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+      {calPanelPickMode === "picking" && (
+        <div className="flex flex-col gap-1">
+          {snapshotError && (
+            <div className="rounded bg-rose-50 px-2 py-1 text-[9px] leading-snug text-rose-600 ring-1 ring-rose-100">
+              {snapshotError}
+            </div>
+          )}
+          <div className="flex items-center gap-2 rounded-md border border-violet-300 bg-violet-50 px-2 py-1.5 ring-1 ring-violet-200">
+            <Crosshair className="h-3 w-3 shrink-0 animate-pulse text-violet-600" />
+            <span className="flex-1 text-[9px] text-violet-700">
+              请点击网页日历面板上的任意位置（日格子/年月区均可）
+            </span>
+            <button
+              onClick={onCalPanelPickCancel}
+              className="inline-flex shrink-0 items-center gap-0.5 rounded bg-white px-1.5 py-0.5 text-[9px] font-medium text-slate-500 ring-1 ring-slate-200 transition-colors hover:bg-slate-50"
+            >
+              <X className="h-2.5 w-2.5" />
+              取消
+            </button>
+          </div>
         </div>
       )}
 
       {/* 草稿卡片：快照完成，待绑定保存 */}
       {draft && (
-        <div className="flex flex-col gap-1.5 rounded-lg border-2 border-violet-300 bg-violet-50/60 px-2 py-1.5 ring-1 ring-violet-200">
+        <div
+          data-widget-tab-id={`widget:draft:${draft.id}`}
+          className="flex flex-col gap-1.5 rounded-lg border-2 border-violet-300 bg-violet-50/60 px-2 py-1.5 ring-1 ring-violet-200"
+        >
           <div className="flex items-center gap-1">
             <span
               className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-violet-500 text-[8px] font-bold text-white animate-pulse"
@@ -861,15 +1211,6 @@ export default function WidgetExtractPanel(props: Props) {
               <X className="h-3 w-3" />
             </button>
           </div>
-          <WidgetCardBody
-            widget={draft}
-            cardKey="draft"
-            rolePickingKey={rolePickingKey}
-            optionPickingKey={optionPickingKey}
-            onWidgetChange={onDraftChange}
-            onPickRole={onPickRole}
-            onPickOption={onPickOption}
-          />
           <BindingRow
             binding={draftBinding}
             excelFields={excelFields}
@@ -878,6 +1219,18 @@ export default function WidgetExtractPanel(props: Props) {
             leftPickingKey={leftPickingKey}
             onChange={onDraftBindingChange}
             onPickLeftWeb={onPickLeftWeb}
+          />
+          <WidgetCardBody
+            widget={draft}
+            cardKey="draft"
+            rolePickingKey={rolePickingKey}
+            optionPickingKey={optionPickingKey}
+            onWidgetChange={onDraftChange}
+            onPickRole={onPickRole}
+            onPickOption={onPickOption}
+            calendarState={calendarState}
+            calendarBusyKey={calendarBusyKey}
+            onCalendarMirror={onCalendarMirror}
           />
           {/* 试跑结果 */}
           {testResults["draft"] && (
@@ -923,46 +1276,42 @@ export default function WidgetExtractPanel(props: Props) {
           leftLabel: mapping.left_record_key || undefined,
         };
         const tr = testResults[key];
+        const isBound = !!binding.leftField.trim();
+        const accent = isBound
+          ? { border: "border-emerald-200", bg: "bg-emerald-50/40", num: "bg-emerald-500", icon: "text-emerald-600", title: "text-emerald-800", badgeBg: "bg-emerald-100", badgeText: "text-emerald-700", badgeRing: "ring-emerald-200" }
+          : { border: "border-amber-200", bg: "bg-amber-50/40", num: "bg-amber-500", icon: "text-amber-600", title: "text-amber-800", badgeBg: "bg-amber-100", badgeText: "text-amber-700", badgeRing: "ring-amber-200" };
         return (
           <div
             key={key}
-            className="flex flex-col gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50/40 px-2 py-1.5"
+            data-widget-tab-id={`widget:saved:${mapping.right_selector}`}
+            className={`flex flex-col gap-1.5 rounded-lg border ${accent.border} ${accent.bg} px-2 py-1.5`}
           >
             <div className="flex items-center gap-1">
               <span
-                className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-[8px] font-bold text-white"
-                title={`第 ${widgetIdx + 1} 个提取的控件（先设置先执行）`}
+                className={`inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full ${accent.num} text-[8px] font-bold text-white`}
+                title={`第 ${widgetIdx + 1} 个控件`}
               >
                 {widgetIdx + 1}
               </span>
               {widget.kind === "option" ? (
-                <List className="h-3 w-3 shrink-0 text-emerald-600" />
+                <List className={`h-3 w-3 shrink-0 ${accent.icon}`} />
               ) : (
-                <CalendarDays className="h-3 w-3 shrink-0 text-emerald-600" />
+                <CalendarDays className={`h-3 w-3 shrink-0 ${accent.icon}`} />
               )}
-              <span className="max-w-[130px] truncate text-[10px] font-bold text-emerald-800" title={widget.triggerSelector}>
+              <span className={`max-w-[130px] truncate text-[10px] font-bold ${accent.title}`} title={widget.triggerSelector}>
                 {widget.triggerLabel || mapping.right_label || "控件"}
               </span>
-              <span className="shrink-0 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[8px] text-emerald-700 ring-1 ring-emerald-200">
-                {widget.kind === "option" ? "选项" : "日历"}·已保存
+              <span className={`shrink-0 rounded-full ${accent.badgeBg} px-1.5 py-0.5 text-[8px] ${accent.badgeText} ring-1 ${accent.badgeRing}`}>
+                {widget.kind === "option" ? "选项" : "日历"}·{isBound ? "已保存" : "待绑定"}
               </span>
               <button
                 onClick={() => onRemoveSaved(mapping.right_selector)}
                 className="ml-auto rounded p-0.5 text-slate-400 hover:bg-rose-100 hover:text-rose-500"
-                title="删除此控件映射"
+                title="删除此控件"
               >
                 <Trash2 className="h-3 w-3" />
               </button>
             </div>
-            <WidgetCardBody
-              widget={widget}
-              cardKey={key}
-              rolePickingKey={rolePickingKey}
-              optionPickingKey={optionPickingKey}
-              onWidgetChange={(w) => onUpdateSaved(mapping.right_selector, w)}
-              onPickRole={onPickRole}
-              onPickOption={onPickOption}
-            />
             <BindingRow
               binding={binding}
               excelFields={excelFields}
@@ -971,6 +1320,18 @@ export default function WidgetExtractPanel(props: Props) {
               leftPickingKey={leftPickingKey}
               onChange={(b) => onUpdateSavedBinding(mapping.right_selector, b)}
               onPickLeftWeb={onPickLeftWeb}
+            />
+            <WidgetCardBody
+              widget={widget}
+              cardKey={key}
+              rolePickingKey={rolePickingKey}
+              optionPickingKey={optionPickingKey}
+              onWidgetChange={(w) => onUpdateSaved(mapping.right_selector, w)}
+              onPickRole={onPickRole}
+              onPickOption={onPickOption}
+              calendarState={calendarState}
+              calendarBusyKey={calendarBusyKey}
+              onCalendarMirror={onCalendarMirror}
             />
             {tr && (
               <div
