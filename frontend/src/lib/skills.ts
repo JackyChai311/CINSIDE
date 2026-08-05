@@ -42,7 +42,7 @@ export function deleteSkill(id: string) {
   saveSkills(skills);
 }
 
-export function updateSkillMeta(id: string, patch: { name?: string; icon?: string; iconImage?: string | null }) {
+export function updateSkillMeta(id: string, patch: { name?: string; description?: string; icon?: string; iconImage?: string | null }) {
   const skills = loadSkills();
   const idx = skills.findIndex((s) => s.id === id);
   if (idx >= 0) {
