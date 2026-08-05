@@ -47,20 +47,49 @@ const COMMON = `
   }
   function __wsRealClick(el) {
     if (!el) return;
-    try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
-    var opts = { bubbles: true, cancelable: true, view: el.ownerDocument.defaultView || window };
-    try { el.dispatchEvent(new PointerEvent('pointerover', opts)); } catch (e) {}
+    try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (e) {}
+    var rect = null;
+    try { rect = el.getBoundingClientRect(); } catch (e) {}
+    var cx = rect ? Math.round(rect.left + rect.width / 2) : 0;
+    var cy = rect ? Math.round(rect.top + rect.height / 2) : 0;
+    var view = el.ownerDocument.defaultView || window;
+    var opts = { bubbles: true, cancelable: true, view: view, clientX: cx, clientY: cy, screenX: cx, screenY: cy, button: 0, buttons: 1, detail: 1 };
+    var popts = { bubbles: true, cancelable: true, view: view, clientX: cx, clientY: cy, screenX: cx, screenY: cy, pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1 };
+    var topts = { bubbles: true, cancelable: true, view: view, clientX: cx, clientY: cy, screenX: cx, screenY: cy, touches: [{ identifier: 0, clientX: cx, clientY: cy, pageX: cx, pageY: cy }], targetTouches: [], changedTouches: [{ identifier: 0, clientX: cx, clientY: cy, pageX: cx, pageY: cy }] };
+    try { el.dispatchEvent(new PointerEvent('pointerover', popts)); } catch (e) {}
     try { el.dispatchEvent(new MouseEvent('mouseover', opts)); } catch (e) {}
-    try { el.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch (e) {}
+    try { el.dispatchEvent(new MouseEvent('mouseenter', opts)); } catch (e) {}
+    try { el.dispatchEvent(new PointerEvent('pointerenter', popts)); } catch (e) {}
+    try { el.dispatchEvent(new TouchEvent('touchstart', topts)); } catch (e) {}
+    try { el.dispatchEvent(new PointerEvent('pointerdown', popts)); } catch (e) {}
     try { el.dispatchEvent(new MouseEvent('mousedown', opts)); } catch (e) {}
-    try { el.focus({ preventScroll: true }); } catch (e) {}
-    try { el.dispatchEvent(new PointerEvent('pointerup', opts)); } catch (e) {}
+    try { if (typeof el.focus === 'function') el.focus({ preventScroll: true }); } catch (e) {}
+    try { el.dispatchEvent(new PointerEvent('pointerup', popts)); } catch (e) {}
     try { el.dispatchEvent(new MouseEvent('mouseup', opts)); } catch (e) {}
+    try { el.dispatchEvent(new TouchEvent('touchend', topts)); } catch (e) {}
     try { el.dispatchEvent(new MouseEvent('click', opts)); } catch (e) {}
+    try { el.dispatchEvent(new PointerEvent('pointerout', popts)); } catch (e) {}
+    try { el.dispatchEvent(new MouseEvent('mouseout', opts)); } catch (e) {}
     try { if (typeof el.click === 'function') el.click(); } catch (e) {}
   }
   function __wsWait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   function __wsNorm(s) { return (s || '').replace(/[\\s ]+/g, '').toLowerCase(); }
+  // 元素中心相对面板左上角的投影坐标（px）；miss 时返回当前面板 rect 供调用方自行计算
+  function __wsProj(el, panel) {
+    if (!el || !panel) return null;
+    var r = el.getBoundingClientRect();
+    var pr = panel.getBoundingClientRect();
+    return { dx: Math.round(r.left + r.width / 2 - pr.left), dy: Math.round(r.top + r.height / 2 - pr.top) };
+  }
+  // 面板当前 rect 下，按投影坐标取该点处的可点击元素（对准位置点击）
+  function __wsHitAt(panel, dx, dy) {
+    if (!panel) return null;
+    var pr = panel.getBoundingClientRect();
+    var x = pr.left + (dx || 0), y = pr.top + (dy || 0);
+    var el = null;
+    try { el = panel.ownerDocument ? panel.ownerDocument.elementFromPoint(x, y) : document.elementFromPoint(x, y); } catch (e) { el = null; }
+    return el;
+  }
   // 同一文档树内构建选择器（id 短路 + 类名 + nth-of-type，向上最多 8 层，不跨 shadow）
   function __wsBuildSelector(el) {
     if (!el || el.nodeType !== 1) return '';
@@ -229,158 +258,67 @@ const COMMON = `
     if (m) { var mon = months[m[1].slice(0,3).toLowerCase()]; if (mon) return mon; }
     return 0;
   }
-`;
-
-/** 日历角色自动识别（注入脚本片段）：在面板内找 header / 翻页按钮 / 日格子 */
-const CALENDAR_DETECT = `
-  function __wsDetectCalendar(panel, panelSel) {
-    var cal = { panelSelector: panelSel };
-    var detected = {};
-    var i, el, t;
-    var all;
-    try { all = panel.querySelectorAll('*'); } catch (e) { all = []; }
-    // 1) header：找包含年月模式的最内层元素
-    for (i = 0; i < all.length; i++) {
-      el = all[i];
-      if (!__wsVisible(el)) continue;
-      // 只接受没有元素子节点、或子节点不含年月文本的元素（取最内层）
-      var text = (el.textContent || '').trim();
-      var ym = __wsParseYearMonth(text);
-      if (!ym) continue;
-      var inner = false;
-      for (var k = 0; k < el.children.length; k++) {
-        if (__wsParseYearMonth((el.children[k].textContent || '').trim())) { inner = true; break; }
+  // 日历结构探测：找含「年月文本 + ≥7 个日格子」的最小可见容器。
+  // 不要求文本导航字符（兼容 SVG 图标翻页的日历），覆盖 portal 渲染到 body 底部、内联常驻日历等场景。
+  function __wsFindCalendarPanel(roots, trigger) {
+    var DAY_RE = /^([1-9]|[12]\\d|3[01])$/;
+    function isDayCell(el) {
+      var t = (el.textContent || '').trim();
+      if (!DAY_RE.test(t)) return false;
+      var kids = el.children;
+      for (var i = 0; i < kids.length; i++) {
+        if ((kids[i].textContent || '').trim() === t) return false; // 有更深层同文本节点，取叶子
       }
-      if (inner) continue;
-      cal.headerSelector = __wsChildSelector(panelSel, panel, el);
-      detected.header = text.slice(0, 20);
-      break;
+      return true;
     }
-    // 1b) 无 header：找单独的年（4位数字）和月元素
-    if (!cal.headerSelector) {
-      for (i = 0; i < all.length; i++) {
-        el = all[i];
+    function countDays(container, limit) {
+      var n = 0;
+      var all;
+      try { all = container.querySelectorAll('td,li,span,div,a,button,[role="gridcell"],[class*="day"],[class*="date"],[class*="cell"]'); } catch (e) { return 0; }
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
         if (!__wsVisible(el)) continue;
-        t = (el.textContent || '').trim();
-        if (/^\\d{4}\\s*年?$/.test(t) && !cal.yearSelector) {
-          cal.yearSelector = __wsChildSelector(panelSel, panel, el);
-          detected.year = t.slice(0, 10);
-        } else {
-          var mo = __wsParseMonthOnly(t);
-          if (mo && t.length <= 10 && !cal.monthSelector) {
-            cal.monthSelector = __wsChildSelector(panelSel, panel, el);
-            detected.month = t.slice(0, 10);
-          }
-        }
+        if (isDayCell(el)) { n++; if (n >= limit) return n; }
       }
+      return n;
     }
-    // 2) 翻页按钮：aria/title/class 含 prev/next，或文本为箭头符号的小元素
-    var NAV_TEXT = { '‹': 1, '›': 1, '«': 2, '»': 2, '<': 1, '>': 1, '❮': 1, '❯': 1, '〈': 1, '〉': 1, '<<': 2, '>>': 2, '⟪': 2, '⟫': 2, '←': 1, '→': 1 };
-    var navs = [];
-    for (i = 0; i < all.length; i++) {
-      el = all[i];
-      if (!__wsVisible(el)) continue;
-      var r = el.getBoundingClientRect();
-      if (r.width > 80 || r.height > 60) continue;
-      var aria = ((el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title') || '')) + ' ' + ((el.className && typeof el.className === 'string') ? el.className : '')).toLowerCase();
-      t = (el.textContent || '').trim();
-      var kind = 0; // 1=月级 2=年级
-      var dir = 0;  // -1=prev 1=next
-      var explicit = false; // 是否来自 aria/title/class 明确标注（符号猜测的不算）
-      if (/prev|backward|left|上一|上个|last/.test(aria)) { dir = -1; explicit = true; }
-      if (/next|forward|right|下一|下个/.test(aria)) { dir = 1; explicit = true; }
-      if (explicit) { if (/year|年/.test(aria)) kind = 2; else kind = 1; }
-      if (!dir && NAV_TEXT[t]) {
-        kind = NAV_TEXT[t];
-        // 方向由相对 header 的位置决定，先记录
-      }
-      if (!dir && !kind) continue;
-      navs.push({ el: el, dir: dir, kind: kind, text: t.slice(0, 4), x: r.left + r.width / 2, y: r.top + r.height / 2, explicit: explicit });
-    }
-    if (navs.length) {
-      // header 中心 x（无 header 时用面板中心）
-      var cx;
-      if (cal.headerSelector) {
-        try {
-          var hEl = panel.querySelector(cal.headerSelector.replace(panelSel + ' > ', ''));
-          if (hEl) { var hr = hEl.getBoundingClientRect(); cx = hr.left + hr.width / 2; }
-        } catch (e) {}
-      }
-      if (cx === undefined) { var pr = panel.getBoundingClientRect(); cx = pr.left + pr.width / 2; }
-      var prevs = navs.filter(function (n) { return n.dir === -1 || (n.dir === 0 && n.x < cx); });
-      var nexts = navs.filter(function (n) { return n.dir === 1 || (n.dir === 0 && n.x >= cx); });
-      // 组内按与 header 距离排序：远=年级按钮候选，近=月级按钮候选
-      prevs.sort(function (a, b) { return a.x - b.x; });
-      nexts.sort(function (a, b) { return b.x - a.x; });
-      var usedIdx = {};
-      function assignNav(n, roleBase, group) {
-        var role = roleBase + (n.kind === 2 ? 'Year' : 'Month');
-        if (!cal[role + 'Selector']) {
-          cal[role + 'Selector'] = __wsChildSelector(panelSel, panel, n.el);
-          detected[role] = n.text || role;
-          n.__used = true;
-        }
-      }
-      // 显式 kind=2 的优先占年角色
-      prevs.forEach(function (n) { if (n.kind === 2 && !n.__used) assignNav(n, 'prev', prevs); });
-      nexts.forEach(function (n) { if (n.kind === 2 && !n.__used) assignNav(n, 'next', nexts); });
-      // 显式 kind=1 的占月角色
-      prevs.forEach(function (n) { if (n.kind === 1 && !n.__used) assignNav(n, 'prev', prevs); });
-      nexts.forEach(function (n) { if (n.kind === 1 && !n.__used) assignNav(n, 'next', nexts); });
-      // 同侧 >=2 个按钮且年角色空缺：最远（未占用）的当年级
-      if (!cal.prevYearSelector) { for (var pi = 0; pi < prevs.length; pi++) { if (!prevs[pi].__used) { cal.prevYearSelector = __wsChildSelector(panelSel, panel, prevs[pi].el); detected.prevYear = prevs[pi].text || 'prevYear'; prevs[pi].__used = true; break; } } }
-      if (!cal.nextYearSelector) { for (var ni = 0; ni < nexts.length; ni++) { if (!nexts[ni].__used) { cal.nextYearSelector = __wsChildSelector(panelSel, panel, nexts[ni].el); detected.nextYear = nexts[ni].text || 'nextYear'; nexts[ni].__used = true; break; } } }
-      // 月角色仍空缺：取最近（未占用）的
-      if (!cal.prevMonthSelector) { for (var pj = prevs.length - 1; pj >= 0; pj--) { if (!prevs[pj].__used) { cal.prevMonthSelector = __wsChildSelector(panelSel, panel, prevs[pj].el); detected.prevMonth = prevs[pj].text || 'prevMonth'; prevs[pj].__used = true; break; } } }
-      if (!cal.nextMonthSelector) { for (var nj = nexts.length - 1; nj >= 0; nj--) { if (!nexts[nj].__used) { cal.nextMonthSelector = __wsChildSelector(panelSel, panel, nexts[nj].el); detected.nextMonth = nexts[nj].text || 'nextMonth'; nexts[nj].__used = true; break; } } }
-      // 符号猜测的单按钮降级：年角色来自符号猜测且该侧只有它一个按钮时，改作月级（逐月翻页总是可行）
-      if (cal.prevYearSelector && !cal.prevMonthSelector) {
-        var onlyP = prevs.length === 1 && prevs[0].__used && !prevs[0].explicit;
-        if (onlyP) { cal.prevMonthSelector = cal.prevYearSelector; delete cal.prevYearSelector; detected.prevMonth = detected.prevYear; delete detected.prevYear; }
-      }
-      if (cal.nextYearSelector && !cal.nextMonthSelector) {
-        var onlyN = nexts.length === 1 && nexts[0].__used && !nexts[0].explicit;
-        if (onlyN) { cal.nextMonthSelector = cal.nextYearSelector; delete cal.nextYearSelector; detected.nextMonth = detected.nextYear; delete detected.nextYear; }
-      }
-    }
-    // 3) 日格子：文本为 1-31 的叶子可见元素，>=28 个
-    var dayEls = [];
-    for (i = 0; i < all.length; i++) {
-      el = all[i];
-      if (!__wsVisible(el)) continue;
-      t = (el.textContent || '').trim();
-      if (!/^([1-9]|[12]\\d|3[01])$/.test(t)) continue;
-      if (el.children.length) {
-        // 允许包裹一层同文本节点（如 <td><span>6</span></td>），取最深层
-        var deep = el;
+    var best = null, bestScore = -1;
+    var tr = null;
+    try { tr = trigger ? trigger.getBoundingClientRect() : null; } catch (e) { tr = null; }
+    var tcx = tr ? tr.left + tr.width / 2 : 0, tcy = tr ? tr.top + tr.height / 2 : 0;
+    var seen = [];
+    for (var ri = 0; ri < roots.length; ri++) {
+      var all;
+      try { all = roots[ri].querySelectorAll('*'); } catch (e) { continue; }
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (!__wsVisible(el)) continue;
+        var t = (el.textContent || '').trim();
+        if (!t || t.length > 40) continue;
+        if (!__wsParseYearMonth(t)) continue;
+        // 从年月文本向上找含日格子的最小容器
+        var cur = el;
         var guard = 0;
-        while (deep.firstElementChild && (deep.firstElementChild.textContent || '').trim() === t && guard++ < 4) {
-          deep = deep.firstElementChild;
+        var found = null;
+        while (cur && guard++ < 6) {
+          if (seen.indexOf(cur) !== -1) break; // 该容器已评过
+          var r = null;
+          try { r = cur.getBoundingClientRect(); } catch (e) { r = null; }
+          if (r && r.width >= 120 && r.height >= 100 && countDays(cur, 7) >= 7) { found = cur; break; }
+          cur = cur.parentElement;
         }
-        if (deep !== el) { el = deep; }
+        if (!found || seen.indexOf(found) !== -1) continue;
+        seen.push(found);
+        // 评分：面积小（更具体）+ 离触发框近
+        var fr = found.getBoundingClientRect();
+        var area = fr.width * fr.height;
+        var fcx = fr.left + fr.width / 2, fcy = fr.top + fr.height / 2;
+        var dist = Math.sqrt((fcx - tcx) * (fcx - tcx) + (fcy - tcy) * (fcy - tcy));
+        var score = 1000000 / (1 + area / 10000) + 2000000 / (1 + dist);
+        if (score > bestScore) { best = found; bestScore = score; }
       }
-      if (dayEls.indexOf(el) === -1) dayEls.push(el);
     }
-    if (dayEls.length >= 28) {
-      // 公共选择器：取第一个日格子的"去序号"路径（tag + 稳定类，不带 nth-of-type）
-      var first = dayEls[0];
-      var tag = first.nodeName.toLowerCase();
-      var commonSel = tag;
-      if (first.className && typeof first.className === 'string') {
-        var cls = first.className.trim().split(/\\s+/).filter(function (c) {
-          return c && c.indexOf('cinside') !== 0 && !/active|selected|today|current|disabled|outside|prev|next|other|weekend/i.test(c);
-        }).slice(0, 2).join('.');
-        if (cls) commonSel = tag + '.' + cls;
-      }
-      // 验证公共选择器命中数
-      try {
-        var hit = panel.querySelectorAll(commonSel);
-        if (hit.length < 20) commonSel = tag;
-      } catch (e) { commonSel = tag; }
-      cal.dayCellSelector = panelSel + ' ' + commonSel;
-      detected.dayCell = String(dayEls.length) + ' 格';
-    }
-    return { cal: cal, detected: detected };
+    return best;
   }
 `;
 
@@ -390,11 +328,160 @@ export function buildWidgetOpenScript(triggerSelector: string): string {
   ${DEEP_QUERY}
   ${COMMON}
   (function () {
+    // 清掉拾取器吞点击标记：程序化 __wsRealClick 不能被拾取器误吞
+    try { window.__cinsideJustPicked = false; } catch (e) {}
     var trigger = null;
     try { trigger = __cinsideDeepQuery(${JSON.stringify(sanitize(triggerSelector))}); } catch (e) { trigger = null; }
     if (!trigger) return { ok: false, reason: 'trigger_not_found' };
     __wsRealClick(trigger);
     return { ok: true };
+  })();`;
+}
+
+/** 智能打开控件面板：仅在面板未打开时点击触发框（避免已打开被点关）。引导式拾取推进时用 */
+export function buildWidgetEnsureOpenScript(triggerSelector: string, panelSelector?: string): string {
+  return `
+  ${DEEP_QUERY}
+  ${COMMON}
+  (async function () {
+    try { window.__cinsideJustPicked = false; } catch (e) {}
+    var trigger = null;
+    try { trigger = __cinsideDeepQuery(${JSON.stringify(sanitize(triggerSelector))}); } catch (e) { trigger = null; }
+    if (!trigger) return { ok: false, reason: 'trigger_not_found' };
+    var panel = null;
+    var ps = ${JSON.stringify(sanitize(panelSelector || ""))};
+    if (ps) { try { panel = __cinsideDeepQuery(ps); } catch (e) { panel = null; } }
+    if (!panel || !__wsVisible(panel)) {
+      panel = __wsFindOpenPanel(__wsTriggerRoots(trigger));
+      if (panel && (panel === trigger || (panel.contains && panel.contains(trigger)))) panel = null;
+    }
+    if (!panel || !__wsVisible(panel)) {
+      // 日历结构兜底：低 popup 评分/portal 渲染的日历面板
+      var cp = __wsFindCalendarPanel(__wsTriggerRoots(trigger), trigger);
+      if (cp) panel = cp;
+    }
+    if (panel && __wsVisible(panel)) return { ok: true, opened: false };
+    __wsRealClick(trigger);
+    var deadline = Date.now() + 2500;
+    while (Date.now() < deadline) {
+      if (ps) { try { panel = __cinsideDeepQuery(ps); } catch (e) { panel = null; } }
+      if (panel && __wsVisible(panel)) return { ok: true, opened: true };
+      panel = __wsFindOpenPanel(__wsTriggerRoots(trigger));
+      if (panel && panel !== trigger && !(panel.contains && panel.contains(trigger)) && __wsVisible(panel)) return { ok: true, opened: true };
+      panel = __wsFindCalendarPanel(__wsTriggerRoots(trigger), trigger);
+      if (panel && __wsVisible(panel)) return { ok: true, opened: true };
+      await __wsWait(150);
+    }
+    return { ok: false, reason: 'panel_not_open' };
+  })();`;
+}
+
+/** 日格子种子收集脚本：用户拾取日格子（可多选）并泛化后，用公共选择器收集面板内所有日格子的文本+投影坐标 */
+export function buildDayCellCollectScript(panelSelector: string, dayCellSelectors: string[]): string {
+  return `
+  ${DEEP_QUERY}
+  ${COMMON}
+  (function () {
+    var panel = null;
+    try { panel = __cinsideDeepQuery(${JSON.stringify(sanitize(panelSelector))}); } catch (e) { panel = null; }
+    if (!panel) return { ok: false, reason: 'panel_not_found' };
+    var ps = ${JSON.stringify(sanitize(panelSelector))};
+    var fullList = ${JSON.stringify(dayCellSelectors.map((s) => sanitize(s)))};
+    // 去掉面板前缀，得到面板内相对选择器（多选种子时逐个剥离，再合并为并集选择器）
+    var relParts = [];
+    for (var fi = 0; fi < fullList.length; fi++) {
+      var fs = (fullList[fi] || '').trim();
+      if (!fs) continue;
+      if (ps && fs.indexOf(ps) === 0) fs = fs.slice(ps.length).replace(/^\s*>\s*/, '').trim();
+      if (fs && relParts.indexOf(fs) === -1) relParts.push(fs);
+    }
+    var rel = relParts.join(', ');
+    var cells = [];
+    if (rel) { try { var list = panel.querySelectorAll(rel); for (var i = 0; i < list.length; i++) cells.push(list[i]); } catch (e) {} }
+    if (!cells.length) {
+      // 退化：取第一个种子选择器最后一段的 tag 名兜底
+      var tagMatch = (relParts[0] || '').match(/([a-zA-Z][\\w-]*)$/);
+      if (tagMatch) { try { var tl = panel.getElementsByTagName(tagMatch[1]); for (var j = 0; j < tl.length; j++) cells.push(tl[j]); } catch (e) {} }
+    }
+    var dayCells = [];
+    for (var k = 0; k < cells.length; k++) {
+      var c = cells[k];
+      if (!__wsVisible(c)) continue;
+      var t = (c.textContent || '').trim();
+      if (!/^([1-9]|[12]\\d|3[01])$/.test(t)) continue;
+      var proj = __wsProj(c, panel);
+      if (proj) dayCells.push({ text: t, dx: proj.dx, dy: proj.dy });
+    }
+    return { ok: true, dayCells: dayCells, count: dayCells.length };
+  })();`;
+}
+
+/**
+ * 手动面板点选兜底：用户点选日历面板内任意元素（如某个日格子/年月区），
+ * 从该种子元素向上找「含年月文本 + ≥7 日格子」的容器作为面板；找不到则用种子本身。
+ * 返回 { ok, panelSelector, upgraded }（upgraded=true 表示已从种子向上找到了真正的面板容器）
+ */
+export function buildCalendarPanelFromSeedScript(seedSelector: string): string {
+  return `
+  ${DEEP_QUERY}
+  ${COMMON}
+  (function () {
+    var seed = null;
+    try { seed = __cinsideDeepQuery(${JSON.stringify(sanitize(seedSelector))}); } catch (e) { seed = null; }
+    if (!seed) return { ok: false, reason: 'seed_not_found' };
+    // 从种子向上找日历容器（年月文本 + ≥7 日格子）
+    var DAY_RE = /^([1-9]|[12]\\d|3[01])$/;
+    function isDayCell(el) {
+      var t = (el.textContent || '').trim();
+      if (!DAY_RE.test(t)) return false;
+      var kids = el.children;
+      for (var i = 0; i < kids.length; i++) {
+        if ((kids[i].textContent || '').trim() === t) return false;
+      }
+      return true;
+    }
+    function countDays(container, limit) {
+      var n = 0;
+      var all;
+      try { all = container.querySelectorAll('td,li,span,div,a,button,[role="gridcell"],[class*="day"],[class*="date"],[class*="cell"]'); } catch (e) { return 0; }
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (!__wsVisible(el)) continue;
+        if (isDayCell(el)) { n++; if (n >= limit) return n; }
+      }
+      return n;
+    }
+    function hasYM(container) {
+      var all;
+      try { all = container.querySelectorAll('*'); } catch (e) { return false; }
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (!__wsVisible(el)) continue;
+        var t = (el.textContent || '').trim();
+        if (t && t.length <= 40 && __wsParseYearMonth(t)) return true;
+      }
+      return false;
+    }
+    var cur = seed;
+    var guard = 0;
+    var found = null;
+    while (cur && guard++ < 8) {
+      var r = null;
+      try { r = cur.getBoundingClientRect(); } catch (e) { r = null; }
+      // 日历容器特征：足够大 + ≥7 个日格子（年月文本作为加分项而非硬性条件，兼容年月分开放置的日历）
+      if (r && r.width >= 120 && r.height >= 100 && countDays(cur, 7) >= 7) { found = cur; break; }
+      cur = cur.parentElement;
+    }
+    if (!found) {
+      // 种子本身也不是日历的一部分（里面连日格子都没有）→ 判定用户点错位置
+      var seedDays = 0;
+      try { seedDays = countDays(seed, 3); } catch (e) { seedDays = 0; }
+      if (seedDays < 1) return { ok: false, reason: 'not_calendar' };
+    }
+    var panel = found || seed;
+    var sel = __wsBuildSelector(panel);
+    if (!sel) return { ok: false, reason: 'selector_build_fail' };
+    return { ok: true, panelSelector: sel, upgraded: !!found };
   })();`;
 }
 
@@ -423,8 +510,11 @@ export function buildWidgetSnapshotScript(triggerSelector: string, kind: "option
   return `
   ${DEEP_QUERY}
   ${COMMON}
-  ${CALENDAR_DETECT}
   (async function () {
+    // 快照脚本自身的点击是程序化触发（用于展开面板），不能被拾取器吞掉：
+    // 拾取完成后 __cinsideJustPicked 会短暂为 true，若不重置，紧随其后的 __wsRealClick 会被吞掉，
+    // 导致下拉/日历刚展开又被关闭，快照永远找不到面板。这里先清掉该标记。
+    try { window.__cinsideJustPicked = false; } catch (e) {}
     var trigger = null;
     try { trigger = __cinsideDeepQuery(${JSON.stringify(sanitize(triggerSelector))}); } catch (e) { trigger = null; }
     if (!trigger) return { ok: false, reason: 'trigger_not_found' };
@@ -445,41 +535,48 @@ export function buildWidgetSnapshotScript(triggerSelector: string, kind: "option
       }
     });
 
-    // 2) 点击触发框，等待面板展开
+    // 2) 点击触发框，轮询等待面板展开（日历/下拉常有展开动画，最长约 3.5s）
     __wsRealClick(trigger);
-    await __wsWait(650);
+    var panel = null;
+    var pollDeadline = Date.now() + 3500;
+    while (Date.now() < pollDeadline) {
+      // 找新出现 / 新变为可见的弹出层候选
+      var cands = [];
+      roots.forEach(function (root) {
+        var all;
+        try { all = root.querySelectorAll('*'); } catch (e) { return; }
+        for (var i = 0; i < all.length; i++) {
+          var el = all[i];
+          var isNew = !el.hasAttribute('data-cinside-ws-old');
+          var newlyVisible = el.hasAttribute('data-cinside-ws-old') && !el.hasAttribute('data-cinside-ws-vis');
+          if (!isNew && !newlyVisible) continue;
+          if (!__wsVisible(el)) continue;
+          var score = __wsPopupScore(el);
+          if (score < 3) continue;
+          var r = el.getBoundingClientRect();
+          if (r.width < 40 || r.height < 20) continue;
+          cands.push(el);
+        }
+      });
+      cands = __wsOutermost(cands);
+      // 评分排序： popup 特征分高优先，面积大优先
+      cands.sort(function (a, b) {
+        var d = __wsPopupScore(b) - __wsPopupScore(a);
+        if (d) return d;
+        var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+        return (rb.width * rb.height) - (ra.width * ra.height);
+      });
+      if (cands.length) { panel = cands[0]; break; }
+      // 兜底：未检测到"新出现"的面板时，找当前可见弹出层（排除触发框祖先链）
+      var fp = __wsFindOpenPanel(roots);
+      if (fp && !(fp === trigger || (fp.contains && fp.contains(trigger)))) { panel = fp; break; }
+      await __wsWait(150);
+    }
 
-    // 3) 找新出现 / 新变为可见的弹出层候选
-    var cands = [];
-    roots.forEach(function (root) {
-      var all;
-      try { all = root.querySelectorAll('*'); } catch (e) { return; }
-      for (var i = 0; i < all.length; i++) {
-        var el = all[i];
-        var isNew = !el.hasAttribute('data-cinside-ws-old');
-        var newlyVisible = el.hasAttribute('data-cinside-ws-old') && !el.hasAttribute('data-cinside-ws-vis');
-        if (!isNew && !newlyVisible) continue;
-        if (!__wsVisible(el)) continue;
-        var score = __wsPopupScore(el);
-        if (score < 3) continue;
-        var r = el.getBoundingClientRect();
-        if (r.width < 40 || r.height < 20) continue;
-        cands.push(el);
-      }
-    });
-    cands = __wsOutermost(cands);
-    // 评分排序： popup 特征分高优先，面积大优先
-    cands.sort(function (a, b) {
-      var d = __wsPopupScore(b) - __wsPopupScore(a);
-      if (d) return d;
-      var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
-      return (rb.width * rb.height) - (ra.width * ra.height);
-    });
-    var panel = cands.length ? cands[0] : null;
-    // 兜底：未检测到"新出现"的面板时，找当前可见弹出层（排除触发框祖先链）
-    if (!panel) {
-      panel = __wsFindOpenPanel(roots);
-      if (panel && (panel === trigger || panel.contains(trigger))) panel = null;
+    // 日历的特殊处理：即使没找到"弹出层"，也按日历结构找面板（年月文本 + ≥7 日格子）。
+    // 覆盖：portal 渲染到 body 底部、内联常驻日历、SVG 图标翻页（无文本导航字符）等场景。
+    if (!panel && ${JSON.stringify(kind)} === 'calendar') {
+      panel = __wsFindCalendarPanel(roots, trigger);
     }
 
     var cleanup = function () {
@@ -509,29 +606,13 @@ export function buildWidgetSnapshotScript(triggerSelector: string, kind: "option
         cleanup();
         return { ok: false, reason: 'options_empty' };
       }
+      // 选项控件：快照后关闭面板
+      __wsClosePanel(trigger, panel);
     } else {
-      var det = __wsDetectCalendar(panel, panelSel);
-      result.calendar = det.cal;
-      result.detected = det.detected;
-      if (!det.cal.headerSelector && !det.cal.yearSelector) {
-        __wsClosePanel(trigger, panel);
-        cleanup();
-        return { ok: false, reason: 'calendar_header_not_found', calendar: det.cal, detected: det.detected, panelSelector: panelSel };
-      }
-      if (!det.cal.prevMonthSelector && !det.cal.nextMonthSelector) {
-        __wsClosePanel(trigger, panel);
-        cleanup();
-        return { ok: false, reason: 'calendar_nav_not_found', calendar: det.cal, detected: det.detected, panelSelector: panelSel };
-      }
-      if (!det.cal.dayCellSelector) {
-        __wsClosePanel(trigger, panel);
-        cleanup();
-        return { ok: false, reason: 'calendar_days_not_found', calendar: det.cal, detected: det.detected, panelSelector: panelSel };
-      }
+      // 日历控件：引导式手动拾取，不自动识别角色；面板保持打开供用户继续拾取各按钮
+      result.calendar = {};
     }
 
-    // 5) 关闭面板并清理标记
-    __wsClosePanel(trigger, panel);
     await __wsWait(200);
     cleanup();
     return result;
@@ -556,18 +637,35 @@ export function buildOptionSelectScript(widget: WidgetDef, targetValue: string):
   ${DEEP_QUERY}
   ${COMMON}
   (async function () {
+    // 清掉拾取器吞点击标记：测试/执行时此处的 __wsRealClick 是程序化触发，
+    // 若上一帧拾取刚完成（__cinsideJustPicked=true），click 会被吞掉导致面板无法展开。
+    try { window.__cinsideJustPicked = false; } catch (e) {}
     var W = ${JSON.stringify(w)};
     var TARGET = ${JSON.stringify(targetValue)};
     var trigger = null;
     try { trigger = __cinsideDeepQuery(W.triggerSelector); } catch (e) { trigger = null; }
     if (!trigger) return { ok: false, reason: 'trigger_not_found' };
-    __wsRealClick(trigger);
-    await __wsWait(550);
+
+    function optFindPanel() {
+      var p = null;
+      if (W.panelSelector) { try { p = __cinsideDeepQuery(W.panelSelector); } catch (e) { p = null; } }
+      if (p && __wsVisible(p)) return p;
+      p = __wsFindOpenPanel(__wsTriggerRoots(trigger));
+      if (p && (p === trigger || p.contains(trigger))) p = null;
+      return p && __wsVisible(p) ? p : null;
+    }
+
+    // 多策略打开选项面板
     var panel = null;
-    if (W.panelSelector) { try { panel = __cinsideDeepQuery(W.panelSelector); } catch (e) { panel = null; } }
-    if (!panel || !__wsVisible(panel)) {
-      panel = __wsFindOpenPanel(__wsTriggerRoots(trigger));
-      if (panel && (panel === trigger || panel.contains(trigger))) panel = null;
+    __wsRealClick(trigger);
+    var od = Date.now() + 2000;
+    while (Date.now() < od) { panel = optFindPanel(); if (panel) break; await __wsWait(150); }
+    if (!panel) {
+      try { if (typeof trigger.focus === 'function') trigger.focus({ preventScroll: false }); } catch(e) {}
+      await __wsWait(80);
+      __wsRealClick(trigger);
+      od = Date.now() + 2000;
+      while (Date.now() < od) { panel = optFindPanel(); if (panel) break; await __wsWait(150); }
     }
     if (!panel) return { ok: false, reason: 'panel_not_open' };
 
@@ -640,36 +738,180 @@ export function buildCalendarSetScript(widget: WidgetDef, y: number, m: number, 
       prevMonthSelector: sanitize(cal.prevMonthSelector || ""),
       nextMonthSelector: sanitize(cal.nextMonthSelector || ""),
       dayCellSelector: sanitize(cal.dayCellSelector || ""),
+      headerRect: cal.headerRect || null,
+      yearRect: cal.yearRect || null,
+      monthRect: cal.monthRect || null,
+      prevYearRect: cal.prevYearRect || null,
+      nextYearRect: cal.nextYearRect || null,
+      prevMonthRect: cal.prevMonthRect || null,
+      nextMonthRect: cal.nextMonthRect || null,
+      dayCells: cal.dayCells || [],
     },
   };
   return `
   ${DEEP_QUERY}
   ${COMMON}
-  ${CALENDAR_DETECT}
   (async function () {
+    // 清掉拾取器吞点击标记：测试/执行时此处的 __wsRealClick 是程序化触发，
+    // 若上一帧拾取刚完成（__cinsideJustPicked=true），click 会被吞掉导致日历无法展开。
+    try { window.__cinsideJustPicked = false; } catch (e) {}
     var W = ${JSON.stringify(w)};
     var TY = ${y | 0}, TM = ${m | 0}, TD = ${d | 0};
     var log = [];
     var trigger = null;
     try { trigger = __cinsideDeepQuery(W.triggerSelector); } catch (e) { trigger = null; }
-    if (!trigger) return { ok: false, reason: 'trigger_not_found' };
-    __wsRealClick(trigger);
-    await __wsWait(550);
-    var panel = null;
-    if (W.calendar.panelSelector) { try { panel = __cinsideDeepQuery(W.calendar.panelSelector); } catch (e) { panel = null; } }
-    if (!panel || !__wsVisible(panel)) {
-      panel = __wsFindOpenPanel(__wsTriggerRoots(trigger));
-      if (panel && (panel === trigger || panel.contains(trigger))) panel = null;
+    if (!trigger) { log.push('[calSet] 触发框未找到'); return { ok: false, reason: 'trigger_not_found', log: log }; }
+
+    // 坐标兜底：如果选择器点击失败，记录触发框坐标，用 elementFromPoint 找真实元素再点击
+    var triggerRect = null;
+    try {
+      var r = trigger.getBoundingClientRect();
+      triggerRect = { x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height };
+      log.push('[calSet] 触发框坐标=' + JSON.stringify(triggerRect));
+    } catch (e) { log.push('[calSet] 获取触发框坐标失败'); }
+
+    // 尝试在 body 范围内找日历结构（含已标记选择器和自动扫描）
+    function tryFindPanel() {
+      var p = null;
+      // 1) 优先使用已保存的 panelSelector
+      if (W.calendar.panelSelector) { try { p = __cinsideDeepQuery(W.calendar.panelSelector); } catch (e) { p = null; } }
+      if (p && __wsVisible(p)) return p;
+      // 2) 通用弹出层扫描
+      p = __wsFindOpenPanel(__wsTriggerRoots(trigger));
+      if (p && (p === trigger || (p.contains && p.contains(trigger)))) p = null;
+      if (p && __wsVisible(p)) return p;
+      // 3) 日历结构探测：年月文本 + ≥7 日格子（不要求文本导航字符，覆盖 portal/SVG 翻页日历）
+      p = __wsFindCalendarPanel(__wsTriggerRoots(trigger), trigger);
+      if (p && __wsVisible(p)) return p;
+      return null;
     }
-    if (!panel) return { ok: false, reason: 'panel_not_open' };
+
+    // 多策略打开日历面板
+    var panel = null;
+    var deadline = 0;
+
+    // 前置点击步骤可能已把日历打开：直接使用，避免重复点击把已开面板点关
+    panel = tryFindPanel();
+    if (panel) log.push('[calSet] 面板已打开（前置点击步骤），跳过触发框点击');
+
+    // 策略1: 标准点击
+    if (!panel) {
+      log.push('[calSet] 尝试打开策略: click');
+      __wsRealClick(trigger);
+      deadline = Date.now() + 2000;
+      while (Date.now() < deadline) { panel = tryFindPanel(); if (panel) break; await __wsWait(150); }
+    }
+
+    // 策略2: focus + 等待 + 点击
+    if (!panel) {
+      log.push('[calSet] 尝试打开策略: focus+click');
+      try { if (typeof trigger.focus === 'function') trigger.focus({ preventScroll: false }); } catch(e) {}
+      await __wsWait(80);
+      __wsRealClick(trigger);
+      deadline = Date.now() + 2000;
+      while (Date.now() < deadline) { panel = tryFindPanel(); if (panel) break; await __wsWait(150); }
+    }
+
+    // 策略3: 临时移除 readonly + focus + 点击
+    if (!panel) {
+      log.push('[calSet] 尝试打开策略: readonly-remove+click');
+      var wasReadonly = trigger.getAttribute && trigger.getAttribute('readonly') !== null;
+      var wasDisabled = trigger.disabled === true;      if (wasReadonly) try { trigger.removeAttribute('readonly'); } catch(e) {}
+      if (wasDisabled) try { trigger.disabled = false; } catch(e) {}
+      try { if (typeof trigger.focus === 'function') trigger.focus({ preventScroll: false }); } catch(e) {}
+      await __wsWait(80);
+      __wsRealClick(trigger);
+      if (wasReadonly) try { trigger.setAttribute('readonly', 'readonly'); } catch(e) {}
+      if (wasDisabled) try { trigger.disabled = true; } catch(e) {}
+      deadline = Date.now() + 2000;
+      while (Date.now() < deadline) { panel = tryFindPanel(); if (panel) break; await __wsWait(150); }
+    }
+
+    // 策略4: mousedown → 延迟 → mouseup + click（模拟按住再松开）
+    if (!panel) {
+      log.push('[calSet] 尝试打开策略: down+delay+up');
+      var view4 = trigger.ownerDocument.defaultView || window;
+      var r4 = trigger.getBoundingClientRect();
+      var cx4 = Math.round(r4.left + r4.width/2), cy4 = Math.round(r4.top + r4.height/2);
+      var mopts4 = { bubbles: true, cancelable: true, view: view4, clientX: cx4, clientY: cy4, button: 0, buttons: 1 };
+      try { trigger.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch(e) {}
+      try { trigger.dispatchEvent(new MouseEvent('mousedown', mopts4)); } catch(e) {}
+      try { if (typeof trigger.focus === 'function') trigger.focus({ preventScroll: false }); } catch(e) {}
+      await __wsWait(120);
+      try { trigger.dispatchEvent(new MouseEvent('mouseup', mopts4)); } catch(e) {}
+      try { trigger.dispatchEvent(new MouseEvent('click', mopts4)); } catch(e) {}
+      try { if (typeof trigger.click === 'function') trigger.click(); } catch(e) {}
+      deadline = Date.now() + 2000;
+      while (Date.now() < deadline) { panel = tryFindPanel(); if (panel) break; await __wsWait(150); }
+    }
+
+    // 策略5: 键盘事件触发（Enter / Space / ArrowDown）
+    if (!panel) {
+      log.push('[calSet] 尝试打开策略: keyboard');
+      try { if (typeof trigger.focus === 'function') trigger.focus({ preventScroll: false }); } catch(e) {}
+      await __wsWait(50);
+      var doc5 = trigger.ownerDocument || document;
+      var kcodes = [
+        { key: 'ArrowDown', keyCode: 40 },
+        { key: 'Enter', keyCode: 13 },
+        { key: ' ', keyCode: 32 },
+      ];
+      for (var ki = 0; ki < kcodes.length; ki++) {
+        var kc = kcodes[ki];
+        try { trigger.dispatchEvent(new KeyboardEvent('keydown', { key: kc.key, keyCode: kc.keyCode, bubbles: true, cancelable: true })); } catch(e) {}
+        await __wsWait(50);
+        try { trigger.dispatchEvent(new KeyboardEvent('keyup', { key: kc.key, keyCode: kc.keyCode, bubbles: true, cancelable: true })); } catch(e) {}
+        await __wsWait(200);
+        panel = tryFindPanel();
+        if (panel) break;
+      }
+      if (!panel) {
+        deadline = Date.now() + 1000;
+        while (Date.now() < deadline) { panel = tryFindPanel(); if (panel) break; await __wsWait(150); }
+      }
+    }
+
+    // 策略6: 坐标兜底点击（用 elementFromPoint 找到触发框坐标的真实元素）
+    if (!panel && triggerRect) {
+      log.push('[calSet] 尝试打开策略: coord-fallback, 坐标=' + JSON.stringify(triggerRect));
+      try {
+        var doc6 = trigger.ownerDocument || document;
+        var hitEl = doc6.elementFromPoint(triggerRect.x, triggerRect.y);
+        if (hitEl && hitEl !== trigger) {
+          log.push('[calSet] elementFromPoint 找到不同元素=' + (hitEl.tagName + (hitEl.className ? '.' + hitEl.className.split(' ')[0] : '')));
+          __wsRealClick(hitEl);
+          deadline = Date.now() + 2000;
+          while (Date.now() < deadline) { panel = tryFindPanel(); if (panel) break; await __wsWait(150); }
+        } else {
+          log.push('[calSet] elementFromPoint 找到相同元素或null');
+        }
+      } catch (e) { log.push('[calSet] 坐标兜底点击异常=' + e.message); }
+    }
+
+    if (panel) log.push('[calSet] 面板打开成功');
+    if (!panel) { log.push('[calSet] 面板未打开（所有策略均失败）'); return { ok: false, reason: 'panel_not_open', log: log }; }
+    log.push('[calSet] 面板已打开, 目标=' + TY + '-' + TM + '-' + TD);
     var panelSel = W.calendar.panelSelector || __wsBuildSelector(panel) || 'body';
 
     function q(sel) {
       if (!sel) return null;
       var el = null;
+      // 如果已经有面板元素，直接在面板内查找相对路径更稳定（用户手动标记的元素肯定在面板里）
+      // 用正则完整去掉面板前缀，匹配任意开头空白
+      if (panel) {
+        try {
+          var panelPrefixRegex = new RegExp('^' + panelSel.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '\\s*');
+          var relSel = sel.replace(panelPrefixRegex, '');
+          if (relSel) {
+            el = panel.querySelector(relSel);
+            if (el) return el;
+          }
+        } catch (e) {}
+      }
+      // 完整路径全局查找兜底
       try { el = __cinsideDeepQuery(sel); } catch (e) { el = null; }
       if (el) return el;
-      // 面板选择器可能漂移：退化到面板内相对查找
+      // 面板选择器可能漂移：退化到面板内相对查找（旧方式）
       try { el = panel.querySelector(sel.replace(panelSel + ' > ', '').replace(panelSel + ' ', '')); } catch (e) { el = null; }
       return el;
     }
@@ -680,67 +922,133 @@ export function buildCalendarSetScript(widget: WidgetDef, y: number, m: number, 
         var ym = __wsParseYearMonth((h.textContent || '').trim());
         if (ym) return ym;
       }
+      // 选择器失效时按投影坐标取 header 元素读文本
+      if (!h && W.calendar.headerRect) {
+        var hh = __wsHitAt(panel, W.calendar.headerRect.dx, W.calendar.headerRect.dy);
+        if (hh) { var ymh = __wsParseYearMonth((hh.textContent || '').trim()); if (ymh) return ymh; }
+      }
       var y = 0, mo = 0;
       var ye = q(W.calendar.yearSelector);
       var me = q(W.calendar.monthSelector);
       if (ye) { var ym2 = (ye.textContent || '').match(/(\\d{4})/); if (ym2) y = +ym2[1]; }
       if (me) { mo = __wsParseMonthOnly((me.textContent || '').trim()); }
       if (y && mo) return { y: y, m: mo };
-      // 自动兜底：重新识别面板 header
-      var det = __wsDetectCalendar(panel, panelSel);
-      if (det.cal.headerSelector) {
-        try {
-          var hEl = panel.querySelector(det.cal.headerSelector.replace(panelSel + ' > ', ''));
-          if (hEl) { var ym3 = __wsParseYearMonth((hEl.textContent || '').trim()); if (ym3) return ym3; }
-        } catch (e) {}
+      return null;
+    }
+    // 从 .cal-head 固定结构精确定位翻页按钮。
+    // 注意 .cal-head 直接子元素含 span.title，需先过滤出纯 button，顺序为 [«,‹,›,»]。
+    function navBtn(role) {
+      var head = null;
+      try { head = panel.querySelector('.cal-head'); } catch (e) {}
+      if (!head) return null;
+      var btns = [];
+      for (var i = 0; i < head.children.length; i++) {
+        var c = head.children[i];
+        if (c.tagName === 'BUTTON') btns.push(c);
+      }
+      var idx = role === 'prevYear' ? 0 : role === 'prevMonth' ? 1 : role === 'nextMonth' ? 2 : role === 'nextYear' ? 3 : -1;
+      if (idx >= 0 && btns[idx] && __wsVisible(btns[idx])) return btns[idx];
+      // 兜底：按 title 属性匹配（上一年/上一月/下一月/下一年）
+      var titleMap = { prevYear: '上一年', prevMonth: '上一月', nextMonth: '下一月', nextYear: '下一年' };
+      var want = titleMap[role];
+      for (var j = 0; j < btns.length; j++) {
+        if (btns[j].getAttribute && btns[j].getAttribute('title') === want && __wsVisible(btns[j])) return btns[j];
       }
       return null;
     }
-    // 点翻页按钮（存储选择器失效时自动重识别一次）
-    var redetected = null;
+    // 点翻页按钮：结构定位优先（最稳）→ 保存的选择器 → 坐标兜底
     function clickNav(role) {
-      var sel = W.calendar[role + 'Selector'];
-      var el = q(sel);
-      if (!el || !__wsVisible(el)) {
-        if (!redetected) redetected = __wsDetectCalendar(panel, panelSel).cal;
-        var rsel = redetected[role + 'Selector'];
-        if (rsel) {
-          try { el = panel.querySelector(rsel.replace(panelSel + ' > ', '')); } catch (e) { el = null; }
-        }
-      }
-      if (!el) return false;
-      __wsRealClick(el);
+      var el = navBtn(role);
+      if (!el) { var sel = W.calendar[role + 'Selector']; if (sel) el = q(sel); }
+      if (!el) { var rect = W.calendar[role + 'Rect']; if (rect) { var hit = __wsHitAt(panel, rect.dx, rect.dy); if (hit && __wsVisible(hit)) el = hit; } }
+      if (!el || !__wsVisible(el)) return false;
+      // 用原生 el.click() 只触发一次 onclick。切勿用 __wsRealClick：
+      // 它既 dispatchEvent(click) 又 el.click()，会触发两次 → 月份走2格（只走偶数）
+      try { el.click(); } catch (e) { __wsRealClick(el); }
       return true;
+    }
+    // 面板意外关闭时自动重新打开
+    async function reopenPanel() {
+      log.push('[calSet] 面板关闭了，重新打开');
+      panel = null;
+      __wsRealClick(trigger);
+      var dl = Date.now() + 2000;
+      while (Date.now() < dl) {
+        await __wsWait(150);
+        panel = tryFindPanel();
+        if (panel) { log.push('[calSet] 面板已重新打开'); return true; }
+      }
+      return false;
     }
 
     var iter = 0, arrived = false;
+    var lastCur = null;
+    var failCount = 0;
+    var recentTotals = [];
     while (iter++ < 240) {
-      var cur = readCur();
-      if (!cur) { __wsClosePanel(trigger, panel); return { ok: false, reason: 'header_parse_fail', log: log }; }
-      if (cur.y === TY && cur.m === TM) { arrived = true; break; }
-      var delta = (TY - cur.y) * 12 + (TM - cur.m);
-      var role;
-      if (delta >= 12 && W.calendar.nextYearSelector) role = 'nextYear';
-      else if (delta <= -12 && W.calendar.prevYearSelector) role = 'prevYear';
-      else role = delta > 0 ? 'nextMonth' : 'prevMonth';
-      if (!clickNav(role)) {
-        role = delta > 0 ? 'nextMonth' : 'prevMonth';
-        if (!clickNav(role)) {
-          __wsClosePanel(trigger, panel);
-          return { ok: false, reason: 'nav_button_missing', log: log };
-        }
+      // 检查面板是否还在
+      if (!panel || !__wsVisible(panel)) {
+        if (!(await reopenPanel())) { log.push('[calSet] 面板无法重新打开'); break; }
       }
-      log.push(role);
-      await __wsWait(130);
-    }
-    if (!arrived) { __wsClosePanel(trigger, panel); return { ok: false, reason: 'navigate_timeout', log: log }; }
+      var cur = readCur();
+      if (!cur) { await __wsWait(200); continue; }
+      if (iter === 1) log.push('[calSet] 当前=' + cur.y + '-' + cur.m + ', 目标=' + TY + '-' + TM);
+      if (cur.y === TY && cur.m === TM) { arrived = true; break; }
+      var curTotal = cur.y * 12 + cur.m;
+      recentTotals.push(curTotal);
+      if (recentTotals.length > 6) recentTotals.shift();
+      var delta = (TY - cur.y) * 12 + (TM - cur.m);
+      var lastTotal = lastCur ? lastCur.y * 12 + lastCur.m : -999;
+      var noProgress = lastCur && lastCur.y === cur.y && lastCur.m === cur.m;
+      var wentWrong = lastCur && !noProgress && (
+        (delta > 0 && curTotal < lastTotal) || (delta < 0 && curTotal > lastTotal)
+      );
+      // 检测振荡: A→B→A 或 A→B→A→B
+      var oscillating = false;
+      var r = recentTotals, rl = r.length;
+      if (rl >= 3 && r[rl-1] === r[rl-3] && r[rl-1] !== r[rl-2]) oscillating = true;
 
-    // 点目标日：严格匹配文本，排除非本月/禁用格
+      var extraClick = false;
+      if (noProgress || wentWrong || oscillating) {
+        failCount++;
+        if (oscillating) { log.push('[calSet] 振荡! +1次点击打破'); extraClick = true; }
+        await __wsWait(200);
+      } else {
+        failCount = 0;
+      }
+      lastCur = { y: cur.y, m: cur.m };
+      var role;
+      if (delta >= 12 && (W.calendar.nextYearSelector || W.calendar.nextYearRect)) role = 'nextYear';
+      else if (delta <= -12 && (W.calendar.prevYearSelector || W.calendar.prevYearRect)) role = 'prevYear';
+      else role = delta > 0 ? 'nextMonth' : 'prevMonth';
+      log.push('[calSet] #' + iter + ' delta=' + delta + ' role=' + role + (extraClick?' [+1]':''));
+      var navOk = clickNav(role);
+      // 振荡时再点1次
+      if (navOk && extraClick) {
+        await __wsWait(150);
+        if (panel && __wsVisible(panel)) clickNav(role);
+      }
+      // 年级按钮失败→降级月级
+      if (!navOk && (role === 'prevYear' || role === 'nextYear')) {
+        var fb = role === 'prevYear' ? 'prevMonth' : 'nextMonth';
+        log.push('[calSet] 年级失败→降级: ' + fb);
+        navOk = clickNav(fb);
+        if (navOk) role = fb;
+      }
+      if (!navOk) { await __wsWait(300); continue; }
+      await __wsWait(extraClick ? 300 : 200);
+    }
+    if (!arrived) { log.push('[calSet] 翻页超时'); __wsClosePanel(trigger, panel); return { ok: false, reason: 'navigate_timeout', log: log }; }
+    log.push('[calSet] 已到达目标年月, 翻页' + (iter - 1) + '次, 准备点日期=' + TD);
+
+    // 点目标日：先按文本在选择器候选中查找（与网格布局无关，翻月后仍准确）；
+    // 投影坐标仅作最后兜底（坐标是按拾取时的月份布局记录的，翻月后网格位移，直接命中可能点到别的日）
     function findDay(dnum) {
+      // 策略1: 选择器/文本查找日格子
       var cells = [];
       if (W.calendar.dayCellSelector) {
         try {
-          var rel = W.calendar.dayCellSelector.replace(panelSel + ' ', '');
+          var rel = W.calendar.dayCellSelector.split(',').map(function (sx) { sx = (sx || '').trim(); if (panelSel && sx.indexOf(panelSel) === 0) sx = sx.slice(panelSel.length).replace(/^\\s*>\\s*/, '').trim(); return sx; }).filter(Boolean).join(', ');
           var list = panel.querySelectorAll(rel);
           for (var i = 0; i < list.length; i++) cells.push(list[i]);
         } catch (e) {}
@@ -752,8 +1060,8 @@ export function buildCalendarSetScript(widget: WidgetDef, y: number, m: number, 
         } catch (e) {}
       }
       var fallback = null;
-      for (var i = 0; i < cells.length; i++) {
-        var c = cells[i];
+      for (var k = 0; k < cells.length; k++) {
+        var c = cells[k];
         var t = (c.textContent || '').trim();
         if (t !== String(dnum)) continue;
         if (!__wsVisible(c)) continue;
@@ -770,10 +1078,22 @@ export function buildCalendarSetScript(widget: WidgetDef, y: number, m: number, 
         if (!outside) return c;
         if (!fallback) fallback = c;
       }
-      return fallback;
+      if (fallback) return fallback;
+      // 策略2(最后兜底): 投影坐标命中。命中后校验该元素文本确为目标日，避免翻月后网格位移误点
+      var proj = W.calendar.dayCells || [];
+      for (var pi = 0; pi < proj.length; pi++) {
+        if (proj[pi].text !== String(dnum)) continue;
+        var pc = __wsHitAt(panel, proj[pi].dx, proj[pi].dy);
+        if (pc && __wsVisible(pc) && (pc.textContent || '').trim() === String(dnum)) {
+          log.push('[calSet] 使用坐标兜底点日期=' + dnum);
+          return pc;
+        }
+      }
+      return null;
     }
     var dayEl = findDay(TD);
-    if (!dayEl) { __wsClosePanel(trigger, panel); return { ok: false, reason: 'day_not_found', log: log }; }
+    if (!dayEl) { log.push('[calSet] 日期未找到: day=' + TD); __wsClosePanel(trigger, panel); return { ok: false, reason: 'day_not_found', log: log }; }
+    log.push('[calSet] 点击日期=' + TD + ', 元素=' + (dayEl.tagName + (dayEl.className ? '.' + dayEl.className.split(' ')[0] : '')));
     __wsRealClick(dayEl);
     await __wsWait(280);
     log.push('day:' + TD);
@@ -788,7 +1108,235 @@ export function buildCalendarSetScript(widget: WidgetDef, y: number, m: number, 
         val = inner ? (inner.value || '') : (trigger.textContent || '').trim();
       }
     } catch (e) {}
+    log.push('[calSet] 完成, 触发框值=' + val);
     return { ok: true, value: val, log: log };
+  })();`;
+}
+
+/** 镜像操作的类型 */
+export type CalendarMirrorAction =
+  | { type: "open" } // 打开面板并读取当前年月
+  | { type: "nav"; role: "prevYear" | "nextYear" | "prevMonth" | "nextMonth" } // 点击指定角色按钮
+  | { type: "day"; day: number }; // 点击指定日期
+
+/**
+ * 日历镜像操作脚本：面板与网页真实日历实时联动。
+ * 每次执行：若面板未打开则自动打开 → 执行指定动作（翻页/点日期）→ 读取当前年月返回。
+ * 返回 { ok, year?, month?, reason? }
+ */
+export function buildWidgetCalendarMirrorScript(widget: WidgetDef, action: CalendarMirrorAction): string {
+  const cal: CalendarControls = widget.calendar || {};
+  const w = {
+    triggerSelector: sanitize(widget.triggerSelector),
+    calendar: {
+      panelSelector: sanitize(cal.panelSelector || ""),
+      headerSelector: sanitize(cal.headerSelector || ""),
+      yearSelector: sanitize(cal.yearSelector || ""),
+      monthSelector: sanitize(cal.monthSelector || ""),
+      prevYearSelector: sanitize(cal.prevYearSelector || ""),
+      nextYearSelector: sanitize(cal.nextYearSelector || ""),
+      prevMonthSelector: sanitize(cal.prevMonthSelector || ""),
+      nextMonthSelector: sanitize(cal.nextMonthSelector || ""),
+      dayCellSelector: sanitize(cal.dayCellSelector || ""),
+      headerRect: cal.headerRect || null,
+      yearRect: cal.yearRect || null,
+      monthRect: cal.monthRect || null,
+      prevYearRect: cal.prevYearRect || null,
+      nextYearRect: cal.nextYearRect || null,
+      prevMonthRect: cal.prevMonthRect || null,
+      nextMonthRect: cal.nextMonthRect || null,
+      dayCells: cal.dayCells || [],
+    },
+  };
+  return `
+  ${DEEP_QUERY}
+  ${COMMON}
+  (async function () {
+    console.log('[widgetMirror] 脚本开始执行, action=' + ${JSON.stringify(action)} + ', trigger=' + W.triggerSelector);
+    try { window.__cinsideJustPicked = false; } catch (e) {}
+    var W = ${JSON.stringify(w)};
+    var ACTION = ${JSON.stringify(action)};
+    var trigger = null;
+    try { trigger = __cinsideDeepQuery(W.triggerSelector); } catch (e) { trigger = null; }
+    if (!trigger) { console.log('[widgetMirror] 触发框未找到'); return { ok: false, reason: 'trigger_not_found' }; }
+    console.log('[widgetMirror] 触发框已找到, tag=' + trigger.tagName + ', class=' + trigger.className);
+    // 若面板未打开则先打开
+    var panel = null;
+    function mirrorFindPanel() {
+      var p = null;
+      if (W.calendar.panelSelector) { try { p = __cinsideDeepQuery(W.calendar.panelSelector); } catch (e) { p = null; } }
+      if (p && __wsVisible(p)) return p;
+      p = __wsFindOpenPanel(__wsTriggerRoots(trigger));
+      if (p && (p === trigger || (p.contains && p.contains(trigger)))) p = null;
+      if (p && __wsVisible(p)) return p;
+      // 日历结构探测：年月文本 + ≥7 日格子（覆盖 portal/SVG 翻页日历）
+      p = __wsFindCalendarPanel(__wsTriggerRoots(trigger), trigger);
+      if (p && __wsVisible(p)) return p;
+      return null;
+    }
+    if (W.calendar.panelSelector) { try { panel = __cinsideDeepQuery(W.calendar.panelSelector); } catch (e) { panel = null; } }
+    if (!panel || !__wsVisible(panel)) {
+      // 策略1: 标准点击
+      __wsRealClick(trigger);
+      var od = Date.now() + 2500;
+      while (Date.now() < od) { panel = mirrorFindPanel(); if (panel) break; await __wsWait(150); }
+      // 策略2: focus+click
+      if (!panel) {
+        try { if (typeof trigger.focus === 'function') trigger.focus({ preventScroll: false }); } catch(e) {}
+        await __wsWait(80);
+        __wsRealClick(trigger);
+        od = Date.now() + 2000;
+        while (Date.now() < od) { panel = mirrorFindPanel(); if (panel) break; await __wsWait(150); }
+      }
+    }
+    if (!panel) { console.log('[widgetMirror] 面板未打开'); return { ok: false, reason: 'panel_not_open' }; }
+    console.log('[widgetMirror] 面板已打开, panel=' + (panel.tagName + (panel.id ? '#' + panel.id : '') + (panel.className ? '.' + panel.className.split(' ')[0] : '')));
+    // 兜底：如果找到的面板不包含日历结构（年月/翻页/日格子），尝试从触发框向上找日历容器
+    var hasCalendarStructure = false;
+    var panelAll = [];
+    try { panelAll = panel.querySelectorAll('*'); } catch (e) {}
+    for (var pi = 0; pi < panelAll.length; pi++) {
+      var pel = panelAll[pi];
+      if (!__wsVisible(pel)) continue;
+      var pt = (pel.textContent || '').trim();
+      if (__wsParseYearMonth(pt) || /^[‹›«»<>❮❯〈〉⟪⟫←→]$/.test(pt) || /^([1-9]|[12]\d|3[01])$/.test(pt)) {
+        hasCalendarStructure = true;
+        break;
+      }
+    }
+    if (!hasCalendarStructure) {
+      console.log('[widgetMirror] 面板不包含日历结构，尝试按日历结构重新探测');
+      var cp2 = __wsFindCalendarPanel(__wsTriggerRoots(trigger), trigger);
+      if (cp2) panel = cp2;
+    }
+    var panelSel = W.calendar.panelSelector || __wsBuildSelector(panel) || 'body';
+
+    function q(sel) {
+      if (!sel) return null;
+      var el = null;
+      if (panel) {
+        try {
+          var panelPrefixRegex = new RegExp('^' + panelSel.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '\\s*');
+          var relSel = sel.replace(panelPrefixRegex, '');
+          if (relSel) { el = panel.querySelector(relSel); if (el) return el; }
+        } catch (e) {}
+      }
+      try { el = __cinsideDeepQuery(sel); } catch (e) { el = null; }
+      if (el) return el;
+      try { el = panel.querySelector(sel.replace(panelSel + ' > ', '').replace(panelSel + ' ', '')); } catch (e) { el = null; }
+      return el;
+    }
+    function readCur() {
+      var h = q(W.calendar.headerSelector);
+      if (h) { var ym = __wsParseYearMonth((h.textContent || '').trim()); if (ym) return ym; }
+      if (!h && W.calendar.headerRect) {
+        var hh = __wsHitAt(panel, W.calendar.headerRect.dx, W.calendar.headerRect.dy);
+        if (hh) { var ymh = __wsParseYearMonth((hh.textContent || '').trim()); if (ymh) return ymh; }
+      }
+      var y = 0, mo = 0;
+      var ye = q(W.calendar.yearSelector);
+      var me = q(W.calendar.monthSelector);
+      if (ye) { var ym2 = (ye.textContent || '').match(/(\\d{4})/); if (ym2) y = +ym2[1]; }
+      if (me) { mo = __wsParseMonthOnly((me.textContent || '').trim()); }
+      if (y && mo) return { y: y, m: mo };
+      return null;
+    }
+    function navBtn(role) {
+      var head = null;
+      try { head = panel.querySelector('.cal-head'); } catch (e) {}
+      if (!head) return null;
+      var btns = [];
+      for (var i = 0; i < head.children.length; i++) {
+        var c = head.children[i];
+        if (c.tagName === 'BUTTON') btns.push(c);
+      }
+      var idx = role === 'prevYear' ? 0 : role === 'prevMonth' ? 1 : role === 'nextMonth' ? 2 : role === 'nextYear' ? 3 : -1;
+      if (idx >= 0 && btns[idx] && __wsVisible(btns[idx])) return btns[idx];
+      var titleMap = { prevYear: '上一年', prevMonth: '上一月', nextMonth: '下一月', nextYear: '下一年' };
+      var want = titleMap[role];
+      for (var j = 0; j < btns.length; j++) {
+        if (btns[j].getAttribute && btns[j].getAttribute('title') === want && __wsVisible(btns[j])) return btns[j];
+      }
+      return null;
+    }
+    function clickNav(role) {
+      var el = navBtn(role);
+      if (!el) {
+        var sel = W.calendar[role + 'Selector'];
+        if (sel) el = q(sel);
+      }
+      if (!el) {
+        var rect = W.calendar[role + 'Rect'];
+        if (rect) {
+          var hit = __wsHitAt(panel, rect.dx, rect.dy);
+          if (hit && __wsVisible(hit)) el = hit;
+        }
+      }
+      if (!el || !__wsVisible(el)) return false;
+      // 原生 el.click() 只触发一次 onclick，避免 __wsRealClick 双重触发导致月份走2格
+      try { el.click(); } catch (e) { __wsRealClick(el); }
+      return true;
+    }
+    function findDay(dnum) {
+      var cells = [];
+      if (W.calendar.dayCellSelector) {
+        try {
+          var rel = W.calendar.dayCellSelector.split(',').map(function (sx) { sx = (sx || '').trim(); if (panelSel && sx.indexOf(panelSel) === 0) sx = sx.slice(panelSel.length).replace(/^\\s*>\\s*/, '').trim(); return sx; }).filter(Boolean).join(', ');
+          var list = panel.querySelectorAll(rel);
+          for (var i = 0; i < list.length; i++) cells.push(list[i]);
+        } catch (e) {}
+      }
+      if (!cells.length) {
+        try {
+          var all = panel.querySelectorAll('td,li,span,div,a,button,[role="gridcell"],[class*="day"],[class*="date"],[class*="cell"]');
+          for (var j = 0; j < all.length; j++) cells.push(all[j]);
+        } catch (e) {}
+      }
+      var fallback = null;
+      for (var i = 0; i < cells.length; i++) {
+        var c = cells[i];
+        var t = (c.textContent || '').trim();
+        if (t !== String(dnum)) continue;
+        if (!__wsVisible(c)) continue;
+        var guard = 0;
+        while (c.firstElementChild && (c.firstElementChild.textContent || '').trim() === t && guard++ < 4) { c = c.firstElementChild; }
+        if (c.children.length) continue;
+        var cls = ((c.className && typeof c.className === 'string' ? c.className : '') + ' ' +
+          (c.parentElement && typeof c.parentElement.className === 'string' ? c.parentElement.className : '') + ' ' +
+          (c.getAttribute('aria-disabled') || '') + ' ' + (c.getAttribute('disabled') || '')).toLowerCase();
+        var outside = /disabled|outside|prev|next|other|muted|not-current|is-disabled/.test(cls);
+        if (!outside) return c;
+        if (!fallback) fallback = c;
+      }
+      if (!fallback) {
+        // 坐标兜底：命中后校验文本确为目标日（翻月后网格位移，旧坐标可能指向别的日）
+        var proj = W.calendar.dayCells || [];
+        for (var pi = 0; pi < proj.length; pi++) {
+          if (proj[pi].text !== String(dnum)) continue;
+          var pc = __wsHitAt(panel, proj[pi].dx, proj[pi].dy);
+          if (pc && __wsVisible(pc) && (pc.textContent || '').trim() === String(dnum)) { fallback = pc; break; }
+        }
+      }
+      return fallback;
+    }
+
+    // 执行动作
+    if (ACTION.type === 'nav') {
+      console.log('[widgetMirror] 执行翻页: role=' + ACTION.role);
+      if (!clickNav(ACTION.role)) { console.log('[widgetMirror] 翻页按钮未找到: role=' + ACTION.role); return { ok: false, reason: 'nav_button_missing', role: ACTION.role }; }
+      await __wsWait(250);
+    } else if (ACTION.type === 'day') {
+      console.log('[widgetMirror] 执行点日期: day=' + ACTION.day);
+      var dayEl = findDay(ACTION.day);
+      if (!dayEl) { console.log('[widgetMirror] 日期未找到: day=' + ACTION.day); return { ok: false, reason: 'day_not_found', day: ACTION.day }; }
+      __wsRealClick(dayEl);
+      await __wsWait(250);
+    }
+    // 读取当前年月
+    var cur = readCur();
+    if (cur) { console.log('[widgetMirror] 读取当前年月: ' + cur.y + '-' + cur.m); }
+    else { console.log('[widgetMirror] 读取当前年月失败'); }
+    return cur ? { ok: true, year: cur.y, month: cur.m } : { ok: false, reason: 'header_parse_fail' };
   })();`;
 }
 
@@ -982,6 +1530,9 @@ export function buildInlineOptionSelectScript(widget: WidgetDef, targetValue: st
   ${DEEP_QUERY}
   ${COMMON}
   (function () {
+    // 清掉拾取器吞点击标记：测试/执行时此处的 __wsRealClick 是程序化触发，
+    // 若上一帧拾取刚完成（__cinsideJustPicked=true），click 会被吞掉导致选项点击失败。
+    try { window.__cinsideJustPicked = false; } catch (e) {}
     var W = ${JSON.stringify(w)};
     var TARGET = ${JSON.stringify(targetValue)};
 
