@@ -74,14 +74,18 @@ import type { CalendarRole, WidgetDef } from "./types";
 import { normalizeText, parseDateCandidates, valuesEquivalent } from "./utils/formatNormalize";
 import WidgetExtractPanel, { type WidgetBinding, type WidgetTestResult } from "./components/WidgetExtractPanel";
 import {
+  buildCalendarPanelFromSeedScript,
   buildCalendarSetScript,
+  buildWidgetCalendarMirrorScript,
   buildInlineOptionSelectScript,
+  buildDayCellCollectScript,
   buildInlineOptionSnapshotScript,
   buildOptionSelectScript,
   buildWidgetCloseScript,
-  buildWidgetOpenScript,
+  buildWidgetEnsureOpenScript,
   buildWidgetReadScript,
   buildWidgetSnapshotScript,
+  type CalendarMirrorAction,
   type CalendarSetResult,
   type OptionSelectResult,
   type WidgetReadResult,
@@ -96,12 +100,13 @@ import type { ExtractSummaryItem } from "./components/ResultsPanel";
 import SettingsModal from "./components/SettingsModal";
 import DocFillDialog from "./components/DocFillDialog";
 import SkillPanel from "./components/SkillPanel";
+import LoopEditor from "./components/LoopEditor";
 import SaveSkillDialog from "./components/SaveSkillDialog";
 import CredentialsPanel from "./components/CredentialsPanel";
 import DocLocalExtractConfig from "./components/DocLocalExtractConfig";
 import ExecutionBubbles from "./components/ExecutionBubbles";
 import ExecutionPanel from "./components/ExecutionPanel";
-import { saveSkill, getSkillById } from "./lib/skills";
+import { saveSkill, getSkillById, loadSkills } from "./lib/skills";
 import { getBlockRules, addBlockRule, removeBlockRule, getHost, type BlockRule, SIDEBAR_AUTO_SELECTORS, getSidebarAutoCollapse, setSidebarAutoCollapse } from "./lib/blockRules";
 import { getAllCredentials, addCredential, removeCredential, type Credential } from "./lib/credentials";
 import type { ViewSide } from "./electron";
@@ -170,14 +175,21 @@ const WIDGET_ROLE_TO_FIELD: Record<string, string> = {
   dayCell: "dayCellSelector",
 };
 
+/** 日历引导式拾取：依次引导用户在网页日历上标注各按钮位置 */
+const CALENDAR_GUIDE_STEPS: Array<{ role: CalendarRole; label: string; required: boolean }> = [
+  { role: "header", label: "年月显示区（如 2024年1月）", required: true },
+  { role: "prevMonth", label: "上一月按钮 ‹", required: true },
+  { role: "nextMonth", label: "下一月按钮 ›", required: true },
+  { role: "prevYear", label: "上一年按钮 «（若无则跳过）", required: false },
+  { role: "nextYear", label: "下一年按钮 »（若无则跳过）", required: false },
+  { role: "dayCell", label: "日格子（拖拽框选一片 / 逐个点选，点「完成」结束）", required: true },
+];
+
 /** 控件快照失败原因 → 人类可读提示 */
 const WIDGET_SNAPSHOT_REASONS: Record<string, string> = {
   trigger_not_found: "未在网页中找到该元素，请重新拾取",
   panel_not_found: "点击后未检测到展开的面板，请确认点的是「可展开的框框」",
   options_empty: "面板展开后未识别到选项，请确认这是点击展开选项的控件",
-  calendar_header_not_found: "未识别到日历的年月显示，请确认点的是日历控件",
-  calendar_nav_not_found: "未识别到日历的翻页按钮（上一月/下一月）",
-  calendar_days_not_found: "未识别到日历的日期格子",
   container_not_found: "未在网页中找到该元素，请重新拾取",
   inline_options_not_found: "未识别到选项按钮组：请直接点选「男/女」这类选项区域中的某一个选项",
   collect_error: "选项收集失败，请尝试点选更靠近选项按钮的位置",
@@ -203,6 +215,18 @@ function generalizeDayCellSelector(sel: string): string {
   parts[parts.length - 1] = last;
   shadowSegs[shadowSegs.length - 1] = parts.join(" > ");
   return shadowSegs.join(" >>> ");
+}
+
+/** TS 侧年月文本粗校验：文本中是否包含可解析的年月（与注入脚本 __wsParseYearMonth 对应，含式匹配） */
+function containsYearMonthText(text: string): boolean {
+  const t = (text || "").trim();
+  if (!t) return false;
+  if (/\d{4}\s*年\s*\d{1,2}\s*月/.test(t)) return true;
+  if (/\d{4}\s*[-\/.]\s*\d{1,2}(?!\d)/.test(t)) return true;
+  if (/\d{1,2}\s*月\s*\d{4}/.test(t)) return true;
+  if (/[A-Za-z]{3,9}[a-z]*\s*,?\s*\d{4}/.test(t)) return true;
+  if (/\d{4}\s*,?\s*[A-Za-z]{3,9}/.test(t)) return true;
+  return false;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -256,6 +280,7 @@ function useApplyUiScale() {
     const handleBlur = () => { ctrlPressed = false; };
     const handleWheel = (e: WheelEvent) => {
       if (!ctrlPressed) return;
+      if ((window as any).__cinsideFlowEditorOpen) return;
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
@@ -1064,13 +1089,13 @@ const [customTextEntries, setCustomTextEntries] = useState<CustomTextEntry[]>([]
 const [customTextPickingId, setCustomTextPickingId] = useState<string | null>(null);
 const customTextPickingIdRef = useRef<string | null>(null);
 customTextPickingIdRef.current = customTextPickingId;
-// 提取元素面板 TAB 切换请求：配置哪个功能就自动切到对应 TAB（doc=文件提取 / custom=自定义文本 / widget=控件提取）
-const [extractTabRequest, setExtractTabRequest] = useState<{ tab: "doc" | "custom" | "widget"; ts: number } | null>(null);
+// 提取元素面板 TAB 切换请求：配置哪个功能就自动切到对应 TAB（支持 widgetTabId 滚动到具体控件）
+const [extractTabRequest, setExtractTabRequest] = useState<{ tab: "doc" | "custom" | "widget"; widgetTabId?: string; ts: number } | null>(null);
 // 提取元素面板 TAB 顺序：谁先设置谁排前（FIFO），保存 LOOP 后顺序随步骤保留
 const [extractTabOrder, setExtractTabOrder] = useState<Array<"doc" | "custom" | "widget">>([]);
 // 统一入口：请求切换 TAB 的同时把该 TAB 追加到 FIFO 顺序末尾（已在顺序中则不动）
-const requestExtractTab = useCallback((tab: "doc" | "custom" | "widget") => {
-  setExtractTabRequest({ tab, ts: Date.now() });
+const requestExtractTab = useCallback((tab: "doc" | "custom" | "widget", widgetTabId?: string) => {
+  setExtractTabRequest({ tab, widgetTabId, ts: Date.now() });
   setExtractTabOrder((prev) => (prev.includes(tab) ? prev : [...prev, tab]));
 }, []);
 // 控件提取模式：点击展开型控件（选项控件/日历控件）的提取、标注与绑定
@@ -1095,6 +1120,20 @@ widgetDraftBindingRef.current = widgetDraftBinding;
 const [widgetRolePickingKey, setWidgetRolePickingKey] = useState<string | null>(null);
 const widgetRolePickingKeyRef = useRef<string | null>(null);
 widgetRolePickingKeyRef.current = widgetRolePickingKey;
+// 日历引导式拾取：当前步骤索引（null=未在引导式拾取，0~N=正在拾取第 N 步）
+const [calPickStepIdx, setCalPickStepIdx] = useState<number | null>(null);
+const calPickStepIdxRef = useRef<number | null>(null);
+calPickStepIdxRef.current = calPickStepIdx;
+// 日格子多选：引导到日格子步骤时，用户可连续点选多个日格子，点「完成」结束（收集各选择器覆盖全部日格子）
+const [calDayCellPicks, setCalDayCellPicks] = useState<Array<{ text: string; selector: string }>>([]);
+const calDayCellPicksRef = useRef<Array<{ text: string; selector: string }>>([]);
+calDayCellPicksRef.current = calDayCellPicks;
+// 日历手动面板点选兜底：快照未检测到面板时，用户手动点开日历并点选面板
+const [calPanelPickFailed, setCalPanelPickFailed] = useState(false);
+const [calPanelPickMode, setCalPanelPickMode] = useState<"idle" | "await-open" | "picking">("idle");
+const calPanelPickModeRef = useRef<"idle" | "await-open" | "picking">("idle");
+calPanelPickModeRef.current = calPanelPickMode;
+const calFailTriggerRef = useRef<{ selector: string; label: string } | null>(null);
 // 正在重选单个选项的 key（"draft:option:0" 或 "saved:<selector>:option:2"）
 const [widgetOptionPickingKey, setWidgetOptionPickingKey] = useState<string | null>(null);
 const widgetOptionPickingKeyRef = useRef<string | null>(null);
@@ -1106,6 +1145,9 @@ widgetLeftPickingKeyRef.current = widgetLeftPickingKey;
 // 控件试跑结果 / 执行中
 const [widgetTestResults, setWidgetTestResults] = useState<Record<string, WidgetTestResult>>({});
 const [widgetTestBusyKey, setWidgetTestBusyKey] = useState<string | null>(null);
+// 日历镜像：每个卡片当前显示的年月（与网页真实日历实时同步）
+const [widgetCalendarState, setWidgetCalendarState] = useState<Record<string, { year: number; month: number } | null>>({});
+const [widgetCalendarBusyKey, setWidgetCalendarBusyKey] = useState<string | null>(null);
 // 文件提取审查面板数据（原图 + 提取字段框 + 同名图片对比）
 const [docExtractPanel, setDocExtractPanel] = useState<{
   imageUrl: string;
@@ -1303,6 +1345,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
   // ============ SKILL 技能模板系统 ============
   const [showSkillPanel, setShowSkillPanel] = useState(false);
+  /** 流程图编辑器：正在编辑的模板 */
+  const [editingFlowTemplate, setEditingFlowTemplate] = useState<WorkflowTemplate | null>(null);
   const [showSaveSkill, setShowSaveSkill] = useState(false);
   const [saveSkillRunAfter, setSaveSkillRunAfter] = useState(false); // 保存后是否立即执行
   const [skillVersion, setSkillVersion] = useState(0); // 递增触发刷新
@@ -1405,6 +1449,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       const script = `
         ${DEEP_QUERY_HELPER}
         (function() {
+          // 清掉拾取器的吞点击标记：performRealClick 的 el.click() 是程序化真实点击，
+          // 若上一帧拾取刚完成（__cinsideJustPicked=true），此 click 会被拾取器误吞导致失效。
+          try { window.__cinsideJustPicked = false; } catch(e) {}
           var el = null;
           try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(selector))}); } catch(e) { el = null; }
           if (!el) return { ok: false, reason: 'not_found' };
@@ -1802,6 +1849,17 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       if (successTimerRef.current != null) window.clearTimeout(successTimerRef.current);
     };
   }, []);
+
+  // 监听模态覆盖层退出事件，触发 resize 让 BrowserPane 重新同步显示 BrowserView
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    const off = window.electronAPI.onModalOverlayExited(() => {
+      setTimeout(() => window.dispatchEvent(new Event("resize")), 50);
+      setTimeout(() => window.dispatchEvent(new Event("resize")), 300);
+    });
+    return off;
+  }, []);
+
   const [waitingManual, setWaitingManual] = useState(false);
   const [verifyStatus, setVerifyStatus] = useState<VerifyStatus>("idle");
   // 每条记录的核验结论：record_id -> overall（pass/fail/review）
@@ -2268,6 +2326,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 滚轮事件：Ctrl按下时调整整体UI缩放
     const handleWheel = (e: WheelEvent) => {
       if (!ctrlPressedRef.current) return;
+      // 流程图编辑器打开时，让其内部自己处理缩放，不触发整体UI缩放
+      if ((window as any).__cinsideFlowEditorOpen) return;
       // 阻止默认的页面缩放/滚动行为
       e.preventDefault();
       e.stopPropagation();
@@ -5028,6 +5088,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           const [yy, mm, dd] = cands[0].split("-").map(Number);
           const wres = (await execJS(buildCalendarSetScript(w, yy, mm, dd))) as CalendarSetResult | null;
           rlog(`[executeMark] 日历控件结果:`, wres);
+          if (wres?.log && Array.isArray(wres.log)) {
+            for (const line of wres.log) rlog(`[calSet] ${line}`);
+          }
           if (!wres?.ok) {
             throw new Error(`日历控件设定失败: ${wres?.reason || "未知"} (${w.triggerSelector})`);
           }
@@ -5885,17 +5948,18 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     window.electronAPI?.viewClearHighlight("left").catch(() => {});
     window.electronAPI?.viewClearHighlight("right").catch(() => {});
 
-    // 从当前选中的卡片开始排序（第一条LOOP = 当前选中卡片）
-    // 若传入了 targetIds（勾选模式），则只执行勾选的卡片，按原列表顺序排列
-    const selectedIdx = cardRecords.findIndex((r) => r.record_id === selectedId);
-    const startIdx = selectedIdx >= 0 ? selectedIdx : 0;
-    const allTargets = [
-      ...cardRecords.slice(startIdx),
-      ...cardRecords.slice(0, startIdx),
-    ];
+    // 非勾选模式：跳过第一张示范卡（教学时已录入过），从第二张开始按原顺序执行
+    // 勾选模式：只执行勾选的卡片，按原列表顺序排列
+    const skipFirst = !targetIds || targetIds.length === 0;
+    const pool = skipFirst ? cardRecords.slice(1) : cardRecords;
     const targets = targetIds && targetIds.length > 0
-      ? allTargets.filter((r) => targetIds.includes(r.record_id))
-      : allTargets;
+      ? cardRecords.filter((r) => targetIds.includes(r.record_id))
+      : pool;
+    if (targets.length === 0) {
+      console.warn("[runBatch] ⚠️ 待执行卡片为空（已全部跳过示范卡）");
+      setBatchRunning(false);
+      return;
+    }
     setBatchTargets(targets);
 
     // 快照教学时左右网页的 URL：每条 LOOP 开始前重置回这个搜索页，
@@ -5927,7 +5991,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const allComparisons: FieldComparison[] = [];
 
     // 首条日志同步写入，让用户点击后立刻看到 LOOP 已启动
-    rlog(`[batch] 开始LOOP执行，共 ${targets.length} 条，从第 ${startIdx + 1} 条（选中卡片）开始`);
+    rlog(`[batch] 开始LOOP执行，共 ${targets.length} 条${skipFirst ? "（已跳过示范卡，从第二张开始）" : "（勾选模式）"}`);
     setSteps([
       {
         step: 1,
@@ -7482,6 +7546,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       window.electronAPI?.viewStopPicking("right").catch(() => {});
       return;
     }
+    // 日历手动面板点选兜底：快照未检测到面板时，用户点选日历面板内元素
+    if (calPanelPickModeRef.current === "picking") {
+      void handleCalPanelPicked(info.selector);
+      return;
+    }
     // 控件提取：拾取触发框 → 自动快照（点击展开 → 识别面板 → 关闭）
     if (widgetPickKindRef.current) {
       const kind = widgetPickKindRef.current;
@@ -7491,7 +7560,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       void runWidgetSnapshot(info.selector, info.label || info.tag || info.selector, kind);
       return;
     }
-    // 控件日历角色重选：把点到的元素记录为对应角色的选择器
+    // 控件日历角色重选：把点到的元素记录为对应角色的选择器 + 投影坐标
     if (widgetRolePickingKeyRef.current) {
       const fullKey = widgetRolePickingKeyRef.current;
       setWidgetRolePickingKey(null);
@@ -7500,19 +7569,124 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       const sep = fullKey.lastIndexOf(":");
       const cardKey = fullKey.slice(0, sep);
       const role = fullKey.slice(sep + 1);
+      // 引导式拾取：校验点选元素是否符合角色要求，不合格则提示并重新拾取当前步
+      if (calPickStepIdxRef.current !== null) {
+        const txt = (info.text || info.label || info.value || "").trim();
+        let rejectMsg: string | null = null;
+        if (role === "dayCell") {
+          if (!/^([1-9]|[12]\d|3[01])$/.test(txt)) {
+            rejectMsg = `点选的不是日格子（应为 1-31 的数字，当前：「${txt.slice(0, 12) || "空"}」），请重新点选`;
+          }
+        } else if (role === "header") {
+          if (!containsYearMonthText(txt)) {
+            rejectMsg = "点选的区域未包含年月文本（如 2024年1月 / 2024-01）。若年月分开放置，请点选它们外侧的整个标题栏";
+          }
+        }
+        if (rejectMsg) {
+          setWidgetSnapshotError(rejectMsg);
+          // 恢复当前步的拾取状态，重新进入拾取模式（先确保面板仍打开）
+          setWidgetRolePickingKey(fullKey);
+          const isDayCellReject = role === "dayCell";
+          void (async () => {
+            const w = widgetDraftRef.current;
+            if (w) {
+              try {
+                await window.electronAPI?.viewExecuteJS("right", buildWidgetEnsureOpenScript(w.triggerSelector, w.panelSelector));
+              } catch { /* ignore */ }
+            }
+            setTimeout(() => {
+              if (widgetRolePickingKeyRef.current) {
+                window.electronAPI?.viewStartPicking("right").then(() => {
+                  // viewStopPicking 的 DEACTIVATE_SCRIPT 会把 marqueeMode 重置为 false，
+                  // 日格子多选流程需要重新启用框选模式
+                  if (isDayCellReject) {
+                    window.electronAPI?.viewSetMarqueeMode?.("right", true);
+                  }
+                }).catch(() => {});
+              }
+            }, 200);
+          })();
+          return;
+        }
+        // 校验通过：清掉上一条校验错误
+        setWidgetSnapshotError(null);
+        // 日格子多选（引导模式）：累积点选的日格子选择器，保持拾取状态，等用户点「完成」统一收集并推进
+        if (role === "dayCell") {
+          const sel0 = generalizeDayCellSelector(info.selector);
+          const txt0 = (info.text || info.label || info.value || "").trim();
+          setCalDayCellPicks((prev) => (prev.some((p) => p.selector === sel0 && p.text === txt0) ? prev : [...prev, { text: txt0, selector: sel0 }]));
+          // 恢复当前步拾取状态（picker 每次点选后自动失活，需延迟重启以继续多选）
+          setWidgetRolePickingKey(fullKey);
+          setTimeout(() => {
+            if (widgetRolePickingKeyRef.current) {
+              // viewStopPicking 的 DEACTIVATE_SCRIPT 已把 marqueeMode 重置为 false，重启后需重新启用框选
+              window.electronAPI?.viewStartPicking("right").then(() => {
+                window.electronAPI?.viewSetMarqueeMode?.("right", true);
+              }).catch(() => {});
+            }
+          }, 200);
+          return;
+        }
+      }
       const field = WIDGET_ROLE_TO_FIELD[role];
       if (field) {
         const sel = role === "dayCell" ? generalizeDayCellSelector(info.selector) : info.selector;
+        const rectField = `${field.replace(/Selector$/, "")}Rect`;
         const applyRole = (w: WidgetDef): WidgetDef => ({
           ...w,
           calendar: { ...(w.calendar || {}), [field]: sel },
         });
-        if (cardKey === "draft") {
-          setWidgetDraft((prev) => (prev ? applyRole(prev) : prev));
-        } else {
-          const rightSelector = cardKey.replace(/^saved:/, "");
-          setMappings((prev) => prev.map((m) => (m.right_selector === rightSelector && m.widget ? { ...m, widget: applyRole(m.widget) } : m)));
-          setPickedMarks((prev) => prev.map((mk) => (mk.selector === rightSelector && mk.widget ? { ...mk, widget: applyRole(mk.widget) } : mk)));
+        const commit = (fn: (w: WidgetDef) => WidgetDef) => {
+          if (cardKey === "draft") {
+            setWidgetDraft((prev) => (prev ? fn(prev) : prev));
+          } else {
+            const rightSelector = cardKey.replace(/^saved:/, "");
+            setMappings((prev) => prev.map((m) => (m.right_selector === rightSelector && m.widget ? { ...m, widget: fn(m.widget) } : m)));
+            setPickedMarks((prev) => prev.map((mk) => (mk.selector === rightSelector && mk.widget ? { ...mk, widget: fn(mk.widget) } : mk)));
+          }
+        };
+        commit(applyRole);
+        // 非日格子：把元素中心相对面板左上角的投影坐标一起存下来（选择器失效时按坐标对准点击）
+        if (role !== "dayCell" && info.rect) {
+          const widget = cardKey === "draft"
+            ? widgetDraftRef.current
+            : mappings.find((m) => m.right_selector === cardKey.replace(/^saved:/, ""))?.widget;
+          const panelSel = widget?.calendar?.panelSelector || widget?.panelSelector;
+          if (panelSel && window.electronAPI) {
+            const rectScript = `
+              ${DEEP_QUERY_HELPER}
+              (function(){
+                var el = null;
+                try { el = __cinsideDeepQuery(${JSON.stringify(panelSel)}); } catch(e) {}
+                if (!el) return null;
+                var r = el.getBoundingClientRect();
+                return { x: r.left, y: r.top };
+              })();
+            `;
+            window.electronAPI.viewExecuteJS("right", rectScript).then((_raw) => {
+              const pr = _raw as { x: number; y: number } | null;
+              if (pr && typeof pr.x === "number") {
+                commit((w) => ({
+                  ...w,
+                  calendar: { ...(w.calendar || {}), [rectField]: { dx: Math.round(info.rect!.x + info.rect!.width / 2 - pr.x), dy: Math.round(info.rect!.y + info.rect!.height / 2 - pr.y) } },
+                }));
+              }
+            }).catch(() => {});
+          }
+        }
+        // 日格子：拾取种子后，用公共选择器收集面板内所有日格子坐标
+        if (role === "dayCell") {
+          const baseWidget = cardKey === "draft"
+            ? widgetDraftRef.current
+            : mappings.find((m) => m.right_selector === cardKey.replace(/^saved:/, ""))?.widget;
+          if (baseWidget) {
+            const updatedWidget: WidgetDef = { ...baseWidget, calendar: { ...(baseWidget.calendar || {}), [field]: sel } };
+            void collectDayCells(updatedWidget, cardKey);
+          }
+        }
+        // 引导式拾取中：推进到下一步
+        if (calPickStepIdxRef.current !== null) {
+          void advanceCalendarGuide(calPickStepIdxRef.current);
         }
       }
       return;
@@ -7576,8 +7750,6 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       const clickLabel = nextClickLabelRef.current;
       const currentPhase = addingClickPhaseRef.current;
       rlog("[onRightPicked] click模式, nextClickLabel=", clickLabel, "addingClickMode=", addingClickModeRef.current, "phase=", currentPhase);
-      // 不调用 performRealClick：picker 的 pointerdown 拦截后物理 click 仍会触发元素，
-      // 再调 el.click() 会导致点击两次。物理点击已经完成。
       addPickedMark({
         side: "right",
         source: "web",
@@ -7592,6 +7764,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         tag: info.tag,
         type: info.type,
       });
+      // 触发真实点击：picker 的 pointerdown 已 preventDefault，click 事件不会自动发生，
+      // 必须显式 el.click() 网页才会响应（导航/打开面板）。拿不到所选元素时跳过。
+      if (info.selector) performRealClick("right", info.selector, !!info.fromPopup);
       // 判断点击后的行为：添加点击按钮模式/教学搜索→确认人物/完成
       if (addingClickModeRef.current) {
         // 连续添加点击按钮模式：保持点击状态，使用对应phase的标签
@@ -7828,6 +8003,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       });
     }
     // 自动进入下一步：选择左侧来源（默认提示用户选网页或 Excel）
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- handleCalPanelPicked 声明在后且为稳定引用，闭包延迟读取安全
   }, [addPickedMark, selected, performRealClick, performInputValue, teachingPhase, recyclePickedMark, handleUploadBindPick]);
 
   const onLeftPicked = useCallback(async (info: PickedElementInfo) => {
@@ -7909,8 +8085,6 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       const clickLabel = nextClickLabelRef.current;
       const currentPhase = addingClickPhaseRef.current;
       rlog("[onLeftPicked] click模式, nextClickLabel=", clickLabel, "addingClickMode=", addingClickModeRef.current, "phase=", currentPhase);
-      // 不调用 performRealClick：picker 的 pointerdown 拦截后物理 click 仍会触发元素，
-      // 再调 el.click() 会导致点击两次。物理点击已经完成。
       addPickedMark({
         side: "left",
         source: "web",
@@ -7925,6 +8099,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         tag: info.tag,
         type: info.type,
       });
+      // 触发真实点击：picker 的 pointerdown 已 preventDefault，click 事件不会自动发生，
+      // 必须显式 el.click() 网页才会响应（导航/打开面板）。拿不到所选元素时跳过。
+      if (info.selector) performRealClick("left", info.selector, !!info.fromPopup);
       // 判断点击后的行为：添加点击按钮模式/教学搜索→确认人物/完成
       if (addingClickModeRef.current) {
         // 连续添加点击按钮模式：保持点击状态，使用对应phase的标签
@@ -8245,7 +8422,10 @@ type: info.type,
         setWidgetPickKind(null);
         setWidgetRolePickingKey(null);
         setWidgetLeftPickingKey(null);
+        setCalPickStepIdx(null);
+        setCalDayCellPicks([]);
         setWidgetSnapshotError(null);
+        window.electronAPI?.viewSetMarqueeMode?.("right", false);
         window.electronAPI?.viewStopPicking("left").catch(() => {});
         window.electronAPI?.viewStopPicking("right").catch(() => {});
       }
@@ -8253,16 +8433,114 @@ type: info.type,
     });
   }, []);
 
+  /**
+   * 将控件草稿提交到 mappings 列表（使其出现在「已保存控件」中）。
+   * @param createMark 是否同步创建 pickedMark（供 LOOP 执行）——绑定时为 true，未绑定时为 false（绑定时再补建）
+   */
+  const commitWidgetDraft = useCallback((draft: WidgetDef, binding: WidgetBinding, opts: { createMark: boolean }) => {
+    const stepType = currentLoopStepTypeRef.current;
+    const isEntry = stepType === "entry";
+    const isExcelSource = binding.leftSource === "excel";
+    const isManualSource = binding.leftSource === "manual";
+    const isPassportSource = binding.leftSource === "passport";
+    const leftWebSelector = (!isExcelSource && !isManualSource && !isPassportSource) ? binding.leftField : undefined;
+    const sourceLabel = isExcelSource ? "Excel" : isManualSource ? "固定值" : isPassportSource ? "护照提取" : "左网页";
+    const leftFieldTrimmed = binding.leftField.trim();
+
+    // 1. 写入 mappings（无论是否有绑定都保存，以便在卡片上继续配置）
+    setMappings((prev) => [
+      ...prev.filter((x) => x.right_selector !== draft.triggerSelector),
+      {
+        right_selector: draft.triggerSelector,
+        right_label: draft.triggerLabel || draft.triggerSelector,
+        right_input_type: "widget",
+        left_source: binding.leftSource,
+        left_field: leftFieldTrimmed,
+        left_record_key: binding.leftLabel || null,
+        verify_method: "smart" as const,
+        widget: draft,
+      },
+    ]);
+
+    // 2. 仅当有绑定且正在添加步骤模式时，才创建 pickedMark（无绑定时不创建，避免 LOOP 执行时空值报错）
+    if (opts.createMark && leftFieldTrimmed && addingStepModeRef.current) {
+      // 日历控件：先记录一个「打开日历」点击步骤（LOOP 时先真实点开日历，设值步骤检测到已打开则跳过重复点击）
+      if (draft.kind === "calendar") {
+        addPickedMark({
+          side: "right",
+          source: "web",
+          selector: draft.triggerSelector,
+          label: `点击 · 打开日历「${draft.triggerLabel || draft.triggerSelector}」`,
+          value: "",
+          workflow: stepType || "review",
+          action: "click",
+          rect: undefined,
+          tag: "",
+          type: "",
+        });
+      }
+      addPickedMark({
+        side: "right",
+        source: isExcelSource ? "excel" : isPassportSource ? "passport" : "web",
+        selector: draft.triggerSelector,
+        label: `${isEntry ? "录入" : "审查"} · ${draft.triggerLabel || draft.triggerSelector} ← ${sourceLabel}「${isManualSource ? binding.leftField : leftFieldTrimmed}」`,
+        value: isManualSource ? binding.leftField : "",
+        workflow: stepType || "review",
+        action: isEntry ? "input" : "pick",
+        rect: undefined,
+        tag: "",
+        type: "",
+        inputTarget: isEntry ? draft.triggerSelector : undefined,
+        inputTargetLabel: isEntry ? (draft.triggerLabel || draft.triggerSelector) : undefined,
+        variableField: isEntry && (isExcelSource || isPassportSource) ? leftFieldTrimmed : undefined,
+        excelField: isExcelSource ? leftFieldTrimmed : undefined,
+        sourceSelector: isEntry ? leftWebSelector : undefined,
+        widget: draft,
+      });
+      rlog(`[commitWidgetDraft] 添加${stepType}步骤(控件): ${draft.triggerSelector} ← ${sourceLabel}(${leftFieldTrimmed})`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /** 开始拾取控件触发框（右侧网页） */
   const startWidgetPick = useCallback((kind: "option" | "calendar") => {
+    // 若日历引导式拾取进行中，先取消并丢弃不完整 draft（引导未完成不应保存）
+    if (calPickStepIdxRef.current !== null) {
+      setCalPickStepIdx(null);
+      setWidgetRolePickingKey(null);
+      setCalDayCellPicks([]);
+      window.electronAPI?.viewSetMarqueeMode?.("right", false);
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+      setWidgetDraft(null);
+      setWidgetDraftBinding({ leftSource: "excel", leftField: "" });
+    } else {
+      // 如果有未保存的草稿，先自动保存（避免添加新控件时丢失前一个）
+      const existingDraft = widgetDraftRef.current;
+      if (existingDraft) {
+        commitWidgetDraft(existingDraft, widgetDraftBindingRef.current, { createMark: !!widgetDraftBindingRef.current.leftField.trim() });
+        setWidgetDraft(null);
+        setWidgetDraftBinding({ leftSource: "excel", leftField: "" });
+      }
+    }
     setWidgetSnapshotError(null);
     setWidgetPickKind(kind);
+    // 清理手动面板点选兜底状态（新一轮提取）
+    setCalPanelPickFailed(false);
+    setCalPanelPickMode("idle");
+    calFailTriggerRef.current = null;
     window.electronAPI?.viewStopPicking("left").catch(() => {});
     window.electronAPI?.viewStartPicking("right").catch(() => {});
+    // 确保提取元素面板展开、widget TAB 在 FIFO 顺序中
+    requestExtractTab("widget");
+    setWidgetExtractMode(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const cancelWidgetPick = useCallback(() => {
     setWidgetPickKind(null);
+    setCalPanelPickMode("idle");
+    setCalPanelPickFailed(false);
+    calFailTriggerRef.current = null;
     window.electronAPI?.viewStopPicking("right").catch(() => {});
   }, []);
 
@@ -8288,20 +8566,55 @@ type: info.type,
       }
       if (res && res.ok) {
         const isInline = (res as { inline?: boolean }).inline;
+        // 防护：若快照完成时仍有旧草稿（理论上 startWidgetPick 已经提交过），先提交旧草稿再替换
+        const oldDraft = widgetDraftRef.current;
+        if (oldDraft && oldDraft.triggerSelector !== triggerSelector) {
+          commitWidgetDraft(oldDraft, widgetDraftBindingRef.current, { createMark: !!widgetDraftBindingRef.current.leftField.trim() });
+          setWidgetDraftBinding({ leftSource: "excel", leftField: "" });
+        }
+        // 日历控件：引导式手动拾取各按钮位置（snapshot 已打开面板并保持，不自动识别、不套用模板）
+        const calendarData = kind === "calendar" ? (res.calendar || {}) : undefined;
+        const newWgId = `wg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         setWidgetDraft({
-          id: `wg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          id: newWgId,
           kind,
           inline: isInline,
           triggerSelector,
           triggerLabel,
           panelSelector: res.panelSelector,
           options: kind === "option" ? res.options || [] : undefined,
-          calendar: kind === "calendar" ? res.calendar || {} : undefined,
+          calendar: calendarData,
           createdAt: Date.now(),
         });
+        // 自动滚动到新添加的控件 TAB
+        setTimeout(() => {
+          requestExtractTab("widget", `widget:draft:${newWgId}`);
+        }, 150);
+        // 日历控件：启动引导式拾取第 0 步（面板已打开，进入拾取模式让用户标注第一个按钮）
+        if (kind === "calendar") {
+          setCalPickStepIdx(0);
+          setWidgetRolePickingKey(`draft:${CALENDAR_GUIDE_STEPS[0].role}`);
+          setTimeout(() => {
+            window.electronAPI?.viewStartPicking("right").catch(() => {});
+          }, 300);
+        }
+        // 快照成功：清掉手动面板点选兜底状态
+        setCalPanelPickFailed(false);
+        setCalPanelPickMode("idle");
+        calFailTriggerRef.current = null;
       } else {
         const reason = res?.reason || "unknown";
         setWidgetSnapshotError(WIDGET_SNAPSHOT_REASONS[reason] || `快照失败：${reason}`);
+        // 日历面板检测失败：记录触发框，允许「手动点选面板」兜底（用户手动点开日历后点选面板）
+        if (kind === "calendar" && reason === "panel_not_found") {
+          calFailTriggerRef.current = { selector: triggerSelector, label: triggerLabel };
+          setCalPanelPickFailed(true);
+          setCalPanelPickMode("await-open");
+        } else {
+          setCalPanelPickFailed(false);
+          setCalPanelPickMode("idle");
+          calFailTriggerRef.current = null;
+        }
       }
     } catch (e) {
       console.warn("[widget] snapshot failed", e);
@@ -8311,22 +8624,256 @@ type: info.type,
     }
   }, []);
 
-  /** 请求重选日历角色：先脚本打开面板，再进入拾取 */
+  /** 请求重选日历角色：先确保面板打开（已开则不重复点击，避免被点关），再进入拾取 */
   const pickWidgetRole = useCallback((key: string, role: CalendarRole) => {
     const widget = key === "draft"
       ? widgetDraftRef.current
       : mappings.find((m) => m.right_selector === key.replace(/^saved:/, ""))?.widget;
     if (!widget) return;
-    setWidgetRolePickingKey(`${key}:${role}`);
-    // 拾取模式会拦截点击，所以用脚本打开面板
-    window.electronAPI?.viewExecuteJS("right", buildWidgetOpenScript(widget.triggerSelector)).catch(() => {});
-    setTimeout(() => {
-      if (widgetRolePickingKeyRef.current) {
-        window.electronAPI?.viewStartPicking("right").catch(() => {});
-      }
-    }, 450);
+    // 先执行 ensure-open（此时拾取器未激活，脚本里的程序化点击不会被拦截），完成后再设置拾取 key 激活拾取
+    void (async () => {
+      try {
+        await window.electronAPI?.viewExecuteJS("right", buildWidgetEnsureOpenScript(widget.triggerSelector, widget.panelSelector));
+      } catch { /* ignore */ }
+      setWidgetRolePickingKey(`${key}:${role}`);
+      setTimeout(() => {
+        if (widgetRolePickingKeyRef.current) {
+          window.electronAPI?.viewStartPicking("right").catch(() => {});
+        }
+      }, 250);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mappings]);
+
+  /** 引导式拾取：推进到下一步（确保面板打开→设置下一步角色→进入拾取） */
+  const advanceCalendarGuide = useCallback(async (currentIdx: number) => {
+    // 离开日格子步骤时关闭框选模式
+    if (CALENDAR_GUIDE_STEPS[currentIdx]?.role === "dayCell") {
+      window.electronAPI?.viewSetMarqueeMode?.("right", false);
+    }
+    const nextIdx = currentIdx + 1;
+    if (nextIdx >= CALENDAR_GUIDE_STEPS.length) {
+      // 引导结束：面板保持打开供镜像测试
+      setCalPickStepIdx(null);
+      setWidgetRolePickingKey(null);
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+      // 明确完成反馈：引导条消失后用户能在草稿卡片看到下一步指引
+      setWidgetTestResults((prev) => ({
+        ...prev,
+        draft: { ok: true, message: "✓ 标注完成！点下方模拟面板的翻页/日期测试与网页联动，确认无误后绑定左侧来源并保存" },
+      }));
+      return;
+    }
+    const nextRole = CALENDAR_GUIDE_STEPS[nextIdx].role;
+    // 进入日格子步骤：清空多选累积，重新开始点选
+    if (nextRole === "dayCell") setCalDayCellPicks([]);
+    // 确保面板打开（上一步拾取点击可能触发关闭）
+    const widget = widgetDraftRef.current;
+    if (widget) {
+      try {
+        await window.electronAPI?.viewExecuteJS("right", buildWidgetEnsureOpenScript(widget.triggerSelector, widget.panelSelector));
+      } catch { /* ignore */ }
+    }
+    setCalPickStepIdx(nextIdx);
+    setWidgetRolePickingKey(`draft:${nextRole}`);
+    setTimeout(() => {
+      window.electronAPI?.viewStartPicking("right").catch(() => {});
+      // 日格子步骤：启用框选模式（拖拽矩形批量选中日格子）
+      if (nextRole === "dayCell") {
+        setTimeout(() => {
+          window.electronAPI?.viewSetMarqueeMode?.("right", true);
+        }, 120);
+      }
+    }, 200);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 引导式拾取：跳过当前可选步骤（仅 prevYear/nextYear 可跳过） */
+  const skipCalendarGuideStep = useCallback(() => {
+    const idx = calPickStepIdxRef.current;
+    if (idx === null) return;
+    if (CALENDAR_GUIDE_STEPS[idx].required) return; // 必选步不可跳过
+    void advanceCalendarGuide(idx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 日格子多选完成：合并所有点选种子的泛化选择器（去重）→ 收集全部日格子坐标 → 推进引导 */
+  const finishCalDayCellPicks = useCallback((extraPicks?: Array<{ text: string; selector: string }>) => {
+    const idx = calPickStepIdxRef.current;
+    if (idx === null) return;
+    if (CALENDAR_GUIDE_STEPS[idx]?.role !== "dayCell") return;
+    const basePicks = calDayCellPicksRef.current;
+    const picks = extraPicks && extraPicks.length ? [...basePicks, ...extraPicks] : basePicks;
+    if (!picks.length) {
+      setWidgetSnapshotError("请先在右侧网页日历上点选至少一个日格子");
+      return;
+    }
+    const sels = Array.from(new Set(picks.map((p) => p.selector).filter(Boolean)));
+    const combined = sels.join(", ");
+    // 合并选择器写入草稿（覆盖不同结构/区域的日格子，执行时按文本匹配目标日）
+    const applySel = (w: WidgetDef): WidgetDef => ({ ...w, calendar: { ...(w.calendar || {}), dayCellSelector: combined } });
+    setWidgetDraft((prev) => (prev ? applySel(prev) : prev));
+    const w0 = widgetDraftRef.current;
+    if (w0) {
+      const updated: WidgetDef = { ...w0, calendar: { ...(w0.calendar || {}), dayCellSelector: combined } };
+      void collectDayCells(updated, "draft", sels);
+    }
+    setWidgetSnapshotError(null);
+    setCalDayCellPicks([]);
+    void advanceCalendarGuide(idx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 右侧框选批量拾取回调（日格子步骤专用）：批量写入 calDayCellPicks 后自动完成 */
+  const onRightMultiPicked = useCallback((infos: PickedElementInfo[]) => {
+    const idx = calPickStepIdxRef.current;
+    if (idx === null || CALENDAR_GUIDE_STEPS[idx]?.role !== "dayCell") return;
+    if (!infos.length) return;
+    const existing = calDayCellPicksRef.current;
+    const existingKeys = new Set(existing.map((p) => `${p.selector}|${p.text}`));
+    const toAdd: Array<{ text: string; selector: string }> = [];
+    for (const info of infos) {
+      const sel = generalizeDayCellSelector(info.selector);
+      const txt = (info.text || info.label || info.value || "").trim();
+      const key = `${sel}|${txt}`;
+      if (!existingKeys.has(key)) {
+        existingKeys.add(key);
+        toAdd.push({ text: txt, selector: sel });
+      }
+    }
+    if (toAdd.length) {
+      setCalDayCellPicks((prev) => [...prev, ...toAdd]);
+    }
+    // 框选属于明确的多选操作，用户松开鼠标时即完成本次框选 → 自动推进
+    // 直接把 toAdd 作为 extraPicks 传入，避免依赖 React state/ref 更新时序
+    finishCalDayCellPicks(toAdd);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 右侧拾取警告（框选无结果等）→ 显示在 snapshotError 区域 */
+  const onRightPickWarning = useCallback((message: string) => {
+    setWidgetSnapshotError(message);
+  }, []);
+
+  /** 引导式拾取：取消（用户放弃标注，退出引导并关掉网页面板，保持网页干净） */
+  const cancelCalendarGuide = useCallback(() => {
+    setCalPickStepIdx(null);
+    setWidgetRolePickingKey(null);
+    setCalDayCellPicks([]);
+    window.electronAPI?.viewSetMarqueeMode?.("right", false);
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+    const widget = widgetDraftRef.current;
+    if (widget) {
+      window.electronAPI?.viewExecuteJS("right", buildWidgetCloseScript(widget.triggerSelector, widget.panelSelector)).catch(() => {});
+    }
+  }, []);
+
+  /** 手动面板点选：用户已手动点开日历，开始点选面板 */
+  const armCalPanelPick = useCallback(() => {
+    setCalPanelPickMode("picking");
+    setWidgetSnapshotError(null);
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
+    window.electronAPI?.viewStartPicking("right").catch(() => {});
+  }, []);
+
+  /** 手动面板点选：取消 */
+  const cancelCalPanelPick = useCallback(() => {
+    setCalPanelPickMode("idle");
+    setCalPanelPickFailed(false);
+    calFailTriggerRef.current = null;
+    setWidgetSnapshotError(null);
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+  }, []);
+
+  /** 放弃草稿：若引导式拾取/手动面板点选仍在进行，一并退出，避免残留拾取态 */
+  const discardWidgetDraft = useCallback(() => {
+    setWidgetDraft(null);
+    setWidgetDraftBinding({ leftSource: "excel", leftField: "" });
+    if (calPickStepIdxRef.current !== null) {
+      setCalPickStepIdx(null);
+      setWidgetRolePickingKey(null);
+      setCalDayCellPicks([]);
+      window.electronAPI?.viewSetMarqueeMode?.("right", false);
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+    }
+    if (calPanelPickModeRef.current !== "idle") {
+      setCalPanelPickMode("idle");
+      setCalPanelPickFailed(false);
+      calFailTriggerRef.current = null;
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+    }
+  }, []);
+
+  /** 手动面板点选：用户点选了面板内元素 → 向上找日历容器 → 建草稿并进入引导式拾取 */
+  const handleCalPanelPicked = useCallback(async (seedSelector: string) => {
+    setCalPanelPickMode("idle");
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+    const trig = calFailTriggerRef.current;
+    if (!trig || !window.electronAPI) return;
+    try {
+      const res = (await window.electronAPI.viewExecuteJS("right", buildCalendarPanelFromSeedScript(seedSelector))) as { ok: boolean; panelSelector?: string; upgraded?: boolean; reason?: string } | null;
+      if (res?.ok && res.panelSelector) {
+        const newWgId = `wg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        setWidgetDraft({
+          id: newWgId,
+          kind: "calendar",
+          triggerSelector: trig.selector,
+          triggerLabel: trig.label,
+          panelSelector: res.panelSelector,
+          calendar: {},
+          createdAt: Date.now(),
+        });
+        calFailTriggerRef.current = null;
+        setCalPanelPickFailed(false);
+        setWidgetSnapshotError(null);
+        setTimeout(() => {
+          requestExtractTab("widget", `widget:draft:${newWgId}`);
+        }, 150);
+        // 启动引导式拾取（面板已打开）
+        setCalPickStepIdx(0);
+        setWidgetRolePickingKey(`draft:${CALENDAR_GUIDE_STEPS[0].role}`);
+        setTimeout(() => {
+          window.electronAPI?.viewStartPicking("right").catch(() => {});
+        }, 300);
+      } else {
+        // 点选无效：提示并允许重新点选（not_calendar = 点的位置不属于任何日历结构）
+        setWidgetSnapshotError(
+          res?.reason === "not_calendar"
+            ? "点的位置不是日历，请点日历面板上的日格子或年月区（若日历已收起，请先点开再点选）"
+            : "未识别到日历结构，请点选日历面板内的元素（如日格子、年月区）"
+        );
+        setCalPanelPickMode("picking");
+        window.electronAPI?.viewStartPicking("right").catch(() => {});
+      }
+    } catch {
+      setWidgetSnapshotError("面板识别失败，请重试");
+      setCalPanelPickMode("picking");
+      window.electronAPI?.viewStartPicking("right").catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 收集日格子坐标：用户拾取日格子种子（可多选）后，用公共选择器收集面板内所有日格子的文本+投影坐标 */
+  const collectDayCells = useCallback(async (widget: WidgetDef, cardKey: string, dayCellSelectors?: string[]) => {
+    const sels = dayCellSelectors && dayCellSelectors.length
+      ? dayCellSelectors
+      : (widget?.calendar?.dayCellSelector ? [widget.calendar.dayCellSelector] : []);
+    if (!sels.length || !widget?.panelSelector || !window.electronAPI) return;
+    try {
+      const res = (await window.electronAPI.viewExecuteJS("right", buildDayCellCollectScript(widget.panelSelector, sels))) as { ok: boolean; dayCells?: { text: string; dx: number; dy: number }[]; count?: number } | null;
+      if (res?.ok && res.dayCells && res.dayCells.length > 0) {
+        const dayCells = res.dayCells;
+        if (cardKey === "draft") {
+          setWidgetDraft((prev) => (prev ? { ...prev, calendar: { ...(prev.calendar || {}), dayCells } } : prev));
+        } else {
+          const rightSelector = cardKey.replace(/^saved:/, "");
+          setMappings((prev) => prev.map((m) => (m.right_selector === rightSelector && m.widget ? { ...m, widget: { ...m.widget, calendar: { ...(m.widget.calendar || {}), dayCells } } } : m)));
+          setPickedMarks((prev) => prev.map((mk) => (mk.selector === rightSelector && mk.widget ? { ...mk, widget: { ...mk.widget, calendar: { ...(mk.widget.calendar || {}), dayCells } } } : mk)));
+        }
+      }
+    } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /** 请求从左侧网页拾取来源元素 */
   const pickWidgetLeftWeb = useCallback((key: string) => {
@@ -8342,21 +8889,12 @@ type: info.type,
     window.electronAPI?.viewStartPicking("right").catch(() => {});
   }, []);
 
-  /** 保存草稿控件为字段映射（走 saveMapping，自动生成 LOOP 步骤 mark） */
+  /** 保存草稿控件为字段映射（走 commitWidgetDraft，自动生成 LOOP 步骤 mark） */
   const saveWidgetDraft = useCallback(() => {
     const draft = widgetDraftRef.current;
     const binding = widgetDraftBindingRef.current;
     if (!draft || !binding.leftField.trim()) return;
-    saveMapping({
-      right_selector: draft.triggerSelector,
-      right_label: draft.triggerLabel || draft.triggerSelector,
-      right_input_type: "widget",
-      left_source: binding.leftSource,
-      left_field: binding.leftField.trim(),
-      left_record_key: binding.leftLabel || null,
-      verify_method: "smart",
-      widget: draft,
-    });
+    commitWidgetDraft(draft, binding, { createMark: true });
     setWidgetDraft(null);
     setWidgetDraftBinding({ leftSource: "excel", leftField: "" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -8374,29 +8912,95 @@ type: info.type,
     setMappings((prev) => prev.map((m) => (m.right_selector === rightSelector
       ? { ...m, left_source: binding.leftSource, left_field: binding.leftField, left_record_key: binding.leftLabel || null }
       : m)));
-    // 同步 mark 的取值字段（与 saveMapping 的规则一致）
-    setPickedMarks((prev) => prev.map((mk) => {
-      if (mk.selector !== rightSelector || !mk.widget) return mk;
-      const isEntry = mk.action === "input";
-      const isExcel = binding.leftSource === "excel";
-      const isPassport = binding.leftSource === "passport";
-      const isManual = binding.leftSource === "manual";
-      return {
-        ...mk,
-        source: isExcel ? "excel" : isPassport ? "passport" : "web",
-        excelField: isExcel ? binding.leftField : undefined,
-        variableField: isEntry && (isExcel || isPassport) ? binding.leftField : undefined,
-        sourceSelector: isEntry && !isExcel && !isPassport && !isManual ? binding.leftField : undefined,
-        value: isManual ? binding.leftField : mk.value,
-      };
-    }));
+    // 同步 mark 的取值字段；若之前未绑定（无 mark）且现在绑定有效且在步骤模式，则补建 mark
+    const leftFieldTrimmed = binding.leftField.trim();
+    setPickedMarks((prev) => {
+      const existing = prev.find((mk) => mk.selector === rightSelector && mk.widget);
+      if (existing) {
+        // 更新已有 mark
+        return prev.map((mk) => {
+          if (mk.selector !== rightSelector || !mk.widget) return mk;
+          const isEntry = mk.action === "input";
+          const isExcel = binding.leftSource === "excel";
+          const isPassport = binding.leftSource === "passport";
+          const isManual = binding.leftSource === "manual";
+          return {
+            ...mk,
+            source: isExcel ? "excel" : isPassport ? "passport" : "web",
+            excelField: isExcel ? binding.leftField : undefined,
+            variableField: isEntry && (isExcel || isPassport) ? binding.leftField : undefined,
+            sourceSelector: isEntry && !isExcel && !isPassport && !isManual ? binding.leftField : undefined,
+            value: isManual ? binding.leftField : mk.value,
+          };
+        });
+      }
+      // 无已有 mark：若绑定有效且在步骤添加模式，补建一个
+      if (leftFieldTrimmed && addingStepModeRef.current) {
+        const mapping = mappingsRef.current.find((m) => m.right_selector === rightSelector);
+        const w = mapping?.widget;
+        if (w) {
+          const stepType = currentLoopStepTypeRef.current;
+          const isEntry = stepType === "entry";
+          const isExcel = binding.leftSource === "excel";
+          const isPassport = binding.leftSource === "passport";
+          const isManual = binding.leftSource === "manual";
+          const sourceLabel = isExcel ? "Excel" : isManual ? "固定值" : isPassport ? "护照提取" : "左网页";
+          const leftWebSelector = (!isExcel && !isManual && !isPassport) ? binding.leftField : undefined;
+          const order = prev.length + 1;
+          const newMark: PickedMark = {
+            id: `mk-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            side: "right",
+            source: isExcel ? "excel" : isPassport ? "passport" : "web",
+            selector: rightSelector,
+            label: `${isEntry ? "录入" : "审查"} · ${w.triggerLabel || rightSelector} ← ${sourceLabel}「${isManual ? binding.leftField : leftFieldTrimmed}」`,
+            value: isManual ? binding.leftField : "",
+            workflow: stepType || "review",
+            action: isEntry ? "input" : "pick",
+            rect: undefined,
+            tag: "",
+            type: "",
+            order,
+            createdAt: Date.now(),
+            inputTarget: isEntry ? rightSelector : undefined,
+            inputTargetLabel: isEntry ? (w.triggerLabel || rightSelector) : undefined,
+            variableField: isEntry && (isExcel || isPassport) ? leftFieldTrimmed : undefined,
+            excelField: isExcel ? leftFieldTrimmed : undefined,
+            sourceSelector: isEntry ? leftWebSelector : undefined,
+            widget: w,
+          };
+          rlog(`[updateSavedWidgetBinding] 补建控件步骤mark: ${rightSelector} ← ${sourceLabel}(${leftFieldTrimmed})`);
+          // 日历控件：同时补建「打开日历」点击步骤（排在设值步骤前）
+          if (w.kind === "calendar") {
+            const openMark: PickedMark = {
+              id: `mk-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+              side: "right",
+              source: "web",
+              selector: rightSelector,
+              label: `点击 · 打开日历「${w.triggerLabel || rightSelector}」`,
+              value: "",
+              workflow: stepType || "review",
+              action: "click",
+              rect: undefined,
+              tag: "",
+              type: "",
+              order,
+              createdAt: Date.now(),
+            };
+            return [...prev, openMark, { ...newMark, order: order + 1 }];
+          }
+          return [...prev, newMark];
+        }
+      }
+      return prev;
+    });
   }, []);
 
   /** 删除已保存控件映射 */
   const removeSavedWidget = useCallback((rightSelector: string) => {
     setMappings((prev) => prev.filter((m) => m.right_selector !== rightSelector));
     setPickedMarks((prev) => {
-      const filtered = prev.filter((mk) => !(mk.selector === rightSelector && mk.widget));
+      // 同选择器下：控件设值 mark + 自动补建的「打开日历」点击 mark 一并移除
+      const filtered = prev.filter((mk) => !(mk.selector === rightSelector && (mk.widget || mk.label.startsWith("点击 · 打开日历"))));
       return filtered.map((m, i) => ({ ...m, order: i + 1 }));
     });
   }, []);
@@ -8482,6 +9086,73 @@ type: info.type,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, getRecordDocFields]);
+
+  /** 日历镜像操作：点击面板按钮 → 真实点网页对应按钮 → 刷新面板年月 */
+  const handleCalendarMirrorClick = useCallback(async (mirrorKey: string, widget: WidgetDef, action: CalendarMirrorAction) => {
+    if (!window.electronAPI) return;
+    setWidgetCalendarBusyKey(mirrorKey);
+    rlog(`[widgetMirror] 开始镜像操作, key=${mirrorKey}, action=${JSON.stringify(action)}, widget=${widget.triggerLabel || widget.triggerSelector}`);
+    try {
+      // 先执行 open 动作，确保面板已打开并读取当前年月
+      const openRes = (await window.electronAPI.viewExecuteJS("right", buildWidgetCalendarMirrorScript(widget, { type: "open" }))) as { ok: boolean; year?: number; month?: number; reason?: string } | null;
+      if (openRes?.ok && typeof openRes.year === "number" && typeof openRes.month === "number") {
+        const y = openRes.year as number;
+        const m = openRes.month as number;
+        rlog(`[widgetMirror] open 成功, 当前年月=${y}-${m}`);
+        // 模拟面板按 JS 0 基月份渲染（new Date(y, m, 1) / monthNames[m]），脚本返回 1 基月份，存 0 基
+        setWidgetCalendarState((prev) => ({ ...prev, [mirrorKey]: { year: y, month: m - 1 } }));
+      } else {
+        rlog(`[widgetMirror] open 失败, reason=${openRes?.reason || '未知'}`);
+        // open 失败：给用户可见反馈（之前仅写日志，用户点了没反应）
+        setWidgetTestResults((prev) => ({
+          ...prev,
+          [mirrorKey]: { ok: false, message: "网页日历未能展开：请先在网页手动点开日历再试；若反复失败，请重新提取该控件" },
+        }));
+        return;
+      }
+
+      // 如果用户点击的是 open 动作，直接返回
+      if (action.type === "open") {
+        return;
+      }
+
+      // 执行用户点击的动作（翻页/点日期）
+      const res = (await window.electronAPI.viewExecuteJS("right", buildWidgetCalendarMirrorScript(widget, action))) as { ok: boolean; year?: number; month?: number; reason?: string } | null;
+      if (res?.ok && typeof res.year === "number" && typeof res.month === "number") {
+        const y = res.year as number;
+        const m = res.month as number;
+        rlog(`[widgetMirror] 动作成功, 结果年月=${y}-${m}, action=${JSON.stringify(action)}`);
+        // 存 0 基月份（同上）
+        setWidgetCalendarState((prev) => ({ ...prev, [mirrorKey]: { year: y, month: m - 1 } }));
+        if (action.type === "day") {
+          setWidgetTestResults((prev) => ({
+            ...prev,
+            [mirrorKey]: { ok: true, message: `已在网页点选 ${y}年${m}月${action.day}日` },
+          }));
+        }
+      } else {
+        rlog(`[widgetMirror] 动作失败, reason=${res?.reason || '未知'}, action=${JSON.stringify(action)}`);
+        // 失败不更新状态，但给用户可见反馈和下一步指引
+        const reasonMap: Record<string, string> = {
+          nav_button_missing: "翻页按钮点不到：请点该按钮的「重选」在网页日历上重新标注",
+          day_not_found: "该日格子点不到：请「重选」日格子（点任意一个日格子即可自动推导全部）",
+          header_parse_fail: "年月读取失败：请「重选」年月显示区",
+          panel_not_open: "网页日历未展开：请在网页手动点开后重试",
+          trigger_not_found: "网页上的日历框框找不到了：请重新提取该控件",
+        };
+        setWidgetTestResults((prev) => ({
+          ...prev,
+          [mirrorKey]: { ok: false, message: reasonMap[res?.reason || ""] || `镜像操作失败（${res?.reason || "未知"}）：可尝试重新标注对应按钮` },
+        }));
+      }
+    } catch (e) {
+      rlog(`[widgetMirror] 异常: ${e instanceof Error ? e.message : String(e)}`);
+      console.warn("[widgetMirror] action failed", e);
+    } finally {
+      setWidgetCalendarBusyKey(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ============ 面板脱离 ============
   const detachPanel = async (side: "left" | "bottom" | "browser-left" | "browser-right" | "browser-excel") => {
@@ -8872,38 +9543,19 @@ type: info.type,
     }
   }, [browserRightDetached, rightUrl, selectMode, pickTarget, pendingAction, teachingPhase]);
 
-  // 模态弹窗打开时隐藏主窗口 BrowserView，避免原生视图覆盖 HTML 弹窗
+  // 模态弹窗打开时通过主进程彻底隐藏所有原生 BrowserView（left/right/弹窗/脱离面板/dock），根治穿模
+  // 使用 modalOverlayEnter/Exit 引用计数支持多层模态嵌套
   useEffect(() => {
-    if (!window.electronAPI) return;
-    // 检查是否有任何面板打开：设置、文档填充、保存技能、技能面板、执行进度(LOOP/站外循环)、账号密码、屏蔽规则
+    const api = window.electronAPI;
+    if (!api) return;
     const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel || executionPanelOpen || !!showCredentialsPanel || !!showBlockPanel;
     if (anyModalOpen) {
-      const api = window.electronAPI;
-      // 立即隐藏
-      const hideViews = () => {
-        if (!browserLeftDetached && leftViewMode === "web") api.viewHide("left");
-        if (!browserRightDetached) api.viewHide("right");
-      };
-      hideViews();
-      // 监听 resize 事件：BrowserPane 的 sync 可能在 resize 后重新显示 BrowserView，
-      // 用 rAF 确保在 sync 执行后再次隐藏，防止原生视图覆盖弹窗
-      const onResize = () => {
-        requestAnimationFrame(() => {
-          requestAnimationFrame(hideViews);
-        });
-      };
-      window.addEventListener("resize", onResize);
+      api.modalOverlayEnter();
       return () => {
-        window.removeEventListener("resize", onResize);
+        api.modalOverlayExit();
       };
-    } else {
-      // 弹窗关闭后不要直接把 BrowserView 设成全屏，否则一旦同步延迟，
-      // 原生视图会盖住整个窗口导致所有按钮无法点击。交给 BrowserPane 的
-      // IntersectionObserver + sync() 在容器重绘后恢复正确 bounds。
-      const timer = setTimeout(() => window.dispatchEvent(new Event("resize")), 50);
-      return () => clearTimeout(timer);
     }
-  }, [showSettings, docFillData, showSaveSkill, showSkillPanel, executionPanelOpen, showCredentialsPanel, showBlockPanel, browserLeftDetached, browserRightDetached, leftViewMode]);
+  }, [showSettings, docFillData, showSaveSkill, showSkillPanel, executionPanelOpen, showCredentialsPanel, showBlockPanel]);
 
   // ============ 核验 ============
   const start = async () => {
@@ -9083,7 +9735,7 @@ type: info.type,
         onDraftChange={setWidgetDraft}
         onDraftBindingChange={setWidgetDraftBinding}
         onSaveDraft={saveWidgetDraft}
-        onDiscardDraft={() => setWidgetDraft(null)}
+        onDiscardDraft={discardWidgetDraft}
         onUpdateSaved={updateSavedWidget}
         onUpdateSavedBinding={updateSavedWidgetBinding}
         onRemoveSaved={removeSavedWidget}
@@ -9091,6 +9743,24 @@ type: info.type,
         onPickOption={pickWidgetOption}
         onPickLeftWeb={pickWidgetLeftWeb}
         onTest={testWidget}
+        calendarState={widgetCalendarState}
+        calendarBusyKey={widgetCalendarBusyKey}
+        onCalendarMirror={handleCalendarMirrorClick}
+        calGuide={calPickStepIdx !== null ? {
+          stepIdx: calPickStepIdx,
+          total: CALENDAR_GUIDE_STEPS.length,
+          role: CALENDAR_GUIDE_STEPS[calPickStepIdx].role,
+          label: CALENDAR_GUIDE_STEPS[calPickStepIdx].label,
+          required: CALENDAR_GUIDE_STEPS[calPickStepIdx].required,
+        } : null}
+        calDayCellCount={calDayCellPicks.length}
+        onFinishDayCells={finishCalDayCellPicks}
+        onSkipGuideStep={skipCalendarGuideStep}
+        onCancelGuide={cancelCalendarGuide}
+        calPanelPickFailed={calPanelPickFailed}
+        calPanelPickMode={calPanelPickMode}
+        onCalPanelPickArm={armCalPanelPick}
+        onCalPanelPickCancel={cancelCalPanelPick}
       />
     );
   }, [
@@ -9099,7 +9769,34 @@ type: info.type,
     widgetTestResults, widgetTestBusyKey,
     startWidgetPick, cancelWidgetPick, saveWidgetDraft, updateSavedWidget, updateSavedWidgetBinding,
     removeSavedWidget, pickWidgetRole, pickWidgetOption, pickWidgetLeftWeb, testWidget,
+    widgetCalendarState, widgetCalendarBusyKey, handleCalendarMirrorClick,
+    calPickStepIdx, calDayCellPicks, finishCalDayCellPicks, skipCalendarGuideStep, cancelCalendarGuide,
+    calPanelPickFailed, calPanelPickMode, armCalPanelPick, cancelCalPanelPick, discardWidgetDraft,
   ]);
+
+  // 控件 TAB 列表（浏览器标签页风格：每个控件一个 TAB）
+  const widgetTabs = useMemo(() => {
+    const tabs: Array<{ id: string; label: string; kind: "option" | "calendar"; isDraft?: boolean; isBound?: boolean }> = [];
+    // 已保存控件按顺序
+    for (const { mapping, widget } of savedWidgets) {
+      tabs.push({
+        id: `widget:saved:${mapping.right_selector}`,
+        label: widget.triggerLabel || mapping.right_label || (widget.kind === "option" ? "选项" : "日历"),
+        kind: widget.kind,
+        isBound: !!mapping.left_field?.trim(),
+      });
+    }
+    // 草稿控件（当前正在编辑的）放最后
+    if (widgetDraft) {
+      tabs.push({
+        id: `widget:draft:${widgetDraft.id}`,
+        label: widgetDraft.triggerLabel || (widgetDraft.kind === "option" ? "新选项" : "新日历"),
+        kind: widgetDraft.kind,
+        isDraft: true,
+      });
+    }
+    return tabs;
+  }, [savedWidgets, widgetDraft]);
 
   // 脱离模式：根据 URL query param 渲染独立面板窗口
   const detachMode = getDetachMode();
@@ -9731,7 +10428,7 @@ type: info.type,
                   onToggleSidebarCollapse={() => toggleSidebarAutoCollapse("left")}
                   onOpenCredentials={() => setShowCredentialsPanel(showCredentialsPanel === "left" ? null : "left")}
                   credentialCount={credentials.filter((c) => c.host === getHost(leftUrl)).length}
-                  picking={(selectMode && pickTarget === "left") || avatarMode || (pendingAction === "click" && (pickTarget === "left" || (teachingPhase !== "idle" && !!nextClickLabel) || addingClickMode)) || (pendingAction === "input" && pickTarget === "left") || !!bindInputSide || (teachingPhase !== "idle" && !!nextClickLabel && pickTarget === "left") || !!customTextPickingId}
+                  picking={(selectMode && pickTarget === "left") || avatarMode || (pendingAction === "click" && (pickTarget === "left" || (teachingPhase !== "idle" && !!nextClickLabel) || addingClickMode)) || (pendingAction === "input" && pickTarget === "left") || !!bindInputSide || (teachingPhase !== "idle" && !!nextClickLabel && pickTarget === "left") || !!customTextPickingId || !!widgetLeftPickingKey}
                   onPickedElement={avatarMode ? onAvatarPicked : onLeftPicked}
                   verifyStatus="idle"
                   disabled={running}
@@ -9871,8 +10568,10 @@ type: info.type,
                   onToggleSidebarCollapse={() => toggleSidebarAutoCollapse("right")}
                   onOpenCredentials={() => setShowCredentialsPanel(showCredentialsPanel === "right" ? null : "right")}
                   credentialCount={credentials.filter((c) => c.host === getHost(rightUrl)).length}
-                  picking={(selectMode && pickTarget === "right") || (pendingAction === "click" && (pickTarget === "right" || (teachingPhase !== "idle" && !!nextClickLabel) || addingClickMode)) || (pendingAction === "input" && pickTarget === "right") || !!bindInputSide || (teachingPhase !== "idle" && !!nextClickLabel && pickTarget === "right") || !!customTextPickingId}
+                  picking={(selectMode && pickTarget === "right") || (pendingAction === "click" && (pickTarget === "right" || (teachingPhase !== "idle" && !!nextClickLabel) || addingClickMode)) || (pendingAction === "input" && pickTarget === "right") || !!bindInputSide || (teachingPhase !== "idle" && !!nextClickLabel && pickTarget === "right") || !!customTextPickingId || !!widgetPickKind || !!widgetRolePickingKey || !!widgetOptionPickingKey || calPanelPickMode === "picking"}
                   onPickedElement={onRightPicked}
+                  onMultiPickedElements={onRightMultiPicked}
+                  onPickWarning={onRightPickWarning}
                   verifyStatus={verifyStatus}
                   disabled={running}
                   popupActive={popupSide === "right"}
@@ -10274,6 +10973,8 @@ type: info.type,
                   }}
                   extractStepSummary={extractStepSummary}
                   widgetExtractContent={widgetExtractContent}
+                  widgetTabs={widgetTabs}
+                  onAddWidget={startWidgetPick}
                   widgetSetupSignal={widgetExtractMode}
                   records={records}
                   onSelectRecord={(id) => {
@@ -10654,8 +11355,19 @@ type: info.type,
         open={showSkillPanel}
         onClose={() => setShowSkillPanel(false)}
         onRunSkill={handleRunSkill}
+        onEditFlow={(tpl) => { setEditingFlowTemplate(tpl); setShowSkillPanel(false); }}
         onSkillsChange={() => setSkillVersion((v) => v + 1)}
       />
+
+      {/* ============ 流程图编辑器 ============ */}
+      {editingFlowTemplate && (
+        <LoopEditor
+          template={editingFlowTemplate}
+          allTemplates={loadSkills()}
+          onClose={() => setEditingFlowTemplate(null)}
+          onSave={(updated) => { setEditingFlowTemplate(null); setSkillVersion((v) => v + 1); void updated; }}
+        />
+      )}
 
       {/* ============ 保存 SKILL 弹窗 ============ */}
       <SaveSkillDialog
