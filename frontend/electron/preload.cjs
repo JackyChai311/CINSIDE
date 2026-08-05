@@ -95,6 +95,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // 绑定输入模式右键菜单：开启/关闭
   viewSetBindInputMode: (side, enabled) => ipcRenderer.invoke("view-set-bind-input-mode", side, enabled),
+  // 框选模式（日格子多选）：true=拖拽框选，false=单点选择
+  viewSetMarqueeMode: (side, enabled) => ipcRenderer.invoke("view-set-marquee-mode", side, enabled),
   // 回传 Excel 列列表到 picker 脚本（右键菜单响应）
   viewCtxMenuResponse: (side, columns, currentField) => ipcRenderer.invoke("view-ctx-menu-response", side, columns, currentField),
 
@@ -230,5 +232,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const handler = (_e, data) => callback(data);
     ipcRenderer.on("two-step-paste-progress", handler);
     return () => ipcRenderer.removeListener("two-step-paste-progress", handler);
+  },
+
+  // === 模态覆盖层：临时隐藏所有原生 BrowserView 防止穿模 ===
+  modalOverlayEnter: () => ipcRenderer.invoke("modal-overlay-enter"),
+  modalOverlayExit: () => ipcRenderer.invoke("modal-overlay-exit"),
+  onModalOverlayExited: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on("modal-overlay-exited", handler);
+    return () => ipcRenderer.removeListener("modal-overlay-exited", handler);
   },
 });
