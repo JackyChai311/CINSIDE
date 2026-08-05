@@ -29,6 +29,10 @@ interface Props {
   picking: boolean;
   /** 选择模式时点击元素的回调 */
   onPickedElement?: (info: PickedElementInfo) => void;
+  /** 框选模式下批量拾取的回调（日格子多选等） */
+  onMultiPickedElements?: (infos: PickedElementInfo[]) => void;
+  /** 拾取警告（如框选无结果） */
+  onPickWarning?: (message: string) => void;
   /** 核验状态：用于外框颜色（绿=一致 / 红=不一致） */
   verifyStatus?: "idle" | "scanning" | "match" | "mismatch";
   /** 是否禁用 URL 输入（核验中） */
@@ -149,6 +153,8 @@ export default function BrowserPane({
   onUrlChange,
   picking,
   onPickedElement,
+  onMultiPickedElements,
+  onPickWarning,
   verifyStatus = "idle",
   disabled,
   emptyHint,
@@ -359,6 +365,14 @@ export default function BrowserPane({
     window.addEventListener("resize", onResize);
     scrollEl?.addEventListener("scroll", scheduleSync, { passive: true });
 
+    // 模态覆盖层退出后，BrowserView 已被主进程移除，需要重置 lastBoundsRef
+    // 否则 sync() 会因 bounds 未变化而跳过 viewShow()，导致 BrowserView 不恢复
+    const onModalExited = () => {
+      lastBoundsRef.current = null;
+      scheduleSync();
+    };
+    const offModalExited = window.electronAPI?.onModalOverlayExited?.(onModalExited);
+
     // 监听容器自身尺寸/位置变化（面板开闭时容器会resize）
     const resizeObserver = new ResizeObserver(() => scheduleSync());
     resizeObserver.observe(el);
@@ -372,6 +386,7 @@ export default function BrowserPane({
       resizeObserver.disconnect();
       window.removeEventListener("resize", onResize);
       scrollEl?.removeEventListener("scroll", scheduleSync);
+      offModalExited?.();
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
       if (detachedSide) window.electronAPI?.detachedViewHide(detachedSide);
       else window.electronAPI?.viewHide(side);
@@ -450,7 +465,8 @@ export default function BrowserPane({
 
   // 监听来自该 side 的元素选择消息
   useEffect(() => {
-    if (!window.electronAPI || !picking || !onPickedElement) return;
+    if (!window.electronAPI || !picking) return;
+    if (!onPickedElement && !onMultiPickedElements && !onPickWarning) return;
     console.log(`[BrowserPane:${side}] picking=true, 注册 element-picked 监听器`);
     window.electronAPI?.rendererLog?.(`[BrowserPane:${side}] picking=true, 注册 element-picked 监听器`);
     const off = window.electronAPI.onViewMessage((msg) => {
@@ -458,6 +474,7 @@ export default function BrowserPane({
       window.electronAPI?.rendererLog?.(`[BrowserPane:${side}] onViewMessage: side=${msg.side} kind=${msg.payload?.kind}`);
       if (msg.side !== side) return;
       if (msg.payload?.kind === "element-picked") {
+        if (!onPickedElement) return;
         const p = msg.payload as unknown as PickedElementInfo & { kind: string };
         console.log(`[BrowserPane:${side}] 收到 element-picked:`, { tag: p.tag, selector: p.selector });
         window.electronAPI?.rendererLog?.(`[BrowserPane:${side}] 收到 element-picked: tag=${p.tag} selector=${p.selector}`);
@@ -477,10 +494,33 @@ export default function BrowserPane({
           fileInputAccept: p.fileInputAccept,
           fromPopup: (msg as { fromPopup?: boolean }).fromPopup === true,
         });
+      } else if (msg.payload?.kind === "multi-element-picked") {
+        const p = msg.payload as unknown as { kind: string; elements: Array<Record<string, unknown>> };
+        const infos: PickedElementInfo[] = (p.elements || []).map((el) => ({
+          selector: el.selector as string,
+          label: el.label as string,
+          value: el.value as string,
+          tag: el.tag as string,
+          type: el.type as string,
+          text: el.text as string,
+          isContentEditable: !!el.isContentEditable,
+          rect: el.rect as PickedElementInfo["rect"],
+          href: el.href as string | undefined,
+          src: el.src as string | undefined,
+          accept: el.accept as string | undefined,
+          fileInputSelector: el.fileInputSelector as string | undefined,
+          fileInputAccept: el.fileInputAccept as string | undefined,
+        }));
+        console.log(`[BrowserPane:${side}] 收到 multi-element-picked, 数量=${infos.length}`);
+        window.electronAPI?.rendererLog?.(`[BrowserPane:${side}] 收到 multi-element-picked, 数量=${infos.length}`);
+        onMultiPickedElements?.(infos);
+      } else if (msg.payload?.kind === "pick-warning") {
+        const p = msg.payload as unknown as { kind: string; message?: string };
+        if (p.message) onPickWarning?.(p.message);
       }
     });
     return () => off?.();
-  }, [picking, side, onPickedElement]);
+  }, [picking, side, onPickedElement, onMultiPickedElements, onPickWarning]);
 
   // 激活/取消元素选择模式（脱离模式走 detached API）
   useEffect(() => {
