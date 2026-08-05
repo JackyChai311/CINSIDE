@@ -1138,6 +1138,11 @@ function loadView(side, url) {
   view.webContents.loadURL(url);
 }
 
+// === 模态覆盖层锁：modalOverlayDepth > 0 时禁止任何 BrowserView 被 add 回窗口，
+// 防止 BrowserPane 的 150ms sync() 定时器或 resize 事件在模态期间把原生视图加回来遮挡 HTML ===
+let modalOverlayDepth = 0;
+let dockWasVisibleForModal = false;
+
 function showView(side, bounds, _url) {
   // 注意：不再根据 url 不一致就自动 loadURL。
   // URL 加载只通过显式的 view-load / detached-view-load IPC 触发，
@@ -1250,6 +1255,7 @@ const ELEMENT_PICKER_SCRIPT = `
   if (needsInstall) {
     window.__cinsidePickerInstalled = true;
     window.__cinsidePickerActive = false;
+    window.__cinsideJustPicked = false;
   }
 
   function buildSelector(el) {
@@ -1449,6 +1455,15 @@ const ELEMENT_PICKER_SCRIPT = `
     return null;
   }
   function onPick(e) {
+    // 拾取完成后的指针已 handled，紧随其后的 click 会穿透到网页再触发一次控件
+    // （下拉/日历被二次点击 → 打开又关闭 → 快照永远找不到面板）。此处吞掉该 click。
+    if (window.__cinsideJustPicked && e.type === 'click') {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      window.__cinsideJustPicked = false;
+      return;
+    }
     if (!window.__cinsidePickerActive) return;
     var now = Date.now();
     if (now - lastPickTime < 200) return;
@@ -1481,6 +1496,9 @@ const ELEMENT_PICKER_SCRIPT = `
     window.__cinsidePickerActive = false;
     document.body.classList.remove('cinside-picking');
     removeFrameArms();
+    // 标记本次拾取已完成，接下来吞掉紧随其后的 click（避免它穿透网页二次触发控件）
+    window.__cinsideJustPicked = true;
+    setTimeout(function () { window.__cinsideJustPicked = false; }, 350);
     highlight(el, '#6366f1');
     // 文档提取：收集元素的链接/图片地址（PDF、图片等）
     var linkEl = (el.closest && el.closest('a')) || (el.tagName === 'A' ? el : null);
@@ -1734,6 +1752,178 @@ const ELEMENT_PICKER_SCRIPT = `
   }
 
   if (needsInstall) {
+    // ============ 框选模式（日格子多选）：拖拽画矩形框，松开时批量选中矩形内所有日格子元素 ============
+    // 通过设置 window.__cinsidePickerMarqueeMode = true 启用（日格子引导步骤）；false 还原为单点模式
+    window.__cinsidePickerMarqueeMode = false;
+    var _marqueeOverlay = null;
+    var _marqueeStart = null;
+    var _marqueeMoveListener = null;
+    var _marqueeUpListener = null;
+    var _marqueeCancelListener = null;
+    function _clearMarquee() {
+      if (_marqueeOverlay && _marqueeOverlay.parentNode) _marqueeOverlay.parentNode.removeChild(_marqueeOverlay);
+      _marqueeOverlay = null;
+      _marqueeStart = null;
+      if (_marqueeMoveListener) { window.removeEventListener('pointermove', _marqueeMoveListener, true); _marqueeMoveListener = null; }
+      if (_marqueeUpListener) { window.removeEventListener('pointerup', _marqueeUpListener, true); _marqueeUpListener = null; }
+      if (_marqueeCancelListener) { window.removeEventListener('pointercancel', _marqueeCancelListener, true); _marqueeCancelListener = null; }
+    }
+    // 判断元素是否像日格子：叶子级可见元素，可见文本为 1-31 的纯数字
+    function _isDayCellLike(el) {
+      if (!el || el.nodeType !== 1) return false;
+      var tag = el.nodeName.toLowerCase();
+      // 排除脚本/样式/不可见容器
+      if (tag === 'script' || tag === 'style' || tag === 'br' || tag === 'wbr') return false;
+      if (el.disabled) return false;
+      var r;
+      try { r = el.getBoundingClientRect(); } catch(e) { return false; }
+      if (r.width < 8 || r.height < 8 || r.width > 120 || r.height > 120) return false;
+      // 可见性
+      var st;
+      try { st = (el.ownerDocument.defaultView || window).getComputedStyle(el); } catch(e) { return false; }
+      if (st.display === 'none' || st.visibility === 'hidden' || parseFloat(st.opacity || '1') === 0) return false;
+      // 文本：用 innerText 取可见文本（兼容含 sr-only 隐藏文本的日格子）
+      var txt = (el.innerText || el.textContent || '').trim();
+      if (!/^([1-9]|[12]\d|3[01])$/.test(txt)) return false;
+      // 叶子检测：不含更深层同文本子元素
+      var kids = el.children;
+      for (var i = 0; i < kids.length; i++) {
+        if ((kids[i].textContent || '').trim() === txt) return false;
+      }
+      return true;
+    }
+    // 为单个元素构建拾取 payload（与 onPick 中单点拾取的 payload 结构一致）
+    function _buildPickPayload(el) {
+      return {
+        selector: buildSelector(el),
+        label: getLabel(el),
+        value: el.value || el.getAttribute('value') || (el.isContentEditable ? (el.innerText || '').trim() : ''),
+        tag: el.nodeName.toLowerCase(),
+        type: el.getAttribute && el.getAttribute('type') || '',
+        accept: (el.getAttribute && el.getAttribute('accept')) || '',
+        isContentEditable: !!el.isContentEditable,
+        rect: getRect(el),
+        text: (el.innerText || '').trim().slice(0, 120),
+        href: el.href || '',
+        src: el.src || '',
+        fileInputSelector: '',
+        fileInputAccept: '',
+      };
+    }
+    function _onMarqueeDown(e) {
+      if (!window.__cinsidePickerActive || !window.__cinsidePickerMarqueeMode) return;
+      // 只响应主键
+      if (e.button !== 0) return;
+      _marqueeStart = { x: e.clientX, y: e.clientY };
+      // 阻止默认的单点 onPick 触发（onPick 也在 pointerdown capture 阶段）
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      // 创建矩形遮罩
+      _marqueeOverlay = document.createElement('div');
+      _marqueeOverlay.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483646;'
+        + 'border:2px dashed #3b82f6;background:rgba(59,130,246,0.12);'
+        + 'border-radius:2px;box-shadow:0 0 0 1px rgba(255,255,255,.5);';
+      document.body.appendChild(_marqueeOverlay);
+      var moved = false;
+      _marqueeMoveListener = function(ev) {
+        if (!_marqueeStart) return;
+        var dx = ev.clientX - _marqueeStart.x;
+        var dy = ev.clientY - _marqueeStart.y;
+        if (!moved && Math.hypot(dx, dy) < 4) return;
+        moved = true;
+        _marqueeOverlay.style.left = Math.min(_marqueeStart.x, ev.clientX) + 'px';
+        _marqueeOverlay.style.top = Math.min(_marqueeStart.y, ev.clientY) + 'px';
+        _marqueeOverlay.style.width = Math.abs(dx) + 'px';
+        _marqueeOverlay.style.height = Math.abs(dy) + 'px';
+      };
+      _marqueeUpListener = function(ev) {
+        if (!_marqueeStart) return;
+        var dx = ev.clientX - _marqueeStart.x;
+        var dy = ev.clientY - _marqueeStart.y;
+        var dist = Math.hypot(dx, dy);
+        var marqueeRect = {
+          left: Math.min(_marqueeStart.x, ev.clientX),
+          top: Math.min(_marqueeStart.y, ev.clientY),
+          right: Math.max(_marqueeStart.x, ev.clientX),
+          bottom: Math.max(_marqueeStart.y, ev.clientY),
+        };
+        // 清理遮罩与监听器（先清，再处理结果）
+        _clearMarquee();
+        // 吞掉随后的 click 事件，避免穿透到网页
+        window.__cinsideJustPicked = true;
+        setTimeout(function() { window.__cinsideJustPicked = false; }, 350);
+        if (dist < 5) {
+          // 单击（无拖拽）：对点击位置的元素执行一次单点拾取
+          // （用 elementsFromPoint 精确定位；日格子不是 input，跳过 findInputFromTarget）
+          var stack = document.elementsFromPoint(marqueeRect.left, marqueeRect.top) || [];
+          var target = null;
+          for (var si = 0; si < stack.length; si++) {
+            var se = stack[si];
+            if (!se || se.nodeType !== 1) continue;
+            if (se.id === 'cinside-highlight-layer') continue;
+            if (se.className && typeof se.className === 'string' && se.className.indexOf('cinside') === 0) continue;
+            target = se; break;
+          }
+          if (target) {
+            highlight(target, '#6366f1');
+            window.__cinsidePostMessage(Object.assign({ kind: 'element-picked' }, _buildPickPayload(target)));
+          }
+        } else {
+          // 拖拽：收集矩形内所有日格子元素
+          var candSelectors = 'td, li, span, div, a, button, [role="gridcell"], [role="button"], [class*="day"], [class*="date"], [class*="cell"]';
+          var all;
+          try { all = document.querySelectorAll(candSelectors); } catch(e) { all = []; }
+          var picked = [];
+          var seenSet = {};
+          for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            if (!_isDayCellLike(el)) continue;
+            var er;
+            try { er = el.getBoundingClientRect(); } catch(e2) { continue; }
+            // 元素中心需在矩形内部（边缘擦到不算，避免误选）
+            var cx = er.left + er.width / 2;
+            var cy = er.top + er.height / 2;
+            if (cx < marqueeRect.left || cx > marqueeRect.right || cy < marqueeRect.top || cy > marqueeRect.bottom) continue;
+            var key = buildSelector(el);
+            if (seenSet[key]) continue;
+            seenSet[key] = true;
+            picked.push(el);
+          }
+          // 采样点兜底（覆盖非典型标签/类名的日格子）
+          var stepX = Math.max(8, Math.floor((marqueeRect.right - marqueeRect.left) / 12));
+          var stepY = Math.max(8, Math.floor((marqueeRect.bottom - marqueeRect.top) / 8));
+          for (var sx = marqueeRect.left + stepX / 2; sx < marqueeRect.right; sx += stepX) {
+            for (var sy = marqueeRect.top + stepY / 2; sy < marqueeRect.bottom; sy += stepY) {
+              var stack2 = document.elementsFromPoint(sx, sy) || [];
+              for (var k = 0; k < stack2.length; k++) {
+                var e2 = stack2[k];
+                if (!e2 || e2.nodeType !== 1) continue;
+                if (!_isDayCellLike(e2)) continue;
+                var k2 = buildSelector(e2);
+                if (seenSet[k2]) continue;
+                seenSet[k2] = true;
+                picked.push(e2);
+              }
+            }
+          }
+          if (picked.length > 0) {
+            picked.forEach(function(el) { highlight(el, '#6366f1'); });
+            var payloads = picked.map(_buildPickPayload);
+            window.__cinsidePostMessage({ kind: 'multi-element-picked', elements: payloads });
+          } else {
+            window.__cinsidePostMessage({ kind: 'pick-warning', message: '框内未发现日格子（应为 1-31 数字的可见单元格）' });
+          }
+        }
+      };
+      _marqueeCancelListener = function() { _clearMarquee(); };
+      window.addEventListener('pointermove', _marqueeMoveListener, true);
+      window.addEventListener('pointerup', _marqueeUpListener, true);
+      window.addEventListener('pointercancel', _marqueeCancelListener, true);
+    }
+    window.__cinsideOnMarqueeDown = _onMarqueeDown;
+    window.__cinsideClearMarquee = _clearMarquee;
+    document.addEventListener('pointerdown', _onMarqueeDown, true);
     // pointerdown 比 click 更早触发，能更好捕获 input 等会抢占焦点的元素
     document.addEventListener('pointerdown', onPick, true);
     document.addEventListener('click', onPick, true);
@@ -1741,6 +1931,14 @@ const ELEMENT_PICKER_SCRIPT = `
   } else {
     // 重复注入：清掉旧武装，下面会用新闭包重新武装
     try { removeFrameArms(); } catch (_) {}
+    // 重复注入时若有未完成的框选，清理掉
+    try { if (window.__cinsideClearMarquee) window.__cinsideClearMarquee(); } catch (_) {}
+    // 更新全局引用（主文档首次注册的监听器通过这些引用调到最新闭包）
+    if (window.__cinsideOnMarqueeDown) {
+      // 替换为新的闭包：通过 listener 无法替换，这里用全局包装让下次调用走新逻辑
+      // （实际上因为主 doc listener 只添加一次，调用旧闭包 _onMarqueeDown；
+      //  但它依赖的 buildSelector/getLabel/highlight 等都是旧闭包中的版本，功能一致，无状态冲突）
+    }
   }
   // 清理旧的 Enter 监听器并添加新的，避免重复或引用错乱
   var oldEnterHandler = window.__cinsideEnterHandler;
@@ -1768,10 +1966,15 @@ const ELEMENT_PICKER_DEACTIVATE_SCRIPT = `
   window.__cinsidePickerActive = false;
   window.__cinsideBlockEnter = false;
   window.__cinsideBindInputMode = false;
+  window.__cinsidePickerMarqueeMode = false;
   document.body.classList.remove('cinside-picking');
   // 清理右键菜单
   var ctxMenu = document.getElementById('cinside-ctx-menu');
   if (ctxMenu && ctxMenu.parentNode) ctxMenu.parentNode.removeChild(ctxMenu);
+  // 清理未完成的框选
+  if (window.__cinsideClearMarquee) {
+    try { window.__cinsideClearMarquee(); } catch (_) {}
+  }
   if (window.__cinsideEnterHandler) {
     document.removeEventListener('keydown', window.__cinsideEnterHandler, true);
     window.__cinsideEnterHandler = null;
@@ -2698,6 +2901,7 @@ ipcMain.handle("view-load", (_event, side, url) => {
 });
 
 ipcMain.handle("view-show", (_event, side, bounds, url) => {
+  if (modalOverlayDepth > 0) { console.log(`[modal] BLOCKED view-show(${side}) depth=${modalOverlayDepth}`); return; } // 模态覆盖期间禁止重新添加 BrowserView，防止原生层遮挡 HTML
   showView(side, bounds, url);
 });
 
@@ -2707,6 +2911,71 @@ ipcMain.handle("view-hide", (_event, side) => {
 
 ipcMain.handle("view-hide-all", () => {
   hideAllViews();
+});
+
+// === 模态覆盖层：临时隐藏所有原生 BrowserView（防止穿模），关闭后恢复 ===
+// 使用引用计数支持多层模态框嵌套（如：设置面板 → 流程图编辑器 → 子LOOP选择器）
+function hideAllBrowserViews() {
+  // 1. 隐藏主窗口的 left/right 及弹窗
+  hideAllViews();
+  // 2. 隐藏所有脱离面板中的 BrowserView 及弹窗
+  for (const key of Object.keys(detachedPanels)) {
+    const w = detachedPanels[key];
+    const v = detachedPanels[key + "_view"];
+    if (w && !w.isDestroyed() && v) {
+      if (w.getBrowserViews().includes(v)) {
+        w.removeBrowserView(v);
+      }
+      // 脱离面板上的弹窗（popup）也要移除
+      for (const side of Object.keys(popupViews)) {
+        const pp = popupViews[side];
+        if (pp && pp.win === w && w.getBrowserViews().includes(pp.view)) {
+          w.removeBrowserView(pp.view);
+        }
+      }
+    }
+  }
+}
+ipcMain.handle("modal-overlay-enter", () => {
+  if (modalOverlayDepth === 0) {
+    // 第一次进入：隐藏所有原生视图
+    hideAllBrowserViews();
+    // 临时隐藏 dock 悬浮窗（如果可见）
+    if (dockWindow && !dockWindow.isDestroyed() && dockWindow.isVisible()) {
+      dockWasVisibleForModal = true;
+      dockWindow.hide();
+    } else {
+      dockWasVisibleForModal = false;
+    }
+  }
+  modalOverlayDepth++;
+  console.log(`[modal] enter -> depth=${modalOverlayDepth}`);
+});
+
+ipcMain.handle("modal-overlay-exit", () => {
+  if (modalOverlayDepth <= 0) return;
+  modalOverlayDepth--;
+  console.log(`[modal] exit -> depth=${modalOverlayDepth}`);
+  if (modalOverlayDepth > 0) return; // 还有外层模态框，保持隐藏
+
+  // 最后一层退出：恢复 dock
+  if (dockWasVisibleForModal && dockWindow && !dockWindow.isDestroyed()) {
+    dockWindow.show();
+  }
+  dockWasVisibleForModal = false;
+
+  // BrowserView 的恢复交由前端处理：监听 modal-overlay-exited 事件后触发 window resize，
+  // BrowserPane 的 IntersectionObserver/ResizeObserver 会自动重新 sync()
+  // 调用 viewShow() 重新 addBrowserView + setBounds，脱离面板同理。
+  function notifyWindow(win) {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send("modal-overlay-exited");
+    }
+  }
+  notifyWindow(mainWindow);
+  for (const key of Object.keys(detachedPanels)) {
+    notifyWindow(detachedPanels[key]);
+  }
 });
 
 // 设置 BrowserView 缩放因子（0.5 ~ 3.0）
@@ -2880,6 +3149,16 @@ ipcMain.handle("view-clear-highlight", (_event, side) => {
 // 设置绑定输入模式（右键菜单开关）：true=开启右键菜单，false=关闭
 ipcMain.handle("view-set-bind-input-mode", (_event, side, enabled) => {
   return executeInView(side, `window.__cinsideBindInputMode = ${enabled ? "true" : "false"};`);
+});
+
+// 启用/禁用框选模式（日格子多选：拖拽画矩形批量选中矩形内所有日格子元素）
+ipcMain.handle("view-set-marquee-mode", (_event, side, enabled) => {
+  return executeInView(side, `
+    window.__cinsidePickerMarqueeMode = ${enabled ? "true" : "false"};
+    if (window.__cinsideClearMarquee && !${enabled ? "true" : "false"}) {
+      try { window.__cinsideClearMarquee(); } catch (_) {}
+    }
+  `);
 });
 
 // 回传 Excel 列列表到 picker 脚本（右键菜单响应）
@@ -3108,6 +3387,7 @@ ipcMain.handle("panel-detach", (_event, side) => {
 
 // 脱离的浏览器面板：控制其 BrowserView
 ipcMain.handle("detached-view-show", (_event, side, bounds, _url) => {
+  if (modalOverlayDepth > 0) return; // 模态覆盖期间禁止重新添加 BrowserView
   // 同 showView：不在此处自动 loadURL，避免无限刷新
   const view = detachedPanels[side + "_view"];
   const win = detachedPanels[side];
