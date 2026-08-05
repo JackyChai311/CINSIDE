@@ -529,11 +529,13 @@ function selOpt(id,field,val){
 }
 // 日历
 let calState={};
+// field 是 DOM 元素 id 前缀（如 f_birth），formData 键名去掉 f_ 前缀（如 birth）
+function fk(field){return field.replace(/^f_/,'')}
 function toggleCal(field){
   closeAllPop(field);
   const el=$(field+'_cal');
   el.classList.toggle('hidden');
-  if(!el.classList.contains('hidden'))showCal(field,formData[field]||null);
+  if(!el.classList.contains('hidden'))showCal(field,formData[fk(field)]||null);
 }
 function showCal(field,def,initOnly){
   let d=def?new Date(def):new Date();
@@ -542,13 +544,13 @@ function showCal(field,def,initOnly){
   if(initOnly)setTimeout(()=>{const el=$(field+'_cal');if(el)el.classList.add('hidden')},0);
 }
 function renderCal(field){
-  const{y,m}=calState[field],sel=formData[field];
+  const{y,m}=calState[field],sel=formData[fk(field)];
   const first=new Date(y,m,1),last=new Date(y,m+1,0);
   const startDow=first.getDay(),days=last.getDate();
   const prevLast=new Date(y,m,0).getDate();
   const months=['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
   const dows=['日','一','二','三','四','五','六'];
-  let html=`<div class="cal-head"><button onclick="calNav('${field}',-1)">‹</button><span class="title">${y}年 ${months[m]}</span><button onclick="calNav('${field}',1)">›</button></div><div class="cal-grid">`;
+  let html=`<div class="cal-head"><button onclick="calNav('${field}',-12)" title="上一年">«</button><button onclick="calNav('${field}',-1)" title="上一月">‹</button><span class="title">${y}年 ${months[m]}</span><button onclick="calNav('${field}',1)" title="下一月">›</button><button onclick="calNav('${field}',12)" title="下一年">»</button></div><div class="cal-grid">`;
   dows.forEach(d=>html+=`<div class="dow">${d}</div>`);
   for(let i=startDow-1;i>=0;i--)html+=`<div class="day other">${prevLast-i}</div>`;
   const today=new Date();
@@ -563,9 +565,9 @@ function renderCal(field){
   for(let i=1;i<=rem;i++)html+=`<div class="day other">${i}</div>`;
   html+='</div>';$(field+'_cal').innerHTML=html;
 }
-function calNav(field,dir){calState[field].m+=dir;if(calState[field].m<0){calState[field].m=11;calState[field].y--}if(calState[field].m>11){calState[field].m=0;calState[field].y++}renderCal(field)}
+function calNav(field,dir){const st=calState[field];st.m+=dir;while(st.m<0){st.m+=12;st.y--}while(st.m>11){st.m-=12;st.y++}renderCal(field)}
 function pickDate(field,ds){
-  formData[field]=ds;$(field+'_v').textContent=ds;$(field+'_cal').classList.add('hidden');
+  formData[fk(field)]=ds;$(field+'_v').textContent=ds;$(field+'_cal').classList.add('hidden');
 }
 function closeAllPop(except){
   document.querySelectorAll('.select-dropdown,.cal-pop').forEach(el=>{
@@ -574,6 +576,8 @@ function closeAllPop(except){
   });
 }
 document.addEventListener('click',e=>{
+  // 翻页按钮点击后日历 innerHTML 重绘，被点元素已脱离文档树，此时不算"点击外部"，不关弹层
+  if(!e.target.isConnected)return;
   if(!e.target.closest('.pos-rel')&&!e.target.closest('.select-dropdown')&&!e.target.closest('.cal-pop')){closeAllPop()}
 });
 
