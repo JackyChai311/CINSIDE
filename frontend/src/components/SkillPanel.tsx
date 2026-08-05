@@ -1,5 +1,5 @@
-import { useCallback, useState, type DragEvent, type ClipboardEvent } from "react";
-import { Check, Play, Pencil, Trash2, X, Sparkles } from "lucide-react";
+import { useCallback, useRef, useState, type DragEvent, type ClipboardEvent, type ChangeEvent } from "react";
+import { Check, Play, Pencil, Trash2, X, Sparkles, GitBranch, ImagePlus } from "lucide-react";
 import type { WorkflowTemplate, AppMode } from "../types";
 import { loadSkills, deleteSkill, updateSkillMeta, getDefaultIcons } from "../lib/skills";
 
@@ -7,6 +7,7 @@ interface SkillPanelProps {
   open: boolean;
   onClose: () => void;
   onRunSkill: (tpl: WorkflowTemplate) => void;
+  onEditFlow?: (tpl: WorkflowTemplate) => void;
   onSkillsChange?: () => void;
 }
 
@@ -28,15 +29,19 @@ function readFileAsDataURL(file: File | Blob): Promise<string> {
   });
 }
 
-export default function SkillPanel({ open, onClose, onRunSkill, onSkillsChange }: SkillPanelProps) {
+export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSkillsChange }: SkillPanelProps) {
   const [skills, setSkills] = useState<WorkflowTemplate[]>(() => loadSkills());
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  const [editDesc, setEditDesc] = useState("");
   const [editIcon, setEditIcon] = useState("");
   const [editIconImage, setEditIconImage] = useState<string | null | undefined>(undefined);
   const [showIconPicker, setShowIconPicker] = useState(false);
   // 正在悬停图片拖拽的 skill id
   const [imgDragOverId, setImgDragOverId] = useState<string | null>(null);
+  // 每个卡片单独的文件选择 input ref
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingSkillId = useRef<string | null>(null);
 
   const refresh = () => {
     setSkills(loadSkills());
@@ -52,16 +57,20 @@ export default function SkillPanel({ open, onClose, onRunSkill, onSkillsChange }
     setEditingId(skill.id);
     setEditName(skill.name);
     setEditIcon(skill.icon || "🔍");
+    setEditDesc(skill.description || "");
     setEditIconImage(skill.iconImage);
     setShowIconPicker(false);
   };
 
   const saveEdit = () => {
     if (!editingId || !editName.trim()) return;
-    const patch: { name: string; icon: string; iconImage?: string | null } = {
+    const patch: { name: string; description?: string; icon: string; iconImage?: string | null } = {
       name: editName.trim(),
       icon: editIcon || "🔍",
     };
+    const desc = editDesc.trim().slice(0, 40);
+    if (desc) patch.description = desc;
+    else patch.description = "";
     // iconImage 显式设置：undefined=不修改；null=清除；string=新图片
     if (editIconImage === null) patch.iconImage = null;
     else if (editIconImage) patch.iconImage = editIconImage;
@@ -87,6 +96,23 @@ export default function SkillPanel({ open, onClose, onRunSkill, onSkillsChange }
     updateSkillMeta(id, { iconImage: null });
     refresh();
   }, []);
+
+  /** 点击图标区域：弹出文件选择框给指定 skill 上传图片 */
+  const handlePickImage = (skillId: string) => {
+    pendingSkillId.current = skillId;
+    fileInputRef.current?.click();
+  };
+
+  /** 文件输入框变化：读取所选图片设置图标 */
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    const skillId = pendingSkillId.current;
+    e.target.value = "";
+    if (file && file.type.startsWith("image/") && skillId) {
+      readFileAsDataURL(file).then((url) => { if (url) setSkillIconImage(skillId, url); });
+    }
+    pendingSkillId.current = null;
+  };
 
   /** 卡片接收图片粘贴（焦点在卡片上时 Ctrl+V） */
   const handleCardPaste = (e: ClipboardEvent, skillId: string) => {
@@ -162,7 +188,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onSkillsChange }
       >
         <div className="flex items-center gap-2 border-b border-slate-200 bg-gradient-to-r from-indigo-50 to-violet-50 px-4 py-3">
           <Sparkles className="h-5 w-5 text-indigo-600" />
-          <span className="text-sm font-semibold text-slate-800">SKILL 管理</span>
+          <span className="text-sm font-semibold text-slate-800">循环管理</span>
           <span className="ml-auto text-[11px] text-slate-500">{skills.length} 个技能 · 拖拽到人物卡片可单卡执行 · Ctrl+V/拖入图片换图标</span>
           <button
             onClick={onClose}
@@ -193,7 +219,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onSkillsChange }
                   <div
                     key={skill.id}
                     className={[
-                      "relative flex items-center gap-2 overflow-hidden rounded-xl border bg-white p-3 shadow-sm transition-all",
+                      "relative flex items-center gap-2 overflow-hidden rounded-xl border bg-white p-4 shadow-sm transition-all",
                       isEditing
                         ? "border-indigo-300 ring-2 ring-indigo-200"
                         : "border-slate-200 hover:border-indigo-300 hover:shadow-md",
@@ -210,7 +236,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onSkillsChange }
                   >
                     {/* 左侧自定义图标图片（仅非编辑态显示渐隐图；编辑态在按钮里预览） */}
                     {!isEditing && currentIconImage ? (
-                      <div className="relative h-12 w-20 shrink-0 -m-3 mr-1 self-stretch overflow-hidden rounded-l-xl">
+                      <div className="relative min-h-[4.5rem] w-28 shrink-0 self-stretch overflow-hidden rounded-l-xl py-1 pr-2">
                         <img
                           src={currentIconImage}
                           alt=""
@@ -308,6 +334,18 @@ export default function SkillPanel({ open, onClose, onRunSkill, onSkillsChange }
                             onKeyDown={(e) => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") cancelEdit(); }}
                             className="w-full rounded-md border border-slate-300 px-2 py-1 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-200"
                           />
+                          <textarea
+                            value={editDesc}
+                            onChange={(e) => setEditDesc(e.target.value.slice(0, 40))}
+                            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveEdit(); } if (e.key === "Escape") cancelEdit(); }}
+                            rows={2}
+                            maxLength={40}
+                            placeholder="填写介绍（最多40字）"
+                            className="mt-1.5 w-full resize-none rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-200"
+                          />
+                          <div className={`mt-0.5 text-right text-[10px] ${editDesc.length >= 40 ? "text-rose-500" : "text-slate-400"}`}>
+                            {editDesc.length}/40
+                          </div>
                           {showIconPicker && !editIconImage && (
                             <div className="mt-2 flex flex-wrap gap-1">
                               {getDefaultIcons().map((ic) => (
@@ -340,14 +378,19 @@ export default function SkillPanel({ open, onClose, onRunSkill, onSkillsChange }
                       </>
                     ) : (
                       <>
-                        {/* 非编辑态 & 无自定义图：显示 emoji 占位 */}
+                        {/* 非编辑态 & 无自定义图：显示 emoji 占位，点击可上传图片 */}
                         {!currentIconImage && (
-                          <span
-                            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-50 to-violet-50 text-2xl select-none"
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handlePickImage(skill.id); }}
                             onPaste={(e) => handleCardPaste(e, skill.id)}
+                            className="group relative flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-lg bg-gradient-to-br from-indigo-50 to-violet-50 text-2xl select-none hover:ring-2 hover:ring-indigo-300"
+                            title="点击上传图片，或 Ctrl+V / 拖入图片"
                           >
                             {currentIcon}
-                          </span>
+                            <span className="absolute inset-0 flex items-center justify-center bg-slate-900/50 text-white opacity-0 transition-opacity group-hover:opacity-100">
+                              <ImagePlus className="h-4 w-4" />
+                            </span>
+                          </button>
                         )}
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5">
@@ -356,36 +399,47 @@ export default function SkillPanel({ open, onClose, onRunSkill, onSkillsChange }
                               {modeInfo.label}
                             </span>
                           </div>
-                          <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                          {skill.description ? (
+                            <p className="mt-1 line-clamp-2 text-[11px] leading-snug text-slate-500">{skill.description}</p>
+                          ) : null}
+                          <div className="mt-1.5 flex items-center gap-2 text-[10px] text-slate-400">
                             <span>{stepCount} 步</span>
                             <span>·</span>
                             <span>{new Date(skill.updatedAt || skill.createdAt).toLocaleDateString("zh-CN")}</span>
-                            <span>·</span>
-                            <span className="text-indigo-400">拖到卡片执行</span>
                           </div>
                         </div>
-                        <button
-                          onClick={() => onRunSkill(skill)}
-                          className="flex items-center gap-1 rounded-lg bg-brand-600 px-3 py-1.5 text-[11px] font-medium text-white transition-all hover:bg-brand-700"
-                          title="批量执行此 SKILL（所有卡片）"
-                        >
-                          <Play className="h-3 w-3" />
-                          批量
-                        </button>
-                        <button
-                          onClick={() => startEdit(skill)}
-                          className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
-                          title="编辑名称和图标（Ctrl+V/拖入图片换图标）"
-                        >
-                          <Pencil className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          onClick={() => handleDelete(skill.id)}
-                          className="rounded-md p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-500"
-                          title="删除"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            onClick={() => onRunSkill(skill)}
+                            className="flex h-7 items-center gap-1 rounded-lg bg-brand-600 px-2.5 text-[11px] font-medium text-white shadow-sm transition-all hover:bg-brand-700"
+                            title="批量执行此循环（所有卡片）"
+                          >
+                            <Play className="h-3 w-3" />
+                            执行
+                          </button>
+                          <button
+                            onClick={() => onEditFlow?.(skill)}
+                            className="flex h-7 items-center gap-1 rounded-lg bg-violet-50 px-2 text-[11px] font-medium text-violet-700 ring-1 ring-violet-200 transition-all hover:bg-violet-100"
+                            title="打开流程图编辑器：剪开插入子LOOP / IF-ELSE / CASE"
+                          >
+                            <GitBranch className="h-3 w-3" />
+                            流程
+                          </button>
+                          <button
+                            onClick={() => startEdit(skill)}
+                            className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+                            title="编辑标题、介绍和图标"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handleDelete(skill.id)}
+                            className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-500"
+                            title="删除"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </>
                     )}
                   </div>
@@ -394,6 +448,13 @@ export default function SkillPanel({ open, onClose, onRunSkill, onSkillsChange }
             </div>
           )}
         </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={handleFileChange}
+        />
       </div>
     </div>
   );
