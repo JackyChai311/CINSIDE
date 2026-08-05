@@ -162,7 +162,15 @@ export type CalendarRole =
   | "nextMonth"  // 下一月
   | "dayCell";   // 日格子（当前月）
 
-/** 日历控件结构（自动识别 + 用户修正） */
+/** 页面元素相对其所在日历面板左上角的投影坐标（px） */
+export interface CalendarRoleRect {
+  /** 相对面板左边缘的 x */
+  dx: number;
+  /** 相对面板上边缘的 y */
+  dy: number;
+}
+
+/** 日历控件结构（引导式手动拾取：用户在网页日历上依次点选各按钮位置，AI 据此点击） */
 export interface CalendarControls {
   /** 日历面板容器选择器 */
   panelSelector?: string;
@@ -176,8 +184,18 @@ export interface CalendarControls {
   nextYearSelector?: string;
   prevMonthSelector?: string;
   nextMonthSelector?: string;
-  /** 日格子通用选择器（定位日历面板内所有日期格） */
+  /** 日格子通用选择器（拾取一个种子格子后，用公共选择器收集面板内所有日格子） */
   dayCellSelector?: string;
+  // ---- 投影（坐标）辅助：选择器失效时按面板当前位置对准点击 ----
+  headerRect?: CalendarRoleRect;
+  yearRect?: CalendarRoleRect;
+  monthRect?: CalendarRoleRect;
+  prevYearRect?: CalendarRoleRect;
+  nextYearRect?: CalendarRoleRect;
+  prevMonthRect?: CalendarRoleRect;
+  nextMonthRect?: CalendarRoleRect;
+  /** 日格子投影：面板内每个日格中心坐标 + 抽取时的文本（执行时按坐标对准点击） */
+  dayCells?: { text: string; dx: number; dy: number }[];
 }
 
 /** 点击展开型控件定义：点击触发框后展开选项面板/日历面板 */
@@ -190,6 +208,8 @@ export interface WidgetDef {
   triggerSelector: string;
   /** 触发框标签（显示用） */
   triggerLabel?: string;
+  /** 触发框坐标（点击时的绝对坐标，用于坐标兜底点击） */
+  triggerRect?: { x: number; y: number; width: number; height: number };
   /** 展开面板容器选择器（inline 模式下不需要） */
   panelSelector?: string;
   /** 选项控件：可选项列表 */
@@ -309,6 +329,73 @@ export type AppMode = "loop" | "review" | "entry";
 /** 批量执行中每张卡片的执行状态 */
 export type BatchStatus = "pending" | "running" | "success" | "failed" | "skipped";
 
+// ========== LOOP 流程图编辑器（v0.4.5+） ==========
+
+/** 流程图节点类型 */
+export type FlowNodeKind =
+  | "step"        // 普通步骤：一个 PickedMark（点击/输入/提取/等待）
+  | "subloop"     // 子LOOP：内嵌另一个 WorkflowTemplate，执行时完整跑完子LOOP
+  | "ifelse"      // IF/ELSE 二分支：根据 condition 选择其中一个分支执行
+  | "case"        // CASE 多分支：根据 switchValue 匹配 caseValue 选择分支
+  | "comment"     // 注释节点：纯文本注释，不参与执行
+  | "loopback";   // 回环节点：显式标记回到 LOOP 起点（大 Loop 闭环点）
+
+/** 一个分支（ifelse 有两个分支；case 有多个分支） */
+export interface FlowBranch {
+  /** 分支 ID */
+  id: string;
+  /** 分支标签：ifelse 的"是/否"，case 的 case 值文本 */
+  label: string;
+  /** 条件表达式（留空表示默认/else分支；未来AI可填JS表达式或规则） */
+  condition?: string;
+  /** 该分支内部的节点序列 */
+  nodes: FlowNode[];
+}
+
+/** 流程图中的一个节点 */
+export interface FlowNode {
+  /** 节点唯一 ID（uuid） */
+  id: string;
+  /** 节点类型 */
+  kind: FlowNodeKind;
+  /** 节点显示标题（可手动编辑，默认自动生成） */
+  label?: string;
+  /** 节点备注/描述 */
+  note?: string;
+  /** 高亮颜色（无则用默认颜色） */
+  color?: string;
+  /** 折叠状态（分支节点有效）：true = 折叠不显示内部节点 */
+  collapsed?: boolean;
+
+  // --- step 类型专用：引用原模板中的 PickedMark ---
+  /** 引用阶段: data=数据源, review=审查, entry=录入 */
+  markPhase?: "data-source" | "review" | "entry";
+  /** 引用的 PickedMark id */
+  markId?: string;
+
+  // --- subloop 类型专用：子模板 ---
+  /** 子LOOP 模板 ID（引用其他已保存的 WorkflowTemplate） */
+  subloopTemplateId?: string;
+  /** 子LOOP 执行次数（>1 时重复跑 N 次；默认 1） */
+  subloopRepeat?: number;
+
+  // --- ifelse/case 类型专用 ---
+  /** ifelse 的两个分支 [true分支, false分支]；case 的多个分支 */
+  branches?: FlowBranch[];
+  /** case 节点：用于匹配的字段名/表达式（如 fieldName 或 left_field==value） */
+  switchField?: string;
+}
+
+/** 流程图定义（一个模板可以有一个主流程图；没有则自动从 marks 生成线性流程图） */
+export interface FlowGraph {
+  /** 流程图版本（用于未来迁移） */
+  version: 1;
+  /** 主节点序列 */
+  nodes: FlowNode[];
+  /** 流程图更新时间戳 */
+  updatedAt: number;
+}
+
 /** 批量执行结果记录 */
 export interface BatchResult {
   recordId: string;
@@ -326,6 +413,8 @@ export interface WorkflowTemplate {
   id: string;
   /** 模板名称 */
   name: string;
+  /** 模板介绍（最多40字） */
+  description?: string;
   /** 图标（emoji 字符，默认 🔍） */
   icon?: string;
   /** 自定义图标图片（base64 dataURL）：存在时优先显示该图片，左侧渐隐融入卡片背景 */
@@ -346,6 +435,8 @@ export interface WorkflowTemplate {
   entryMarks: PickedMark[];
   /** 字段映射（审查字段/控件/固定值等）：随模板保存，复用模板时比对不丢失 */
   mappings?: FieldMapping[];
+  /** 流程图（可选）：如果存在，执行器可按流程图中的嵌套/分支逻辑运行；不存在则按 marks 线性执行 */
+  flowGraph?: FlowGraph;
   /** 是否包含搜索步骤（自动检测，审查流用） */
   hasSearchSteps: boolean;
   /** 是否包含提交步骤（自动检测，录入流用：点保存/提交按钮） */
