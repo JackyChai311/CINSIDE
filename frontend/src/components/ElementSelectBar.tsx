@@ -115,14 +115,18 @@ interface Props {
   onSwitchStepType?: (type: "review" | "entry") => void;
   /** 是否处于添加点击按钮模式 */
   addingClickMode?: boolean;
-  /** 当前添加的点击阶段：pre=前置(搜索/进入)，post=收尾(保存/返回) */
-  addingClickPhase?: "pre" | "post" | null;
+  /** 当前添加的点击阶段：pre=前置(搜索/进入)，mid=过程(点击NEXT等)，post=收尾(保存/返回) */
+  addingClickPhase?: "pre" | "mid" | "post" | null;
   /** 已添加的前置点击数量（步骤3：搜索/进入） */
   preClickCount?: number;
+  /** 已添加的过程点击数量（步骤4：点击NEXT等中间步骤） */
+  processClickCount?: number;
   /** 已添加的收尾点击数量（步骤5：保存/返回） */
   postClickCount?: number;
   /** 开始添加前置点击（步骤3） */
   onStartAddPreClick?: () => void;
+  /** 开始添加过程点击（步骤4：点击NEXT等中间步骤） */
+  onStartAddProcessClick?: () => void;
   /** 开始添加收尾点击（步骤5） */
   onStartAddPostClick?: () => void;
   /** 退出添加点击按钮模式 */
@@ -257,8 +261,10 @@ onSwitchStepType,
 addingClickMode = false,
 addingClickPhase = null,
 preClickCount = 0,
+processClickCount = 0,
 postClickCount = 0,
 onStartAddPreClick,
+onStartAddProcessClick,
 onStartAddPostClick,
 onExitAddClickMode,
 onSwapSide,
@@ -891,7 +897,7 @@ onRightBindColumnChange,
                   ) : pendingAction === "click" && addingClickMode ? (
                     <>
                       <span className="step-highlight" key="entry-revisit-click">
-                        正在添加{addingClickPhase === "post" ? "收尾" : "前置"}点击 — 点击右侧网页的搜索/确认人物/返回等按钮
+                        正在添加{addingClickPhase === "post" ? "收尾" : addingClickPhase === "mid" ? "过程" : "前置"}点击 — 点击右侧网页的搜索/确认人物/返回等按钮
                       </span>
                       {onExitAddClickMode && (
                         <button
@@ -1033,13 +1039,7 @@ onRightBindColumnChange,
                             if (onExitAddClickMode) onExitAddClickMode();
                             onStartBindInputs();
                           }}
-                          disabled={!selectedExcelColumn}
-                          className={[
-                            "inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2.5 text-[11px] font-medium transition-all",
-                            selectedExcelColumn
-                              ? "bg-brand-600 text-white hover:bg-brand-700"
-                              : "cursor-not-allowed bg-slate-200 text-slate-400",
-                          ].join(" ")}
+                          className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md bg-brand-600 px-2.5 text-[11px] font-medium text-white transition-all hover:bg-brand-700"
                         >
                           <Plus className="h-3 w-3" />
                           继续绑定
@@ -1047,7 +1047,7 @@ onRightBindColumnChange,
                       )}
                       {rightBindPicker}
                     </>
-                  ) : cardsGenerated ? (
+                  ) : (
                     <>
                       <ArrowRight className="h-3 w-3 text-amber-500 shrink-0" />
                       <span className="step-highlight" key="step2-idle">
@@ -1058,20 +1058,12 @@ onRightBindColumnChange,
                           if (onExitAddClickMode) onExitAddClickMode();
                           onStartBindInputs?.();
                         }}
-                        disabled={!selectedExcelColumn}
-                        className={[
-                          "inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2.5 text-[11px] font-medium transition-all",
-                          selectedExcelColumn
-                            ? "bg-brand-600 text-white hover:bg-brand-700"
-                            : "cursor-not-allowed bg-slate-200 text-slate-400",
-                        ].join(" ")}
+                        className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md bg-brand-600 px-2.5 text-[11px] font-medium text-white transition-all hover:bg-brand-700"
                       >
                         搜索输入
                       </button>
                       {rightBindPicker}
                     </>
-                  ) : (
-                    <span className="text-slate-400">搜索输入（生成卡片后可配置）</span>
                   )}
                 </div>
               </div>
@@ -1164,7 +1156,72 @@ onRightBindColumnChange,
                 </div>
               </div>
 
-              {/* Step 4 — 添加循环体内容 */}
+              {/* Step 4 — 过程点击任务（点击NEXT等中间步骤，位于前置点击与收尾点击之间） */}
+              <div className="flex items-center gap-2 text-[11px]">
+                <span className={[
+                  "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white",
+                  pendingAction === "click" && addingClickMode && addingClickPhase === "mid" ? "bg-amber-500" :
+                  processClickCount > 0 ? "bg-emerald-500" : "bg-slate-300",
+                ].join(" ")}>
+                  {processClickCount > 0 && !(pendingAction === "click" && addingClickMode && addingClickPhase === "mid") ? <Check className="h-2.5 w-2.5" /> : 4}
+                </span>
+                <div className="flex flex-1 flex-wrap items-center gap-1.5">
+                  {pendingAction === "click" && addingClickMode && addingClickPhase === "mid" ? (
+                    <>
+                      <span className="step-highlight" key="step4-process-active">
+                        正在添加过程点击 — 点击 NEXT 等中间步骤按钮（已添加 {processClickCount} 个）
+                      </span>
+                      {onExitAddClickMode && (
+                        <button
+                          onClick={onExitAddClickMode}
+                          className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md bg-slate-200 px-2.5 text-[11px] font-medium text-slate-700 transition-all hover:bg-slate-300"
+                        >
+                          完成添加
+                        </button>
+                      )}
+                    </>
+                  ) : processClickCount > 0 ? (
+                    <>
+                      <span className="text-emerald-700 font-medium">✓ 已添加 {processClickCount} 个过程点击</span>
+                      {onStartAddProcessClick && !addingStepMode && !(pendingAction === "click" && addingClickMode && addingClickPhase === "post") && (
+                        <button
+                          onClick={onStartAddProcessClick}
+                          disabled={!!bindInputSide}
+                          className={[
+                            "inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2.5 text-[11px] font-medium transition-all",
+                            bindInputSide
+                              ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                              : "bg-teal-500 text-white hover:bg-teal-600",
+                          ].join(" ")}
+                        >
+                          <Plus className="h-3 w-3" />
+                          继续添加
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {onStartAddProcessClick && !addingStepMode && !(pendingAction === "click" && addingClickMode && addingClickPhase === "post") && (
+                        <button
+                          onClick={onStartAddProcessClick}
+                          disabled={!!bindInputSide}
+                          className={[
+                            "inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2.5 text-[11px] font-medium transition-all",
+                            bindInputSide
+                              ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                              : "bg-teal-50 text-teal-600 hover:bg-teal-100",
+                          ].join(" ")}
+                        >
+                          <Plus className="h-3 w-3" />
+                          添加过程点击
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Step 5 — 添加循环体内容 */}
               <div className="flex items-center gap-2 text-[11px]">
                 <span className={[
                   "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white",
@@ -1176,7 +1233,7 @@ onRightBindColumnChange,
                     (preClickCount > 0 || hasBoundInputs) &&
                     reviewCount + entryCount === 0 && postClickCount === 0) ? "bg-amber-500" : "bg-slate-300",
                 ].join(" ")}>
-                  {(reviewCount + entryCount > 0 || (postClickCount > 0 && !addingStepMode && !(pendingAction === "click" && addingClickMode && addingClickPhase === "post"))) ? <Check className="h-2.5 w-2.5" /> : 4}
+                  {(reviewCount + entryCount > 0 || (postClickCount > 0 && !addingStepMode && !(pendingAction === "click" && addingClickMode && addingClickPhase === "post"))) ? <Check className="h-2.5 w-2.5" /> : 5}
                 </span>
                 <div className="flex flex-1 flex-wrap items-center gap-1.5">
                   {/* 活跃模式：正在添加审查/录入步骤 */}
@@ -1381,7 +1438,7 @@ onRightBindColumnChange,
                 </div>
               </div>
 
-              {/* Step 5 — 收尾点击任务（保存/提交/返回，收尾本次 Loop） */}
+              {/* Step 6 — 收尾点击任务（保存/提交/返回，收尾本次 Loop） */}
               {cardsGenerated && (
                 <div className="flex items-center gap-2 text-[11px]">
                   <span className={[
@@ -1389,7 +1446,7 @@ onRightBindColumnChange,
                     addingClickMode && addingClickPhase === "post" ? "bg-amber-500" : postClickCount > 0 ? "bg-emerald-500" :
                     !addingStepMode && !bindInputSide && !(pendingAction === "click" && addingClickMode && addingClickPhase === "pre") ? "bg-amber-500" : "bg-slate-300",
                   ].join(" ")}>
-                    {postClickCount > 0 && !(addingClickMode && addingClickPhase === "post") ? <Check className="h-2.5 w-2.5" /> : 5}
+                    {postClickCount > 0 && !(addingClickMode && addingClickPhase === "post") ? <Check className="h-2.5 w-2.5" /> : 6}
                   </span>
                   <div className="flex flex-1 flex-wrap items-center gap-1.5">
                     {addingClickMode && addingClickPhase === "post" ? (
