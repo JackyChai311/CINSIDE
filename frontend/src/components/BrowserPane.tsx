@@ -3,6 +3,7 @@ import {
   ArrowRight,
   ExternalLink,
   EyeOff,
+  FilePlus,
   FileSpreadsheet,
   Globe,
   KeyRound,
@@ -66,6 +67,10 @@ interface Props {
   excelFileName?: string;
   /** 请求添加Excel文件回调（点击+按钮时触发） */
   onRequestAddExcel?: () => void;
+  /** 新建空白Excel回调（可填写、可导出） */
+  onNewBlankExcel?: () => void;
+  /** 是否正在显示空白Excel（控制Tab标签） */
+  isBlankExcel?: boolean;
   /** 拖拽Excel文件回调（Web模式下拖拽文件时触发） */
   onExcelDrop?: (file: File) => void;
   /** 关闭Excel数据回调（点击Excel Tab关闭按钮时触发） */
@@ -172,6 +177,8 @@ export default function BrowserPane({
   hasExcelData = false,
   excelFileName,
   onRequestAddExcel,
+  onNewBlankExcel,
+  isBlankExcel = false,
   onExcelDrop,
   onCloseExcel,
   excelEmptyState,
@@ -192,6 +199,9 @@ export default function BrowserPane({
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const excelScrollRef = useRef<HTMLDivElement>(null);
+  const [excelDragOver, setExcelDragOver] = useState(false);
+  const excelDragCountRef = useRef(0);
   const [inView, setInView] = useState(false);
   const inViewRef = useRef(inView);
   const urlRef = useRef(url);
@@ -994,6 +1004,17 @@ export default function BrowserPane({
                 >
                   <Plus className="h-3.5 w-3.5" />
                 </button>
+                {/* 新建空白Excel按钮 */}
+                {onNewBlankExcel && !isBlankExcel && (
+                  <button
+                    onClick={onNewBlankExcel}
+                    className="shrink-0 rounded-md p-0.5 text-slate-400 transition-colors hover:bg-white/60 hover:text-emerald-600"
+                    title="新建空白表格"
+                    disabled={disabled}
+                  >
+                    <FilePlus className="h-3.5 w-3.5" />
+                  </button>
+                )}
               </>
             )}
           </div>
@@ -1378,7 +1399,8 @@ export default function BrowserPane({
       {/* Excel容器：始终挂载，通过hidden切换 */}
       {enableViewSwitch && (
         <div
-          className={`relative min-h-0 flex-1 overflow-auto bg-white ${isWebMode ? "hidden" : ""}`}
+          ref={excelScrollRef}
+          className={`relative min-h-0 flex-1 overflow-auto bg-white transition-colors ${isWebMode ? "hidden" : ""} ${excelDragOver ? "ring-2 ring-inset ring-emerald-400 bg-emerald-50/40" : ""}`}
           onWheel={(e) => {
             if (e.ctrlKey) {
               e.preventDefault();
@@ -1388,9 +1410,40 @@ export default function BrowserPane({
               });
             }
           }}
+          onDragEnter={(e) => {
+            if (!hasExcelData && onExcelDrop) {
+              e.preventDefault();
+              excelDragCountRef.current++;
+              if (excelDragCountRef.current === 1) setExcelDragOver(true);
+            }
+          }}
+          onDragOver={(e) => {
+            if (!hasExcelData && onExcelDrop) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = "copy";
+            }
+          }}
+          onDragLeave={(e) => {
+            if (!hasExcelData && onExcelDrop) {
+              excelDragCountRef.current--;
+              if (excelDragCountRef.current <= 0) {
+                excelDragCountRef.current = 0;
+                setExcelDragOver(false);
+              }
+            }
+          }}
+          onDrop={(e) => {
+            if (!hasExcelData && onExcelDrop) {
+              e.preventDefault();
+              excelDragCountRef.current = 0;
+              setExcelDragOver(false);
+              const f = e.dataTransfer.files?.[0];
+              if (f && /\.(xlsx|xls|csv)$/i.test(f.name)) onExcelDrop(f);
+            }
+          }}
           style={{ WebkitOverflowScrolling: "auto" }}
         >
-          <div style={{ transform: `scale(${excelZoom})`, transformOrigin: "top left", width: `${100 / excelZoom}%` }}>
+          <div style={{ transform: `scale(${excelZoom})`, transformOrigin: "top left", width: `${100 / excelZoom}%`, minHeight: "100%" }}>
             {hasExcelData ? children : (excelEmptyState || (
               <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-xs text-slate-400">
                 <Upload className="h-10 w-10 text-slate-300" />
@@ -1398,6 +1451,14 @@ export default function BrowserPane({
               </div>
             ))}
           </div>
+          {excelDragOver && !hasExcelData && (
+            <div className="pointer-events-none absolute inset-3 flex items-center justify-center rounded-xl border-2 border-dashed border-emerald-400 bg-emerald-50/60">
+              <div className="flex flex-col items-center gap-2 text-emerald-600">
+                <Upload className="h-12 w-12" />
+                <p className="text-sm font-semibold">释放以上传 Excel / CSV</p>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
