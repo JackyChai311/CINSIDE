@@ -1054,7 +1054,7 @@ export default function DocLocalExtractConfig({
                 <p className="mb-0.5 font-semibold">操作流程：</p>
                 1. 在右侧网页中依次点击元素导航到下载按钮（开头点击）<br />
                 2. 触发下载后系统自动捕获并 OCR 提取<br />
-                3. 提取成功后可添加收尾点击（所有人处理完后闭环）<br />
+                3. 提取成功后可添加过程点击（提取后的中间步骤）<br />
                 4. 完成后点底部「完成提取」
                 <p className="mt-1 text-[8px] text-sky-500">快捷键：Ctrl+Z 撤销 · Backspace 返回 · 任意键恢复光标</p>
               </div>
@@ -1084,10 +1084,10 @@ export default function DocLocalExtractConfig({
                   <p className="mt-1 text-[9px] text-slate-400">请在右侧网页点击元素以记录导航步骤…</p>
                 )}
                 {webStepCount > 0 && webPostStepCount === 0 && (
-                  <p className="mt-1 text-[9px] text-sky-600">✓ 已记录开头导航步骤，点击触发下载后可继续添加收尾点击</p>
+                  <p className="mt-1 text-[9px] text-sky-600">✓ 已记录开头导航步骤，点击触发下载后可继续添加过程点击</p>
                 )}
                 {webPostStepCount > 0 && (
-                  <p className="mt-1 text-[9px] text-amber-600">✓ 已记录收尾步骤，可继续点击或完成提取</p>
+                  <p className="mt-1 text-[9px] text-amber-600">✓ 已记录过程点击步骤，可继续点击或完成提取</p>
                 )}
               </div>
             )}
@@ -1649,7 +1649,7 @@ export default function DocLocalExtractConfig({
         )}
 
         {/* ===== 本地模式专属内容 ===== */}
-        {!isWeb && (
+        {!isChoose && !isWeb && (
           <div className="flex min-h-0 flex-1 flex-col gap-2">
             {/* 步骤1：选择文件夹 */}
             <div className="shrink-0">
@@ -1816,13 +1816,13 @@ export default function DocLocalExtractConfig({
                 : webStatus?.phase === "ocr"
                 ? "OCR 识别中…"
                 : webStatus?.phase === "success"
-                ? `✓ 已提取 ${webStatus.filename || ""}${webPostStepCount > 0 ? ` · 收尾${webPostStepCount}步` : ""}`
+                ? `✓ 已提取 ${webStatus.filename || ""}${webPostStepCount > 0 ? ` · 过程${webPostStepCount}步` : ""}`
                 : webStatus?.phase === "post-click"
-                ? `收尾点击模式 — 点击网页元素${webPostStepCount > 0 ? `（已记录${webPostStepCount}步）` : ""}`
+                ? `过程点击模式 — 点击网页元素${webPostStepCount > 0 ? `（已记录${webPostStepCount}步）` : ""}`
                 : webStatus?.phase === "error"
                 ? <span className="text-rose-500">✗ {webStatus.message || "提取失败"}</span>
                 : webStepCount > 0 || webPostStepCount > 0
-                  ? `✓ 开头${webStepCount}步${webPostStepCount > 0 ? ` · 收尾${webPostStepCount}步` : ""}，可继续或完成`
+                  ? `✓ 开头${webStepCount}步${webPostStepCount > 0 ? ` · 过程${webPostStepCount}步` : ""}，可继续或完成`
                   : "请在网页点击元素（开头导航点击）"}
             </span>
             <div className="flex items-center gap-1">
@@ -1860,9 +1860,9 @@ export default function DocLocalExtractConfig({
                 <button
                   onClick={onStartAddPostClicks}
                   className="rounded-md bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 transition-all hover:bg-amber-200"
-                  title="添加收尾点击：提取完成后，点击网页上的元素作为所有记录处理完后的闭环操作（如关闭弹窗、返回列表等）"
+                  title="添加过程点击：提取完成后，点击网页上的元素作为中间步骤（如翻页、继续下载下一个等）"
                 >
-                  + 收尾点击
+                  + 过程点击
                 </button>
               )}
               <button
