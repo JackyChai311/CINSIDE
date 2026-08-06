@@ -130,6 +130,9 @@ export interface AppSettings {
 
   // 整体UI缩放比例（0.6~1.6）
   ui_scale?: number;
+
+  // 新手模式：开启时显示步骤仪表引导，关闭时直接用字段对比面板且三面板常开
+  beginner_mode?: boolean;
 }
 
 // ========== 可配置工作流（新） ==========
@@ -202,6 +205,8 @@ export interface CalendarControls {
 export interface WidgetDef {
   id: string;
   kind: "option" | "calendar";
+  /** 控件所在的浏览器面板侧（默认 right，兼容旧数据） */
+  side?: "left" | "right";
   /** 是否是直接显示型（不需要点击触发，选项直接在页面上可见，如男/女单选按钮组） */
   inline?: boolean;
   /** 触发框选择器（点击后展开面板的元素；inline 模式下这是选项组容器） */
@@ -300,8 +305,8 @@ export interface PickedMark {
   docLocalSamplePath?: string;
   /** 文件提取序列中的导航点击步骤标记（配置阶段记录的多步点击） */
   docExtractClick?: boolean;
-  /** 文件提取点击阶段：pre=开头导航点击（下载前），post=收尾点击（所有人提取完成后），undefined=默认(pre) */
-  docExtractClickPhase?: "pre" | "post";
+  /** 文件提取点击阶段：pre=开头导航点击（下载前），mid=过程点击（提取后中间步骤），post=收尾点击（所有人提取完成后），undefined=默认(pre) */
+  docExtractClickPhase?: "pre" | "mid" | "post";
   /** 文件上传步骤标记：把文件槽位中的文件填入网页 file input（DataTransfer 方案） */
   docUpload?: boolean;
   /** 上传来源：绑定的文件提取步骤 mark id（执行时从该槽位取文件）；空=取最近一次提取的文件 */
@@ -312,8 +317,8 @@ export interface PickedMark {
   uploadFormat?: string;
   /** 上传框 accept 属性（配置时记录，显示用） */
   uploadAccept?: string;
-  /** 点击阶段：pre=前置点击（搜索/进入，步骤3），post=收尾点击（保存/返回，步骤5） */
-  clickPhase?: "pre" | "post";
+  /** 点击阶段：pre=前置点击（搜索/进入，步骤3），mid=过程点击（点击NEXT等中间步骤），post=收尾点击（保存/返回，步骤5） */
+  clickPhase?: "pre" | "mid" | "post";
   /** 点击展开型控件（选项/日历）：录入时按左侧值自动选择/翻页点选 */
   widget?: WidgetDef | null;
   /** 弹窗内拾取的元素：执行时 JS/高亮路由到弹窗 BrowserView 而非主 view */
@@ -372,6 +377,8 @@ export interface FlowNode {
   markPhase?: "data-source" | "review" | "entry";
   /** 引用的 PickedMark id */
   markId?: string;
+  /** 该步骤操作的浏览器侧：left=左网页，right=右网页；用于流程图泳道定位 */
+  markSide?: "left" | "right";
 
   // --- subloop 类型专用：子模板 ---
   /** 子LOOP 模板 ID（引用其他已保存的 WorkflowTemplate） */
@@ -624,6 +631,7 @@ export const FIELD_LABELS: Record<string, string> = {
   gender: "性别",
   passport_issue: "护照签发日",
   passport_expiry: "护照有效期",
+  issue_authority: "签发所",
   email: "邮箱",
   phone: "电话",
 };
