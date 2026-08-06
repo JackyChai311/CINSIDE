@@ -26,6 +26,7 @@ export function buildLinearGraph(tpl: WorkflowTemplate): FlowGraph {
         label: buildStepLabel(m),
         markPhase: ph.key,
         markId: m.id,
+        markSide: m.side,
       });
     }
   }
@@ -45,7 +46,7 @@ export function buildStepLabel(m: PickedMark): string {
     input: "输入",
     pick: "取值",
   };
-  const phaseTag = m.clickPhase === "post" ? " [收尾]" : m.clickPhase === "pre" ? " [导航]" : "";
+  const phaseTag = m.clickPhase === "post" ? " [收尾]" : m.clickPhase === "mid" ? " [过程]" : m.clickPhase === "pre" ? " [导航]" : "";
   if (m.docExtract) return `📄 提取文件${phaseTag}: ${m.label || m.selector}`;
   if (m.docUpload) return `📎 上传文件${phaseTag}: ${m.label || m.selector}`;
   if (m.widget) {
