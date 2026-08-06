@@ -85,6 +85,8 @@ interface Props {
   calPanelPickFailed: boolean;
   /** 手动面板点选模式：idle=未启用 / await-open=等待用户手动点开日历 / picking=点选面板中 */
   calPanelPickMode: "idle" | "await-open" | "picking";
+  /** 手动面板兜底当前针对的控件类型（UI 文案/图标分支用） */
+  panelPickKind?: "option" | "calendar" | null;
   /** 用户已手动点开日历 → 开始点选面板 */
   onCalPanelPickArm: () => void;
   /** 取消手动面板点选 */
@@ -179,7 +181,7 @@ function OptionChip({
         }}
         placeholder="别名=左侧值"
         className="w-24 rounded border border-violet-400 bg-white px-1 py-0.5 text-[9px] text-violet-700 outline-none"
-        title="当左侧值与选项文字不同时，在这里填左侧的值（如选项是「本科(学士)」，左侧是「本科」）"
+        title="当左侧值与选项文字不同时，在这里填触发词，多个用斜杠分隔（如 FEMALE/F/woman，任一命中即可；大小写不区分)"
       />
     );
   }
@@ -194,7 +196,7 @@ function OptionChip({
           ? "border-violet-300 bg-violet-100 text-violet-700 ring-1 ring-violet-200"
           : "border-slate-200 bg-slate-50 text-slate-600 hover:border-violet-200 hover:bg-violet-50"
       }`}
-      title={alias ? `别名「${alias}」— 点击修改` : "点击标注别名（左侧值与选项文字不同时使用）"}
+      title={alias ? `触发词「${alias}」— 点击修改（多个用斜杠分隔，大小写不区分）` : "点击标注触发词（左侧值与选项文字不同时使用，多个用斜杠分隔）"}
     >
       <span className="truncate">{text}</span>
       {alias && (
@@ -1019,6 +1021,7 @@ export default function WidgetExtractPanel(props: Props) {
     onCancelGuide,
     calPanelPickFailed,
     calPanelPickMode,
+    panelPickKind,
     onCalPanelPickArm,
     onCalPanelPickCancel,
   } = props;
@@ -1041,7 +1044,7 @@ export default function WidgetExtractPanel(props: Props) {
               {calGuide.role === "dayCell"
                 ? `已选 ${calDayCellCount} 个 · 鼠标拖拽框选一片日格子，或逐个点选，至少 1 个后点「完成」`
                 : calGuide.required
-                ? "必选 · 在右侧网页日历上点选对应元素"
+                ? `必选 · 在${draft?.side === "left" ? "左侧" : "右侧"}网页日历上点选对应元素`
                 : "可选 · 无该按钮时点「跳过」"}
             </span>
           </div>
@@ -1088,7 +1091,7 @@ export default function WidgetExtractPanel(props: Props) {
             className="inline-flex flex-1 items-center justify-center gap-1 rounded-md bg-violet-500 px-2 py-1 text-[10px] font-medium text-white animate-pulse"
           >
             <Crosshair className="h-3 w-3" />
-            请在右侧网页点击{pickingKind === "option" ? "可展开选项的框框" : "日历框框"}…（点击取消）
+            请在网页上点击{pickingKind === "option" ? "可展开选项的框框" : "日历框框"}…（点击取消）
           </button>
         ) : (
           <>
@@ -1124,17 +1127,33 @@ export default function WidgetExtractPanel(props: Props) {
           {snapshotError}
         </div>
       )}
-      {/* 日历手动面板点选兜底：自动检测失败 → 引导用户手动点开日历并点选面板 */}
+      {/* 手动面板点选兜底：自动检测失败 → 引导用户手动点开面板并点选其中元素（选项/日历通用） */}
       {calPanelPickFailed && calPanelPickMode === "await-open" && (
         <div className="flex flex-col gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 ring-1 ring-amber-200">
           <div className="flex items-start gap-1.5">
-            <CalendarDays className="mt-0.5 h-3 w-3 shrink-0 text-amber-600" />
+            {panelPickKind === "option" ? (
+              <List className="mt-0.5 h-3 w-3 shrink-0 text-amber-600" />
+            ) : (
+              <CalendarDays className="mt-0.5 h-3 w-3 shrink-0 text-amber-600" />
+            )}
             <div className="flex-1">
-              <div className="text-[9px] font-medium text-amber-800">未检测到展开的日历，请手动指定面板：</div>
+              <div className="text-[9px] font-medium text-amber-800">
+                未检测到展开的{panelPickKind === "option" ? "选项面板" : "日历"}，请手动指定面板：
+              </div>
               <ol className="mt-0.5 list-decimal pl-3.5 text-[8px] leading-relaxed text-amber-700">
-                <li>在右侧网页点击日期框框，手动点开日历</li>
-                <li>日历展开后，点下方「开始点选面板」</li>
-                <li>再点日历面板上的任意位置（日格子/年月区均可）</li>
+                {panelPickKind === "option" ? (
+                  <>
+                    <li>在网页上点击框框，手动点开下拉</li>
+                    <li>下拉展开后，点下方「开始点选面板」</li>
+                    <li>再点下拉面板上的任意选项</li>
+                  </>
+                ) : (
+                  <>
+                    <li>在网页上点击日期框框，手动点开日历</li>
+                    <li>日历展开后，点下方「开始点选面板」</li>
+                    <li>再点日历面板上的任意位置（日格子/年月区均可）</li>
+                  </>
+                )}
               </ol>
             </div>
           </div>
@@ -1144,7 +1163,7 @@ export default function WidgetExtractPanel(props: Props) {
               className="inline-flex flex-1 items-center justify-center gap-1 rounded bg-amber-500 px-2 py-1 text-[9px] font-medium text-white transition-colors hover:bg-amber-600"
             >
               <Crosshair className="h-2.5 w-2.5" />
-              我已点开日历，开始点选面板
+              我已点开{panelPickKind === "option" ? "下拉" : "日历"}，开始点选面板
             </button>
             <button
               onClick={onCalPanelPickCancel}
@@ -1166,7 +1185,9 @@ export default function WidgetExtractPanel(props: Props) {
           <div className="flex items-center gap-2 rounded-md border border-violet-300 bg-violet-50 px-2 py-1.5 ring-1 ring-violet-200">
             <Crosshair className="h-3 w-3 shrink-0 animate-pulse text-violet-600" />
             <span className="flex-1 text-[9px] text-violet-700">
-              请点击网页日历面板上的任意位置（日格子/年月区均可）
+              {panelPickKind === "option"
+                ? "请点击网页下拉面板上的任意选项"
+                : "请点击网页日历面板上的任意位置（日格子/年月区均可）"}
             </span>
             <button
               onClick={onCalPanelPickCancel}
@@ -1249,7 +1270,7 @@ export default function WidgetExtractPanel(props: Props) {
               onClick={() => onTest("draft", draft, draftBinding)}
               disabled={!draftReady || testBusyKey === "draft"}
               className="inline-flex items-center gap-0.5 rounded-md bg-sky-500 px-2 py-0.5 text-[9px] font-medium text-white transition-colors hover:bg-sky-600 disabled:opacity-40"
-              title="用当前卡片的值在右侧网页真实演练一遍"
+              title={`用当前卡片的值在${draft?.side === "left" ? "左侧" : "右侧"}网页真实演练一遍`}
             >
               {testBusyKey === "draft" ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Play className="h-2.5 w-2.5" />}
               试跑
@@ -1347,7 +1368,7 @@ export default function WidgetExtractPanel(props: Props) {
                 onClick={() => onTest(key, widget, binding)}
                 disabled={!binding.leftField || testBusyKey === key}
                 className="inline-flex items-center gap-0.5 rounded-md bg-sky-500 px-2 py-0.5 text-[9px] font-medium text-white transition-colors hover:bg-sky-600 disabled:opacity-40"
-                title="用当前卡片的值在右侧网页真实演练一遍"
+                title={`用当前卡片的值在${widget?.side === "left" ? "左侧" : "右侧"}网页真实演练一遍`}
               >
                 {testBusyKey === key ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Play className="h-2.5 w-2.5" />}
                 试跑
