@@ -89,6 +89,7 @@ def build_linear_graph(tpl: dict) -> dict:
                 "label": _step_label(m),
                 "markPhase": key,
                 "markId": m.get("id"),
+                "markSide": m.get("side"),
             })
     nodes.append({"id": _nid("loop"), "kind": "loopback", "label": "下一张卡片（回到开头）"})
     return {"version": 1, "nodes": nodes, "updatedAt": 0}
