@@ -30,6 +30,7 @@ app.commandLine.appendSwitch("remote-debugging-port", "9222");
 
 // 设置 AppUserModelID，使 Windows 任务栏显示窗口自身图标（app-icon.ico）
 // 而不是 electron.exe 的默认图标。必须在 app.whenReady() 之前调用。
+app.setName("CINSIDE");
 app.setAppUserModelId("com.cinside.app");
 
 let mainWindow = null;
