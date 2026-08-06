@@ -5,6 +5,7 @@ import {
   CalendarDays,
   CheckCircle2,
   ChevronDown,
+  Columns2,
   Database,
   Eye,
   ExternalLink,
@@ -17,6 +18,7 @@ import {
   MoveRight,
   PanelRightOpen,
   PanelRightClose,
+  Play,
   Plus,
   Save,
   Settings2,
@@ -99,20 +101,56 @@ interface Props {
   onPickExtractedField?: (side: "left" | "right", field: string, value: string) => void;
   /** 本地文件提取配置内容（有值时"文件处理"卡片显示它，替代正常内容） */
   docLocalConfigContent?: React.ReactNode;
-  /** 聚焦面板模式："field"=只显示字段对比，"doc"=只显示文件处理，"doc-extract"=文件处理+提取元素两栏，null=三面板 */
-  focusPanel?: "field" | "doc" | "doc-extract" | null;
+  /** 聚焦面板模式："field"=只显示字段对比，"doc"=只显示文件处理，"doc-extract"=文件处理+提取元素两栏，"field-doc"=字段对比+文件处理两栏，null=三面板 */
+  focusPanel?: "field" | "doc" | "doc-extract" | "field-doc" | null;
   /** 字段对比设置模式数据：前置点击 marks */
   preClickMarks?: PickedMark[];
+  /** 字段对比设置模式数据：过程点击 marks（点击NEXT等中间步骤） */
+  processClickMarks?: PickedMark[];
   /** 字段对比设置模式数据：收尾点击 marks */
   postClickMarks?: PickedMark[];
+  /** 开始添加前置点击 */
+  onStartAddPreClick?: () => void;
+  /** 开始绑定输入框 */
+  onStartBindInputs?: () => void;
+  /** 是否正在绑定输入框模式中（用于高亮按钮） */
+  bindInputActive?: boolean;
+  /** 已绑定的输入/点击步数（用于数量徽章） */
+  bindStepCount?: number;
+  /** 是否正在添加前置点击 */
+  preClickActive?: boolean;
+  /** 开始添加过程点击（点击NEXT等中间步骤） */
+  onStartAddProcessClick?: () => void;
+  /** 是否正在添加过程点击 */
+  processClickActive?: boolean;
+  /** 开始添加收尾点击（提交按钮等） */
+  onStartAddPostClick?: () => void;
+  /** 是否正在添加收尾点击 */
+  postClickActive?: boolean;
+  /** 开始添加文件提取步骤 */
+  onStartAddDocExtract?: () => void;
+  /** 是否正在文件提取模式 */
+  docExtractActive?: boolean;
+  /** 切换提取步骤的录入/审核模式（用于文件提取和自定义文本面板） */
+  onSwitchStepMode?: (mode: "review" | "entry") => void;
   /** 字段对比设置模式数据：已配置的审查映射 */
   reviewMappings?: FieldMapping[];
   /** 删除一个 picked mark（前置/收尾点击） */
   onRemoveMark?: (id: string) => void;
+  /** 删除一个审查映射（按索引） */
+  onRemoveMapping?: (index: number) => void;
+  /** 删除一个提取元素步骤（按 id 和 kind） */
+  onRemoveExtractStep?: (id: string, kind: "doc" | "custom" | "widget") => void;
   /** 点击卡片预览：在对应网页高亮显示元素位置 */
   onPreviewMark?: (mark: PickedMark) => void;
   /** 保存当前步骤配置到这批勾选的卡片（分割批次用） */
   onSaveToBatch?: () => void;
+  /** 命名保存为 LOOP 模板 */
+  onRequestSaveLoop?: () => void;
+  /** 直接执行当前配置（临时运行，不保存） */
+  onDirectRun?: () => void;
+  /** 是否有可保存/执行的步骤（控制按钮禁用态） */
+  canSaveLoop?: boolean;
   /** 当前是否有勾选的卡片（控制"保存到这批"按钮显隐） */
   hasCheckedBatch?: boolean;
   /** 自定义文本面板内容（有值时"提取元素"卡片显示它，替代正常内容） */
@@ -121,6 +159,8 @@ interface Props {
   customTextMode?: boolean;
   /** 文件提取字段内容（从文件/图片识别出来送到面板的字段） */
   docFieldsContent?: React.ReactNode;
+  /** 统一字段面板内容（文件提取+自定义文本合并，紫色/蓝色区分来源） */
+  unifiedFieldsContent?: React.ReactNode;
   /** 提取元素面板 TAB 切换请求：ts 变化时自动切到对应 TAB（widgetTabId 指定具体控件） */
   extractTabRequest?: { tab: "doc" | "custom" | "widget"; widgetTabId?: string; ts: number } | null;
   /** 提取元素面板 TAB 顺序（FIFO：先设置的功能排前面） */
@@ -135,6 +175,8 @@ interface Props {
   widgetTabs?: Array<{ id: string; label: string; kind: "option" | "calendar"; isDraft?: boolean; isBound?: boolean }>;
   /** 添加控件回调（TAB 栏 + 按钮） */
   onAddWidget?: (kind: "option" | "calendar") => void;
+  /** 添加自定义文本字段 */
+  onAddCustomText?: () => void;
   /** 外部信号：当为 true 时，自动切换"提取元素"面板到设置模式（控件提取） */
   widgetSetupSignal?: boolean;
   /** 数据源记录（用于卡片显示名字+学号） */
@@ -176,15 +218,34 @@ export default function ResultsPanel({
   docLocalConfigContent,
   focusPanel = null,
   preClickMarks = [],
+  processClickMarks = [],
   postClickMarks = [],
   reviewMappings = [],
   onRemoveMark,
+  onRemoveMapping,
+  onRemoveExtractStep,
   onPreviewMark,
+  onStartAddPreClick,
+  onStartBindInputs,
+  bindInputActive = false,
+  bindStepCount = 0,
+  preClickActive = false,
+  onStartAddProcessClick,
+  processClickActive = false,
+  onStartAddPostClick,
+  postClickActive = false,
+  onStartAddDocExtract,
+  docExtractActive = false,
+  onSwitchStepMode,
   onSaveToBatch,
+  onRequestSaveLoop,
+  onDirectRun,
+  canSaveLoop = false,
   hasCheckedBatch = false,
   customTextContent,
   customTextMode = false,
   docFieldsContent,
+  unifiedFieldsContent,
   extractTabRequest = null,
   extractTabOrder = [],
   extractCounts,
@@ -192,6 +253,7 @@ export default function ResultsPanel({
   widgetExtractContent,
   widgetTabs = [],
   onAddWidget,
+  onAddCustomText,
   widgetSetupSignal = false,
   records = [],
   onSelectRecord,
@@ -246,15 +308,30 @@ export default function ResultsPanel({
           docLocalConfigContent={docLocalConfigContent}
           focusPanel={focusPanel}
           preClickMarks={preClickMarks}
+          processClickMarks={processClickMarks}
           postClickMarks={postClickMarks}
           reviewMappings={reviewMappings}
           onRemoveMark={onRemoveMark}
+          onRemoveMapping={onRemoveMapping}
+          onRemoveExtractStep={onRemoveExtractStep}
           onPreviewMark={onPreviewMark}
+          onStartAddPreClick={onStartAddPreClick}
+          onStartBindInputs={onStartBindInputs}
+          bindInputActive={bindInputActive}
+          bindStepCount={bindStepCount}
+          onStartAddProcessClick={onStartAddProcessClick}
+          onStartAddPostClick={onStartAddPostClick}
+          onStartAddDocExtract={onStartAddDocExtract}
+          onSwitchStepMode={onSwitchStepMode}
           onSaveToBatch={onSaveToBatch}
+          onRequestSaveLoop={onRequestSaveLoop}
+          onDirectRun={onDirectRun}
+          canSaveLoop={canSaveLoop}
           hasCheckedBatch={hasCheckedBatch}
           customTextContent={customTextContent}
           customTextMode={customTextMode}
           docFieldsContent={docFieldsContent}
+          unifiedFieldsContent={unifiedFieldsContent}
           extractTabRequest={extractTabRequest}
           extractTabOrder={extractTabOrder}
           extractCounts={extractCounts}
@@ -262,6 +339,7 @@ export default function ResultsPanel({
           widgetExtractContent={widgetExtractContent}
           widgetTabs={widgetTabs}
           onAddWidget={onAddWidget}
+          onAddCustomText={onAddCustomText}
           widgetSetupSignal={widgetSetupSignal}
           records={records}
           onSelectRecord={onSelectRecord}
@@ -561,15 +639,34 @@ function ReportTab({
   docLocalConfigContent,
   focusPanel = null,
   preClickMarks = [],
+  processClickMarks = [],
   postClickMarks = [],
   reviewMappings = [],
   onRemoveMark,
+  onRemoveMapping,
+  onRemoveExtractStep,
   onPreviewMark,
+  onStartAddPreClick,
+  onStartBindInputs,
+  bindInputActive = false,
+  bindStepCount = 0,
+  preClickActive = false,
+  onStartAddProcessClick,
+  processClickActive = false,
+  onStartAddPostClick,
+  postClickActive = false,
+  onStartAddDocExtract,
+  docExtractActive = false,
+  onSwitchStepMode,
   onSaveToBatch,
+  onRequestSaveLoop,
+  onDirectRun,
+  canSaveLoop = false,
   hasCheckedBatch = false,
   customTextContent,
   customTextMode = false,
   docFieldsContent,
+  unifiedFieldsContent,
   extractTabRequest = null,
   extractTabOrder = [],
   extractCounts,
@@ -577,6 +674,7 @@ function ReportTab({
   widgetExtractContent,
   widgetTabs = [],
   onAddWidget,
+  onAddCustomText,
   widgetSetupSignal = false,
   records = [],
   onSelectRecord,
@@ -604,20 +702,56 @@ function ReportTab({
   onPickExtractedField?: (side: "left" | "right", field: string, value: string) => void;
   /** 本地文件提取配置内容（有值时"文件处理"卡片显示它，替代正常内容） */
   docLocalConfigContent?: React.ReactNode;
-  /** 聚焦面板模式："field"=只显示字段对比，"doc"=只显示文件处理，"doc-extract"=文件处理+提取元素两栏，null=三面板 */
-  focusPanel?: "field" | "doc" | "doc-extract" | null;
+  /** 聚焦面板模式："field"=只显示字段对比，"doc"=只显示文件处理，"doc-extract"=文件处理+提取元素两栏，"field-doc"=字段对比+文件处理两栏，null=三面板 */
+  focusPanel?: "field" | "doc" | "doc-extract" | "field-doc" | null;
   /** 字段对比设置模式数据：前置点击 marks */
   preClickMarks?: PickedMark[];
+  /** 字段对比设置模式数据：过程点击 marks（点击NEXT等中间步骤） */
+  processClickMarks?: PickedMark[];
   /** 字段对比设置模式数据：收尾点击 marks */
   postClickMarks?: PickedMark[];
+  /** 开始添加前置点击 */
+  onStartAddPreClick?: () => void;
+  /** 开始绑定输入框 */
+  onStartBindInputs?: () => void;
+  /** 是否正在绑定输入框模式中（用于高亮按钮） */
+  bindInputActive?: boolean;
+  /** 已绑定的输入/点击步数（用于数量徽章） */
+  bindStepCount?: number;
+  /** 是否正在添加前置点击 */
+  preClickActive?: boolean;
+  /** 开始添加过程点击（点击NEXT等中间步骤） */
+  onStartAddProcessClick?: () => void;
+  /** 是否正在添加过程点击 */
+  processClickActive?: boolean;
+  /** 开始添加收尾点击（提交按钮等） */
+  onStartAddPostClick?: () => void;
+  /** 是否正在添加收尾点击 */
+  postClickActive?: boolean;
+  /** 开始添加文件提取步骤 */
+  onStartAddDocExtract?: () => void;
+  /** 是否正在文件提取模式 */
+  docExtractActive?: boolean;
+  /** 切换提取步骤的录入/审核模式（用于文件提取和自定义文本面板） */
+  onSwitchStepMode?: (mode: "review" | "entry") => void;
   /** 字段对比设置模式数据：已配置的审查映射 */
   reviewMappings?: FieldMapping[];
   /** 删除一个 picked mark（前置/收尾点击） */
   onRemoveMark?: (id: string) => void;
+  /** 删除一个审查映射（按索引） */
+  onRemoveMapping?: (index: number) => void;
+  /** 删除一个提取元素步骤（按 id 和 kind） */
+  onRemoveExtractStep?: (id: string, kind: "doc" | "custom" | "widget") => void;
   /** 点击卡片预览：在对应网页高亮显示元素位置 */
   onPreviewMark?: (mark: PickedMark) => void;
   /** 保存当前步骤配置到这批勾选的卡片（分割批次用） */
   onSaveToBatch?: () => void;
+  /** 命名保存为 LOOP 模板 */
+  onRequestSaveLoop?: () => void;
+  /** 直接执行当前配置（临时运行，不保存） */
+  onDirectRun?: () => void;
+  /** 是否有可保存/执行的步骤（控制按钮禁用态） */
+  canSaveLoop?: boolean;
   /** 当前是否有勾选的卡片（控制"保存到这批"按钮显隐） */
   hasCheckedBatch?: boolean;
   /** 自定义文本面板内容（有值时"提取元素"卡片显示它，替代正常内容） */
@@ -626,6 +760,8 @@ function ReportTab({
   customTextMode?: boolean;
   /** 文件提取字段内容（从文件/图片识别出来送到面板的字段） */
   docFieldsContent?: React.ReactNode;
+  /** 统一字段面板内容（文件提取+自定义文本合并，紫色/蓝色区分来源） */
+  unifiedFieldsContent?: React.ReactNode;
   /** 提取元素面板 TAB 切换请求：ts 变化时自动切到对应 TAB（widgetTabId 指定具体控件） */
   extractTabRequest?: { tab: "doc" | "custom" | "widget"; widgetTabId?: string; ts: number } | null;
   /** 提取元素面板 TAB 顺序（FIFO：先设置的功能排前面） */
@@ -640,6 +776,8 @@ function ReportTab({
   widgetTabs?: Array<{ id: string; label: string; kind: "option" | "calendar"; isDraft?: boolean; isBound?: boolean }>;
   /** 添加控件回调（TAB 栏 + 按钮） */
   onAddWidget?: (kind: "option" | "calendar") => void;
+  /** 添加自定义文本字段 */
+  onAddCustomText?: () => void;
   /** 外部信号：当为 true 时，自动切换"提取元素"面板到设置模式（控件提取） */
   widgetSetupSignal?: boolean;
   /** 数据源记录（用于卡片显示名字+学号） */
@@ -680,24 +818,24 @@ function ReportTab({
   const [activeCategory, setActiveCategory] = useState<"doc" | "custom" | "widget">("custom");
   /** 控件提取内部当前激活的控件 TAB id（用于 scroll spy 高亮 + 滚动定位） */
   const [activeWidgetTabId, setActiveWidgetTabId] = useState<string | null>(null);
+  /** 提取元素面板左右分栏模式：true=左半显示文件/自定义文本，右半显示控件提取 */
+  const [splitWidgetMode, setSplitWidgetMode] = useState(false);
+  /** 左右分栏时左侧宽度百分比（默认 50%） */
+  const [splitLeftPct, setSplitLeftPct] = useState(50);
   /** 提取元素滚动容器 ref + widget节 ref（用于控件子TAB滚动定位） */
   const extractScrollRef = useRef<HTMLDivElement | null>(null);
   const extractSectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  /** 左右分栏拖拽相关 ref */
+  const splitContainerRef = useRef<HTMLDivElement | null>(null);
+  const splitDraggingRef = useRef(false);
 
-  // 确定当前实际显示的大分类（兜底：如果请求的分类没有内容，自动切换到有内容的分类）
+  // 确定当前实际显示的大分类（兜底：默认显示统一字段面板，点击控件TAB时才切到控件）
   const currentCategory = useMemo<"doc" | "custom" | "widget">(() => {
-    const hasDoc = docFieldsContent !== undefined;
-    const hasCustom = customTextContent !== undefined;
     const hasWidget = !!(widgetExtractContent || widgetTabs.length > 0);
-    if (activeCategory === "doc" && hasDoc) return "doc";
-    if (activeCategory === "custom" && hasCustom) return "custom";
     if (activeCategory === "widget" && hasWidget) return "widget";
-    // 兜底：按 widget > custom > doc 优先级选第一个有内容的
-    if (hasWidget) return "widget";
-    if (hasCustom) return "custom";
-    if (hasDoc) return "doc";
+    // 默认始终返回 custom（统一字段面板），不再切换到 doc/widget
     return "custom";
-  }, [activeCategory, docFieldsContent, customTextContent, widgetExtractContent, widgetTabs.length]);
+  }, [activeCategory, widgetExtractContent, widgetTabs.length]);
 
   /** 点击大分类 TAB：切换分类（不滚动，直接切换显示） */
   const switchCategory = useCallback((cat: "doc" | "custom" | "widget") => {
@@ -723,13 +861,49 @@ function ReportTab({
     container.scrollTo({ top: container.scrollTop + delta, behavior: "smooth" });
   }, []);
 
+  /** 左右分栏拖拽分隔条 */
+  const onSplitDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    splitDraggingRef.current = true;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const container = splitContainerRef.current;
+    if (!container) return;
+    const startX = e.clientX;
+    const startPct = splitLeftPct;
+    const rect = container.getBoundingClientRect();
+    const onMove = (ev: MouseEvent) => {
+      if (!splitDraggingRef.current) return;
+      const dx = ev.clientX - startX;
+      const pctDelta = (dx / rect.width) * 100;
+      const newPct = Math.min(80, Math.max(20, startPct + pctDelta));
+      setSplitLeftPct(newPct);
+    };
+    const onUp = () => {
+      splitDraggingRef.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [splitLeftPct]);
+
+  // 进入左右分栏模式时，如果当前在 widget 分类，自动将左侧切到 doc 或 custom
+  useEffect(() => {
+    if (splitWidgetMode && activeCategory === "widget") {
+      if (docFieldsContent !== undefined) setActiveCategory("doc");
+      else if (customTextContent !== undefined) setActiveCategory("custom");
+    }
+  }, [splitWidgetMode, activeCategory, docFieldsContent, customTextContent]);
   // 聚焦字段对比面板时（用户正在添加前置/收尾点击或审查步骤），自动切换到设置模式
   useEffect(() => {
-    if (focusPanel === "field") setFieldSetupMode(true);
+    if (focusPanel === "field" || focusPanel === "field-doc") setFieldSetupMode(true);
   }, [focusPanel]);
   // 聚焦文件处理面板时（用户正在配置文件提取），自动切换到设置模式
   useEffect(() => {
-    if (focusPanel === "doc" || focusPanel === "doc-extract") setDocSetupMode(true);
+    if (focusPanel === "doc" || focusPanel === "doc-extract" || focusPanel === "field-doc") setDocSetupMode(true);
   }, [focusPanel]);
   // doc-extract 模式自动展开提取元素面板到设置态
   useEffect(() => {
@@ -1944,14 +2118,18 @@ function ReportTab({
   const isFieldFocus = focusPanel === "field";
   const isDocFocus = focusPanel === "doc";
   const isDocExtractFocus = focusPanel === "doc-extract";
+  const isFieldDocFocus = focusPanel === "field-doc";
   const isAll = !focusPanel;
-  // 控件提取模式：有 widgetExtractContent 时隐藏文件处理面板，只显示字段对比+提取元素两栏
-  const isWidgetMode = !!widgetExtractContent;
+  // 控件提取模式：处于控件提取激活态（widgetSetupSignal=widgetExtractMode）时隐藏文件处理面板，
+  // 只显示字段对比+提取元素两栏。仅保存过控件（widgetExtractContent 非空）但不在提取模式时，
+  // 文件处理面板应正常显示，避免面板开启后变成空白区域
+  const isWidgetMode = !!widgetSetupSignal;
   // 提取元素面板显示逻辑：
   // - 非步骤设置模式（结果查看）：始终显示（三栏布局）
   // - 步骤设置模式：按用户手动开关控制（默认隐藏，给步骤卡片更多空间，可手动展开）
   // - 自定义文本/控件提取模式：强制显示
   // - doc-extract 聚焦模式：强制显示（文件处理+提取元素两栏）
+  // - field-doc 聚焦模式：隐藏（字段对比+文件处理两栏）
   const isSetupMode = fieldSetupMode || docSetupMode || extractSetupMode;
   const showExtract = isAll
     ? (!isSetupMode || showExtractPanel || !!customTextContent || !!widgetExtractContent || !!docFieldsContent || extractSetupMode)
@@ -1976,16 +2154,51 @@ function ReportTab({
           <MousePointerClick className="h-3.5 w-3.5" />
           前置设置
           <span className="rounded-full bg-indigo-100 px-1.5 py-0.5 text-[9px] font-semibold text-indigo-600">{preClickMarks.length}</span>
+          {fieldSetupMode && onStartBindInputs && !running && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onStartBindInputs(); }}
+              className={[
+                "ml-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
+                bindInputActive
+                  ? "bg-red-500 text-white shadow-sm animate-pulse"
+                  : bindStepCount > 0
+                  ? "bg-indigo-100 text-indigo-600 hover:bg-indigo-200 hover:text-indigo-700"
+                  : "bg-indigo-100 text-indigo-600 hover:bg-indigo-200 hover:text-indigo-700",
+              ].join(" ")}
+              title={bindInputActive ? "绑定输入框/点击进行中：点左/右侧输入框=绑定Excel列，点按钮=真实点击（再次点击关闭）" : "开始绑定输入框/点击（点输入框自动绑定Excel列并填入第一行值）"}
+            >
+              <Keyboard className="h-2.5 w-2.5" />
+              绑定输入框
+              {bindStepCount > 0 && (
+                <span className={bindInputActive ? "rounded bg-white/30 px-1 text-[8px] leading-tight" : "rounded bg-indigo-200/70 px-1 text-[8px] leading-tight"}>{bindStepCount}</span>
+              )}
+            </button>
+          )}
+          {fieldSetupMode && onStartAddPreClick && !running && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onStartAddPreClick(); }}
+              className={[
+                "inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
+                preClickActive
+                  ? "bg-red-500 text-white shadow-sm animate-pulse"
+                  : "bg-indigo-100 text-indigo-600 hover:bg-indigo-200 hover:text-indigo-700",
+              ].join(" ")}
+              title={preClickActive ? "前置点击添加中（再次点击关闭）" : "添加前置点击（搜索按钮、开始按钮等）"}
+            >
+              <Plus className="h-2.5 w-2.5" />
+              添加前置点击
+            </button>
+          )}
         </div>
         {preClickMarks.length === 0 ? (
           <div className="flex gap-2 pt-1.5">
-            <div className="flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-xl border-2 border-dashed border-slate-200 bg-white/50 px-2.5 py-2 opacity-50">
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-200 text-[12px] font-bold text-slate-400">
+            <div className="flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/80 px-2.5 py-2">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-200 text-[13px] font-bold text-slate-500">
                 ?
               </span>
               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="text-[10px] font-bold text-slate-300">点击</span>
-                <span className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-300">点击搜索按钮等…</span>
+                <span className="text-[11px] font-bold text-slate-500">点击</span>
+                <span className="line-clamp-2 text-[12px] font-medium leading-tight text-slate-400">点击搜索按钮等…</span>
               </div>
             </div>
           </div>
@@ -2043,24 +2256,148 @@ function ReportTab({
         )}
       </div>
 
+      {/* 过程点击分组 —— 点击NEXT等中间步骤，位于前置设置与收尾点击之间 */}
+      <div className="shrink-0">
+        <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold text-teal-700">
+          <MousePointerClick className="h-3.5 w-3.5" />
+          过程点击
+          <span className="rounded-full bg-teal-100 px-1.5 py-0.5 text-[9px] font-semibold text-teal-600">{processClickMarks.length}</span>
+          {fieldSetupMode && onStartAddProcessClick && !running && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onStartAddProcessClick(); }}
+              className={[
+                "ml-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
+                processClickActive
+                  ? "bg-red-500 text-white shadow-sm animate-pulse"
+                  : "bg-teal-100 text-teal-600 hover:bg-teal-200 hover:text-teal-700",
+              ].join(" ")}
+              title={processClickActive ? "过程点击添加中（再次点击关闭）" : "添加过程点击（NEXT、下一步等中间步骤）"}
+            >
+              <Plus className="h-2.5 w-2.5" />
+              添加过程点击
+            </button>
+          )}
+        </div>
+        {processClickMarks.length === 0 ? (
+          <div className="flex gap-2 pt-1.5">
+            <div className="flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/80 px-2.5 py-2">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-200 text-[13px] font-bold text-slate-500">?</span>
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className="text-[11px] font-bold text-slate-500">点击</span>
+                <span className="line-clamp-2 text-[12px] font-medium leading-tight text-slate-400">点击 NEXT 等中间步骤…</span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
+            {processClickMarks.map((m) => (
+              <div
+                key={m.id}
+                onClick={() => onPreviewMark?.(m)}
+                className="group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-xl border-2 border-teal-200 bg-teal-50/30 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md"
+                title={`点击 · ${m.label}（点击在网页定位）`}
+              >
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-teal-500 to-cyan-600 text-[12px] font-bold text-white shadow-sm">{m.order}</span>
+                <div className="flex min-w-0 flex-1 flex-col gap-0.5 pr-5">
+                  <span className="text-[10px] font-bold text-teal-600">点击</span>
+                  <span className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-700">{m.label}</span>
+                </div>
+                {onRemoveMark && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (window.confirm("确定要删除这个过程点击吗？")) {
+                        onRemoveMark(m.id);
+                      }
+                    }}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-5 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
+                    title="删除"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* 审查映射分组 —— 小卡片从左到右排列 */}
       <div className="shrink-0">
-        <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold text-emerald-700">
+        <div className="mb-1.5 flex flex-wrap items-center gap-1.5 text-[11px] font-bold text-emerald-700">
           <Table2 className="h-3.5 w-3.5" />
           审查映射
           <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-600">{reviewMappings.length}</span>
+          {fieldSetupMode && !running && (
+            <>
+              {onSwitchStepMode && (
+                <div className="ml-1 flex shrink-0 items-center gap-0 rounded-md bg-emerald-100/70 p-0.5 ring-1 ring-emerald-200/80">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onSwitchStepMode("review"); }}
+                    className={[
+                      "flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-all",
+                      addingStepMode === "review"
+                        ? "bg-red-500 text-white shadow-sm animate-pulse"
+                        : "text-emerald-700 hover:bg-white/60",
+                    ].join(" ")}
+                    title={addingStepMode === "review" ? "审核模式激活中（再次点击关闭）" : "审核模式：字段用于右侧网页与左侧Excel核对"}
+                  >
+                    <ArrowLeft className="h-2.5 w-2.5" />
+                    审核
+                  </button>
+                  <div className="h-3.5 w-px bg-emerald-300/70" />
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onSwitchStepMode("entry"); }}
+                    className={[
+                      "flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-all",
+                      addingStepMode === "entry"
+                        ? "bg-red-500 text-white shadow-sm animate-pulse"
+                        : "text-emerald-700 hover:bg-white/60",
+                    ].join(" ")}
+                    title={addingStepMode === "entry" ? "录入模式激活中（再次点击关闭）" : "录入模式：字段用于从左侧Excel填入右侧网页"}
+                  >
+                    <MoveRight className="h-2.5 w-2.5" />
+                    录入
+                  </button>
+                </div>
+              )}
+              {onStartAddDocExtract && (() => {
+                return (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowExtractPanel(true);
+                      setExtractSetupMode(true);
+                      switchCategory("doc");
+                      onStartAddDocExtract();
+                    }}
+                    className={[
+                      "inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
+                      docExtractActive
+                        ? "bg-red-500 text-white shadow-sm animate-pulse"
+                        : "bg-emerald-100 text-emerald-600 hover:bg-emerald-200 hover:text-emerald-700",
+                    ].join(" ")}
+                    title={docExtractActive ? "文件提取模式激活中（再次点击关闭）" : "添加文件提取步骤（网页下载/本地文件识别）"}
+                  >
+                    <FileText className="h-2.5 w-2.5" />
+                    文件提取
+                  </button>
+                );
+              })()}
+            </>
+          )}
         </div>
         {reviewMappings.length === 0 ? (
           <div className="flex gap-2 pt-1.5">
-            <div className="flex shrink-0 min-w-[100px] max-w-[160px] items-start gap-2 rounded-xl border-2 border-dashed border-slate-200 bg-white/50 px-2.5 py-2 opacity-50">
+            <div className="flex shrink-0 min-w-[100px] max-w-[160px] items-start gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/80 px-2.5 py-2">
               <div className="flex shrink-0 flex-col items-center gap-1">
-                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-200 text-[12px] font-bold text-slate-400">?</span>
-                <ArrowLeft className="h-3 w-3 text-slate-300" />
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-200 text-[13px] font-bold text-slate-500">?</span>
+                <ArrowLeft className="h-3.5 w-3.5 text-slate-400" />
               </div>
               <div className="flex min-w-0 flex-1 flex-col">
-                <span className="text-[10px] font-bold text-slate-300">对比</span>
-                <div className="truncate py-0.5 text-[10px] font-medium leading-tight text-slate-300">左侧字段</div>
-                <div className="truncate py-0.5 text-[11px] font-medium leading-tight text-slate-300">右侧字段</div>
+                <span className="text-[11px] font-bold text-slate-500">对比</span>
+                <div className="truncate py-0.5 text-[11px] font-medium leading-tight text-slate-400">左侧字段</div>
+                <div className="truncate py-0.5 text-[12px] font-medium leading-tight text-slate-400">右侧字段</div>
               </div>
             </div>
           </div>
@@ -2072,7 +2409,7 @@ function ReportTab({
                 <div
                   key={i}
                   onClick={() => onPreviewMark?.({ id: `mapping-${i}`, order: i + 1, side: "right", source: "web", selector: mp.right_selector, label: mp.right_label || mp.right_selector, workflow: "review", createdAt: 0 })}
-                  className="group flex shrink-0 min-w-[100px] max-w-[160px] cursor-pointer items-start gap-2 rounded-xl border-2 border-emerald-200 bg-emerald-50/30 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:border-emerald-300 hover:shadow-md"
+                  className="group relative flex shrink-0 min-w-[100px] max-w-[160px] cursor-pointer items-start gap-2 rounded-xl border-2 border-emerald-200 bg-emerald-50/30 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:border-emerald-300 hover:shadow-md"
                   title={`${mp.left_field || "—"} ${isEntry ? "→" : "←"} ${mp.right_label || mp.right_selector}（点击在网页定位）`}
                 >
                   <div className="flex shrink-0 flex-col items-center gap-1">
@@ -2085,11 +2422,25 @@ function ReportTab({
                       <ArrowLeft className="h-3 w-3 text-emerald-500" />
                     )}
                   </div>
-                  <div className="flex min-w-0 flex-1 flex-col">
+                  <div className="flex min-w-0 flex-1 flex-col pr-5">
                     <span className="text-[10px] font-bold text-emerald-600">{isEntry ? "填入" : "对比"}</span>
                     <div className="truncate py-0.5 text-[10px] font-medium leading-tight text-slate-500">{mp.left_field || "—"}</div>
                     <div className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-700">{mp.right_label || mp.right_selector}</div>
                   </div>
+                  {onRemoveMapping && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (window.confirm("确定要删除这个映射吗？")) {
+                          onRemoveMapping(i);
+                        }
+                      }}
+                      className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-5 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
+                      title="删除"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  )}
                 </div>
               );
             })}
@@ -2099,18 +2450,67 @@ function ReportTab({
 
       {/* 提取元素分组 —— 文件提取/自定义文本/控件小卡片，按设置先后 FIFO 排列（全局观察） */}
       <div className="shrink-0">
-        <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold text-violet-700">
+        <div className="mb-1.5 flex flex-wrap items-center gap-1.5 text-[11px] font-bold text-violet-700">
           <Eye className="h-3.5 w-3.5" />
           提取元素
           <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-semibold text-violet-600">{extractStepSummary.length}</span>
+          {fieldSetupMode && !running && (
+            <>
+              {onAddWidget && (() => {
+                return (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowExtractPanel(true);
+                      setExtractSetupMode(true);
+                      switchCategory("widget");
+                      onAddWidget("option");
+                    }}
+                    className={[
+                      "ml-0.5 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
+                      widgetSetupSignal
+                        ? "bg-red-500 text-white shadow-sm animate-pulse"
+                        : "bg-violet-100 text-violet-600 hover:bg-violet-200 hover:text-violet-700",
+                    ].join(" ")}
+                    title={widgetSetupSignal ? "控件提取模式激活中（再次点击关闭）" : "添加控件提取（下拉选项等展开型控件）"}
+                  >
+                    <MousePointerClick className="h-2.5 w-2.5" />
+                    控件提取
+                  </button>
+                );
+              })()}
+              {onAddCustomText && (() => {
+                return (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowExtractPanel(true);
+                      setExtractSetupMode(true);
+                      onAddCustomText();
+                    }}
+                    className={[
+                      "inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
+                      customTextMode
+                        ? "bg-red-500 text-white shadow-sm animate-pulse"
+                        : "bg-sky-100 text-sky-600 hover:bg-sky-200 hover:text-sky-700",
+                    ].join(" ")}
+                    title={customTextMode ? "自定义文本模式激活中（再次点击关闭）" : "添加自定义文本字段"}
+                  >
+                    <Type className="h-2.5 w-2.5" />
+                    自定义文本
+                  </button>
+                );
+              })()}
+            </>
+          )}
         </div>
         {extractStepSummary.length === 0 ? (
           <div className="flex gap-2 pt-1.5">
-            <div className="flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-xl border-2 border-dashed border-slate-200 bg-white/50 px-2.5 py-2 opacity-50">
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-200 text-[12px] font-bold text-slate-400">?</span>
+            <div className="flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/80 px-2.5 py-2">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-200 text-[13px] font-bold text-slate-500">?</span>
               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="text-[10px] font-bold text-slate-300">提取</span>
-                <span className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-300">文件提取/自定义文本/控件…</span>
+                <span className="text-[11px] font-bold text-slate-500">提取</span>
+                <span className="line-clamp-2 text-[12px] font-medium leading-tight text-slate-400">文件提取/自定义文本/控件…</span>
               </div>
             </div>
           </div>
@@ -2157,7 +2557,7 @@ function ReportTab({
                   <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-purple-600 text-[12px] font-bold text-white shadow-sm">
                     {idx + 1}
                   </span>
-                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5 pr-5">
                     <div className="flex items-center justify-between">
                       <span className="text-[10px] font-bold text-violet-600">{typeLabel}</span>
                       <span
@@ -2168,6 +2568,20 @@ function ReportTab({
                     </div>
                     <span className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-700">{item.detail}</span>
                   </div>
+                  {onRemoveExtractStep && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (window.confirm(`确定要删除这个${typeLabel}步骤吗？`)) {
+                          onRemoveExtractStep(item.id, item.kind);
+                        }
+                      }}
+                      className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-5 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
+                      title="删除"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  )}
                 </div>
               );
             })}
@@ -2181,14 +2595,29 @@ function ReportTab({
           <MousePointerClick className="h-3.5 w-3.5" />
           收尾点击
           <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold text-amber-600">{postClickMarks.length}</span>
+          {fieldSetupMode && onStartAddPostClick && !running && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onStartAddPostClick(); }}
+              className={[
+                "ml-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
+                postClickActive
+                  ? "bg-red-500 text-white shadow-sm animate-pulse"
+                  : "bg-amber-100 text-amber-600 hover:bg-amber-200 hover:text-amber-700",
+              ].join(" ")}
+              title={postClickActive ? "收尾点击添加中（再次点击关闭）" : "添加收尾点击（提交按钮等）"}
+            >
+              <Plus className="h-2.5 w-2.5" />
+              添加收尾点击
+            </button>
+          )}
         </div>
         {postClickMarks.length === 0 ? (
           <div className="flex gap-2 pt-1.5">
-            <div className="flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-xl border-2 border-dashed border-slate-200 bg-white/50 px-2.5 py-2 opacity-50">
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-200 text-[12px] font-bold text-slate-400">?</span>
+            <div className="flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/80 px-2.5 py-2">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-200 text-[13px] font-bold text-slate-500">?</span>
               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="text-[10px] font-bold text-slate-300">点击</span>
-                <span className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-300">点击提交按钮等…</span>
+                <span className="text-[11px] font-bold text-slate-500">点击</span>
+                <span className="line-clamp-2 text-[12px] font-medium leading-tight text-slate-400">点击提交按钮等…</span>
               </div>
             </div>
           </div>
@@ -2232,20 +2661,22 @@ function ReportTab({
     <div className="flex h-full flex-col p-1.5" ref={containerRef}>
       {/* 大屏：可拖拽三栏；小屏：垂直堆叠。聚焦模式通过 flex-grow + opacity 过渡实现丝滑动画 */}
       <div className="min-h-0 flex-1 flex flex-col gap-1.5 lg:flex-row lg:gap-0 lg:h-full">
-        {/* 字段对比卡片 —— 最左侧，向右展开/向左回收（纯 flex-basis 过渡，max-w-0 不可过渡会 snap） */}
+        {/* 字段对比卡片 —— 最左侧，向右展开/向左回收 */}
         <div
           className={[
             "flex max-h-[55vh] flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full",
-            "transition-all duration-500 ease-in-out",
-            isFieldFocus ? "flex-1" : isAll ? "" : "lg:border-0 lg:px-0 lg:mx-0",
+            "transition-[flex-basis,opacity,max-width,grow] duration-300 ease-out",
+            isFieldFocus ? "flex-1" : (isAll || isFieldDocFocus) ? "" : "lg:border-0 lg:px-0 lg:mx-0",
           ].join(" ")}
           style={{
-            flexBasis: isFieldFocus ? undefined : (isAll ? `${leftWidth}%` : "0%"),
+            flexBasis: isFieldFocus ? undefined : (isAll || isFieldDocFocus) ? `${leftWidth}%` : "0%",
             flexShrink: 0,
             flexGrow: isFieldFocus ? 1 : 0,
             opacity: (isDocFocus || isDocExtractFocus) ? 0 : 1,
             maxWidth: isDocExtractFocus ? 0 : undefined,
             pointerEvents: isDocExtractFocus ? "none" : undefined,
+            willChange: "opacity, max-width",
+            contain: "layout style",
           }}
         >
           <div className="flex shrink-0 items-center gap-1.5 border-b border-slate-200 bg-slate-50/80 px-2 py-1 text-[11px] font-semibold text-slate-700">
@@ -2265,14 +2696,47 @@ function ReportTab({
                 ].join(" ")}
                 title={running ? "运行中…" : hasCheckedBatch ? "保存当前步骤配置到这批勾选的卡片" : "请先在左侧勾选一批卡片（点第一张定起点，点第二张定范围）"}
               >
+                <CheckCircle2 className="h-2.5 w-2.5" />
+                设置卡片流
+              </button>
+            )}
+            {onRequestSaveLoop && fieldSetupMode && (
+              <button
+                onClick={() => { if (!running) onRequestSaveLoop?.(); }}
+                disabled={running || !canSaveLoop}
+                className={[
+                  "ml-auto flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold transition-all",
+                  (running || !canSaveLoop)
+                    ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                    : "bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm",
+                ].join(" ")}
+                title="命名保存为 LOOP 模板"
+              >
                 <Save className="h-2.5 w-2.5" />
-                保存这批
+                保存为LOOP
+              </button>
+            )}
+            {onDirectRun && fieldSetupMode && (
+              <button
+                onClick={() => { if (!running) onDirectRun?.(); }}
+                disabled={running || !canSaveLoop}
+                className={[
+                  "ml-1 flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold transition-all",
+                  (running || !canSaveLoop)
+                    ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                    : "bg-brand-600 text-white hover:bg-brand-700 shadow-sm",
+                ].join(" ")}
+                title="直接执行当前配置（临时运行，不保存）"
+              >
+                <Play className="h-2.5 w-2.5" />
+                执行
               </button>
             )}
             <button
               onClick={() => setFieldSetupMode((v) => !v)}
               className={[
-                "ml-auto flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
+                "flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
+                fieldSetupMode ? "ml-1" : "ml-auto",
                 fieldSetupMode
                   ? "bg-indigo-100 text-indigo-700"
                   : "text-slate-400 hover:bg-slate-100 hover:text-slate-600",
@@ -2297,10 +2761,10 @@ function ReportTab({
         <div
           className={[
             "group relative hidden shrink-0 cursor-col-resize items-center justify-center lg:flex",
-            "transition-opacity duration-300",
-            (isAll && !isWidgetMode) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
+            "transition-opacity duration-200",
+            ((isAll && !isWidgetMode) || isFieldDocFocus) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
           ].join(" ")}
-          style={{ width: (isAll && !isWidgetMode) ? 6 : 0 }}
+          style={{ width: ((isAll && !isWidgetMode) || isFieldDocFocus) ? 6 : 0 }}
           onMouseDown={onMouseDown("left")}
         >
           <div className="h-full w-px bg-slate-200 transition-colors group-hover:bg-brand-400" />
@@ -2311,8 +2775,8 @@ function ReportTab({
         <div
           className={[
             "relative flex max-h-[55vh] flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full",
-            "transition-all duration-500 ease-in-out",
-            (isDocFocus || isDocExtractFocus) ? "flex-1" : (isAll && !isWidgetMode) ? "" : "lg:border-0 lg:px-0 lg:mx-0",
+            "transition-[flex-basis,opacity,max-width] duration-300 ease-out",
+            (isDocFocus || isDocExtractFocus || isFieldDocFocus) ? "flex-1" : (isAll && !isWidgetMode) ? "" : "lg:border-0 lg:px-0 lg:mx-0",
           ].join(" ")}
           style={{
             flexBasis: isFieldFocus || isWidgetMode
@@ -2321,14 +2785,18 @@ function ReportTab({
                 ? undefined
                 : isDocExtractFocus
                   ? "50%"
-                  : isAll
-                    ? (showExtract ? `${midWidth}%` : undefined)
-                    : "0%",
+                  : isFieldDocFocus
+                    ? undefined
+                    : isAll
+                      ? (showExtract ? `${midWidth}%` : undefined)
+                      : "0%",
             flexShrink: 0,
-            flexGrow: (isDocFocus || isDocExtractFocus || (isAll && !isWidgetMode && !showExtract)) ? 1 : 0,
+            flexGrow: (isDocFocus || isDocExtractFocus || isFieldDocFocus || (isAll && !isWidgetMode && !showExtract)) ? 1 : 0,
             opacity: isWidgetMode ? 0 : 1,
             maxWidth: isWidgetMode ? 0 : undefined,
             pointerEvents: isWidgetMode ? "none" : undefined,
+            willChange: "opacity, max-width",
+            contain: "layout style",
           }}
         >
           {/* 展开/收起「提取元素」面板按钮 —— 仅步骤设置模式下显示（结果模式始终展开三栏），贴在文件处理面板右边缘外侧 */}
@@ -2411,7 +2879,7 @@ function ReportTab({
         <div
           className={[
             "group relative hidden shrink-0 cursor-col-resize items-center justify-center lg:flex",
-            "transition-opacity duration-300",
+            "transition-opacity duration-200",
             (showExtract && isAll && !isWidgetMode) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
           ].join(" ")}
           style={{ width: (showExtract && isAll && !isWidgetMode) ? 6 : 0 }}
@@ -2425,7 +2893,7 @@ function ReportTab({
         <div
           className={[
             "flex max-h-[55vh] min-w-0 flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full",
-            "transition-all duration-500 ease-in-out",
+            "transition-[flex-basis,opacity,max-width] duration-300 ease-out",
             showExtract ? "flex-1" : "lg:border-0 lg:px-0 lg:mx-0",
           ].join(" ")}
           style={{
@@ -2440,6 +2908,8 @@ function ReportTab({
                     : showExtract ? "30%" : "0%",
             flexShrink: 0,
             flexGrow: showExtract ? 1 : 0,
+            willChange: "opacity, max-width",
+            contain: "layout style",
           }}
         >
           <div className="flex shrink-0 items-center gap-1 border-b border-violet-200 bg-violet-50/60 px-1.5 py-1 text-[11px] font-semibold text-violet-800">
@@ -2451,56 +2921,19 @@ function ReportTab({
               </span>
             )}
             {extractSetupMode && (
-              <div className="ml-3 flex shrink-0 items-center gap-1 rounded-lg bg-violet-100/70 p-0.5 ring-1 ring-violet-200/80">
-                {docFieldsContent !== undefined && (
-                  <button
-                    onClick={() => switchCategory("doc")}
-                    className={[
-                      "flex items-center gap-0.5 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
-                      currentCategory === "doc"
-                        ? "bg-violet-600 text-white shadow-sm"
-                        : "bg-white/80 text-violet-600 hover:bg-white ring-1 ring-violet-200/50",
-                    ].join(" ")}
-                    title="文件提取"
-                  >
-                    <FileText className="h-3 w-3 shrink-0" />
-                    <span className="truncate">文件提取</span>
-                    {(extractCounts?.doc ?? 0) > 0 && (
-                      <span
-                        className={`ml-0.5 inline-flex h-3.5 min-w-3.5 shrink-0 items-center justify-center rounded-full px-0.5 text-[8px] font-bold ${
-                          currentCategory === "doc" ? "bg-white text-violet-700" : "bg-violet-500 text-white"
-                        }`}
-                      >
-                        {extractCounts?.doc ?? 0}
-                      </span>
-                    )}
-                  </button>
-                )}
-                {customTextContent !== undefined && (
-                  <button
-                    onClick={() => switchCategory("custom")}
-                    className={[
-                      "flex items-center gap-0.5 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
-                      currentCategory === "custom"
-                        ? "bg-violet-600 text-white shadow-sm"
-                        : "bg-white/80 text-violet-600 hover:bg-white ring-1 ring-violet-200/50",
-                    ].join(" ")}
-                    title="自定义文本"
-                  >
-                    <Type className="h-3 w-3 shrink-0" />
-                    <span className="truncate">自定义文本</span>
-                    {(extractCounts?.custom ?? 0) > 0 && (
-                      <span
-                        className={`ml-0.5 inline-flex h-3.5 min-w-3.5 shrink-0 items-center justify-center rounded-full px-0.5 text-[8px] font-bold ${
-                          currentCategory === "custom" ? "bg-white text-violet-700" : "bg-violet-500 text-white"
-                        }`}
-                      >
-                        {extractCounts?.custom ?? 0}
-                      </span>
-                    )}
-                  </button>
-                )}
-                {(widgetExtractContent || widgetTabs.length > 0) && (
+              <div className="ml-3 flex shrink-0 items-center gap-1">
+                {/* 统一模式：只显示来源图例 + 数量，不显示 doc/custom 切换 TAB */}
+                <div className="flex items-center gap-1.5 rounded-md bg-violet-100/70 px-2 py-0.5 text-[9px] font-medium ring-1 ring-violet-200/80">
+                  <span className="inline-flex items-center gap-0.5 text-violet-600">
+                    <span className="h-2 w-2 rounded-full bg-violet-500" />
+                    文件{(extractCounts?.doc ?? 0) > 0 && <b>{extractCounts?.doc}</b>}
+                  </span>
+                  <span className="inline-flex items-center gap-0.5 text-sky-600">
+                    <span className="h-2 w-2 rounded-full bg-sky-500" />
+                    自定义{(extractCounts?.custom ?? 0) > 0 && <b>{extractCounts?.custom}</b>}
+                  </span>
+                </div>
+                {(widgetExtractContent || widgetTabs.length > 0) && !splitWidgetMode && (
                   <button
                     onClick={() => switchCategory("widget")}
                     className={[
@@ -2526,6 +2959,52 @@ function ReportTab({
                 )}
               </div>
             )}
+            {extractSetupMode && !splitWidgetMode && onSwitchStepMode && (
+              <div className="ml-2 flex shrink-0 items-center gap-0 rounded-md bg-violet-100/70 p-0.5 ring-1 ring-violet-200/80">
+                <button
+                  onClick={() => onSwitchStepMode("review")}
+                  className={[
+                    "flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-all",
+                    addingStepMode === "review"
+                      ? "bg-red-500 text-white shadow-sm animate-pulse"
+                      : "text-violet-600 hover:bg-white/60",
+                  ].join(" ")}
+                  title={addingStepMode === "review" ? "审核模式激活中（再次点击关闭）" : "审核模式：字段用于右侧网页与左侧Excel核对"}
+                >
+                  <ArrowLeft className="h-2.5 w-2.5" />
+                  审核
+                </button>
+                <div className="h-3.5 w-px bg-violet-300/70" />
+                <button
+                  onClick={() => onSwitchStepMode("entry")}
+                  className={[
+                    "flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-all",
+                    addingStepMode === "entry"
+                      ? "bg-red-500 text-white shadow-sm animate-pulse"
+                      : "text-violet-600 hover:bg-white/60",
+                  ].join(" ")}
+                  title={addingStepMode === "entry" ? "录入模式激活中（再次点击关闭）" : "录入模式：字段用于从左侧Excel填入右侧网页"}
+                >
+                  <MoveRight className="h-2.5 w-2.5" />
+                  录入
+                </button>
+              </div>
+            )}
+            {extractSetupMode && (
+              <button
+                onClick={() => setSplitWidgetMode((v) => !v)}
+                className={[
+                  "ml-1 flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors",
+                  splitWidgetMode
+                    ? "bg-red-500 text-white shadow-sm animate-pulse"
+                    : "text-violet-500/70 hover:bg-violet-100 hover:text-violet-700",
+                ].join(" ")}
+                title={splitWidgetMode ? "取消左右分栏" : "左右分栏：左侧显示文件/自定义文本，右侧显示控件提取"}
+              >
+                <Columns2 className="h-3 w-3" />
+                {splitWidgetMode ? "合并" : "分栏"}
+              </button>
+            )}
             <button
               onClick={() => setExtractSetupMode((v) => !v)}
               className={[
@@ -2541,86 +3020,206 @@ function ReportTab({
             </button>
           </div>
           <div
-            ref={extractScrollRef}
-            className="min-h-0 flex-1 min-w-[200px] overflow-y-auto overflow-x-hidden p-1.5 scroll-smooth"
+            ref={splitContainerRef}
+            className="min-h-0 flex-1 flex min-w-[200px] overflow-hidden"
           >
             {extractSetupMode ? (
-              currentCategory === "doc" ? (
-                docFieldsContent !== undefined ? (
-                  docFieldsContent || (
-                    <div className="flex min-h-[100px] flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-violet-200/70 bg-violet-50/20 py-4 text-center text-[10px] text-slate-400">
-                      <FileText className="h-5 w-5 text-violet-200" />
-                      <div className="text-violet-500">暂无文件提取字段</div>
-                      <div>在文件处理面板识别文件后，勾选字段送到这里</div>
-                    </div>
-                  )
-                ) : null
-              ) : currentCategory === "custom" ? (
-                customTextContent !== undefined ? (
-                  customTextContent || (
-                    <div className="flex min-h-[100px] flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-violet-200/70 bg-violet-50/20 py-4 text-center text-[10px] text-slate-400">
-                      <Type className="h-5 w-5 text-violet-200" />
-                      <div className="text-violet-500">点击「自定义文本」添加临时字段</div>
-                      <div>补充 Excel 和网页上都没有的信息</div>
-                    </div>
-                  )
-                ) : null
-              ) : currentCategory === "widget" ? (
-                (widgetExtractContent || widgetTabs.length > 0) ? (
+              splitWidgetMode ? (
+                /* ===== 左右分栏模式：左侧文件/自定义文本，右侧控件提取 ===== */
+                <>
+                  {/* 左侧：统一字段面板（文件提取紫色 + 自定义文本蓝色，不再切换 TAB） */}
                   <div
-                    ref={(el) => { extractSectionRefs.current["widget"] = el; }}
-                    className="flex flex-col gap-1.5"
+                    className="flex min-h-0 min-w-0 flex-col overflow-hidden"
+                    style={{ width: `${splitLeftPct}%` }}
                   >
-                    <div className="flex shrink-0 items-center gap-1 overflow-x-auto rounded-md bg-violet-50/50 px-1 py-1">
-                      {widgetTabs.map((wt, wtIdx) => {
-                        const active = activeWidgetTabId === wt.id;
-                        const WidgetIcon = wt.kind === "calendar" ? CalendarDays : List;
-                        const dotColor = wt.isBound
-                          ? "bg-emerald-500 text-white"
-                          : wt.isDraft
-                            ? "bg-violet-500 text-white animate-pulse"
-                            : "bg-violet-200 text-violet-700";
-                        return (
-                          <button
-                            key={wt.id}
-                            onClick={() => scrollToWidgetTab(wt.id)}
-                            className={[
-                              "flex min-w-0 shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium transition-all",
-                              active
-                                ? "bg-violet-600 text-white shadow-sm"
-                                : wt.isDraft
-                                  ? "bg-violet-100 text-violet-700 hover:bg-violet-200 ring-1 ring-violet-300"
-                                  : "bg-white text-violet-600 hover:bg-violet-100",
-                            ].join(" ")}
-                            title={`${wt.kind === "calendar" ? "日历控件" : "选项控件"}：${wt.label}`}
-                          >
-                            <span
-                              className={`inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full text-[8px] font-bold ${
-                                active ? "bg-white/25 text-white" : dotColor
-                              }`}
-                            >
-                              {wtIdx + 1}
-                            </span>
-                            <WidgetIcon className="h-3 w-3 shrink-0" />
-                            <span className="truncate max-w-[80px]">{wt.label}</span>
-                            {wt.isDraft && (
-                              <span className="text-[8px] opacity-70">·新</span>
-                            )}
-                          </button>
-                        );
-                      })}
+                    {/* 左侧标题条：来源图例 */}
+                    <div className="flex shrink-0 items-center gap-2 border-b border-violet-100 bg-violet-50/40 px-2 py-0.5">
+                      <span className="inline-flex items-center gap-1 text-[9px] font-medium text-violet-600">
+                        <span className="h-2 w-2 rounded-full bg-violet-500" />
+                        文件{(extractCounts?.doc ?? 0) > 0 && <b className="text-[9px]">{extractCounts?.doc}</b>}
+                      </span>
+                      <span className="inline-flex items-center gap-1 text-[9px] font-medium text-sky-600">
+                        <span className="h-2 w-2 rounded-full bg-sky-500" />
+                        自定义{(extractCounts?.custom ?? 0) > 0 && <b className="text-[9px]">{extractCounts?.custom}</b>}
+                      </span>
                     </div>
-                    {widgetExtractContent || (
-                      <div className="flex min-h-[100px] flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-violet-200/70 bg-violet-50/20 py-4 text-center text-[10px] text-slate-400">
-                        <MousePointerClick className="h-5 w-5 text-violet-200" />
-                        <div className="text-violet-500">暂无提取的控件</div>
-                        <div>点击上方「+ 选项控件」或「日历控件」快照</div>
-                      </div>
-                    )}
+                    <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
+                      {unifiedFieldsContent}
+                    </div>
                   </div>
-                ) : null
-              ) : null
-            ) : extractedContent}
+                  {/* 拖拽分隔条 */}
+                  <div
+                    className="group relative flex w-1.5 shrink-0 cursor-col-resize items-center justify-center"
+                    onMouseDown={onSplitDividerMouseDown}
+                  >
+                    <div className="h-full w-px bg-violet-200 transition-colors group-hover:bg-violet-400" />
+                    <div className="absolute h-8 w-1 rounded-full bg-violet-300 opacity-0 transition-opacity group-hover:opacity-100" />
+                  </div>
+                  {/* 右侧：控件提取 */}
+                  <div
+                    className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-l border-violet-100"
+                  >
+                    <div className="flex shrink-0 items-center gap-1 border-b border-violet-100 bg-violet-50/40 px-1 py-0.5">
+                      <span className="flex items-center gap-0.5 rounded bg-violet-600 px-1.5 py-0.5 text-[9px] font-medium text-white shadow-sm">
+                        <MousePointerClick className="h-2.5 w-2.5 shrink-0" />
+                        控件提取
+                        {widgetTabs.length > 0 && (
+                          <span className="ml-0.5 inline-flex h-3 min-w-3 shrink-0 items-center justify-center rounded-full bg-white/25 px-0.5 text-[8px] font-bold text-white">
+                            {widgetTabs.length}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                    <div
+                      ref={(el) => { extractSectionRefs.current["widget"] = el; extractScrollRef.current = el; }}
+                      className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-1.5 scroll-smooth"
+                    >
+                      <div className="flex flex-col gap-1.5">
+                        {widgetTabs.length > 0 && (
+                          <div className="flex shrink-0 items-center gap-1 overflow-x-auto rounded-md bg-violet-50/50 px-1 py-1">
+                            {widgetTabs.map((wt, wtIdx) => {
+                              const active = activeWidgetTabId === wt.id;
+                              const WidgetIcon = wt.kind === "calendar" ? CalendarDays : List;
+                              const dotColor = wt.isBound
+                                ? "bg-emerald-500 text-white"
+                                : wt.isDraft
+                                  ? "bg-violet-500 text-white animate-pulse"
+                                  : "bg-violet-200 text-violet-700";
+                              return (
+                                <button
+                                  key={wt.id}
+                                  onClick={() => scrollToWidgetTab(wt.id)}
+                                  className={[
+                                    "flex min-w-0 shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium transition-all",
+                                    active
+                                      ? "bg-violet-600 text-white shadow-sm"
+                                      : wt.isDraft
+                                        ? "bg-violet-100 text-violet-700 hover:bg-violet-200 ring-1 ring-violet-300"
+                                        : "bg-white text-violet-600 hover:bg-violet-100",
+                                  ].join(" ")}
+                                  title={`${wt.kind === "calendar" ? "日历控件" : "选项控件"}：${wt.label}`}
+                                >
+                                  <span
+                                    className={`inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full text-[8px] font-bold ${
+                                      active ? "bg-white/25 text-white" : dotColor
+                                    }`}
+                                  >
+                                    {wtIdx + 1}
+                                  </span>
+                                  <WidgetIcon className="h-3 w-3 shrink-0" />
+                                  <span className="truncate max-w-[80px]">{wt.label}</span>
+                                  {wt.isDraft && (
+                                    <span className="text-[8px] opacity-70">·新</span>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                        {widgetExtractContent || (
+                          <div className="flex min-h-[100px] flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-violet-200/70 bg-violet-50/20 py-4 text-center text-[10px] text-slate-400">
+                            <MousePointerClick className="h-5 w-5 text-violet-200" />
+                            <div className="text-violet-500">暂无提取的控件</div>
+                            {onAddWidget ? (
+                              <div className="flex items-center gap-1">
+                                <button
+                                  onClick={() => onAddWidget("option")}
+                                  className="rounded bg-violet-500 px-2 py-0.5 text-[9px] font-medium text-white transition-colors hover:bg-violet-600"
+                                >
+                                  + 选项控件
+                                </button>
+                                <button
+                                  onClick={() => onAddWidget("calendar")}
+                                  className="rounded bg-violet-400 px-2 py-0.5 text-[9px] font-medium text-white transition-colors hover:bg-violet-500"
+                                >
+                                  + 日历控件
+                                </button>
+                              </div>
+                            ) : (
+                              <div>点击上方「+ 选项控件」或「日历控件」快照</div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                /* ===== 普通模式：非控件时显示统一字段面板，控件模式时显示控件提取 ===== */
+                <div
+                  ref={extractScrollRef}
+                  className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden scroll-smooth"
+                >
+                  {currentCategory === "widget" ? (
+                    <div className="p-1.5">
+                      {(widgetExtractContent || widgetTabs.length > 0) ? (
+                        <div
+                          ref={(el) => { extractSectionRefs.current["widget"] = el; }}
+                          className="flex flex-col gap-1.5"
+                        >
+                          <div className="flex shrink-0 items-center gap-1 overflow-x-auto rounded-md bg-violet-50/50 px-1 py-1">
+                            {widgetTabs.map((wt, wtIdx) => {
+                              const active = activeWidgetTabId === wt.id;
+                              const WidgetIcon = wt.kind === "calendar" ? CalendarDays : List;
+                              const dotColor = wt.isBound
+                                ? "bg-emerald-500 text-white"
+                                : wt.isDraft
+                                  ? "bg-violet-500 text-white animate-pulse"
+                                  : "bg-violet-200 text-violet-700";
+                              return (
+                                <button
+                                  key={wt.id}
+                                  onClick={() => scrollToWidgetTab(wt.id)}
+                                  className={[
+                                    "flex min-w-0 shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium transition-all",
+                                    active
+                                      ? "bg-violet-600 text-white shadow-sm"
+                                      : wt.isDraft
+                                        ? "bg-violet-100 text-violet-700 hover:bg-violet-200 ring-1 ring-violet-300"
+                                        : "bg-white text-violet-600 hover:bg-violet-100",
+                                  ].join(" ")}
+                                  title={`${wt.kind === "calendar" ? "日历控件" : "选项控件"}：${wt.label}`}
+                                >
+                                  <span
+                                    className={`inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full text-[8px] font-bold ${
+                                      active ? "bg-white/25 text-white" : dotColor
+                                    }`}
+                                  >
+                                    {wtIdx + 1}
+                                  </span>
+                                  <WidgetIcon className="h-3 w-3 shrink-0" />
+                                  <span className="truncate max-w-[80px]">{wt.label}</span>
+                                  {wt.isDraft && (
+                                    <span className="text-[8px] opacity-70">·新</span>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {widgetExtractContent || (
+                            <div className="flex min-h-[100px] flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-violet-200/70 bg-violet-50/20 py-4 text-center text-[10px] text-slate-400">
+                              <MousePointerClick className="h-5 w-5 text-violet-200" />
+                              <div className="text-violet-500">暂无提取的控件</div>
+                              <div>点击上方「+ 选项控件」或「日历控件」快照</div>
+                            </div>
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    /* 非控件模式：显示统一字段面板（文件+自定义文本） */
+                    unifiedFieldsContent
+                  )}
+                </div>
+              )
+            ) : (
+              <div
+                ref={extractScrollRef}
+                className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-1.5 scroll-smooth"
+              >
+                {extractedContent}
+              </div>
+            )}
           </div>
         </div>
       </div>
