@@ -1,7 +1,7 @@
 /**
  * 点击展开型控件脚本库（选项控件 / 日历控件）
  *
- * 所有函数返回注入网页执行的 JS 脚本字符串，通过 viewExecuteJS 在右侧 BrowserView 中运行。
+ * 所有函数返回注入网页执行的 JS 脚本字符串，通过 viewExecuteJS 在对应侧 BrowserView 中运行。
  * 脚本均为自包含（内嵌辅助函数），异步脚本返回 Promise（Electron executeJavaScript 自动 await）。
  */
 import type { CalendarControls, WidgetDef, WidgetOption } from "../types";
@@ -215,6 +215,25 @@ const COMMON = `
   function __wsCollectOptionEls(panel) {
     var out = [];
     var seen = {};
+    function push(el, text) {
+      if (seen[text]) return;
+      seen[text] = 1;
+      out.push({ el: el, text: text });
+    }
+    // 优先：直接子元素行级收集（.select-dropdown > div / ul > li 等"每行一个选项"结构）
+    // 覆盖候选选择器不含 <div> 的场景（最常见的自定义下拉）
+    var kids = panel.children;
+    for (var i = 0; i < kids.length; i++) {
+      var el = kids[i];
+      if (el.nodeType !== 1) continue;
+      if (!__wsVisible(el)) continue;
+      var t = (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ');
+      if (!t || t.length > 80) continue;
+      push(el, t);
+    }
+    if (out.length >= 2) return out;
+    // 兜底：语义选项选择器（叶子级），适配无语义行级 class 的结构
+    out = []; seen = {};
     var SEL = '[role="option"],[role="menuitem"],[role="radio"],[role="button"],li,[class*="item"],[class*="option"],[class*="choice"],[class*="select"],a,button,label';
     var els;
     try { els = panel.querySelectorAll(SEL); } catch (e) { return out; }
@@ -224,10 +243,8 @@ const COMMON = `
       // 只取叶子级：不包含其他候选子项
       try { if (el.querySelector(SEL)) continue; } catch (e) {}
       var text = (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ');
-      if (!text || text.length > 60) continue;
-      if (seen[text]) continue;
-      seen[text] = 1;
-      out.push({ el: el, text: text });
+      if (!text || text.length > 80) continue;
+      push(el, text);
     }
     return out;
   }
@@ -485,6 +502,113 @@ export function buildCalendarPanelFromSeedScript(seedSelector: string): string {
   })();`;
 }
 
+/**
+ * 选项控件手动面板兜底：从用户点选的种子元素（下拉面板内的选项/区域）识别选项面板容器，
+ * 收集面板内所有选项（镜像下拉的每一行）。用于自动快照未能检测到面板（程序化点击未展开 / 面板无 popup 特征）的场景。
+ * 返回 { ok, panelSelector, options } 或 { ok: false, reason }
+ */
+export function buildOptionPanelFromSeedScript(seedSelector: string, triggerSelector: string): string {
+  return `
+  ${DEEP_QUERY}
+  ${COMMON}
+  (function () {
+    var seed = null;
+    try { seed = __cinsideDeepQuery(${JSON.stringify(sanitize(seedSelector))}); } catch (e) { seed = null; }
+    if (!seed) return { ok: false, reason: 'seed_not_found' };
+
+    // 收集容器内的选项行：优先按"同辈兄弟行"（每个可见、有短文本的直接子元素=一行选项）
+    // 这贴合"每一行一个选项"的下拉结构（.select-dropdown > div / ul > li），避免把多行合并成一个选项
+    function collectOptions(container) {
+      var out = [];
+      var seen = {};
+      function push(el, text) {
+        if (seen[text]) return;
+        seen[text] = 1;
+        out.push({ el: el, text: text });
+      }
+      // 策略1：直接子元素（行级）
+      var kids = container.children;
+      for (var i = 0; i < kids.length; i++) {
+        var el = kids[i];
+        if (el.nodeType !== 1) continue;
+        if (!__wsVisible(el)) continue;
+        var t = (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ');
+        if (!t || t.length > 80) continue;
+        push(el, t);
+      }
+      if (out.length >= 2) return out;
+      // 策略2：语义选项选择器（叶子级，兜底无统一行级 class 的结构）
+      out = []; seen = {};
+      var SEL_STD = '[role="option"],[role="menuitem"],[role="radio"],[role="button"],li,[class*="item"],[class*="option"],[class*="choice"],[class*="select"],a,button,label';
+      var els;
+      try { els = container.querySelectorAll(SEL_STD); } catch (e) { els = []; }
+      for (var j = 0; j < els.length; j++) {
+        var el2 = els[j];
+        if (!__wsVisible(el2)) continue;
+        try { if (el2.querySelector(SEL_STD)) continue; } catch (e) {}
+        var t2 = (el2.innerText || el2.textContent || '').trim().replace(/\\s+/g, ' ');
+        if (!t2 || t2.length > 80) continue;
+        push(el2, t2);
+      }
+      return out;
+    }
+
+    // 1) 种子 → 选项行：种子本身可能是某一行的内部元素，或面板空白处。
+    //    先找种子的"行元素"（与兄弟元素同结构、有短文本的可见元素），行元素=面板内一个选项。
+    function findOptionRow(el) {
+      // 种子自身及其祖先（最多向上 4 层），找第一个"有兄弟行"的元素作为行
+      var cur = el;
+      var guard = 0;
+      while (cur && cur.parentElement && guard++ < 4) {
+        var p = cur.parentElement;
+        // 父级有 ≥2 个"同标签、有短文本"的可见子元素 → cur 是其中一行
+        var kids = p.children;
+        var sameTag = 0;
+        for (var i = 0; i < kids.length; i++) {
+          var k = kids[i];
+          if (k.nodeType !== 1 || !__wsVisible(k)) continue;
+          if (k.nodeName !== cur.nodeName) continue;
+          var kt = (k.innerText || k.textContent || '').trim().replace(/\\s+/g, ' ');
+          if (kt && kt.length <= 80) sameTag++;
+        }
+        if (sameTag >= 2) return cur;
+        cur = p;
+      }
+      return null;
+    }
+
+    // 2) 面板识别：优先取"行元素的父级"（最贴近的选项列表容器），否则向上找含 ≥2 行的容器
+    var row = findOptionRow(seed);
+    var panel = null;
+    if (row && row.parentElement && collectOptions(row.parentElement).length >= 2) {
+      panel = row.parentElement;
+    } else {
+      var cur2 = seed;
+      var guard2 = 0;
+      while (cur2 && guard2++ < 8) {
+        if (collectOptions(cur2).length >= 2) { panel = cur2; break; }
+        cur2 = cur2.parentElement;
+      }
+    }
+    if (!panel) return { ok: false, reason: 'not_option_panel' };
+
+    var panelSel = __wsBuildSelector(panel);
+    if (!panelSel) panelSel = 'body';
+
+    // 3) 镜像面板内所有行 → options（选择器为面板相对路径，执行时用 deepQuery 直接定位）
+    var finalItems = collectOptions(panel);
+    var options = [];
+    for (var i = 0; i < finalItems.length && i < 100; i++) {
+      var csel = __wsChildSelector(panelSel, panel, finalItems[i].el);
+      options.push({ text: finalItems[i].text, selector: csel || '' });
+    }
+    if (options.length < 1) return { ok: false, reason: 'options_empty' };
+
+    // 不自动关闭面板：用户手动点开的下拉保持打开，便于对照确认每行选项是否正确
+    return { ok: true, panelSelector: panelSel, options: options };
+  })();`;
+}
+
 /** 关闭控件面板 */
 export function buildWidgetCloseScript(triggerSelector: string, panelSelector?: string): string {
   return `
@@ -697,8 +821,14 @@ export function buildOptionSelectScript(widget: WidgetDef, targetValue: string):
     var tn = __wsNorm(TARGET);
     var best = null;
     var i2;
+    // 别名展开：斜杠分隔多个触发词（如 FEMALE/F/woman），任一精确命中即匹配
+    function aliasWords(a) { return (a || '').split('/').map(function (x) { return __wsNorm(x); }).filter(function (x) { return !!x; }); }
     // 1) 别名精确
-    for (i2 = 0; i2 < items.length; i2++) { if (items[i2].alias && __wsNorm(items[i2].alias) === tn) { best = items[i2]; break; } }
+    for (i2 = 0; i2 < items.length; i2++) {
+      var aw = aliasWords(items[i2].alias);
+      for (var ai = 0; ai < aw.length; ai++) { if (aw[ai] === tn) { best = items[i2]; break; } }
+      if (best) break;
+    }
     // 2) 文本精确
     if (!best) { for (i2 = 0; i2 < items.length; i2++) { if (__wsNorm(items[i2].text) === tn) { best = items[i2]; break; } } }
     // 3) 智能包含（目标长度>=2，避免单字误匹配）
@@ -1582,8 +1712,14 @@ export function buildInlineOptionSelectScript(widget: WidgetDef, targetValue: st
     var tn = __wsNorm(TARGET);
     var best = null;
     var i2;
+    // 别名展开：斜杠分隔多个触发词（如 FEMALE/F/woman），任一精确命中即匹配
+    function aliasWords(a) { return (a || '').split('/').map(function (x) { return __wsNorm(x); }).filter(function (x) { return !!x; }); }
     // 1) 别名精确
-    for (i2 = 0; i2 < items.length; i2++) { if (items[i2].alias && __wsNorm(items[i2].alias) === tn) { best = items[i2]; break; } }
+    for (i2 = 0; i2 < items.length; i2++) {
+      var aw = aliasWords(items[i2].alias);
+      for (var ai = 0; ai < aw.length; ai++) { if (aw[ai] === tn) { best = items[i2]; break; } }
+      if (best) break;
+    }
     // 2) 文本精确
     if (!best) { for (i2 = 0; i2 < items.length; i2++) { if (__wsNorm(items[i2].text) === tn) { best = items[i2]; break; } } }
     // 3) 智能包含
