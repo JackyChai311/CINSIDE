@@ -41,6 +41,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .empty-state{text-align:center;padding:48px 24px;color:#94a3b8}
 .empty-state .ico{font-size:48px;margin-bottom:12px;opacity:.5}
 
+/* 搜索栏 */
+.search-bar{margin-bottom:20px}
+.search-bar input{width:100%;padding:12px 16px;border:1px solid #cbd5e1;border-radius:10px;font-size:15px;background:#fff;transition:all .15s;outline:none;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+.search-bar input:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)}
+.search-results{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-bottom:28px}
+.search-results .draft-card{position:relative}
+.search-results .draft-card .tag{position:absolute;top:14px;right:14px;font-size:11px;padding:3px 10px;border-radius:999px;font-weight:600}
+.tag.draft{background:#fef3c7;color:#92400e}
+.tag.completed{background:#dcfce7;color:#166534}
+
 /* 录入向导 */
 .wizard{display:flex;height:calc(100vh - 0px);background:#f8fafc}
 .wiz-sidebar{width:260px;background:white;border-right:1px solid #e2e8f0;padding:24px 0;flex-shrink:0;display:flex;flex-direction:column}
@@ -147,6 +157,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <h1><span class="logo">🎓</span>大学申请录入系统</h1>
     <button class="btn-primary" onclick="openHelp()">❓ 使用帮助</button>
   </div>
+  <!-- 搜索栏：按姓名 / 护照号查找草稿 / 已提交申请 -->
+  <div class="search-bar">
+    <input type="text" id="searchInput" placeholder="🔍 按姓名 / 护照号搜索学生（草稿 / 已提交）…" oninput="doSearch(this.value)">
+  </div>
+  <div id="searchResults" class="search-results hidden"></div>
   <div class="stats-row">
     <div class="stat-card blue"><div class="label">总申请数</div><div class="value" id="statTotal">0</div></div>
     <div class="stat-card green"><div class="label">已提交</div><div class="value" id="statSubmit">0</div></div>
@@ -270,6 +285,55 @@ function delDraft(id){const d=getDrafts().filter(x=>x.id!==id);setDrafts(d);clos
 function editDraft(id){const drafts=getDrafts(),d=drafts.find(x=>x.id===id);if(!d)return;formData=JSON.parse(JSON.stringify(d.data));curStep=d.step;editId=id;$('homeView').classList.add('hidden');$('wizardView').classList.remove('hidden');renderWizard();startAutoSave()}
 function startNew(){editId=null;curStep=1;formData={};$('homeView').classList.add('hidden');$('wizardView').classList.remove('hidden');renderWizard();startAutoSave()}
 
+// 学生搜索：按姓名 / 护照号匹配草稿箱与已提交
+function doSearch(q){
+  const box=$('searchResults');
+  q=(q||'').trim().toLowerCase();
+  if(!q){box.classList.add('hidden');box.innerHTML='';return}
+  const match=(...vals)=>vals.some(v=>(v||'').toString().toLowerCase().includes(q));
+  const drafts=getDrafts().filter(d=>match(d.data.name,d.data.passportNo));
+  const subs=getSubmitted().filter(s=>match(s.name,s.passportNo));
+  if(drafts.length===0&&subs.length===0){
+    box.innerHTML='<div class="empty-state" style="grid-column:1/-1"><div class="ico">🔎</div><p>未找到姓名或护照号包含 "'+$('searchInput').value.trim()+'" 的学生</p></div>';
+    box.classList.remove('hidden');
+    return;
+  }
+  box.innerHTML=drafts.map(d=>`
+    <div class="draft-card" onclick="viewDraft('${d.id}')">
+      <span class="tag draft">草稿</span>
+      <div class="name">${d.data.name||'未命名'}</div>
+      <div class="meta"><span>🛂 ${d.data.passportNo||'-'}</span></div>
+      <div class="bar"><div class="bar-fill" style="width:${Math.round(d.step/6*100)}%"></div></div>
+      <div class="bar-text">步骤 ${d.step}/6 · ${Math.round(d.step/6*100)}% 完成 · ${new Date(d.savedAt).toLocaleString('zh-CN')}</div>
+    </div>`).join('')
+    + subs.map(s=>`
+    <div class="draft-card" onclick="viewCompleted('${s.id}')">
+      <span class="tag completed">已提交</span>
+      <div class="name">${s.name||'未命名'}</div>
+      <div class="meta"><span>🛂 ${s.passportNo||'-'}</span></div>
+      <div class="bar-text" style="margin-top:16px">✅ 已完成 · ${new Date(s.submittedAt).toLocaleString('zh-CN')}</div>
+    </div>`).join('');
+  box.classList.remove('hidden');
+}
+// 查看已提交申请（只读）
+function viewCompleted(id){
+  const s=getSubmitted().find(x=>x.id===id);if(!s)return;
+  $('modalIcon').textContent='✅';
+  $('modalTitle').textContent='已提交申请 · 查看';
+  $('modalBody').innerHTML=`
+    <div class="draft-preview">
+      <div class="row"><span class="k">学生姓名</span><span class="v">${s.name||'未填写'}</span></div>
+      <div class="row"><span class="k">邮箱</span><span class="v">${s.email||'-'}</span></div>
+      <div class="row"><span class="k">护照号</span><span class="v">${s.passportNo||'-'}</span></div>
+      <div class="row"><span class="k">目标院校</span><span class="v">${s.university||'-'}</span></div>
+      <div class="row"><span class="k">申请专业</span><span class="v">${s.program||'-'}</span></div>
+      <div class="row"><span class="k">入学学期</span><span class="v">${s.semester||'-'}</span></div>
+      <div class="row"><span class="k">提交时间</span><span class="v">${new Date(s.submittedAt).toLocaleString('zh-CN')}</span></div>
+    </div>`;
+  $('modalFoot').innerHTML=`<button class="btn-primary" onclick="closeModal()">知道了</button>`;
+  $('modal').classList.remove('hidden');
+}
+
 // 自动保存
 function startAutoSave(){clearInterval(autoTimer);autoTimer=setInterval(()=>{if(!$('wizardView').classList.contains('hidden')){autoSaveDraft()}},30000)}
 function autoSaveDraft(){const drafts=getDrafts(),now=Date.now();if(editId){let d=drafts.find(x=>x.id===editId);if(d){d.data=JSON.parse(JSON.stringify(formData));d.step=curStep;d.savedAt=now}}else{editId='draft_'+now;drafts.push({id:editId,data:JSON.parse(JSON.stringify(formData)),step:curStep,savedAt:now})}setDrafts(drafts)}
@@ -307,7 +371,9 @@ function renderStep1(){
       </div>
       <div class="form-group"><label>联系电话<span class="req">*</span></label><input type="tel" id="f_phone" value="${formData.phone||''}" placeholder="请输入手机号" oninput="formData.phone=this.value"></div>
       <div class="form-group"><label>电子邮箱<span class="req">*</span></label><input type="email" id="f_email" value="${formData.email||''}" placeholder="请输入邮箱" oninput="formData.email=this.value"></div>
-      <div class="form-group full"><label>通讯地址</label><textarea id="f_addr" placeholder="请输入详细地址" oninput="formData.address=this.value">${formData.address||''}</textarea></div>
+      <div class="form-group"><label>邮编<span class="req">*</span></label><input type="text" id="f_poscode" value="${formData.poscode||''}" placeholder="请输入邮编" oninput="formData.poscode=this.value"></div>
+      <div class="form-group"><label>城市<span class="req">*</span></label><input type="text" id="f_city" value="${formData.city||''}" placeholder="请输入城市" oninput="formData.city=this.value"></div>
+      <div class="form-group full"><label>详细地址<span class="req">*</span></label><input type="text" id="f_addr" value="${formData.address||''}" placeholder="请输入街道门牌号" oninput="formData.address=this.value"></div>
     </div>`;
   if(formData.birth){setTimeout(()=>showCal('f_birth',formData.birth,true),50)}
 }
