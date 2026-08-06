@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Eye, EyeOff, Loader2, Maximize2, Minus, Plus, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, X } from "lucide-react";
+import { Compass, Eye, EyeOff, Loader2, Maximize2, Minus, Plus, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, X } from "lucide-react";
 import { api } from "../api/client";
 import type { AppSettings } from "../types";
 
@@ -20,6 +20,7 @@ const DEFAULTS: AppSettings = {
   browser_use_llm_model: "sensenova-6.7-flash-lite",
   prevent_accidental_close: false,
   ui_scale: 1.0,
+  beginner_mode: true,
 };
 
 export default function SettingsModal({ initial, onClose, onSaved, onScaleChange }: Props) {
@@ -237,6 +238,41 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
                 <p className="mt-0.5 leading-relaxed">
                   开启后，点窗口关闭按钮不会真正退出，而是最小化到系统托盘后台运行。
                   点击托盘图标可恢复窗口，右键托盘选「退出 CINSIDE」可真正退出。
+                </p>
+              </div>
+            </label>
+          </div>
+
+          {/* 进入新手村 */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-700">
+              <Compass className="h-3.5 w-3.5 text-brand-600" />
+              进入新手村
+            </div>
+            <label className="flex cursor-pointer items-start gap-2.5">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.beginner_mode !== false}
+                onClick={() => update({ beginner_mode: settings.beginner_mode === false })}
+                className={[
+                  "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors",
+                  settings.beginner_mode !== false ? "bg-brand-500" : "bg-slate-300",
+                ].join(" ")}
+              >
+                <span
+                  className={[
+                    "inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform",
+                    settings.beginner_mode !== false ? "translate-x-[18px]" : "translate-x-0.5",
+                  ].join(" ")}
+                />
+              </button>
+              <div className="text-xs text-slate-500">
+                <div className="font-medium text-slate-700">
+                  {settings.beginner_mode !== false ? "已开启" : "已关闭"}
+                </div>
+                <p className="mt-0.5 leading-relaxed">
+                  开启时显示步骤仪表引导，按步骤逐步配置；关闭后直接使用字段对比面板，三个功能区常开无需切换，适合熟练用户。
                 </p>
               </div>
             </label>
