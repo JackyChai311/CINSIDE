@@ -12,17 +12,25 @@ import {
 } from "../lib/flowGraph";
 import { saveSkill } from "../lib/skills";
 
-// ========== 布局常量 ==========
-const NODE_W = 220;
-const NODE_H_STEP = 48;
-const NODE_H_SUBLOOP = 56;
-const NODE_H_BRANCH = 56;
-const NODE_H_COMMENT = 36;
-const NODE_H_LOOPBACK = 44;
-const GAP_Y = 28;
-const BRANCH_GAP_X = 40;
-const BRANCH_PAD_X = 20;
-const BRANCH_PAD_Y = 20;
+// ========== 布局常量（左右泳道） ==========
+const LANE_W = 280;                 // 单侧泳道卡片宽度
+const GUTTER = 100;                 // 中间隔带宽度（回归线通道）
+const FULL_W = LANE_W * 2 + GUTTER; // 画布总宽 = 660
+const LEFT_CX = LANE_W / 2;                             // = 140  左侧泳道卡片中心 x
+const RIGHT_CX = LANE_W + GUTTER + LANE_W / 2;          // = 520  右侧泳道卡片中心 x
+const MID_CX = FULL_W / 2;                              // = 330  中线（隔带中心）
+const WIDE_W = FULL_W - 40;                             // = 620  跨泳道节点宽
+
+const NODE_H_STEP = 72;
+const NODE_H_SUBLOOP = 74;
+const NODE_H_BRANCH = 74;
+const NODE_H_COMMENT = 46;
+const NODE_H_LOOPBACK = 56;
+const GAP_Y = 36;
+const BRANCH_GAP_X = 50;
+const BRANCH_PAD_X = 24;
+const BRANCH_PAD_Y = 28;
+const BR_LABEL_H = 28;
 
 type ToolMode = "select" | "subloop" | "ifelse" | "case" | "comment" | "cut";
 
@@ -69,6 +77,21 @@ function anchorEquals(a: InsertAnchor, b: InsertAnchor): boolean {
   return false;
 }
 
+/** 节点所在的泳道：step 按 markSide 分左右，其余节点跨泳道居中 */
+function nodeLane(n: FlowNode): "left" | "right" | "center" {
+  if (n.kind === "step") return n.markSide === "right" ? "right" : "left";
+  return "center";
+}
+
+function laneCx(lane: "left" | "right" | "center"): number {
+  return lane === "left" ? LEFT_CX : lane === "right" ? RIGHT_CX : MID_CX;
+}
+
+function nodeWidth(n: FlowNode): number {
+  if (n.kind === "step") return LANE_W;
+  return WIDE_W;
+}
+
 function layoutNode(node: FlowNode): LaidNode {
   if (node.kind === "ifelse" || node.kind === "case") {
     const branches = node.branches || [];
@@ -79,8 +102,9 @@ function layoutNode(node: FlowNode): LaidNode {
     if (!collapsed) {
       let curX = 0;
       for (const b of branches) {
-        const bNodes = layoutNodesLinear(b.nodes);
-        const bw = Math.max(NODE_W, bNodes.w);
+        // 分支内部节点暂不做泳道分流，保持原线性布局（分支体量小，全在跨泳道卡片内）
+        const bNodes = layoutNodesLinearInner(b.nodes);
+        const bw = Math.max(LANE_W, bNodes.w);
         const bh = bNodes.h;
         branchLayouts.push({ branch: b, x: curX, y: 0, w: bw, h: bh, nodes: bNodes.nodes });
         curX += bw + BRANCH_GAP_X;
@@ -88,14 +112,14 @@ function layoutNode(node: FlowNode): LaidNode {
         totalW = curX - BRANCH_GAP_X;
       }
     }
-    const bodyW = Math.max(NODE_W + 40, totalW + BRANCH_PAD_X * 2);
-    const bodyH = NODE_H_BRANCH + (collapsed ? 0 : maxBranchH + BRANCH_PAD_Y * 2 + 30);
+    const bodyW = Math.max(WIDE_W, totalW + BRANCH_PAD_X * 2);
+    const bodyH = NODE_H_BRANCH + (collapsed ? 0 : maxBranchH + BR_LABEL_H + BRANCH_PAD_Y * 2);
     if (!collapsed && branchLayouts.length > 0) {
       const innerW = branchLayouts.reduce((s, b) => s + b.w, 0) + (branchLayouts.length - 1) * BRANCH_GAP_X;
       let curX = (bodyW - innerW) / 2;
       for (const bl of branchLayouts) {
         bl.x = curX;
-        bl.y = NODE_H_BRANCH + BRANCH_PAD_Y;
+        bl.y = NODE_H_BRANCH + BR_LABEL_H;
         curX += bl.w + BRANCH_GAP_X;
       }
     }
@@ -105,12 +129,13 @@ function layoutNode(node: FlowNode): LaidNode {
     : node.kind === "comment" ? NODE_H_COMMENT
     : node.kind === "loopback" ? NODE_H_LOOPBACK
     : NODE_H_STEP;
-  return { node, x: 0, y: 0, w: NODE_W, h, subtreeH: h };
+  return { node, x: 0, y: 0, w: nodeWidth(node), h, subtreeH: h };
 }
 
-function layoutNodesLinear(nodes: FlowNode[]): { nodes: LaidNode[]; w: number; h: number } {
+/** 分支内部使用的简单线性布局（不做泳道分流，居中对齐） */
+function layoutNodesLinearInner(nodes: FlowNode[]): { nodes: LaidNode[]; w: number; h: number } {
   const laid: LaidNode[] = [];
-  let curY = 0;
+  let curY = BR_LABEL_H + 4; // 留空放分支标签 pill
   let maxW = 0;
   for (const n of nodes) {
     const ln = layoutNode(n);
@@ -131,6 +156,24 @@ function layoutNodesLinear(nodes: FlowNode[]): { nodes: LaidNode[]; w: number; h
   return { nodes: laid, w: maxW, h: totalH };
 }
 
+/** 顶层泳道布局：按执行顺序纵向排列，横向按 markSide 分左右 */
+function layoutNodesLinear(nodes: FlowNode[]): { nodes: LaidNode[]; w: number; h: number } {
+  const laid: LaidNode[] = [];
+  const TOP_PAD = 36; // 顶部留出泳道标签空间
+  let curY = TOP_PAD;
+  for (const n of nodes) {
+    const ln = layoutNode(n);
+    const lane = nodeLane(n);
+    const cx = laneCx(lane);
+    ln.x = cx - ln.w / 2;
+    ln.y = curY;
+    laid.push(ln);
+    curY += ln.h + GAP_Y;
+  }
+  const totalH = laid.length > 0 ? curY - GAP_Y : 0;
+  return { nodes: laid, w: FULL_W, h: totalH };
+}
+
 function shiftLaidNodeX(ln: LaidNode, dx: number) {
   ln.x += dx;
   if (ln.branchLayouts) {
@@ -141,7 +184,7 @@ function shiftLaidNodeX(ln: LaidNode, dx: number) {
   }
 }
 
-function nodeStyle(kind: FlowNode["kind"], selected: boolean) {
+function nodeStyle(kind: FlowNode["kind"], selected: boolean, side?: "left" | "right") {
   const base: Record<string, { fill: string; stroke: string; text: string }> = {
     step:     { fill: "#ffffff", stroke: "#cbd5e1", text: "text-slate-800" },
     subloop:  { fill: "#faf5ff", stroke: "#a78bfa", text: "text-violet-900" },
@@ -150,7 +193,12 @@ function nodeStyle(kind: FlowNode["kind"], selected: boolean) {
     comment:  { fill: "#f8fafc", stroke: "#cbd5e1", text: "text-slate-500" },
     loopback: { fill: "#ecfdf5", stroke: "#34d399", text: "text-emerald-800" },
   };
-  const s = base[kind] || base.step;
+  const s = { ...(base[kind] || base.step) };
+  // 左右泳道的步骤卡片用不同描边颜色轻微区分：左蓝右紫
+  if (kind === "step") {
+    if (side === "left")  { s.stroke = selected ? "#6366f1" : "#93c5fd"; s.fill = selected ? "#eff6ff" : "#ffffff"; }
+    if (side === "right") { s.stroke = selected ? "#6366f1" : "#c4b5fd"; s.fill = selected ? "#f5f3ff" : "#ffffff"; }
+  }
   return { ...s, strokeWidth: 2 };
 }
 
@@ -248,40 +296,68 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
     return { x: rect.left + cx * view.scale + view.x, y: rect.top + cy * view.scale + view.y };
   }, [view]);
 
-  // 收集所有连线
+  // 收集所有连线（泳道路由）
   const edges = useMemo<EdgeInfo[]>(() => {
     const result: EdgeInfo[] = [];
+
+    /** 在两个锚点之间绘制正交折线：同列走竖线+贝塞尔圆角；跨列走 L 型，经中间隔带 */
+    const connectPoints = (
+      prevId: string, nextId: string, anchor: InsertAnchor,
+      fromX: number, fromY: number, toX: number, toY: number,
+      isBranchTop = false,
+    ) => {
+      const dx = toX - fromX;
+      let d: string;
+      let midX: number, midY: number;
+      if (Math.abs(dx) < 2) {
+        // 同列：贝塞尔 S 曲线（与原实现一致）
+        const cpY = (fromY + toY) / 2;
+        d = `M${fromX},${fromY} C${fromX},${cpY} ${toX},${cpY} ${toX},${toY}`;
+        midX = fromX;
+        midY = cpY;
+      } else {
+        // 跨列：L 型路径，拐点取中线
+        const turnY = fromY + Math.min((toY - fromY) * 0.5, GAP_Y * 0.7);
+        const midLaneX = MID_CX;
+        d = `M${fromX},${fromY} L${fromX},${turnY} L${midLaneX},${turnY} L${midLaneX},${toY - 10} C${midLaneX},${toY} ${toX},${toY} ${toX},${toY}`;
+        midX = midLaneX;
+        midY = turnY;
+      }
+      result.push({
+        id: isBranchTop ? `${prevId}-brtop-${nextId}` : `e-${prevId}-${nextId}`,
+        anchor,
+        pathD: d,
+        midX, midY,
+      });
+    };
 
     const collectLinear = (lns: LaidNode[], parentPrefix: string, offX: number, offY: number) => {
       for (let i = 0; i < lns.length; i++) {
         const ln = lns[i];
-        const myTopX = offX + ln.x + ln.w / 2;
+        const myCx = offX + ln.x + ln.w / 2;
         const myTopY = offY + ln.y;
-        const myBotX = offX + ln.x + ln.w / 2;
         const myBotY = offY + ln.y + ln.h;
+        const myLane = nodeLane(ln.node);
+        // 顶部/底部锚点：step 从卡片顶部/底部中点出线；宽节点从中线（MID_CX）出线
+        const myTopX = myLane === "center" ? offX + MID_CX : myCx;
+        const myBotX = myLane === "center" ? offX + MID_CX : myCx;
 
         if (i > 0) {
           const prev = lns[i - 1];
-          const prevBotX = offX + prev.x + prev.w / 2;
+          const prevLane = nodeLane(prev.node);
+          const prevCx = offX + prev.x + prev.w / 2;
+          const prevBotX = prevLane === "center" ? offX + MID_CX : prevCx;
           const prevBotY = offY + prev.y + prev.h;
-          const cpY = (prevBotY + myTopY) / 2;
-          const d = `M${prevBotX},${prevBotY} C${prevBotX},${cpY} ${myTopX},${cpY} ${myTopX},${myTopY}`;
-          result.push({
-            id: `${parentPrefix}${prev.node.id}-${ln.node.id}`,
-            anchor: { type: "before", nodeId: ln.node.id },
-            pathD: d,
-            midX: (prevBotX + myTopX) / 2,
-            midY: (prevBotY + myTopY) / 2,
-          });
+          connectPoints(prev.node.id, ln.node.id, { type: "before", nodeId: ln.node.id },
+            prevBotX, prevBotY, myTopX, myTopY);
         }
 
+        // 分支：从分支父节点底部中点引出，到各分支顶部
         if ((ln.node.kind === "ifelse" || ln.node.kind === "case") && ln.branchLayouts && !ln.node.collapsed) {
-          const mergeY = offY + ln.y + ln.h - 20;
-          const mergeX = offX + ln.x + ln.w / 2;
           for (const bl of ln.branchLayouts) {
             const brTopX = offX + ln.x + bl.x + bl.w / 2;
             const brTopY = offY + ln.y + bl.y;
-            const dTop = `M${myBotX},${myBotY} L${myBotX},${myBotY+8} L${brTopX},${myBotY+8} L${brTopX},${brTopY}`;
+            const dTop = `M${myBotX},${myBotY} L${myBotX},${myBotY + 8} L${brTopX},${myBotY + 8} L${brTopX},${brTopY}`;
             result.push({
               id: `${parentPrefix}brtop-${ln.node.id}-${bl.branch.id}`,
               anchor: { type: "branch-start", parentNodeId: ln.node.id, branchId: bl.branch.id },
@@ -297,22 +373,27 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
 
     collectLinear(layout.nodes, "e-", 0, 0);
 
-    // 闭环线
+    // 闭环线：从最后一个节点 → 走中线回顶部 → 第一个节点顶部
     if (layout.nodes.length > 0) {
       const last = layout.nodes[layout.nodes.length - 1];
+      const lastLane = nodeLane(last.node);
       const lastCx = last.x + last.w / 2;
-      const lastCy = last.y + last.h / 2;
+      const lastBotX = lastLane === "center" ? MID_CX : lastCx;
+      const lastBotY = last.y + last.h;
       const first = layout.nodes[0];
+      const firstLane = nodeLane(first.node);
       const firstCx = first.x + first.w / 2;
-      const firstTy = first.y;
-      const rightX = layout.w + 30;
-      const topY = -20;
+      const firstTopX = firstLane === "center" ? MID_CX : firstCx;
+      const firstTopY = first.y;
+      const topY = -4;
+      // 从最后节点底部 → 中线 → 顶部横线 → 第一个节点顶部
+      const d = `M${lastBotX},${lastBotY} L${MID_CX},${lastBotY} L${MID_CX},${topY} L${firstTopX},${topY} L${firstTopX},${firstTopY}`;
       result.push({
         id: "loopback",
         anchor: { type: "end" },
-        pathD: `M${lastCx + last.w/2 - 10},${lastCy} L${rightX},${lastCy} L${rightX},${topY} L${firstCx},${topY} L${firstCx},${firstTy}`,
-        midX: rightX,
-        midY: (lastCy + topY) / 2,
+        pathD: d,
+        midX: MID_CX,
+        midY: (lastBotY + topY) / 2,
         isLoopback: true,
       });
     }
@@ -366,14 +447,18 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
   }, []);
 
   const resetView = useCallback(() => {
-    const first = layout.nodes[0];
     const rect = canvasContainerRef.current?.getBoundingClientRect();
-    if (first && rect) {
-      setView({ x: rect.width / 2 - (first.x + first.w / 2), y: 80, scale: 1 });
+    if (rect) {
+      // 将画布水平+垂直居中在容器内
+      setView({
+        x: rect.width / 2 - FULL_W / 2,
+        y: Math.max(20, rect.height / 2 - layout.h / 2),
+        scale: 1,
+      });
     } else {
       setView({ x: 40, y: 40, scale: 1 });
     }
-  }, [layout.nodes]);
+  }, [layout.h]);
 
   useEffect(() => {
     const el = canvasContainerRef.current;
@@ -382,6 +467,20 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
     el.addEventListener("wheel", h, { passive: false });
     return () => el.removeEventListener("wheel", h);
   }, []);
+
+  // 初次挂载时自动居中画布
+  const centeredRef = useRef(false);
+  useEffect(() => {
+    if (centeredRef.current) return;
+    const rect = canvasContainerRef.current?.getBoundingClientRect();
+    if (!rect || layout.h === 0) return;
+    setView({
+      x: rect.width / 2 - FULL_W / 2,
+      y: Math.max(20, rect.height / 2 - layout.h / 2),
+      scale: 1,
+    });
+    centeredRef.current = true;
+  }, [layout.h]);
 
   const selectedLoc = selectedId ? findNode(graph.nodes, selectedId) : null;
 
@@ -698,12 +797,14 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
 
         <svg className="absolute inset-0 h-full w-full">
           <defs>
-            <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8" /></marker>
-            <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#10b981" /></marker>
-            <marker id="arrow-indigo" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4f46e5" /></marker>
+            <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8" /></marker>
+            <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#10b981" /></marker>
+            <marker id="arrow-indigo" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4f46e5" /></marker>
           </defs>
           <rect x={-100000} y={-100000} width={200000} height={200000} fill="transparent" data-bg="1" />
           <g transform={`translate(${view.x}, ${view.y}) scale(${view.scale})`}>
+            <LaneBackdrop layoutW={layout.w} layoutH={layout.h} />
+            <GhostCardsLayer nodes={layout.nodes} />
             <ConnectionsLayer edges={edges} tool={tool} hoverEdgeId={hoverEdgeId} cutAnchor={cutAnchor} onEdgeHover={setHoverEdgeId} onEdgeClick={handleEdgeClick} />
             {cutAnchor && <CutPointMarker edges={edges} cutAnchor={cutAnchor} />}
             <g>
@@ -738,6 +839,101 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
   );
 }
 
+// ========== 泳道背景层 ==========
+function LaneBackdrop({ layoutW, layoutH }: { layoutW: number; layoutH: number }) {
+  const pad = 20;
+  const totalH = layoutH + pad;
+  return (
+    <g>
+      {/* 左侧泳道背景 */}
+      <rect x={0} y={0} width={LANE_W} height={totalH} fill="#f0f7ff" opacity={0.5} />
+      {/* 中间隔带 */}
+      <rect x={LANE_W} y={0} width={GUTTER} height={totalH} fill="#fafafa" opacity={0.5} />
+      {/* 右侧泳道背景 */}
+      <rect x={LANE_W + GUTTER} y={0} width={LANE_W} height={totalH} fill="#faf5ff" opacity={0.5} />
+      {/* 中间虚线分界 */}
+      <line x1={MID_CX} y1={0} x2={MID_CX} y2={totalH} stroke="#d1d5db" strokeWidth={1} strokeDasharray="4 4" />
+      {/* 泳道标签 */}
+      <text x={LEFT_CX} y={18} textAnchor="middle" className="fill-sky-500 text-[13px] font-bold">左网页</text>
+      <text x={RIGHT_CX} y={18} textAnchor="middle" className="fill-violet-500 text-[13px] font-bold">执行操作</text>
+    </g>
+  );
+}
+
+// ========== 数据来源残影卡片层 ==========
+interface GhostEntry {
+  realX: number; realY: number; realW: number; realH: number;
+  ghostX: number; ghostY: number; ghostW: number; ghostH: number;
+  sourceText: string;
+}
+
+function walkNodesForGhosts(lns: LaidNode[], offX: number, offY: number, out: GhostEntry[]) {
+  for (const ln of lns) {
+    if (ln.node.kind === "step") {
+      const lane = nodeLane(ln.node);
+      const parsed = splitStepLabel(ln.node.label || "");
+      const needsGhost =
+        (lane === "right" && parsed.sourceSide === "left") ||
+        (lane === "left" && parsed.sourceSide === "right");
+      if (needsGhost && parsed.sourceText) {
+        const realLane = lane;
+        const ghostLane = realLane === "right" ? "left" : "right";
+        const ghostCx = laneCx(ghostLane as "left" | "right");
+        const realX = offX + ln.x;
+        const realY = offY + ln.y;
+        const ghostX = offX + ghostCx - LANE_W / 2;
+        const ghostY = realY;
+        out.push({
+          realX, realY, realW: ln.w, realH: ln.h,
+          ghostX, ghostY, ghostW: LANE_W, ghostH: ln.h,
+          sourceText: parsed.sourceText,
+        });
+      }
+    }
+    // 注意：分支内部节点不做泳道分流（布局居中），此处不递归绘制残影以避免错位
+  }
+}
+
+function GhostCardsLayer({ nodes }: { nodes: LaidNode[] }) {
+  const ghosts: GhostEntry[] = [];
+  walkNodesForGhosts(nodes, 0, 0, ghosts);
+  if (ghosts.length === 0) return null;
+  return (
+    <g>
+      {ghosts.map((g, i) => {
+        // 残影的右中 / 实卡的左中
+        const gRightX = g.ghostX + g.ghostW;
+        const gMidY = g.ghostY + g.ghostH / 2;
+        const rLeftX = g.realX;
+        const rMidY = g.realY + g.realH / 2;
+        // S 型虚线穿过隔带
+        const cpOff = Math.min(Math.abs(rMidY - gMidY) * 0.4 + 20, GUTTER * 0.6);
+        const pathD = `M${gRightX},${gMidY} C${gRightX + cpOff},${gMidY} ${rLeftX - cpOff},${rMidY} ${rLeftX},${rMidY}`;
+        return (
+          <g key={i} style={{ pointerEvents: "none" }}>
+            {/* 数据流虚线 */}
+            <path d={pathD} stroke="#93c5fd" strokeWidth={1.5} strokeDasharray="4 3" fill="none" opacity={0.7} />
+            {/* 数据流动小圆点动画 */}
+            <circle r={3} fill="#60a5fa" opacity={0.85}>
+              <animateMotion dur={`${1.8 + i * 0.15}s`} repeatCount="indefinite" path={pathD} />
+            </circle>
+            {/* 残影卡片 */}
+            <rect x={g.ghostX} y={g.ghostY} width={g.ghostW} height={g.ghostH} rx={10}
+              fill="#eff6ff" fillOpacity={0.55} stroke="#93c5fd" strokeWidth={1.5} strokeDasharray="5 3" />
+            {/* 残影标签：📤 取值 · 来源文字 */}
+            <foreignObject x={g.ghostX + 8} y={g.ghostY + 4} width={g.ghostW - 16} height={g.ghostH - 8}>
+              <div className="flex h-full w-full flex-col items-center justify-center gap-1 px-1 text-center">
+                <span className="w-full truncate text-[12px] font-medium leading-tight text-sky-600">📤 取值来源</span>
+                <span className="w-full truncate text-[10px] leading-tight text-sky-500/70" title={g.sourceText}>{g.sourceText}</span>
+              </div>
+            </foreignObject>
+          </g>
+        );
+      })}
+    </g>
+  );
+}
+
 // ========== 连线层 ==========
 function ConnectionsLayer({
   edges, tool, hoverEdgeId, cutAnchor, onEdgeHover, onEdgeClick,
@@ -758,7 +954,7 @@ function ConnectionsLayer({
         const canInsert = !edge.isLoopback;
         const highlight = (interactive && hover && canInsert) || isCut;
         const color = edge.isLoopback ? "#10b981" : isCut ? "#f43f5e" : "#94a3b8";
-        const w = edge.isLoopback ? 2 : isCut ? 2.5 : 1.5;
+        const w = edge.isLoopback ? 2.5 : isCut ? 3 : 2;
         return (
           <g key={edge.id}>
             <path d={edge.pathD}
@@ -778,9 +974,8 @@ function ConnectionsLayer({
             )}
             {highlight && !isCut && (
               <g transform={`translate(${edge.midX}, ${edge.midY})`} style={{ pointerEvents: "none" }}>
-                <circle r={10} fill="#4f46e5" opacity={0.15} />
-                <circle r={6} fill="#4f46e5" />
-                {tool !== "cut" && <Plus className="h-3.5 w-3.5 text-white" style={{ transform: "translate(-7px, -7px)" }} />}
+                <circle r={6} className="fill-indigo-500" />
+                {tool !== "cut" && <Plus className="h-3 w-3 text-white" style={{ transform: "translate(-6px, -6px)" }} />}
               </g>
             )}
           </g>
@@ -807,6 +1002,68 @@ function CutPointMarker({ edges, cutAnchor }: { edges: EdgeInfo[]; cutAnchor: In
   );
 }
 
+// ========== 步骤标签拆分 ==========
+
+/** 将步骤节点的超长 label 拆成「主描述 + 来源信息」，用于卡片两行展示。
+ *  匹配尾部「... ← 来源「选择器」」格式，例如：
+ *  ⌨️ 输入: 录入 · 请输入姓名 ← 左网页「div.media-body > ...」
+ *  其他格式（无 ←/「」）则原样返回，仅显示一行。 */
+function splitStepLabel(label: string): { main: string; sub: string; sourceSide?: "left" | "right" | "excel" | "other"; sourceText?: string } {
+  if (!label) return { main: label, sub: "" };
+  const m = label.match(/^(.*)←\s*([^「]+)「([^」]*)」\s*$/);
+  if (m) {
+    const source = m[2].trim();
+    const sel = m[3].trim();
+    const sub = sel ? `${source}「${sel}」` : "";
+    let sourceSide: "left" | "right" | "excel" | "other" = "other";
+    if (/左网页/.test(source)) sourceSide = "left";
+    else if (/右网页/.test(source)) sourceSide = "right";
+    else if (/Excel|Excel|表格|固定值/.test(source)) sourceSide = "excel";
+    return { main: m[1].trim(), sub, sourceSide, sourceText: sel };
+  }
+  return { main: label, sub: "" };
+}
+
+/** 步骤节点卡片：主描述一行 + 选择器明细一行（超长省略，悬停看全文） */
+function StepLabel({ label }: { label: string }) {
+  const { main, sub } = splitStepLabel(label);
+  return (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-1 px-2 text-center" title={label}>
+      <span className="w-full truncate text-[13px] font-semibold leading-tight text-slate-800">{main}</span>
+      {sub && <span className="w-full truncate text-[11px] leading-tight text-slate-400">{sub}</span>}
+    </div>
+  );
+}
+
+// ========== 节点下方的「+」插入按钮 ==========
+
+/** 节点下方小加号：默认是连线上的小灰点，悬停时展开为小蓝圆 + 白色加号，不破坏连线视觉 */
+function InsertPlusBtn({ cx, cy, onClick }: { cx: number; cy: number; onClick: (e: React.MouseEvent) => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <g
+      transform={`translate(${cx}, ${cy})`}
+      onClick={(e) => { e.stopPropagation(); onClick(e); }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      className="cursor-pointer"
+      style={{ pointerEvents: "all" }}
+    >
+      {/* 大号透明命中区 */}
+      <circle r={16} fill="transparent" />
+      {/* 默认：灰色小点（连线上的连接点） */}
+      {!hover && <circle r={3} fill="#cbd5e1" />}
+      {/* 悬停：小蓝圆 + 白加号 */}
+      {hover && (
+        <g style={{ pointerEvents: "none" }}>
+          <circle r={10} className="fill-indigo-500" style={{ filter: "drop-shadow(0 1px 3px rgba(79,70,229,0.4))" }} />
+          <Plus className="h-4 w-4 -translate-x-[8px] -translate-y-[8px] text-white" />
+        </g>
+      )}
+    </g>
+  );
+}
+
 // ========== 节点渲染 ==========
 function LaidNodeView(props: {
   ln: LaidNode;
@@ -826,28 +1083,35 @@ function LaidNodeView(props: {
   const { node, x, y, w, h } = ln;
   const selected = selectedId === node.id;
   const inRange = rangeStart && selectedId && rangeStart !== selectedId && (rangeStart === node.id || selectedId === node.id);
-  const sty = nodeStyle(node.kind, selected);
+  const side = node.kind === "step" ? (node.markSide || "left") : undefined;
+  const sty = nodeStyle(node.kind, selected, side);
   const isEditing = editingLabel === node.id;
   const isBranch = node.kind === "ifelse" || node.kind === "case";
+  const isWide = node.kind !== "step";
 
   const strokeDash = node.kind === "comment" || node.kind === "loopback" ? "6 3" : undefined;
   let shape: JSX.Element;
   if (isBranch) {
     const cx = w / 2, cy = NODE_H_BRANCH / 2;
-    const rx = Math.min(w / 2 - 10, 130), ry = NODE_H_BRANCH / 2 - 4;
+    const rx = Math.min(w / 2 - 10, 160), ry = NODE_H_BRANCH / 2 - 4;
     shape = <polygon points={`${cx},${cy-ry} ${cx+rx},${cy} ${cx},${cy+ry} ${cx-rx},${cy}`} fill={sty.fill} stroke={sty.stroke} strokeWidth={sty.strokeWidth} strokeDasharray={strokeDash}
       style={{ filter: selected ? "drop-shadow(0 0 6px rgba(99,102,241,0.6))" : "drop-shadow(0 1px 2px rgba(0,0,0,0.08))" }} />;
   } else if (node.kind === "loopback") {
-    shape = <rect x={w/2-90} y={0} width={180} height={h} rx={h/2} fill={sty.fill} stroke={sty.stroke} strokeWidth={sty.strokeWidth} strokeDasharray={strokeDash}
+    shape = <rect x={0} y={0} width={w} height={h} rx={h/2} fill={sty.fill} stroke={sty.stroke} strokeWidth={sty.strokeWidth} strokeDasharray={strokeDash}
       style={{ filter: selected ? "drop-shadow(0 0 6px rgba(99,102,241,0.6))" : "drop-shadow(0 1px 2px rgba(0,0,0,0.08))" }} />;
   } else {
     const rr = node.kind === "comment" ? 8 : 10;
     const sw = node.kind === "comment" ? 1 : sty.strokeWidth;
-    shape = <rect x={w/2-NODE_W/2} y={0} width={NODE_W} height={h} rx={rr} fill={sty.fill} stroke={sty.stroke} strokeWidth={sw} strokeDasharray={strokeDash}
+    shape = <rect x={0} y={0} width={w} height={h} rx={rr} fill={sty.fill} stroke={sty.stroke} strokeWidth={sw} strokeDasharray={strokeDash}
       style={{ filter: selected ? "drop-shadow(0 0 6px rgba(99,102,241,0.6))" : "drop-shadow(0 1px 2px rgba(0,0,0,0.08))" }} />;
   }
 
   const labelText = node.label || node.kind;
+  const textPad = isWide ? 20 : 10;
+  const textW = w - textPad * 2;
+  const textX = textPad;
+  const textY = isBranch ? 0 : 6;
+  const textH = isBranch ? NODE_H_BRANCH : h - 12;
 
   return (
     <g data-node-click="1">
@@ -856,60 +1120,55 @@ function LaidNodeView(props: {
          style={{ transform: `translate(${x}px, ${y}px)` }}
          className="cursor-pointer">
         {shape}
-        <foreignObject x={w/2 - (isBranch ? Math.min(w/2-20, 120) : NODE_W/2-10)} y={isBranch ? 0 : 6}
-                       width={isBranch ? Math.min(w-40, 240) : NODE_W-20}
-                       height={isBranch ? NODE_H_BRANCH : h-12}>
-          <div className="flex h-full w-full items-center justify-center px-2 text-center">
+        <foreignObject x={textX} y={textY} width={textW} height={textH}>
+          <div className="flex h-full w-full items-center justify-center px-1 text-center">
             {isEditing ? (
               <input autoFocus defaultValue={labelText}
                 onBlur={(e) => { props.onCommitLabel(node.id, e.target.value); props.onEditLabel(null); }}
                 onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") props.onEditLabel(null); }}
                 onClick={(e) => e.stopPropagation()}
-                className="w-full rounded border border-indigo-400 bg-white px-1 py-0.5 text-center text-[11px] outline-none" />
+                className="w-full rounded border border-indigo-400 bg-white px-1 py-1 text-center text-[13px] outline-none" />
+            ) : node.kind === "step" ? (
+              <StepLabel label={labelText} />
             ) : (
-              <span className={`block text-[11px] font-medium leading-tight ${sty.text} ${node.kind === "comment" ? "italic" : ""}`}>{labelText}</span>
+              <span className={`block text-[13px] font-semibold leading-tight ${sty.text} ${node.kind === "comment" ? "italic" : ""}`}>{labelText}</span>
             )}
           </div>
         </foreignObject>
         {isBranch && node.branches && (
-          <g transform={`translate(${w/2 + Math.min(w/2-20, 120) - 4}, ${NODE_H_BRANCH/2 - 6})`}
+          <g transform={`translate(${w - 22}, ${NODE_H_BRANCH/2 - 7})`}
              onClick={(e) => { e.stopPropagation(); props.onToggleCollapse(node.id); }}
              className="cursor-pointer">
-            <circle r="7" className="fill-white stroke-slate-300" />
+            <circle r="9" className="fill-white stroke-slate-300" />
             {node.collapsed
-              ? <ChevronRight className="h-3 w-3 -translate-x-[6px] -translate-y-[6px] text-slate-500" />
-              : <ChevronDown className="h-3 w-3 -translate-x-[6px] -translate-y-[6px] text-slate-500" />}
+              ? <ChevronRight className="h-4 w-4 -translate-x-[8px] -translate-y-[8px] text-slate-500" />
+              : <ChevronDown className="h-4 w-4 -translate-x-[8px] -translate-y-[8px] text-slate-500" />}
           </g>
         )}
         {inRange && (
-          <rect x={w/2-NODE_W/2-2} y={-2} width={NODE_W+4} height={h+4} rx={12} fill="none" stroke="#6366f1" strokeWidth="2" strokeDasharray="4 3" />
+          <rect x={-2} y={-2} width={w+4} height={h+4} rx={12} fill="none" stroke="#6366f1" strokeWidth={2} strokeDasharray="4 3" />
         )}
       </g>
 
       {node.kind !== "loopback" && (
-        <g transform={`translate(${x + w/2 - 12}, ${y + h + 6})`}
-           onClick={(e) => { e.stopPropagation(); props.onOpenInsertAfter(node.id, x + w/2, y + h + 14); }}
-           className="cursor-pointer">
-          {/* 大号透明命中区：保证整个按钮都容易点到 */}
-          <circle cx="12" cy="8" r="22" fill="transparent" pointerEvents="all" />
-          {/* 白色外圈 + 强调色圆：始终清晰可见，不再依赖选中态 */}
-          <circle cx="12" cy="8" r="12" fill="white" stroke="#cbd5e1" strokeWidth="1" />
-          <circle cx="12" cy="8" r="10" className="fill-indigo-500 stroke-white" strokeWidth="2" />
-          <Plus className="h-4 w-4 text-white" style={{ transform: "translate(8px, 2px)" }} />
-        </g>
+        <InsertPlusBtn
+          cx={x + w / 2}
+          cy={y + h + 14}
+          onClick={() => props.onOpenInsertAfter(node.id, x + w / 2, y + h + 14)}
+        />
       )}
 
       {isBranch && !node.collapsed && ln.branchLayouts && (
         <g>
-          <circle cx={x + w/2} cy={y + ln.h - 20} r="3" fill="#94a3b8" />
+          <circle cx={x + w/2} cy={y + ln.h - 24} r="4" fill="#94a3b8" />
           {ln.branchLayouts.map((bl) => (
             <g key={bl.branch.id} transform={`translate(${x + bl.x}, ${y + bl.y})`}>
-              <foreignObject x={0} y={0} width={bl.w} height={22}>
+              <foreignObject x={0} y={0} width={bl.w} height={28}>
                 <div className="flex h-full w-full items-center justify-between px-2">
-                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${node.kind === "ifelse" ? "bg-amber-100 text-amber-700" : "bg-sky-100 text-sky-700"}`}>{bl.branch.label}</span>
+                  <span className={`rounded-full px-2.5 py-0.5 text-[12px] font-medium ${node.kind === "ifelse" ? "bg-amber-100 text-amber-700" : "bg-sky-100 text-sky-700"}`}>{bl.branch.label}</span>
                   {node.kind === "case" && (node.branches?.length || 0) > 1 && (
                     <button onClick={(e) => { e.stopPropagation(); props.onRemoveBranch(bl.branch.id); }}
-                      className="rounded p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-500"><X className="h-3 w-3" /></button>
+                      className="rounded p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-500"><X className="h-3.5 w-3.5" /></button>
                   )}
                 </div>
               </foreignObject>
@@ -926,10 +1185,10 @@ function LaidNodeView(props: {
                 />
               ))}
               {bl.nodes.length === 0 && (
-                <foreignObject x={10} y={26} width={bl.w-20} height={36}>
-                  <div onClick={(e) => { e.stopPropagation(); props.onOpenInsertBranchStart(node.id, bl.branch.id, x + bl.x + bl.w/2, y + bl.y + 44); }}
-                    className="flex h-full w-full cursor-pointer items-center justify-center rounded-lg border-2 border-dashed border-slate-200 text-[10px] text-slate-400 hover:border-indigo-300 hover:text-indigo-500">
-                    <Plus className="mr-1 h-3 w-3" /> 添加步骤
+                <foreignObject x={10} y={BR_LABEL_H + 4} width={bl.w-20} height={48}>
+                  <div onClick={(e) => { e.stopPropagation(); props.onOpenInsertBranchStart(node.id, bl.branch.id, x + bl.x + bl.w/2, y + bl.y + BR_LABEL_H + 28); }}
+                    className="flex h-full w-full cursor-pointer items-center justify-center rounded-lg border-2 border-dashed border-slate-200 text-[12px] text-slate-400 hover:border-indigo-300 hover:text-indigo-500">
+                    <Plus className="mr-1 h-3.5 w-3.5" /> 添加步骤
                   </div>
                 </foreignObject>
               )}
@@ -938,7 +1197,7 @@ function LaidNodeView(props: {
         </g>
       )}
       {isBranch && node.collapsed && (
-        <text x={x + w/2} y={y + NODE_H_BRANCH + 12} textAnchor="middle" className="fill-slate-400 text-[10px]">（折叠）</text>
+        <text x={x + w/2} y={y + NODE_H_BRANCH + 14} textAnchor="middle" className="fill-slate-400 text-[12px]">（折叠）</text>
       )}
     </g>
   );
