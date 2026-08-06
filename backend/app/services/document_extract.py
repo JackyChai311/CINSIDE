@@ -732,6 +732,8 @@ def _build_fields_prompt(text: str, target_fields: list[str]) -> str:
    - surname（姓）：第一个<<之前的字母，如BYSTROVA
    - given_name（名）：第一个<<之后到行尾的字母，多个<分隔的部分都是名，如ANNA PAVLOVNA
    - name：姓 + 名的完整组合
+6. 护照上方可视区（VIZ）通常印有签发日期（passport_issue）和签发机关（issue_authority），
+   如 "Date of issue" / "签发日期" / "Authority" / "签发机关" 等字段，请从OCR文本中识别填入。
 """
 
 
