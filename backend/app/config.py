@@ -155,7 +155,7 @@ class Settings:
 
     # === UI 偏好（前端设置面板） ===
     # 新手模式：true=显示步骤引导，false=直接使用字段对比面板
-    beginner_mode: bool = field(default_factory=lambda: _env_bool("BEGINNER_MODE", True))
+    beginner_mode: bool = field(default_factory=lambda: _env_bool("BEGINNER_MODE", False))
     # 防误关：true=关闭按钮最小化到托盘
     prevent_accidental_close: bool = field(default_factory=lambda: _env_bool("PREVENT_ACCIDENTAL_CLOSE", False))
     # 整体 UI 缩放比例（0.6~1.6）
@@ -166,6 +166,10 @@ class Settings:
     accent: str = field(default_factory=lambda: _env("ACCENT", "indigo"))
     # BrowserPane 网页亮度（0.3~2.0，1.0=原始亮度）
     browser_brightness: float = field(default_factory=lambda: _env_float("BROWSER_BRIGHTNESS", 1.0))
+
+    # === LOOP 卡片分享（GitHub Gist）===
+    # GitHub Personal Access Token，需 gist 权限；留空则只能用离线分享码
+    github_gist_token: str = field(default_factory=lambda: _env("GITHUB_GIST_TOKEN", ""))
 
     def to_settings_dict(self) -> dict:
         """返回前端设置面板需要读写的配置项。"""
