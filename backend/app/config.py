@@ -50,6 +50,23 @@ def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default)
 
 
+def _env_bool(key: str, default: bool = False) -> bool:
+    val = os.environ.get(key)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_float(key: str, default: float = 1.0) -> float:
+    val = os.environ.get(key)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
 # 前端设置面板可读写的一组配置项
 SETTING_KEYS = {
     "agent_backend": "AGENT_BACKEND",
@@ -59,6 +76,30 @@ SETTING_KEYS = {
     "browser_use_llm_base": "BROWSER_USE_LLM_BASE",
     "browser_use_llm_key": "BROWSER_USE_LLM_KEY",
     "browser_use_llm_model": "BROWSER_USE_LLM_MODEL",
+    "ocr_engine": "OCR_ENGINE",
+    "umi_ocr_host": "UMI_OCR_HOST",
+    "umi_ocr_port": "UMI_OCR_PORT",
+    "umi_ocr_exe_path": "UMI_OCR_EXE_PATH",
+    "beginner_mode": "BEGINNER_MODE",
+    "prevent_accidental_close": "PREVENT_ACCIDENTAL_CLOSE",
+    "ui_scale": "UI_SCALE",
+    "theme": "THEME",
+    "accent": "ACCENT",
+    "browser_brightness": "BROWSER_BRIGHTNESS",
+}
+
+# theme 允许值
+VALID_THEMES = {"light", "dark"}
+# accent 允许值
+VALID_ACCENTS = {"indigo", "sky", "emerald", "rose", "violet", "amber"}
+
+# 非字符串类型字段的类型映射（.env 中统一存字符串，读取时转换）
+_SETTING_TYPES: dict[str, type] = {
+    "beginner_mode": bool,
+    "prevent_accidental_close": bool,
+    "ui_scale": float,
+    "browser_brightness": float,
+    "umi_ocr_port": int,
 }
 
 
@@ -78,6 +119,16 @@ class Settings:
     browser_use_llm_base: str = field(default_factory=lambda: _env("BROWSER_USE_LLM_BASE", "https://open.bigmodel.cn/api/paas/v4"))
     browser_use_llm_key: str = field(default_factory=lambda: _env("BROWSER_USE_LLM_KEY", ""))
     browser_use_llm_model: str = field(default_factory=lambda: _env("BROWSER_USE_LLM_MODEL", "glm-4-plus"))
+
+    # === 文档/护照 OCR 引擎 ===
+    # vision: 识图AI（Vision LLM，需配置 vision_api_key）
+    # umi: 本地 UMI-OCR（离线 PaddleOCR，走 UMI-OCR 的 HTTP 接口）
+    ocr_engine: str = field(default_factory=lambda: _env("OCR_ENGINE", "vision"))
+    # UMI-OCR HTTP 接口地址（需在 UMI-OCR 中开启「HTTP接口服务」）
+    umi_ocr_host: str = field(default_factory=lambda: _env("UMI_OCR_HOST", "127.0.0.1"))
+    umi_ocr_port: int = field(default_factory=lambda: int(_env("UMI_OCR_PORT", "1224")))
+    # UMI-OCR 可执行文件路径（为空则自动搜索常见位置）
+    umi_ocr_exe_path: str = field(default_factory=lambda: _env("UMI_OCR_EXE_PATH", ""))
     browser_use_headless: bool = field(default_factory=lambda: _env("BROWSER_USE_HEADLESS", "false").lower() == "true")
     # Chrome / Chromium 可执行路径；空则让 browser-use 自行查找
     browser_use_executable: str = field(default_factory=lambda: _env("BROWSER_USE_EXECUTABLE", ""))
@@ -102,7 +153,21 @@ class Settings:
     # === CORS ===
     frontend_origin: str = field(default_factory=lambda: _env("FRONTEND_ORIGIN", "http://localhost:5173"))
 
-    def to_settings_dict(self) -> dict[str, str]:
+    # === UI 偏好（前端设置面板） ===
+    # 新手模式：true=显示步骤引导，false=直接使用字段对比面板
+    beginner_mode: bool = field(default_factory=lambda: _env_bool("BEGINNER_MODE", True))
+    # 防误关：true=关闭按钮最小化到托盘
+    prevent_accidental_close: bool = field(default_factory=lambda: _env_bool("PREVENT_ACCIDENTAL_CLOSE", False))
+    # 整体 UI 缩放比例（0.6~1.6）
+    ui_scale: float = field(default_factory=lambda: _env_float("UI_SCALE", 1.0))
+    # 主题：light=浅色 / dark=深色
+    theme: str = field(default_factory=lambda: _env("THEME", "light"))
+    # 主色调：indigo / sky / emerald / rose / violet / amber
+    accent: str = field(default_factory=lambda: _env("ACCENT", "indigo"))
+    # BrowserPane 网页亮度（0.3~2.0，1.0=原始亮度）
+    browser_brightness: float = field(default_factory=lambda: _env_float("BROWSER_BRIGHTNESS", 1.0))
+
+    def to_settings_dict(self) -> dict:
         """返回前端设置面板需要读写的配置项。"""
         return {
             "agent_backend": self.agent_backend,
@@ -112,22 +177,64 @@ class Settings:
             "browser_use_llm_base": self.browser_use_llm_base,
             "browser_use_llm_key": self.browser_use_llm_key,
             "browser_use_llm_model": self.browser_use_llm_model,
+            "ocr_engine": self.ocr_engine,
+            "umi_ocr_host": self.umi_ocr_host,
+            "umi_ocr_port": self.umi_ocr_port,
+            "umi_ocr_exe_path": self.umi_ocr_exe_path,
+            "beginner_mode": self.beginner_mode,
+            "prevent_accidental_close": self.prevent_accidental_close,
+            "ui_scale": self.ui_scale,
+            "theme": self.theme,
+            "accent": self.accent,
+            "browser_brightness": self.browser_brightness,
         }
 
-    def update_from_dict(self, data: dict[str, str]) -> None:
+    def _coerce_value(self, name: str, raw):
+        """将前端传来的值转换为字段对应的 Python 类型。"""
+        target_type = _SETTING_TYPES.get(name, str)
+        if target_type is bool:
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, str):
+                return raw.strip().lower() in ("1", "true", "yes", "on")
+            return bool(raw)
+        if target_type is float:
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return 1.0
+        if target_type is int:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return 0
+        return str(raw or "")
+
+    def update_from_dict(self, data: dict) -> None:
         """根据前端提交更新内存中的配置。"""
         for name, env_key in SETTING_KEYS.items():
             if name in data:
-                value = str(data[name] or "")
+                value = self._coerce_value(name, data[name])
+                # 主题/主色调校验，非法值回退默认
+                if name == "theme" and value not in VALID_THEMES:
+                    value = "light"
+                if name == "accent" and value not in VALID_ACCENTS:
+                    value = "indigo"
                 setattr(self, name, value)
-                os.environ[env_key] = value
+                # os.environ 只接受字符串
+                os.environ[env_key] = str(value) if not isinstance(value, bool) else ("true" if value else "false")
 
     def persist(self) -> None:
-        """把当前设置写回 backend/.env，下次启动仍生效。"""
+        """把当前设置写回 .env，下次启动仍生效。"""
         if set_key is None:
             raise RuntimeError("python-dotenv 未安装，无法保存设置")
         for name, env_key in SETTING_KEYS.items():
-            set_key(_ENV_PATH, env_key, str(getattr(self, name) or ""))
+            value = getattr(self, name)
+            if isinstance(value, bool):
+                str_value = "true" if value else "false"
+            else:
+                str_value = str(value or "")
+            set_key(_ENV_PATH, env_key, str_value)
 
 
 settings = Settings()
