@@ -26,6 +26,22 @@ UMI_OCR_REPO_API = "https://api.github.com/repos/hiroi-sora/Umi-OCR/releases/lat
 # 国内镜像（蓝奏云解析不稳定，这里只作备用提示，实际下载走 GitHub）
 UMI_OCR_MIRROR_URL = "https://hiroi-sora.lanzoul.com/s/umi-ocr"
 
+# GitHub 下载加速镜像（国内回退用），按顺序尝试
+_GITHUB_MIRRORS = [
+    "https://ghfast.top/",
+    "https://gh-proxy.com/",
+    "https://ghproxy.net/",
+    "https://gh.llkk.cc/",
+    "https://mirror.ghproxy.com/",
+]
+
+# 已知最新版本（API 完全不可用时的兜底）
+_KNOWN_LATEST_TAG = "v2.1.5"
+_KNOWN_LATEST_ASSETS = [
+    {"name": "Umi-OCR_Paddle_v2.1.5.7z.exe", "size": 134293725},
+    {"name": "Umi-OCR_Rapid_v2.1.5.7z.exe", "size": 130000000},
+]
+
 # 需要检测的 Python 包：(import_name, pip_name, display_name)
 PYTHON_DEPS = [
     ("markitdown", "markitdown[pdf]", "MarkItDown（Office/PDF 文档解析）"),
@@ -162,42 +178,89 @@ def check_umi_ocr_installed() -> dict:
 def _fetch_latest_umi_ocr_release() -> dict:
     """从 GitHub API 获取最新 UMI-OCR release 信息。
 
+    API 失败时回退到内置已知版本信息，保证一键下载始终可用。
+
     返回:
         {"tag_name": ..., "assets": [{"name": ..., "browser_download_url": ..., "size": ...}, ...]}
     """
     headers = {"Accept": "application/vnd.github+json"}
-    # 不带 token 也能访问公开 API（有限速 60次/小时，对单次下载足够）
-    with httpx.Client(timeout=15.0, trust_env=False, follow_redirects=True) as client:
-        resp = client.get(UMI_OCR_REPO_API, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+    try:
+        with httpx.Client(timeout=15.0, trust_env=True, follow_redirects=True) as client:
+            resp = client.get(UMI_OCR_REPO_API, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
 
+        assets = []
+        for a in data.get("assets", []):
+            assets.append({
+                "name": a.get("name", ""),
+                "browser_download_url": a.get("browser_download_url", ""),
+                "size": a.get("size", 0),
+            })
+        if assets:
+            return {"tag_name": data.get("tag_name", ""), "assets": assets}
+    except Exception:
+        pass
+
+    # 兜底：使用内置已知版本构造 release 信息
+    tag = _KNOWN_LATEST_TAG
+    base = f"https://github.com/hiroi-sora/Umi-OCR/releases/download/{tag}"
     assets = []
-    for a in data.get("assets", []):
+    for a in _KNOWN_LATEST_ASSETS:
         assets.append({
-            "name": a.get("name", ""),
-            "browser_download_url": a.get("browser_download_url", ""),
+            "name": a["name"],
+            "browser_download_url": f"{base}/{a['name']}",
             "size": a.get("size", 0),
         })
-    return {"tag_name": data.get("tag_name", ""), "assets": assets}
+    return {"tag_name": tag, "assets": assets}
+
+
+def _build_download_candidates(github_url: str) -> list[tuple[str, str]]:
+    """根据 GitHub 直链构造所有候选下载地址（直连 + 镜像）。
+
+    Returns:
+        [(label, url), ...]，按优先级排列。
+    """
+    candidates: list[tuple[str, str]] = [("GitHub 直连", github_url)]
+    for mirror in _GITHUB_MIRRORS:
+        candidates.append((f"镜像 {mirror}", mirror.rstrip("/") + "/" + github_url))
+    return candidates
+
+
+def _is_windows_asset(name: str) -> bool:
+    """判断文件名是否为 Windows 可下载的压缩包（.7z / .7z.exe / .zip）。"""
+    lower = name.lower()
+    # 排除明确的非 Windows / 非桌面平台文件
+    excludes = ("linux", "mac", "darwin", ".deb", ".rpm", ".appimage", ".dmg", "arm64", "aarch64")
+    if any(x in lower for x in excludes):
+        return False
+    return lower.endswith((".7z", ".7z.exe", ".zip"))
+
+
+def _asset_ext_rank(name: str) -> int:
+    """扩展名优先级：7z(含自解压) > zip。"""
+    lower = name.lower()
+    if lower.endswith(".7z") or lower.endswith(".7z.exe"):
+        return 0
+    if lower.endswith(".zip"):
+        return 1
+    return 9
 
 
 def _select_umi_ocr_asset(assets: list[dict]) -> dict | None:
     """从 release assets 中选择合适的 Windows 版本。
 
-    优先级：PaddleOCR 版 .7z > RapidOCR 版 .7z > Paddle .zip > 任意 .7z > 任意 .zip
+    优先级：PaddleOCR 版 > RapidOCR 版；7z（含 .7z.exe 自解压）> zip。
     """
     if not assets:
         return None
 
-    # 按优先级排序：先 Paddle，再 Rapid；先 7z，再 zip
     def asset_priority(a: dict) -> tuple:
         name = a["name"].lower()
         engine_rank = 0 if "paddle" in name else (1 if "rapid" in name else 2)
-        ext_rank = 0 if name.endswith(".7z") else (1 if name.endswith(".zip") else 9)
-        return (engine_rank, ext_rank)
+        return (engine_rank, _asset_ext_rank(name))
 
-    valid = [a for a in assets if a["name"].lower().endswith((".7z", ".zip"))]
+    valid = [a for a in assets if _is_windows_asset(a["name"])]
     if not valid:
         return None
     valid.sort(key=asset_priority)
@@ -206,7 +269,7 @@ def _select_umi_ocr_asset(assets: list[dict]) -> dict | None:
 
 def _download_file(url: str, dest: Path, progress_cb: ProgressCb | None = None) -> None:
     """流式下载文件到 dest，支持进度回调。"""
-    with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0), trust_env=False, follow_redirects=True) as client:
+    with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0), trust_env=True, follow_redirects=True) as client:
         with client.stream("GET", url) as resp:
             resp.raise_for_status()
             total = int(resp.headers.get("content-length", 0))
@@ -219,42 +282,122 @@ def _download_file(url: str, dest: Path, progress_cb: ProgressCb | None = None) 
                         progress_cb(downloaded, total)
 
 
-def _extract_archive(archive_path: Path, dest_dir: Path) -> None:
-    """解压 .7z 或 .zip 到目标目录。"""
-    suffix = archive_path.suffix.lower()
+def _download_with_fallback(
+    candidates: list[tuple[str, str]],
+    dest: Path,
+    progress_cb: ProgressCb | None = None,
+) -> str:
+    """依次尝试候选下载地址，第一个成功即返回。
 
-    if suffix == ".zip":
+    Returns:
+        成功使用的候选标签。
+    Raises:
+        RuntimeError: 所有候选均失败。
+    """
+    errors: list[str] = []
+    for label, url in candidates:
+        try:
+            _download_file(url, dest, progress_cb)
+            # 校验下载的文件非空且大于 1MB（正常安装包约 130MB）
+            if dest.exists() and dest.stat().st_size > 1024 * 1024:
+                return label
+            errors.append(f"{label}：下载文件过小或为空")
+            if dest.exists():
+                dest.unlink(missing_ok=True)
+        except Exception as e:
+            errors.append(f"{label}：{e}")
+            if dest.exists():
+                dest.unlink(missing_ok=True)
+    raise RuntimeError("所有下载通道均失败：\n" + "\n".join(errors))
+
+
+def _try_silent_sfx_extract(sfx_path: Path, dest_dir: Path) -> bool:
+    """尝试以静默方式运行 .7z.exe 自解压包。返回是否成功。"""
+    if os.name != "nt":
+        return False
+    try:
+        result = subprocess.run(
+            [str(sfx_path), "-y", f"-o{dest_dir}"],
+            cwd=str(sfx_path.parent),
+            capture_output=True,
+            timeout=180,
+        )
+        if result.returncode == 0:
+            # 验证是否真的解压出了内容
+            if any(dest_dir.iterdir()):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _extract_7z_via_py7zr(archive_path: Path, dest_dir: Path) -> None:
+    """用 py7zr 解压 .7z 文件（自动处理自解压 .7z.exe 的签名偏移）。"""
+    try:
+        import py7zr
+    except ImportError:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "py7zr"],
+            capture_output=True,
+            timeout=120,
+            check=True,
+        )
+        import py7zr
+
+    file_name = archive_path.name.lower()
+    is_sfx = file_name.endswith(".7z.exe")
+
+    if is_sfx:
+        # 自解压包：7z 数据前有一段 PE 引导程序，需要定位 7z 魔数
+        # 7z 签名: 37 7A BC AF 27 1C
+        sig = b"\x37\x7a\xbc\xaf\x27\x1c"
+        with open(archive_path, "rb") as f:
+            data = f.read()
+        idx = data.find(sig)
+        if idx < 0:
+            raise RuntimeError("自解压包中未找到 7z 签名，无法解压")
+        # 复制一份纯 .7z 文件到临时位置
+        pure_7z = archive_path.with_suffix(".sfx.7z")
+        try:
+            with open(pure_7z, "wb") as f:
+                f.write(data[idx:])
+            with py7zr.SevenZipFile(pure_7z, mode="r") as z:
+                z.extractall(path=str(dest_dir))
+        finally:
+            pure_7z.unlink(missing_ok=True)
+    else:
+        with py7zr.SevenZipFile(archive_path, mode="r") as z:
+            z.extractall(path=str(dest_dir))
+
+
+def _extract_archive(archive_path: Path, dest_dir: Path) -> None:
+    """解压 .7z / .7z.exe（自解压）/ .zip 到目标目录。"""
+    file_name = archive_path.name.lower()
+
+    if file_name.endswith(".zip"):
         with zipfile.ZipFile(archive_path, "r") as zf:
             zf.extractall(dest_dir)
-    elif suffix == ".7z":
-        # 尝试用 py7zr 解压
-        try:
-            import py7zr
-            with py7zr.SevenZipFile(archive_path, mode="r") as z:
-                z.extractall(path=str(dest_dir))
-        except ImportError:
-            # py7zr 未安装 → 先安装它再重试
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "py7zr"],
-                capture_output=True,
-                timeout=120,
-                check=True,
-            )
-            import py7zr
-            with py7zr.SevenZipFile(archive_path, mode="r") as z:
-                z.extractall(path=str(dest_dir))
-    else:
-        raise RuntimeError(f"不支持的压缩格式：{suffix}")
+        return
+
+    if file_name.endswith(".7z") or file_name.endswith(".7z.exe"):
+        # 对于 .7z.exe：优先静默运行自解压（最可靠），失败则用 py7zr 解析
+        if file_name.endswith(".7z.exe"):
+            if _try_silent_sfx_extract(archive_path, dest_dir):
+                return
+        _extract_7z_via_py7zr(archive_path, dest_dir)
+        return
+
+    raise RuntimeError(f"不支持的压缩格式：{archive_path.suffix}")
 
 
 def download_and_install_umi_ocr(progress_cb: ProgressCb | None = None) -> tuple[bool, str, str]:
     """下载并安装最新版 UMI-OCR 到工具目录。
 
     流程：
-    1. 查询 GitHub 最新 release
-    2. 选择合适的 Windows 安装包（PaddleOCR .7z）
-    3. 下载到临时文件
-    4. 解压到 TOOLS_DIR / Umi-OCR
+    1. 查询 GitHub 最新 release（API 失败时用内置已知版本兜底）
+    2. 选择合适的 Windows 安装包（PaddleOCR，.7z.exe 自解压优先）
+    3. 依次尝试 GitHub 直连 + 多个国内加速镜像下载
+    4. 静默自解压（失败则用 py7zr 解析）到 TOOLS_DIR / Umi-OCR
     5. 验证 Umi-OCR.exe 存在
     6. 自动更新配置路径
 
@@ -262,7 +405,7 @@ def download_and_install_umi_ocr(progress_cb: ProgressCb | None = None) -> tuple
         (ok, message, exe_path)
     """
     try:
-        # 1. 获取最新版本信息
+        # 1. 获取最新版本信息（API 失败自动回退到内置已知版本）
         if progress_cb:
             progress_cb(0, 0)
         release_info = _fetch_latest_umi_ocr_release()
@@ -270,26 +413,29 @@ def download_and_install_umi_ocr(progress_cb: ProgressCb | None = None) -> tuple
         asset = _select_umi_ocr_asset(release_info["assets"])
 
         if not asset:
-            return False, (
-                "未找到可用的 UMI-OCR Windows 安装包。\n"
-                f"请手动前往下载：{UMI_OCR_MIRROR_URL}（国内蓝奏云）\n"
-                "或 GitHub Releases 页面下载后解压。"
-            ), ""
+            # 即使筛选失败，也用已知版本兜底
+            tag = _KNOWN_LATEST_TAG
+            base = f"https://github.com/hiroi-sora/Umi-OCR/releases/download/{tag}"
+            asset = {
+                "name": _KNOWN_LATEST_ASSETS[0]["name"],
+                "browser_download_url": f"{base}/{_KNOWN_LATEST_ASSETS[0]['name']}",
+                "size": _KNOWN_LATEST_ASSETS[0]["size"],
+            }
 
         asset_name = asset["name"]
         download_url = asset["browser_download_url"]
-        size_mb = asset["size"] / (1024 * 1024)
+        size_mb = asset.get("size", 0) / (1024 * 1024)
 
         # 2. 准备目录
         get_tools_dir()
-        # 清理旧的安装目录（如果存在）
         if UMI_OCR_INSTALL_DIR.exists():
             shutil.rmtree(UMI_OCR_INSTALL_DIR, ignore_errors=True)
         UMI_OCR_INSTALL_DIR.mkdir(parents=True, exist_ok=True)
 
-        # 3. 下载
+        # 3. 构造所有候选下载地址（直连 + 镜像），依次尝试
+        candidates = _build_download_candidates(download_url)
         archive_path = TOOLS_DIR / asset_name
-        _download_file(download_url, archive_path, progress_cb)
+        used_label = _download_with_fallback(candidates, archive_path, progress_cb)
 
         # 4. 解压
         _extract_archive(archive_path, UMI_OCR_INSTALL_DIR)
@@ -300,13 +446,13 @@ def download_and_install_umi_ocr(progress_cb: ProgressCb | None = None) -> tuple
         except Exception:
             pass
 
-        # 6. 查找解压后的 exe
+        # 6. 查找解压后的 exe（支持多层嵌套目录）
         exe_path = _get_umi_ocr_exe_in_dir(UMI_OCR_INSTALL_DIR)
         if not exe_path:
-            # 解压后可能多嵌套了一层目录，尝试搜索
-            for item in UMI_OCR_INSTALL_DIR.rdir("Umi-OCR.exe"):
-                exe_path = item
-                break
+            for item in UMI_OCR_INSTALL_DIR.rglob("Umi-OCR.exe"):
+                if item.is_file():
+                    exe_path = item
+                    break
 
         if not exe_path:
             return False, (
@@ -324,19 +470,22 @@ def download_and_install_umi_ocr(progress_cb: ProgressCb | None = None) -> tuple
         except Exception:
             pass
 
+        size_info = f"（约 {size_mb:.0f} MB，通过{used_label}下载）" if size_mb > 0 else f"（通过{used_label}下载）"
         return True, (
             f"UMI-OCR {tag} 下载安装成功！\n"
             f"安装位置：{exe_str}\n"
-            f"文件大小：{size_mb:.1f} MB\n"
+            f"文件大小：{size_info}\n"
             "路径已自动保存到设置。使用前请确保在 UMI-OCR 中开启「HTTP接口服务」（默认端口 1224）。"
         ), exe_str
 
-    except httpx.HTTPStatusError as e:
-        return False, f"下载失败（HTTP {e.response.status_code}）：{e}\n请检查网络连接，或手动从蓝奏云下载：{UMI_OCR_MIRROR_URL}", ""
-    except httpx.RequestError as e:
-        return False, f"网络请求失败：{e}\n如果无法访问 GitHub，可手动从蓝奏云下载：{UMI_OCR_MIRROR_URL}", ""
     except Exception as e:
-        return False, f"下载安装 UMI-OCR 时出错：{e}", ""
+        return False, (
+            f"下载安装 UMI-OCR 失败：{e}\n\n"
+            f"你也可以手动下载：\n"
+            f"1. 蓝奏云镜像（国内推荐）：{UMI_OCR_MIRROR_URL}\n"
+            f"2. GitHub Releases：https://github.com/hiroi-sora/Umi-OCR/releases\n"
+            f"下载后解压，在设置中选择 Umi-OCR.exe 即可。"
+        ), ""
 
 
 def get_all_deps_status() -> dict:
