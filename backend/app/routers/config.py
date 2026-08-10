@@ -14,7 +14,9 @@ from ..services.dependency_manager import (
     download_and_install_umi_ocr,
     download_and_install_umi_ocr_stream,
     get_all_deps_status,
+    install_officecli,
     install_python_deps,
+    install_remotion,
 )
 
 router = APIRouter(prefix="/api/config", tags=["config"])
@@ -187,6 +189,27 @@ async def download_umi_ocr_stream_endpoint():
             "Connection": "keep-alive",
         },
     )
+
+
+@router.post("/install-remotion")
+def install_remotion_endpoint():
+    """通过 npm 在工具目录中安装 Remotion 视频渲染依赖。
+
+    此操作可能耗时数分钟（下载约 100-200MB），同步执行，前端需显示加载状态。
+    """
+    ok, msg = install_remotion()
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/install-officecli")
+def install_officecli_endpoint():
+    """通过 npm 在工具目录中安装 OfficeCLI 文档操作依赖。
+
+    幻灯片任务需要 OfficeCLI 来读取和修改 PPT 文件。
+    此操作可能耗时数十秒到数分钟（取决于网络），同步执行，前端需显示加载状态。
+    """
+    ok, msg = install_officecli()
+    return {"ok": ok, "message": msg}
 
 
 # ========== LOOP 卡片分享（GitHub Gist）==========
