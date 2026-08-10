@@ -64,6 +64,10 @@ frontend/patch-main.js
 右侧-待验证/
 左侧-数据/
 
+# Downloaded external tools (UMI-OCR etc.) — use Settings one-click download
+tools/
+backend/tools/
+
 # Backend test scripts
 backend/test_browser_use.py
 backend/test_screenshot_stream.py
