@@ -83,6 +83,7 @@ export interface ElectronAPI {
   viewHide: (side: ViewSide) => Promise<void>;
   viewHideAll: () => Promise<void>;
   viewSetZoom: (side: ViewSide, factor: number) => Promise<void>;
+  viewSetBrightness: (side: ViewSide, value: number) => Promise<void>;
 
   viewExecuteJS: (side: ViewSide, script: string) => Promise<unknown>;
   viewInsertCSS: (side: ViewSide, css: string) => Promise<unknown>;
@@ -139,6 +140,8 @@ export interface ElectronAPI {
   viewGetDownloadableLinks: (side: ViewSide) => Promise<{ ok: boolean; links?: Array<{ url: string; text: string; filename?: string }>; error?: string }>;
   // 批量下载URL列表并返回文件数据
   viewBatchDownloadUrls: (side: ViewSide, urls: string[], timeoutMs?: number) => Promise<{ ok: boolean; files?: Array<{ url: string; filename: string; dataUrl: string; size: number; mime: string }>; error?: string }>;
+  // 图片直览页抓取：点击后直接预览图片（无下载按钮）时，按 URL 主动下载
+  viewDownloadSingleUrl: (side: ViewSide, url: string, timeoutMs?: number) => Promise<{ ok: boolean; filename?: string; dataUrl?: string; size?: number; mime?: string; error?: string }>;
 
   // === 本地文件提取：选择目录 + 读取文件 ===
   pickLocalDirectory: () => Promise<{ canceled: boolean; rootPath: string; files: Array<{ relativePath: string; name: string; size: number; ext: string }> }>;
