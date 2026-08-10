@@ -239,6 +239,25 @@ export const api = {
 
   pluginStop: () =>
     jsonFetch<PluginStatus>(`${BASE}/plugin/stop`, { method: "POST" }),
+
+  // ========== LOOP 卡片分享（GitHub Gist）==========
+
+  /** 创建 GitHub Gist 联网分享，返回短码 */
+  createShare: (template: unknown) =>
+    jsonFetch<{ ok: boolean; code?: string; id?: string; error?: string }>(
+      `${BASE}/config/share/create`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ template }),
+      }
+    ),
+
+  /** 根据分享码获取 LOOP 卡片模板 */
+  fetchShare: (code: string) =>
+    jsonFetch<{ ok: boolean; template?: unknown; error?: string }>(
+      `${BASE}/config/share/fetch?code=${encodeURIComponent(code)}`
+    ),
 };
 
 export type VerifyEvent =
