@@ -221,6 +221,10 @@ interface Props {
   rightBindColumn?: string | null;
   /** 设置右侧绑定列 */
   onRightBindColumnChange?: (col: string | null) => void;
+  /** Enter 快捷键保存触发器：canSave 时挂 handleSave，否则清 null */
+  saveTriggerRef?: React.MutableRefObject<(() => void) | null>;
+  /** canSave 状态变化时通知父组件（用于在外部显示"确定映射"按钮） */
+  onCanSaveChange?: (canSave: boolean) => void;
 }
 
 export default function ElementSelectBar({
@@ -312,6 +316,8 @@ onRequestSaveSkill,
 onDirectRun,
 rightBindColumn = null,
 onRightBindColumnChange,
+saveTriggerRef,
+onCanSaveChange,
 }: Props) {
   const [leftSource, setLeftSource] = useState<LeftSource>("database");
   const [excelField, setExcelField] = useState<string>("");
@@ -488,6 +494,28 @@ onRightBindColumnChange,
       verify_method: method,
     });
   };
+
+  // Enter 快捷键：canSave 时将 handleSave 挂到外部 ref，卸载或不可保存时清空
+  useEffect(() => {
+    if (!saveTriggerRef) return;
+    if (active && canSave) {
+      saveTriggerRef.current = handleSave;
+    } else {
+      saveTriggerRef.current = null;
+    }
+    return () => {
+      if (saveTriggerRef.current === handleSave) {
+        saveTriggerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, canSave, rightPicked, leftPicked, leftSource, excelField, method, onSave, saveTriggerRef]);
+
+  // 通知父组件 canSave 状态变化（用于外部显示"确定映射"按钮）
+  useEffect(() => {
+    onCanSaveChange?.(active && canSave);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, canSave]);
 
   // 右侧拾取行（审查模式=第1步；录入模式=第2步，需先完成左侧来源）
   const rightPickRow = (
@@ -1242,17 +1270,6 @@ onRightBindColumnChange,
                       <span className="step-highlight" key="step4-active">
                         正在添加{addingStepMode === "review" ? "审查" : "录入"}步骤 — {addingStepMode === "review" ? "选右侧元素 → 左侧来源 → 保存" : "选左侧来源 → 右侧输入框 → 保存"}
                       </span>
-                      {/* 文件提取子步骤 */}
-                      {addingStepMode && onStartAddDocExtract && !addingDocExtractMode && (
-                        <button
-                          onClick={onStartAddDocExtract}
-                          className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md bg-teal-600 px-2.5 text-[11px] font-medium text-white transition-all hover:bg-teal-700"
-                          title="添加文件提取步骤：支持本地上传按文件名匹配，或点击网页图片/PDF 自动下载提取"
-                        >
-                          <Plus className="h-3 w-3" />
-                          文件提取{docExtractStepCount > 0 ? ` (${docExtractStepCount})` : ""}
-                        </button>
-                      )}
                       {/* 已绑定的文件上传步骤指示 */}
                       {docUploadStepCount > 0 && (
                         <span
@@ -1262,21 +1279,6 @@ onRightBindColumnChange,
                           <Upload className="h-3 w-3" />
                           文件上传 ({docUploadStepCount})
                         </span>
-                      )}
-                      {addingDocExtractMode && docExtractSource === "choose" && (
-                        <>
-                          <span className="step-highlight" key="step4-docchoose">
-                            文件提取 — 请在「文件处理」面板选择来源（网页 / 本地）
-                          </span>
-                          {onExitAddDocExtractMode && (
-                            <button
-                              onClick={onExitAddDocExtractMode}
-                              className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md bg-slate-200 px-2.5 text-[11px] font-medium text-slate-700 transition-all hover:bg-slate-300"
-                            >
-                              取消
-                            </button>
-                          )}
-                        </>
                       )}
                       {addingDocExtractMode && docExtractSource === "web" && (
                         <>
