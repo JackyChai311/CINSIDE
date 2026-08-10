@@ -28,7 +28,6 @@ import {
   PanelLeftClose,
   Play,
   Plus,
-  RefreshCw,
   Repeat2,
   Save,
   Settings2,
@@ -122,6 +121,7 @@ import SettingsModal from "./components/SettingsModal";
 import DocFillDialog from "./components/DocFillDialog";
 import SkillPanel from "./components/SkillPanel";
 import LoopEditor from "./components/LoopEditor";
+import BreakpointDialog from "./components/BreakpointDialog";
 import SaveSkillDialog from "./components/SaveSkillDialog";
 import CredentialsPanel from "./components/CredentialsPanel";
 import DocLocalExtractConfig from "./components/DocLocalExtractConfig";
@@ -701,6 +701,7 @@ function DetachedBottomPanel({ onFieldPanelActive, fieldSetupToggleSignal }: { o
               selectMode={selectMode}
               onFieldPanelActive={onFieldPanelActive}
               fieldSetupToggleSignal={fieldSetupToggleSignal}
+              onRefresh={() => window.electronAPI?.panelSendAction("refresh-workspace", undefined)}
             />
             {/* 步骤设置面板：下面板分离后，TeachingGuide 在此渲染（而非主窗口）（仅新手模式） */}
             {beginnerMode && teachingPhase !== "idle" && !selectMode && (
@@ -1181,6 +1182,8 @@ const [customTextMode, setCustomTextMode] = useState(false);
 const customTextModeRef = useRef(false);
 customTextModeRef.current = customTextMode;
 const [customTextEntries, setCustomTextEntries] = useState<CustomTextEntry[]>([]);
+const customTextEntriesRef = useRef<CustomTextEntry[]>([]);
+customTextEntriesRef.current = customTextEntries;
 const [customTextPickingId, setCustomTextPickingId] = useState<string | null>(null);
 const customTextPickingIdRef = useRef<string | null>(null);
 customTextPickingIdRef.current = customTextPickingId;
@@ -1346,6 +1349,25 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const processClickCount = useMemo(() => pickedMarks.filter((m) => m.action === "click" && m.clickPhase === "mid").length, [pickedMarks]);
   // 收尾点击数量（步骤5：保存/返回）
   const postClickCount = useMemo(() => pickedMarks.filter((m) => m.action === "click" && m.clickPhase === "post").length, [pickedMarks]);
+  // 文件提取步骤的断点状态（取所有 docExtract mark 的断点，有一个总是 always 就显示 always）
+  const docBreakpoint = useMemo<"always" | "on-error" | undefined>(() => {
+    const docMarks = pickedMarks.filter((m) => m.docExtract);
+    if (docMarks.length === 0) return undefined;
+    if (docMarks.some((m) => m.breakpoint === "always")) return "always";
+    if (docMarks.some((m) => m.breakpoint === "on-error")) return "on-error";
+    return undefined;
+  }, [pickedMarks]);
+  // 循环切换文件提取步骤的断点：无→强制→条件→无
+  const toggleDocBreakpoint = useCallback(() => {
+    setPickedMarks((prev) => {
+      const docMarks = prev.filter((m) => m.docExtract);
+      if (docMarks.length === 0) return prev;
+      // 以第一个 docExtract mark 的当前状态为基准循环
+      const cur = docMarks[0].breakpoint;
+      const next = cur === undefined ? "always" : cur === "always" ? "on-error" : undefined;
+      return prev.map((m) => (m.docExtract ? { ...m, breakpoint: next } : m));
+    });
+  }, []);
   const addPickedMark = useCallback(
     (mark: Omit<PickedMark, "id" | "order" | "createdAt">) => {
       setPickedMarks((prev) => {
@@ -1447,6 +1469,37 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const [reviewFieldResults, setReviewFieldResults] = useState<Record<number, FieldMatch>>({});
   const batchStopRef = useRef(false);
   const runBatchRef = useRef<((tplOverride?: WorkflowTemplate, targetIds?: string[]) => Promise<void>) | null>(null);
+
+  // ============ 断点暂停机制 ============
+  /** 断点弹窗的 UI 状态（null=未暂停） */
+  const [breakpointState, setBreakpointState] = useState<import("./components/BreakpointDialog").BreakpointInfo | null>(null);
+  /** Promise resolver：执行引擎在此等待，用户点继续后 resolve */
+  const breakpointResolveRef = useRef<(() => void) | null>(null);
+  /** 记录当前 LOOP 的总记录数（断点弹窗显示用） */
+  const breakpointTotalRef = useRef(0);
+  /**
+   * 触发断点暂停：执行引擎调用后返回 Promise，直到用户点继续才 resolve。
+   * 用于在 executeTemplateForRecord 的步骤循环中插入人工检查点。
+   */
+  const waitForBreakpointRef = useRef<(info: Omit<import("./components/BreakpointDialog").BreakpointInfo, "triggeredAt" | "recordTotal">) => Promise<void>>(
+    async () => { throw new Error("waitForBreakpoint not initialized"); }
+  );
+  waitForBreakpointRef.current = (info) => {
+    return new Promise<void>((resolve) => {
+      breakpointResolveRef.current = resolve;
+      setBreakpointState({
+        ...info,
+        recordTotal: breakpointTotalRef.current,
+        triggeredAt: Date.now(),
+      });
+    });
+  };
+  /** 用户点击"继续执行" */
+  const continueFromBreakpoint = useCallback(() => {
+    breakpointResolveRef.current?.();
+    breakpointResolveRef.current = null;
+    setBreakpointState(null);
+  }, []);
   const [logSignal, setLogSignal] = useState(0); // 递增触发ResultsPanel切换到日志tab
   /** 已勾选的卡片记录 ID 集合（用于批量跑 LOOP） */
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
@@ -1515,15 +1568,24 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
   // 审查流操作时自动收窄底部面板，退出后恢复用户之前的高度；教学模式下自动打开面板
   const savedBottomHeightRef = useRef<number>(20);
+  const savedLeftPanelOpenRef = useRef<boolean>(true);
   useEffect(() => {
     if (selectMode) {
-      // 进入选择模式：自动打开面板，保存当前高度并收窄
+      // 进入选择模式：自动打开底部面板，保存当前高度并收窄
       setBottomPanelOpen(true);
       savedBottomHeightRef.current = bottomPanelHeight;
       setBottomPanelHeight(34);
+      // 自动收起左侧任务卡片面板，腾出浏览器操作空间
+      if (!leftDetached) {
+        savedLeftPanelOpenRef.current = leftPanelOpen;
+        setLeftPanelOpen(false);
+      }
     } else {
-      // 退出选择模式：恢复到用户之前的高度（而不是硬编码 55）
+      // 退出选择模式：恢复到用户之前的高度和侧边栏状态
       setBottomPanelHeight(savedBottomHeightRef.current);
+      if (!leftDetached && savedLeftPanelOpenRef.current) {
+        setLeftPanelOpen(true);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectMode]);
@@ -2325,6 +2387,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const stopQueue = useCallback(() => {
     queueStopRef.current = true;
     batchStopRef.current = true; // 同时停止当前任务内部的批量执行
+    breakpointResolveRef.current?.();
+    breakpointResolveRef.current = null;
+    setBreakpointState(null);
   }, []);
 
   // 从BrowserPane Excel模式上传文件
@@ -3454,19 +3519,32 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setCustomTextEntries((prev) => prev.map((e) => (e.id === id ? { ...e, text } : e)));
   }, []);
 
+  const setCustomTextWorkflow = useCallback((id: string, workflow: "review" | "entry") => {
+    setCustomTextEntries((prev) => prev.map((e) => (e.id === id ? { ...e, workflow } : e)));
+  }, []);
+
   const pickForCustomText = useCallback((id: string) => {
+    customTextModeRef.current = true;
+    customTextPickingIdRef.current = id;
+    setCustomTextMode(true);
     setCustomTextPickingId(id);
-    window.electronAPI?.viewStartPicking("left").catch(() => {});
-    window.electronAPI?.viewStartPicking("right").catch(() => {});
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+    setTimeout(() => {
+      window.electronAPI?.viewStartPicking("left").catch(() => {});
+      window.electronAPI?.viewStartPicking("right").catch(() => {});
+    }, 100);
   }, []);
 
   const saveCustomTextSteps = useCallback(() => {
-    const stepType = currentLoopStepTypeRef.current;
-    const isEntry = stepType === "entry";
+    const savedStepType = currentLoopStepTypeRef.current;
     let saved = 0;
     const newlySavedIds: string[] = [];
     customTextEntries.forEach((entry) => {
       if (!entry.text || !entry.selector || entry.saved) return;
+      // 每个条目按自身的 workflow 保存（未设置时跟随全局）
+      const entryWorkflow = entry.workflow || savedStepType;
+      currentLoopStepTypeRef.current = entryWorkflow;
       // right_label 只用拾取到的元素标签；框框名字（entry.name）不参与保存，仅在 UI 显示
       saveMapping({
         right_selector: entry.selector,
@@ -3479,6 +3557,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       newlySavedIds.push(entry.id);
       saved++;
     });
+    // 恢复全局步骤类型
+    currentLoopStepTypeRef.current = savedStepType;
     if (saved > 0) {
       // 标记已保存的条目，保留在面板中
       setCustomTextEntries((prev) =>
@@ -3671,6 +3751,33 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           {/* 底部操作按钮（控件拾取模式下隐藏，避免误操作） */}
           {!opts.widgetPickActive && (
           <div className="mt-1.5 flex items-center gap-1">
+            {/* 审核/录入模式切换 */}
+            {(() => {
+              const wf = entry.workflow || currentLoopStepType;
+              const isEntry = wf === "entry";
+              return (
+                <div className="inline-flex overflow-hidden rounded-md border border-slate-200 bg-slate-100">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setCustomTextWorkflow(entry.id, "review"); }}
+                    className={`px-1.5 py-0.5 text-[9px] font-semibold transition-colors ${
+                      !isEntry ? "bg-amber-500 text-white" : "text-slate-500 hover:bg-slate-200"
+                    }`}
+                    title="审查模式：拾取网页元素进行字段对比"
+                  >
+                    审查
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setCustomTextWorkflow(entry.id, "entry"); }}
+                    className={`px-1.5 py-0.5 text-[9px] font-semibold transition-colors ${
+                      isEntry ? "bg-sky-500 text-white" : "text-slate-500 hover:bg-slate-200"
+                    }`}
+                    title="录入模式：拾取输入框并直接填入文本"
+                  >
+                    录入
+                  </button>
+                </div>
+              );
+            })()}
             <button
               onClick={(e) => { e.stopPropagation(); pickForCustomText(entry.id); }}
               disabled={!!customTextPickingId && customTextPickingId !== entry.id}
@@ -3727,7 +3834,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       </div>
     </div>
     );
-  }, [customTextPickingId, addingStepMode, renameCustomTextEntry, updateCustomTextEntry, pickForCustomText, removeCustomTextEntry, addCustomTextEntry, saveCustomTextSteps]);
+  }, [customTextPickingId, addingStepMode, renameCustomTextEntry, updateCustomTextEntry, pickForCustomText, removeCustomTextEntry, addCustomTextEntry, saveCustomTextSteps, setCustomTextWorkflow, currentLoopStepType]);
 
   // 控件拾取左侧面板条目：通过 ref 间接调用，解决函数定义顺序问题（真正实现在 testWidget/updateSavedWidgetBinding 之后）
   const onWidgetPickExtractEntryRef = useRef<((entry: CustomTextEntry) => void) | null>(null);
@@ -5286,6 +5393,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // 停止批量执行
   const stopBatch = useCallback(() => {
     batchStopRef.current = true;
+    // 如果正在断点暂停中，resolve Promise 让执行循环能检测到 batchStopRef 并退出
+    breakpointResolveRef.current?.();
+    breakpointResolveRef.current = null;
+    setBreakpointState(null);
     setBatchRunning(false);
   }, []);
 
@@ -6595,12 +6706,62 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           await sleep(800);
           await Promise.race([waitPageSettled("left", 3000), waitPageSettled("right", 3000), sleep(2000)]);
         }
+
+        // ---- 断点检查（步骤成功执行后） ----
+        const markLabel = mark.label || (mark.action === "click" ? "点击" : mark.action === "input" ? "输入" : "提取");
+        if (mark.breakpoint === "always") {
+          rlog(`[batch] 断点（强制）触发：第 ${recordIndex + 1} 行步骤「${markLabel}」，等待人工继续`);
+          await waitForBreakpointRef.current({
+            recordName: String(recordKey),
+            recordIndex: recordIndex + 1,
+            stepLabel: markLabel,
+            type: "always",
+          });
+        } else if (mark.breakpoint === "on-error") {
+          // 条件断点：检查文件提取是否有警告（MRZ 警告、降级引擎等）
+          let docWarn: string | undefined;
+          if (mark.docExtract) {
+            const extracts = docExtractsByRecordRef.current[record.record_id] || [];
+            const latest = extracts[extracts.length - 1];
+            if (latest) {
+              const warnings: string[] = [];
+              if (latest.mrz_warnings?.length) warnings.push(...latest.mrz_warnings);
+              if (latest.fallback) warnings.push(`使用了降级引擎: ${latest.fallback}`);
+              if (warnings.length > 0) docWarn = warnings.join("; ");
+            }
+          }
+          if (docWarn) {
+            rlog(`[batch] 断点（条件-文件警告）触发：${docWarn}`);
+            await waitForBreakpointRef.current({
+              recordName: String(recordKey),
+              recordIndex: recordIndex + 1,
+              stepLabel: markLabel,
+              type: "on-error",
+              error: `文件提取可能有问题：${docWarn}`,
+            });
+          }
+        }
       } catch (e) {
+        const errMsg = e instanceof Error ? e.message : String(e);
         rlog(`[batch] 第 ${recordIndex + 1} 行步骤 ${mark.order} 失败:`, e);
+        // 条件断点：步骤执行出错时暂停，让人工干预后继续（而非直接失败返回）
+        if (mark.breakpoint === "on-error") {
+          const markLabel = mark.label || `步骤${mark.order}`;
+          rlog(`[batch] 断点（条件-执行错误）触发：${errMsg}，等待人工干预`);
+          await waitForBreakpointRef.current({
+            recordName: String(recordKey),
+            recordIndex: recordIndex + 1,
+            stepLabel: markLabel,
+            type: "on-error",
+            error: `执行出错：${errMsg}`,
+          });
+          // 人工点继续后，跳过当前失败步骤继续执行下一个
+          continue;
+        }
         return {
           success: false,
           failedOrder: mark.order,
-          error: e instanceof Error ? e.message : String(e),
+          error: errMsg,
         };
       }
     }
@@ -6614,6 +6775,19 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       const cmp = await compareFieldsForRecord(record, recordIndex, tpl.mappings);
       comparisons = cmp.comparisons;
       verifyOverall = cmp.overall;
+      // 条件断点：字段比对发现不匹配，且本次执行的 marks 中有 on-error 断点
+      if (verifyOverall === "mismatch" && allMarks.some((m) => m.breakpoint === "on-error")) {
+        const mismatchFields = comparisons.filter((c) => c.match === "mismatch" || c.match === "error");
+        const detail = mismatchFields.map((c) => `${c.field}: 「${c.excel_value}」vs「${c.website_value}」`).join("; ");
+        rlog(`[batch] 断点（条件-字段不匹配）触发：${mismatchFields.length} 个字段不匹配`);
+        await waitForBreakpointRef.current({
+          recordName: String(recordKey),
+          recordIndex: recordIndex + 1,
+          stepLabel: "字段比对（审查）",
+          type: "on-error",
+          error: `${mismatchFields.length} 个字段不匹配：${detail}`,
+        });
+      }
     }
 
     return { success: true, comparisons, verifyOverall };
@@ -6689,6 +6863,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       return;
     }
     setBatchTargets(targets);
+    breakpointTotalRef.current = targets.length;
 
     // 快照教学时左右网页的 URL：每条 LOOP 开始前重置回这个搜索页，
     // 保证每条记录都从同一个初始页面状态开始（搜索框存在、无残留详情页）
@@ -7118,6 +7293,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
         // 2. 批量执行该组所有卡片（复用现有 executeTemplateForRecord 逻辑）
         const targets = task.cardRecords;
+        breakpointTotalRef.current = targets.length;
         let successCount = 0;
         let failCount = 0;
         const errors: string[] = [];
@@ -7473,6 +7649,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // ============ 功能3：点击「查看」按钮 → 执行步骤5(收尾)→步骤2+3(搜索+前置点击)，定位到该卡片页面 ============
   const runSingleRecord = useCallback(
     async (recordId: string) => {
+      breakpointTotalRef.current = 1;
       // 优先使用 ref 中的 workflowTemplate（避免 setState 异步导致的旧值），再回退到持久化模板
       let tpl = workflowTemplateRef.current || workflowTemplate || lastTemplateRef.current;
       // 如果当前没有活动模板，查找该卡片所属的已保存批次模板
@@ -7639,6 +7816,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // ============ SKILL 拖拽到人物卡片：加载 SKILL 并在指定记录上单卡执行 ============
   const runSkillOnRecord = useCallback(
     async (skillId: string, recordId: string) => {
+      breakpointTotalRef.current = 1;
       const tpl = getSkillById(skillId);
       if (!tpl) {
         setError("SKILL 不存在或已被删除");
@@ -8490,6 +8668,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 自定义文本拾取模式：优先于其他分支（仅次于文件提取）
     if (customTextModeRef.current && customTextPickingIdRef.current) {
       const id = customTextPickingIdRef.current;
+      const entry = customTextEntriesRef.current.find((e) => e.id === id);
       setCustomTextEntries((prev) => prev.map((e) =>
         e.id === id
           ? { ...e, selector: info.selector, label: info.label || info.tag || info.selector, side: "right", tag: info.tag, type: info.type }
@@ -8498,6 +8677,20 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       setCustomTextPickingId(null);
       window.electronAPI?.viewStopPicking("left").catch(() => {});
       window.electronAPI?.viewStopPicking("right").catch(() => {});
+      // 录入模式：拾取到输入框后立即把文本值填进去（参考「绑定输入框」逻辑）
+      // 使用条目自身的 workflow，未设置时跟随全局 currentLoopStepType
+      const entryWorkflow = entry?.workflow || currentLoopStepTypeRef.current;
+      const isInputLike = /^(input|textarea|select)$/i.test(info.tag || "") || !!info.isContentEditable || /^(text|search|email|tel|url|number|password)$/i.test(info.type || "") || /^(textbox|searchbox|combobox|spinbutton)$/i.test(info.role || "");
+      const isEntry = entryWorkflow === "entry";
+      const fillValue = (entry?.text || "").trim();
+      if (isEntry && isInputLike && fillValue) {
+        rlog("[onRightPicked] 自定义文本拾取后立即填入:", { selector: info.selector, value: fillValue });
+        setTimeout(() => {
+          performInputValue("right", info.selector, fillValue).catch((e) => {
+            console.error("[onRightPicked] 自定义文本填入失败", e);
+          });
+        }, 350);
+      }
       return;
     }
     // 日历手动面板点选兜底：快照未检测到面板时，用户点选日历面板内元素（右侧）
@@ -8883,6 +9076,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 自定义文本拾取模式：优先于其他分支（仅次于文件提取）
     if (customTextModeRef.current && customTextPickingIdRef.current) {
       const id = customTextPickingIdRef.current;
+      const entry = customTextEntriesRef.current.find((e) => e.id === id);
       setCustomTextEntries((prev) => prev.map((e) =>
         e.id === id
           ? { ...e, selector: info.selector, label: info.label || info.tag || info.selector, side: "left", tag: info.tag, type: info.type }
@@ -8891,6 +9085,20 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       setCustomTextPickingId(null);
       window.electronAPI?.viewStopPicking("left").catch(() => {});
       window.electronAPI?.viewStopPicking("right").catch(() => {});
+      // 录入模式：拾取到输入框后立即把文本值填进去（参考「绑定输入框」逻辑）
+      // 使用条目自身的 workflow，未设置时跟随全局 currentLoopStepType
+      const entryWorkflow = entry?.workflow || currentLoopStepTypeRef.current;
+      const isInputLike = /^(input|textarea|select)$/i.test(info.tag || "") || !!info.isContentEditable || /^(text|search|email|tel|url|number|password)$/i.test(info.type || "") || /^(textbox|searchbox|combobox|spinbutton)$/i.test(info.role || "");
+      const isEntry = entryWorkflow === "entry";
+      const fillValue = (entry?.text || "").trim();
+      if (isEntry && isInputLike && fillValue) {
+        rlog("[onLeftPicked] 自定义文本拾取后立即填入:", { selector: info.selector, value: fillValue });
+        setTimeout(() => {
+          performInputValue("left", info.selector, fillValue).catch((e) => {
+            console.error("[onLeftPicked] 自定义文本填入失败", e);
+          });
+        }, 350);
+      }
       return;
     }
     // 日历手动面板点选兜底：快照未检测到面板时，用户点选日历面板内元素（左侧）
@@ -9245,14 +9453,22 @@ type: info.type,
     };
     rlog("[onPickExtractedField]", { field, value });
     setLeftPicked(info);
+    // 录入流：把提取字段值写入来源字段 ref，选右侧输入框时立即填入（与「绑定输入框」一致）
+    sourceFieldValueRef.current = String(value || "").trim();
+    sourceFieldLabelRef.current = label;
     // 审查模式：若右侧已选则两侧完成（等待保存）；否则切到右侧选核对元素
     // 录入模式：左侧来源已选，切到右侧选要填入的输入框
-    setPickTarget((prev) => {
-      if (prev === "right" && rightPickedRef.current) return null; // 审查模式右侧已选 → 完成
-      return "right"; // 其他情况 → 切到右侧
-    });
+    const alreadyHasRight = !!rightPickedRef.current;
+    setPickTarget(alreadyHasRight ? null : "right");
     // 停止左侧网页拾取（合成值不需要网页点击）
     window.electronAPI?.viewStopPicking("left").catch(() => {});
+    // 若右侧还没选，启动右侧拾取光标，让用户可以在 BrowserPane 中点选元素
+    if (!alreadyHasRight) {
+      setTimeout(() => {
+        window.electronAPI?.viewStopPicking("left").catch(() => {});
+        window.electronAPI?.viewStartPicking("right");
+      }, 200);
+    }
   }, []);
 
   const saveMapping = (m: FieldMapping) => {
@@ -10420,6 +10636,9 @@ type: info.type,
         case "direct-run":
           finishTeachingAndRunBatch();
           break;
+        case "refresh-workspace":
+          refreshWorkspace();
+          break;
         case "teaching-back":
           goBackTeachingPhase();
           break;
@@ -11396,14 +11615,6 @@ type: info.type,
         )}
 
         <button
-          onClick={refreshWorkspace}
-          className="rounded-md p-1 text-slate-400 hover:bg-white/70 hover:text-slate-600"
-          title="刷新：清空光标、步骤设置和字段对比（不刷新Excel）"
-        >
-          <RefreshCw className="h-3.5 w-3.5" />
-        </button>
-
-        <button
           onClick={() => setShowSettings(true)}
           className="rounded-md p-1 text-slate-400 hover:bg-white/70 hover:text-slate-600"
           title="设置"
@@ -12038,6 +12249,8 @@ type: info.type,
                   docExtracting={docExtracting}
                   ocrEngine={settings.ocr_engine || "vision"}
                   onChangeOcrEngine={handleChangeOcrEngine}
+                  docBreakpoint={docBreakpoint}
+                  onToggleDocBreakpoint={toggleDocBreakpoint}
                   switchToDocSignal={docSignal}
                   addingStepMode={addingStepMode}
                   onFieldPanelActive={() => setFieldPanelActive(true)}
@@ -12224,6 +12437,7 @@ type: info.type,
                   onRequestSaveLoop={() => { setSaveSkillRunAfter(false); setShowSaveSkill(true); }}
                   onRequestApplyLoop={() => setShowApplyLoop(true)}
                   onDirectRun={finishTeachingAndRunBatch}
+                  onRefresh={refreshWorkspace}
                   canSaveLoop={pickedMarks.filter(m => m.action === "input" || m.action === "click").length > 0}
                   hasCheckedBatch={checkedIds.size > 0}
                   customTextContent={customTextContent}
@@ -12681,6 +12895,9 @@ type: info.type,
           onSave={(updated) => { setEditingFlowTemplate(null); setSkillVersion((v) => v + 1); void updated; }}
         />
       )}
+
+      {/* ============ 断点暂停弹窗 ============ */}
+      <BreakpointDialog info={breakpointState} onContinue={continueFromBreakpoint} />
 
       {/* ============ 保存 SKILL 弹窗 ============ */}
       <SaveSkillDialog
