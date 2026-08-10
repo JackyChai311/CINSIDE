@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import {
   FolderOpen, FileText, Check, Globe, KeyRound, ListChecks, ChevronDown, Eye, Loader2,
-  Upload, X, Database, FileDown, Sparkles, Crop, Download, Copy, Sigma, Wand2, Eraser, RotateCcw, MousePointer2,
+  Upload, X, Database, FileDown, Sparkles, Crop, Download, Copy, Sigma, Wand2, Eraser, RotateCcw, RotateCw, ZoomIn, ZoomOut, MousePointer2, ScanLine, AlertTriangle, Play,
 } from "lucide-react";
 import { FIELD_LABELS } from "../types";
 import { api } from "../api/client";
+import { extractMethodLabel, isVisionMethod, isUmiMethod } from "../utils/formatNormalize";
 
 // 关键字段：排在前面，用带色边框突出
 const DOC_KEY_FIELDS = [
@@ -80,7 +81,25 @@ interface Props {
     fields: Record<string, string>;
     side: "left" | "right";
     workflow: "entry" | "review";
+    fallback?: { from: string; to: string; reason: string } | null;
   } | null;
+  /** 备用引擎提取结果（双引擎对比时的另一个结果） */
+  webAltResult?: {
+    imageUrl: string;
+    filename: string;
+    method: string;
+    text: string;
+    fields: Record<string, string>;
+    fallback?: { from: string; to: string; reason: string } | null;
+  } | null;
+  /** 当前激活的 Tab：primary=主结果，alt=备用引擎结果 */
+  webActiveTab?: "primary" | "alt";
+  /** 切换 Tab */
+  onSwitchWebTab?: (tab: "primary" | "alt") => void;
+  /** 用另一引擎重新提取 */
+  onReExtractAlt?: () => void;
+  /** 备用引擎正在提取中 */
+  webAltExtracting?: boolean;
   onCloseWebResult?: () => void;
   webSameNameImages?: { left: string[]; right: string[] } | null;
   webFindingSameName?: boolean;
@@ -101,6 +120,8 @@ interface Props {
   onCloseSourcePreview?: () => void;
   /** 预览就绪后点击触发 OCR 提取（网页模式） */
   onTriggerWebExtract?: () => void;
+  /** 提取失败后点击重试（网页模式） */
+  onRetryWebExtract?: () => void;
 
   // ===== 网页提取撤销/回退 =====
   /** 撤销最后一次点击（删除步骤 + 浏览器回退） */
@@ -118,6 +139,15 @@ interface Props {
   onPickLocalDirectory?: () => void;
   onSelectDocLocalSample?: (relativePath: string) => void;
   onConfirm?: () => void;
+
+  // ===== OCR 引擎切换 =====
+  /** 当前 OCR 引擎：vision=识图AI（在线Vision LLM），umi=UMI-OCR（本地离线） */
+  ocrEngine?: "vision" | "umi";
+  /** 切换 OCR 引擎 */
+  onChangeOcrEngine?: (engine: "vision" | "umi") => void;
+
+  /** 隐藏自带标题栏（choose 模式下由外层"文件处理"头部替代） */
+  hideHeader?: boolean;
 }
 
 /**
@@ -141,6 +171,11 @@ export default function DocLocalExtractConfig({
   onStartAddPostClicks,
   webStatus,
   webResult = null,
+  webAltResult = null,
+  webActiveTab = "primary",
+  onSwitchWebTab,
+  onReExtractAlt,
+  webAltExtracting = false,
   onCloseWebResult,
   webSameNameImages = null,
   webFindingSameName = false,
@@ -154,6 +189,7 @@ export default function DocLocalExtractConfig({
   sourcePreview = null,
   onCloseSourcePreview,
   onTriggerWebExtract,
+  onRetryWebExtract,
   onUndoClick,
   onGoBack,
   onResumePicking,
@@ -167,6 +203,9 @@ export default function DocLocalExtractConfig({
   onPickLocalDirectory,
   onSelectDocLocalSample,
   onConfirm,
+  ocrEngine = "vision",
+  onChangeOcrEngine,
+  hideHeader = false,
 }: Props) {
   const isChoose = mode === "choose";
   const isWeb = mode === "web";
@@ -871,10 +910,94 @@ export default function DocLocalExtractConfig({
 
   // 源文件预览折叠状态
   const [sourcePreviewOpen, setSourcePreviewOpen] = useState(true);
-  // 新预览到来时自动展开
+  // 预览图片旋转（0/90/180/270）和缩放（1 = 原始大小）
+  const [previewRotation, setPreviewRotation] = useState(0);
+  const [previewZoom, setPreviewZoom] = useState(1);
+  // 新预览到来时自动展开 + 重置旋转/缩放
   useEffect(() => {
-    if (sourcePreview) setSourcePreviewOpen(true);
+    if (sourcePreview) {
+      setSourcePreviewOpen(true);
+      setPreviewRotation(0);
+      setPreviewZoom(1);
+    }
   }, [sourcePreview?.imageUrl, sourcePreview?.filename]);
+
+  // UMI-OCR 连通性状态：idle=未检测 / checking=检测中 / available=可用 / unavailable=不可用
+  const [umiStatus, setUmiStatus] = useState<"idle" | "checking" | "available" | "unavailable">("idle");
+  const [umiStatusMsg, setUmiStatusMsg] = useState("");
+  const [umiLaunching, setUmiLaunching] = useState(false);
+
+  // 切换 OCR 引擎时：切到 umi 自动检测连通性；切到 vision 重置状态
+  const checkUmiStatus = async () => {
+    setUmiStatus("checking");
+    setUmiStatusMsg("正在检测 UMI-OCR…");
+    try {
+      const res = await api.testUmiOcr();
+      if (res.ok) {
+        setUmiStatus("available");
+        setUmiStatusMsg(res.message || "UMI-OCR 可用");
+      } else {
+        setUmiStatus("unavailable");
+        setUmiStatusMsg(res.message || "UMI-OCR 不可用");
+      }
+    } catch {
+      setUmiStatus("unavailable");
+      setUmiStatusMsg("检测请求失败，请确认后端已启动");
+    }
+  };
+
+  // 挂载时如果默认引擎就是 umi，自动验证一次在线状态
+  useEffect(() => {
+    if (ocrEngine === "umi" && umiStatus === "idle") {
+      checkUmiStatus();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ocrEngine]);
+
+  const handleOcrEngineSwitch = async (engine: "vision" | "umi") => {
+    onChangeOcrEngine?.(engine);
+    if (engine === "umi") {
+      checkUmiStatus();
+    } else {
+      setUmiStatus("idle");
+      setUmiStatusMsg("");
+    }
+  };
+
+  // 一键启动 UMI-OCR
+  const handleLaunchUmi = async () => {
+    setUmiLaunching(true);
+    setUmiStatusMsg("正在启动 UMI-OCR…");
+    try {
+      const res = await api.launchUmiOcr();
+      if (res.ok) {
+        setUmiStatus("available");
+        setUmiStatusMsg(res.message || "UMI-OCR 已启动");
+      } else {
+        setUmiStatus("unavailable");
+        setUmiStatusMsg(res.message || "启动失败");
+      }
+    } catch {
+      setUmiStatus("unavailable");
+      setUmiStatusMsg("启动请求失败，请确认后端已启动");
+    } finally {
+      setUmiLaunching(false);
+    }
+  };
+
+  // 选择 Umi-OCR.exe 路径
+  const handleBrowseUmi = async () => {
+    try {
+      const res = await api.browseUmiOcr();
+      if (res.ok && res.path) {
+        setUmiStatusMsg(`已选择程序：${res.path}，正在启动…`);
+        // 选好后自动尝试启动
+        await handleLaunchUmi();
+      }
+    } catch {
+      setUmiStatusMsg("打开文件选择框失败");
+    }
+  };
 
   // 判断源文件类型
   const sourceIsPdf = sourcePreview
@@ -942,12 +1065,55 @@ export default function DocLocalExtractConfig({
 
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
-      {/* 标题条 */}
+      {/* 标题条（hideHeader 时由外层"文件处理"头部替代） */}
+      {!hideHeader && (
       <div className="flex shrink-0 items-center gap-1.5 border-b border-teal-200 bg-teal-50/60 px-2 py-1">
         {isChoose ? <FileText className="h-3 w-3 text-teal-700" /> : isWeb ? <Globe className="h-3 w-3 text-teal-700" /> : <FolderOpen className="h-3 w-3 text-teal-700" />}
         <span className="text-[10px] font-bold text-teal-800">
           {isChoose ? "选择文件提取来源" : isWeb ? "文件提取配置（网页模式）" : "文件提取配置（目录模式）"}
         </span>
+        {/* OCR 识别引擎切换：识图AI（Vision LLM） ↔ UMI-OCR（本地离线） */}
+        {onChangeOcrEngine && !isChoose && (
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            <div
+              className="flex items-center gap-0 rounded-md bg-slate-100/80 p-0.5 ring-1 ring-slate-200"
+              title="护照/图片识别引擎：识图AI（在线Vision）或 UMI-OCR（本地离线）"
+            >
+              {([["vision", "识图AI"], ["umi", "UMI-OCR"]] as const).map(([val, label]) => (
+                <button
+                  key={val}
+                  onClick={(e) => { e.stopPropagation(); if (ocrEngine !== val) handleOcrEngineSwitch(val); }}
+                  className={[
+                    "flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-semibold transition-all",
+                    ocrEngine === val
+                      ? "bg-teal-500 text-white shadow-sm"
+                      : "text-slate-500 hover:bg-white/70 hover:text-teal-700",
+                  ].join(" ")}
+                >
+                  {val === "vision" ? <Eye className="h-2.5 w-2.5" /> : <ScanLine className="h-2.5 w-2.5" />}
+                  {label}
+                </button>
+              ))}
+            </div>
+            {/* UMI-OCR 状态指示灯 */}
+            {ocrEngine === "umi" && umiStatus !== "idle" && (
+              <span
+                className={[
+                  "flex items-center gap-0.5 rounded px-1 py-0.5 text-[8px] font-medium",
+                  umiStatus === "checking" ? "bg-amber-100 text-amber-700" :
+                  umiStatus === "available" ? "bg-emerald-100 text-emerald-700" :
+                  "bg-rose-100 text-rose-700",
+                ].join(" ")}
+                title={umiStatusMsg}
+              >
+                {umiStatus === "checking" && <Loader2 className="h-2 w-2 animate-spin" />}
+                {umiStatus === "available" && <Check className="h-2 w-2" />}
+                {umiStatus === "unavailable" && <X className="h-2 w-2" />}
+                UMI {umiStatus === "checking" ? "检测中" : umiStatus === "available" ? "在线" : "不可用"}
+              </span>
+            )}
+          </div>
+        )}
         {isChoose && onExitChoose && (
           <button
             onClick={onExitChoose}
@@ -958,6 +1124,36 @@ export default function DocLocalExtractConfig({
           </button>
         )}
       </div>
+      )}
+
+      {/* UMI-OCR 不可用时的警告横幅 */}
+      {ocrEngine === "umi" && umiStatus === "unavailable" && (
+        <div className="shrink-0 border-b border-rose-200 bg-rose-50 px-2 py-1.5 text-[9px] leading-relaxed text-rose-700">
+          <div className="flex items-start gap-1">
+            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <div className="whitespace-pre-line">{umiStatusMsg}</div>
+              <div className="mt-1 flex gap-1">
+                <button
+                  onClick={handleLaunchUmi}
+                  disabled={umiLaunching}
+                  className="flex items-center gap-0.5 rounded bg-rose-600 px-1.5 py-0.5 text-[9px] font-medium text-white transition-colors hover:bg-rose-700 disabled:opacity-50"
+                >
+                  {umiLaunching ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Play className="h-2.5 w-2.5" />}
+                  {umiLaunching ? "启动中…" : "一键启动"}
+                </button>
+                <button
+                  onClick={handleBrowseUmi}
+                  className="flex items-center gap-0.5 rounded border border-rose-300 bg-white px-1.5 py-0.5 text-[9px] font-medium text-rose-700 transition-colors hover:bg-rose-100"
+                >
+                  <FolderOpen className="h-2.5 w-2.5" />
+                  选择程序
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 内容区：始终允许垂直滚动，预览窗口使用 max-height 限制高度，内部自行滚动 */}
       <div ref={contentScrollRef} className="min-h-0 flex-1 flex flex-col overflow-y-auto p-2">
@@ -1152,18 +1348,46 @@ export default function DocLocalExtractConfig({
                       {previewShowExport ? "收起" : "导出"}
                     </button>
                   )}
-                  {/* 一键直传：直接上传到网页上传框 */}
-                  {onQuickUploadDoc && sourcePreview && (
-                    <button
-                      onClick={() => {
-                        onQuickUploadDoc({ dataUrl: sourcePreview.imageUrl, filename: sourcePreview.filename });
-                      }}
-                      className="ml-0.5 flex items-center gap-0.5 rounded bg-emerald-50 px-1.5 py-0.5 text-[9px] font-medium text-emerald-600 transition-all hover:bg-emerald-100"
-                      title="一键直传：点击后光标变十字，再点击网页上的上传按钮即可直接上传该文件，不弹额外对话框"
-                    >
-                      <Upload className="h-2.5 w-2.5" />
-                      直传
-                    </button>
+                  {/* 旋转/缩放工具栏（仅图片预览时显示）*/}
+                  {!sourceIsPdf && (
+                    <div className="ml-1 flex items-center gap-0.5 rounded bg-slate-100/80 p-0.5">
+                      <button
+                        onClick={() => setPreviewRotation((r) => (r - 90 + 360) % 360)}
+                        className="rounded p-0.5 text-slate-500 hover:bg-white hover:text-slate-700"
+                        title="向左旋转 90°"
+                      >
+                        <RotateCcw className="h-3 w-3" />
+                      </button>
+                      <button
+                        onClick={() => setPreviewRotation((r) => (r + 90) % 360)}
+                        className="rounded p-0.5 text-slate-500 hover:bg-white hover:text-slate-700"
+                        title="向右旋转 90°"
+                      >
+                        <RotateCw className="h-3 w-3" />
+                      </button>
+                      <div className="mx-0.5 h-3 w-px bg-slate-300" />
+                      <button
+                        onClick={() => setPreviewZoom((z) => Math.max(0.25, +(z - 0.25).toFixed(2)))}
+                        className="rounded p-0.5 text-slate-500 hover:bg-white hover:text-slate-700"
+                        title="缩小"
+                      >
+                        <ZoomOut className="h-3 w-3" />
+                      </button>
+                      <button
+                        onClick={() => { setPreviewZoom(1); setPreviewRotation(0); }}
+                        className="rounded px-1 text-[9px] font-medium text-slate-500 hover:bg-white hover:text-slate-700"
+                        title="重置缩放和旋转"
+                      >
+                        {Math.round(previewZoom * 100)}%
+                      </button>
+                      <button
+                        onClick={() => setPreviewZoom((z) => Math.min(5, +(z + 0.25).toFixed(2)))}
+                        className="rounded p-0.5 text-slate-500 hover:bg-white hover:text-slate-700"
+                        title="放大"
+                      >
+                        <ZoomIn className="h-3 w-3" />
+                      </button>
+                    </div>
                   )}
                   <div className="ml-auto flex items-center gap-0.5">
                     <button
@@ -1210,12 +1434,17 @@ export default function DocLocalExtractConfig({
                         src={sourcePreview.imageUrl}
                         alt={sourcePreview.filename}
                         className={[
-                          "max-w-full rounded border shadow-sm",
+                          "rounded border shadow-sm transition-transform duration-150",
                           cropMode ? "border-violet-300 bg-white object-contain select-none" : "border-slate-200 bg-white object-contain",
+                          (previewRotation === 90 || previewRotation === 270) ? "max-w-none" : "max-w-full",
                         ].join(" ")}
                         draggable={false}
                         onMouseDown={handleCropMouseDown}
-                        style={cropMode ? { cursor: "crosshair" } : undefined}
+                        style={{
+                          ...(cropMode ? { cursor: "crosshair" } : {}),
+                          transform: `rotate(${previewRotation}deg) scale(${previewZoom})`,
+                          transformOrigin: "center center",
+                        }}
                       />
                       {/* 框选遮罩层：在裁剪模式下显示半透明遮罩和选区矩形 */}
                       {cropMode && cropRect && (
@@ -1374,7 +1603,7 @@ export default function DocLocalExtractConfig({
                   >
                     {webStatus.phase === "downloading" && "正在下载文件…"}
                     {webStatus.phase === "preview" && "预览就绪"}
-                    {webStatus.phase === "ocr" && "正在 OCR 提取文字…"}
+                    {webStatus.phase === "ocr" && `正在使用 ${ocrEngine === "umi" ? "UMI-OCR" : "AI Vision"} 识别文字…`}
                     {webStatus.phase === "error" && "提取失败"}
                     {webStatus.phase === "fallback-scanning" && (webStatus.message || "保底机制：回退页面扫描中…")}
                     {webStatus.phase === "fallback-downloading" && `保底下载：${webStatus.current || 0}/${webStatus.total || 0}${webStatus.currentFile ? ` · ${webStatus.currentFile}` : ""}`}
@@ -1482,11 +1711,22 @@ export default function DocLocalExtractConfig({
                   </div>
                 )}
 
-                {/* 错误详情 */}
-                {webStatus.phase === "error" && webStatus.message && (
-                  <p className="mt-1 break-words text-[9px] leading-tight text-rose-600">
-                    {webStatus.message}
-                  </p>
+                {/* 错误详情 + 重试按钮 */}
+                {webStatus.phase === "error" && (
+                  <div className="mt-1.5 flex items-start gap-2">
+                    <p className="flex-1 break-words text-[9px] leading-tight text-rose-600">
+                      {webStatus.message || "提取失败"}
+                    </p>
+                    {onRetryWebExtract && (
+                      <button
+                        onClick={onRetryWebExtract}
+                        className="flex shrink-0 items-center gap-1 rounded-md border border-rose-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-rose-600 shadow-sm transition-all hover:bg-rose-50 hover:border-rose-300 active:scale-95"
+                      >
+                        <RotateCw className="h-3 w-3" />
+                        重试
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             )}
@@ -1495,13 +1735,16 @@ export default function DocLocalExtractConfig({
             {webResult && (
               <WebExtractResultView
                 result={webResult}
+                altResult={webAltResult}
+                activeTab={webActiveTab}
+                onSwitchTab={onSwitchWebTab}
+                onReExtractAlt={onReExtractAlt}
+                altExtracting={webAltExtracting}
                 onClose={onCloseWebResult}
                 sameNameImages={webSameNameImages}
                 findingSameName={webFindingSameName}
                 onFindSameName={onFindSameName}
                 onExtractFields={onExtractFields}
-                onExport={onExportDoc}
-                onBindUpload={onBindUploadDoc}
                 onToast={onToast}
                 onError={onError}
               />
@@ -1814,7 +2057,7 @@ export default function DocLocalExtractConfig({
                 : webStatus?.phase === "preview"
                 ? "预览就绪，点击「录入提取」开始识别"
                 : webStatus?.phase === "ocr"
-                ? "OCR 识别中…"
+                ? `${ocrEngine === "umi" ? "UMI-OCR" : "AI Vision"} 识别中…`
                 : webStatus?.phase === "success"
                 ? `✓ 已提取 ${webStatus.filename || ""}${webPostStepCount > 0 ? ` · 过程${webPostStepCount}步` : ""}`
                 : webStatus?.phase === "post-click"
@@ -1865,6 +2108,16 @@ export default function DocLocalExtractConfig({
                   + 过程点击
                 </button>
               )}
+              {/* 错误状态：显示重试按钮 */}
+              {webStatus?.phase === "error" && onRetryWebExtract && (
+                <button
+                  onClick={onRetryWebExtract}
+                  className="flex items-center gap-1 rounded-md bg-rose-600 px-2 py-0.5 text-[10px] font-semibold text-white transition-all hover:bg-rose-700 active:scale-95"
+                >
+                  <RotateCw className="h-3 w-3" />
+                  重试
+                </button>
+              )}
               <button
                 onClick={onExitWebMode}
                 disabled={webStepCount === 0 && webPostStepCount === 0}
@@ -1913,16 +2166,20 @@ export default function DocLocalExtractConfig({
 /**
  * 网页下载模式下的提取结果视图（内嵌在文件提取配置面板中，替代外部浮动弹窗）。
  * 紧凑版：字段网格 + 操作按钮 + 原始文字 + 同名图片对比。
+ * 支持双引擎对比：UMI-OCR 与 AI Vision 结果可通过 Tab 切换查看。
  */
 function WebExtractResultView({
   result,
+  altResult,
+  activeTab,
+  onSwitchTab,
+  onReExtractAlt,
+  altExtracting,
   onClose,
   sameNameImages,
   findingSameName,
   onFindSameName,
   onExtractFields,
-  onExport,
-  onBindUpload,
   onToast,
   onError,
 }: {
@@ -1934,87 +2191,43 @@ function WebExtractResultView({
     fields: Record<string, string>;
     side: "left" | "right";
     workflow: "entry" | "review";
+    fallback?: { from: string; to: string; reason: string } | null;
   };
+  altResult?: {
+    imageUrl: string;
+    filename: string;
+    method: string;
+    text: string;
+    fields: Record<string, string>;
+    fallback?: { from: string; to: string; reason: string } | null;
+  } | null;
+  activeTab?: "primary" | "alt";
+  onSwitchTab?: (tab: "primary" | "alt") => void;
+  onReExtractAlt?: () => void;
+  altExtracting?: boolean;
   onClose?: () => void;
   sameNameImages?: { left: string[]; right: string[] } | null;
   findingSameName?: boolean;
   onFindSameName?: () => void;
   onExtractFields?: (fields: Record<string, string>) => void;
-  onExport?: () => void;
-  onBindUpload?: () => void;
   onToast?: (msg: string) => void;
   onError?: (msg: string) => void;
 }) {
+  const tab = activeTab || "primary";
+  // 当前显示的结果（主结果 or 备用引擎结果）
+  const cur = tab === "alt" && altResult ? altResult : result;
   const [showRawText, setShowRawText] = useState(false);
   const [checkedFields, setCheckedFields] = useState<Set<string>>(
-    () => new Set(Object.entries(result.fields || {}).filter(([, v]) => v).map(([f]) => f))
+    () => new Set(Object.entries(cur.fields || {}).filter(([, v]) => v).map(([f]) => f))
   );
-  // 切换文件时重置勾选
+
+  // 切换 Tab 或切换文件时重置勾选和原始文字展开状态
   useEffect(() => {
-    setCheckedFields(new Set(Object.entries(result.fields || {}).filter(([, v]) => v).map(([f]) => f)));
+    setCheckedFields(new Set(Object.entries(cur.fields || {}).filter(([, v]) => v).map(([f]) => f)));
     setShowRawText(false);
-    setShowExport(false);
-  }, [result.filename, result.imageUrl]);
+  }, [tab, cur.filename, cur.imageUrl]);
 
-  // ===== 内嵌导出面板状态 =====
-  const [showExport, setShowExport] = useState(false);
-  const [exportFormat, setExportFormat] = useState<"original" | "jpg" | "png" | "pdf">("original");
-  const [exportCompress, setExportCompress] = useState(true);
-  const [exportSizeVal, setExportSizeVal] = useState("500");
-  const [exportSizeUnit, setExportSizeUnit] = useState<"KB" | "MB">("KB");
-  const [exportBusy, setExportBusy] = useState(false);
-  const [exportResult, setExportResult] = useState<{ size: number; reached: boolean; warnings: string[] } | null>(null);
-
-  const isPdf = /\.pdf(\?|#|$)/i.test(result.filename) || result.imageUrl.startsWith("data:application/pdf");
-  const origSize = useMemo(() => {
-    const idx = result.imageUrl.indexOf(",");
-    if (idx < 0) return 0;
-    return Math.floor((result.imageUrl.slice(idx + 1).length * 3) / 4);
-  }, [result.imageUrl]);
-
-  const fmtSize = (bytes: number): string => {
-    if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
-    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${bytes} B`;
-  };
-
-  const doExport = async () => {
-    if (exportBusy) return;
-    setExportBusy(true);
-    setExportResult(null);
-    try {
-      let targetKb = 0;
-      if (exportCompress) {
-        const n = parseFloat(exportSizeVal);
-        if (!isFinite(n) || n <= 0) {
-          onError?.("请填写有效的目标大小");
-          setExportBusy(false);
-          return;
-        }
-        targetKb = Math.round(exportSizeUnit === "MB" ? n * 1024 : n);
-      }
-      const res = await api.convertDocument(result.imageUrl, result.filename, exportFormat, targetKb);
-      const stem = result.filename.replace(/\.[^.]+$/, "") || "export";
-      const outName = `${stem}.${res.ext}`;
-      const saved = await window.electronAPI?.saveExportedFile(outName, res.data_b64);
-      if (!saved) {
-        onError?.("当前环境不支持保存对话框");
-      } else if (saved.canceled) {
-        // 用户取消
-      } else if (saved.ok) {
-        setExportResult({ size: res.size, reached: res.reached, warnings: res.warnings || [] });
-        onToast?.(`已导出：${outName}（${fmtSize(res.size)}）`);
-      } else {
-        onError?.(`保存失败: ${saved.error || "未知错误"}`);
-      }
-    } catch (e) {
-      onError?.(`导出失败: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setExportBusy(false);
-    }
-  };
-
-  const fieldEntries = Object.entries(result.fields || {});
+  const fieldEntries = Object.entries(cur.fields || {});
   const keyEntries = fieldEntries.filter(([f]) => DOC_KEY_FIELDS.includes(f));
   const otherEntries = fieldEntries.filter(([f]) => !DOC_KEY_FIELDS.includes(f));
   const toggleField = (f: string) => {
@@ -2025,8 +2238,55 @@ function WebExtractResultView({
       return next;
     });
   };
-  const checkedCount = Array.from(checkedFields).filter((f) => result.fields[f]).length;
+  const checkedCount = Array.from(checkedFields).filter((f) => cur.fields[f]).length;
   const allChecked = fieldEntries.length > 0 && checkedCount === fieldEntries.filter(([, v]) => v).length;
+
+  // 判断当前主结果使用的引擎，决定备用引擎名称
+  const primaryIsUmi = isUmiMethod(result.method);
+  const altEngineLabel = primaryIsUmi ? "AI Vision" : "UMI-OCR";
+  const altEngineIcon = primaryIsUmi
+    ? <Sparkles className="h-2.5 w-2.5" />
+    : <ScanLine className="h-2.5 w-2.5" />;
+  const hasAlt = !!altResult;
+
+  // 渲染单个引擎 Tab
+  const renderEngineTab = (
+    tabKey: "primary" | "alt",
+    label: string,
+    method: string,
+    fieldCount: number,
+  ) => {
+    const isActive = tab === tabKey;
+    const isVision = isVisionMethod(method);
+    const isUmi = isUmiMethod(method);
+    return (
+      <button
+        onClick={() => onSwitchTab?.(tabKey)}
+        className={[
+          "flex items-center gap-1 rounded-md px-2 py-0.5 text-[9px] font-semibold transition-all",
+          isActive
+            ? isVision
+              ? "bg-violet-500 text-white shadow-sm"
+              : isUmi
+              ? "bg-emerald-500 text-white shadow-sm"
+              : "bg-slate-600 text-white shadow-sm"
+            : "bg-white/60 text-slate-500 hover:bg-white hover:text-slate-700",
+        ].join(" ")}
+      >
+        {isVision ? <Sparkles className="h-2.5 w-2.5" /> : isUmi ? <ScanLine className="h-2.5 w-2.5" /> : null}
+        {label}
+        <span className={[
+          "rounded-full px-1 text-[8px]",
+          isActive ? "bg-white/25" : "bg-slate-200/70",
+        ].join(" ")}>
+          {fieldCount}
+        </span>
+      </button>
+    );
+  };
+
+  const primaryFieldCount = Object.values(result.fields || {}).filter(Boolean).length;
+  const altFieldCount = altResult ? Object.values(altResult.fields || {}).filter(Boolean).length : 0;
 
   return (
     <div className="shrink-0 rounded-lg border border-teal-200 bg-teal-50/40">
@@ -2039,19 +2299,81 @@ function WebExtractResultView({
         ].join(" ")}>
           {result.workflow === "entry" ? "录入提取" : "审查提取"}
         </span>
-        <span className="max-w-[50%] truncate text-[9px] text-slate-500 font-mono" title={result.filename}>
-          {result.filename}
+
+        {/* 双引擎 Tab 切换 */}
+        {hasAlt ? (
+          <div className="flex items-center gap-0.5">
+            {renderEngineTab("primary", extractMethodLabel(result.method), result.method, primaryFieldCount)}
+            {renderEngineTab("alt", extractMethodLabel(altResult!.method), altResult!.method, altFieldCount)}
+          </div>
+        ) : (
+          <span className={[
+            "rounded-full px-1.5 py-0.5 text-[8px] font-bold",
+            isVisionMethod(cur.method)
+              ? "bg-violet-100 text-violet-700"
+              : isUmiMethod(cur.method)
+              ? "bg-emerald-100 text-emerald-700"
+              : "bg-slate-100 text-slate-600",
+          ].join(" ")}>
+            {extractMethodLabel(cur.method)}
+          </span>
+        )}
+
+        <span className="max-w-[40%] truncate text-[9px] text-slate-500 font-mono" title={cur.filename}>
+          {cur.filename}
         </span>
+
+        {/* 用另一引擎重新提取按钮（仅有主结果、无备用结果时显示） */}
+        {!hasAlt && onReExtractAlt && (
+          <button
+            onClick={onReExtractAlt}
+            disabled={altExtracting}
+            className={[
+              "ml-auto flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
+              altExtracting
+                ? "cursor-wait bg-slate-100 text-slate-400"
+                : primaryIsUmi
+                ? "bg-violet-100 text-violet-700 hover:bg-violet-200"
+                : "bg-emerald-100 text-emerald-700 hover:bg-emerald-200",
+            ].join(" ")}
+            title={`用 ${altEngineLabel} 重新提取，可切换对比`}
+          >
+            {altExtracting ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : altEngineIcon}
+            {altExtracting ? `${altEngineLabel} 提取中…` : `用 ${altEngineLabel} 提取`}
+          </button>
+        )}
+
         {onClose && (
           <button
             onClick={onClose}
-            className="ml-auto rounded p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+            className={hasAlt || !onReExtractAlt ? "ml-auto rounded p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600" : "rounded p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"}
             title="关闭结果"
           >
             <X className="h-3 w-3" />
           </button>
         )}
       </div>
+
+      {/* 备用引擎提取中提示 */}
+      {altExtracting && !hasAlt && (
+        <div className="flex items-center gap-1.5 border-b border-violet-200 bg-violet-50 px-2 py-1 text-[9px] text-violet-700">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          <span>正在用 {altEngineLabel} 重新提取，请稍候…</span>
+        </div>
+      )}
+
+      {/* 引擎回退提示 */}
+      {cur.fallback && (
+        <div className="flex items-start gap-1 border-b border-amber-200 bg-amber-50 px-2 py-1 text-[9px] leading-relaxed text-amber-800">
+          <AlertTriangle className="mt-0.5 h-2.5 w-2.5 shrink-0" />
+          <div>
+            <span className="font-semibold">{extractMethodLabel(cur.fallback.from)}</span>
+            {" 失败："}{cur.fallback.reason || "未知错误"}
+            {" → 已自动切换至 "}
+            <span className="font-semibold">{extractMethodLabel(cur.fallback.to)}</span>
+          </div>
+        </div>
+      )}
 
       <div className="space-y-2 p-2">
         {/* 原图已在上方「源文件预览」窗口展示，此处不再重复缩略图 */}
@@ -2136,154 +2458,33 @@ function WebExtractResultView({
         )}
 
         {/* 操作按钮 */}
-        {(onExtractFields || onExport || onBindUpload) && (
+        {onExtractFields && (
           <div className="flex items-center gap-1">
-            {onExtractFields && (
-              <button
-                onClick={() => {
-                  const picked: Record<string, string> = {};
-                  for (const [f, v] of fieldEntries) {
-                    if (checkedFields.has(f) && v) picked[f] = v;
-                  }
-                  if (Object.keys(picked).length === 0) return;
-                  onExtractFields(picked);
-                }}
-                disabled={checkedCount === 0}
-                className={`flex flex-1 items-center justify-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-medium transition-all ${
-                  checkedCount === 0
-                    ? "cursor-not-allowed bg-slate-100 text-slate-400"
-                    : "bg-violet-600 text-white hover:bg-violet-700"
-                }`}
-                title={checkedCount === 0 ? "请先勾选字段" : `把勾选的 ${checkedCount} 个字段送到「提取元素」面板`}
-              >
-                <Database className="h-2.5 w-2.5" />
-                提取元素{checkedCount > 0 ? ` (${checkedCount})` : ""}
-              </button>
-            )}
-            {onExport && (
-              <button
-                onClick={() => setShowExport((v) => !v)}
-                className={[
-                  "flex flex-1 items-center justify-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-medium text-white transition-all",
-                  showExport ? "bg-teal-700 ring-2 ring-teal-300" : "bg-teal-600 hover:bg-teal-700",
-                ].join(" ")}
-                title="导出文件"
-              >
-                <FileDown className="h-2.5 w-2.5" />
-                {showExport ? "收起导出" : "导出"}
-              </button>
-            )}
-            {onBindUpload && (
-              <button
-                onClick={onBindUpload}
-                className="flex flex-1 items-center justify-center gap-1 rounded-md bg-orange-500 px-1.5 py-1 text-[10px] font-medium text-white transition-all hover:bg-orange-600"
-                title="绑定上传：点击网页上的文件上传框，LOOP 执行时自动填入该文件"
-              >
-                <Upload className="h-2.5 w-2.5" />
-                绑定上传
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* 内嵌导出面板 */}
-        {showExport && (
-          <div className="rounded-lg border border-teal-200 bg-white p-2 space-y-2">
-            {/* 原始大小 */}
-            <div className="flex items-center justify-between rounded bg-slate-50 px-2 py-1 text-[9px] text-slate-500">
-              <span>原始大小</span>
-              <span className="font-semibold text-slate-700">{fmtSize(origSize)}</span>
-            </div>
-            {/* 格式选择 */}
-            <div>
-              <div className="mb-1 text-[9px] font-medium text-slate-500">导出格式</div>
-              <div className="grid grid-cols-4 gap-1">
-                {([
-                  { key: "original", label: "原格式" },
-                  { key: "jpg", label: "JPG" },
-                  { key: "png", label: "PNG" },
-                  { key: "pdf", label: "PDF" },
-                ] as const).map((opt) => (
-                  <button
-                    key={opt.key}
-                    onClick={() => setExportFormat(opt.key)}
-                    className={`rounded border px-1 py-1 text-[9px] font-medium transition-all ${
-                      exportFormat === opt.key
-                        ? "border-teal-500 bg-teal-50 text-teal-700 ring-1 ring-teal-200"
-                        : "border-slate-200 bg-white text-slate-500 hover:border-teal-200 hover:bg-teal-50/50"
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-              {isPdf && (exportFormat === "jpg" || exportFormat === "png") && (
-                <p className="mt-0.5 text-[8px] text-amber-600">多页 PDF 转图片仅导出第 1 页</p>
-              )}
-            </div>
-            {/* 压缩设置 */}
-            <div>
-              <div className="mb-1 flex items-center justify-between">
-                <span className="text-[9px] font-medium text-slate-500">压缩到指定大小</span>
-                <button
-                  onClick={() => setExportCompress((v) => !v)}
-                  className={`relative h-3.5 w-6 rounded-full transition-colors ${exportCompress ? "bg-teal-500" : "bg-slate-300"}`}
-                >
-                  <span className={`absolute top-0.5 h-2.5 w-2.5 rounded-full bg-white shadow transition-all ${exportCompress ? "left-3" : "left-0.5"}`} />
-                </button>
-              </div>
-              {exportCompress && (
-                <div className="flex items-center gap-1">
-                  <input
-                    type="number"
-                    min={1}
-                    value={exportSizeVal}
-                    onChange={(e) => setExportSizeVal(e.target.value)}
-                    className="w-16 rounded border border-slate-200 px-1.5 py-1 text-[10px] text-slate-700 outline-none focus:border-teal-400"
-                  />
-                  <div className="flex overflow-hidden rounded border border-slate-200">
-                    {(["KB", "MB"] as const).map((u) => (
-                      <button
-                        key={u}
-                        onClick={() => setExportSizeUnit(u)}
-                        className={`px-1.5 py-1 text-[9px] font-medium transition-colors ${
-                          exportSizeUnit === u ? "bg-teal-500 text-white" : "bg-white text-slate-500 hover:bg-slate-50"
-                        }`}
-                      >
-                        {u}
-                      </button>
-                    ))}
-                  </div>
-                  <span className="text-[8px] text-slate-400">自动降质/缩尺寸</span>
-                </div>
-              )}
-            </div>
-            {/* 结果反馈 */}
-            {exportResult && (
-              <div className={`rounded px-2 py-1 text-[9px] ${exportResult.reached ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-                导出大小：<span className="font-bold">{fmtSize(exportResult.size)}</span>
-                {exportResult.reached ? "（已达标）" : "（已压到极限仍超目标）"}
-                {exportResult.warnings.map((w, i) => (
-                  <div key={i} className="mt-0.5 text-[8px] opacity-80">{w}</div>
-                ))}
-              </div>
-            )}
-            {/* 导出按钮 */}
             <button
-              onClick={doExport}
-              disabled={exportBusy}
-              className={`flex w-full items-center justify-center gap-1 rounded-md px-2 py-1.5 text-[10px] font-semibold transition-all ${
-                exportBusy ? "cursor-wait bg-slate-100 text-slate-400" : "bg-teal-600 text-white hover:bg-teal-700"
+              onClick={() => {
+                const picked: Record<string, string> = {};
+                for (const [f, v] of fieldEntries) {
+                  if (checkedFields.has(f) && v) picked[f] = v;
+                }
+                if (Object.keys(picked).length === 0) return;
+                onExtractFields(picked);
+              }}
+              disabled={checkedCount === 0}
+              className={`flex flex-1 items-center justify-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-medium transition-all ${
+                checkedCount === 0
+                  ? "cursor-not-allowed bg-slate-100 text-slate-400"
+                  : "bg-violet-600 text-white hover:bg-violet-700"
               }`}
+              title={checkedCount === 0 ? "请先勾选字段" : `把勾选的 ${checkedCount} 个字段送到「提取元素」面板`}
             >
-              {exportBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
-              {exportBusy ? "正在转换…" : "选择保存位置并导出"}
+              <Database className="h-2.5 w-2.5" />
+              提取元素{checkedCount > 0 ? ` (${checkedCount})` : ""}
             </button>
           </div>
         )}
 
         {/* 原始提取文字 */}
-        {result.text && (
+        {cur.text && (
           <div>
             <button
               onClick={() => setShowRawText((s) => !s)}
@@ -2293,7 +2494,7 @@ function WebExtractResultView({
             </button>
             {showRawText && (
               <pre className="mt-0.5 max-h-28 overflow-y-auto whitespace-pre-wrap rounded-md bg-slate-50 p-1.5 text-[8px] leading-snug text-slate-600">
-                {result.text.slice(0, 2000)}
+                {cur.text.slice(0, 2000)}
               </pre>
             )}
           </div>
