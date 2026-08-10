@@ -2326,6 +2326,9 @@ function stopBackend() {
 }
 
 app.whenReady().then(() => {
+  // 清空 Windows 任务栏跳转列表，移除默认的 "Electron" 分类
+  try { app.setJumpList([]); } catch (e) { debugLog(`[jumplist] clear failed: ${e.message}`); }
+
   createSplashWindow();
   startBackend();
   createWindow();
