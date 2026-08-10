@@ -122,6 +122,11 @@ export interface AppSettings {
   browser_use_llm_key: string;
   browser_use_llm_model: string;
 
+  // 文档/护照 OCR 引擎：vision=识图AI（Vision LLM），umi=本地 UMI-OCR
+  ocr_engine?: string;
+  umi_ocr_host?: string;
+  umi_ocr_port?: number;
+
   // Agent 后端
   agent_backend: string;
 
@@ -133,6 +138,37 @@ export interface AppSettings {
 
   // 新手模式：开启时显示步骤仪表引导，关闭时直接用字段对比面板且三面板常开
   beginner_mode?: boolean;
+
+  // 主题：light=浅色 / dark=深色
+  theme?: string;
+  // 主色调：indigo / sky / emerald / rose / violet / amber
+  accent?: string;
+
+  // BrowserPane 网页亮度（0.3~2.0，1.0=原始）
+  browser_brightness?: number;
+}
+
+// ========== 依赖与工具状态 ==========
+
+export interface PythonDepStatus {
+  key: string;
+  name: string;
+  pip_name: string;
+  installed: boolean;
+}
+
+export interface UmiOcrStatus {
+  installed: boolean;
+  path: string;
+  location: "configured" | "tools" | "system" | "not_found";
+  service_online: boolean;
+}
+
+export interface DepsStatus {
+  python_deps: PythonDepStatus[];
+  python_all_installed: boolean;
+  umi_ocr: UmiOcrStatus;
+  tools_dir: string;
 }
 
 // ========== 可配置工作流（新） ==========
@@ -307,6 +343,8 @@ export interface PickedMark {
   docExtractClick?: boolean;
   /** 文件提取点击阶段：pre=开头导航点击（下载前），mid=过程点击（提取后中间步骤），post=收尾点击（所有人提取完成后），undefined=默认(pre) */
   docExtractClickPhase?: "pre" | "mid" | "post";
+  /** 面板动作标记：点击的是前端面板按钮（非网页元素），执行时直接调用对应前端逻辑而非网页点击 */
+  panelAction?: "doc-web-extract";
   /** 文件上传步骤标记：把文件槽位中的文件填入网页 file input（DataTransfer 方案） */
   docUpload?: boolean;
   /** 上传来源：绑定的文件提取步骤 mark id（执行时从该槽位取文件）；空=取最近一次提取的文件 */
@@ -519,11 +557,26 @@ export interface VerificationReport {
 
 // ========== 文档提取（功能1/2） ==========
 
-/** 文档提取结果：MarkItDown（PDF/Office）或 Vision OCR（图片） */
+/** 文档提取方式 */
+export type ExtractMethod =
+  | "markitdown"    // PDF 文字层 / Office 文档
+  | "vision_ocr"    // 图片 → Vision LLM 识图
+  | "umi_ocr"       // 图片 → UMI-OCR 本地引擎
+  | "pdf_ocr"       // 扫描 PDF → 渲染图片 → Vision LLM
+  | "pdf_umi_ocr";  // 扫描 PDF → 渲染图片 → UMI-OCR
+
+/** 引擎回退信息（UMI-OCR 失败时自动切换 AI Vision 等） */
+export interface ExtractFallback {
+  from: string;
+  to: string;
+  reason: string;
+}
+
+/** 文档提取结果 */
 export interface DocumentExtractResult {
   filename: string;
   /** 提取方式 */
-  method: "markitdown" | "vision_ocr" | "pdf_ocr";
+  method: ExtractMethod;
   /** 提取出的全文 */
   text: string;
   /** 结构化字段（请求了 fields 时返回） */
@@ -532,6 +585,8 @@ export interface DocumentExtractResult {
   processed_image?: string | null;
   /** MRZ交叉验证警告：上方文字识别与底部MRZ不一致的字段列表，已以MRZ为准修正 */
   mrz_warnings?: string[];
+  /** 引擎回退信息（如 UMI-OCR 失败后自动切换 AI Vision） */
+  fallback?: ExtractFallback | null;
 }
 
 /** 文档预览结果（仅预览图/文本预览，不跑 OCR） */
@@ -585,6 +640,8 @@ export interface DocExtractState {
   processed_image?: string | null;
   /** MRZ交叉验证警告：上方文字识别与底部MRZ不一致的字段列表，已以MRZ为准修正 */
   mrz_warnings?: string[];
+  /** 引擎回退信息（如 UMI-OCR 失败后自动切换 AI Vision） */
+  fallback?: ExtractFallback | null;
 }
 
 // ============ 外挂插件（体外循环） ============
