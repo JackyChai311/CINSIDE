@@ -106,6 +106,10 @@ interface Props {
   onPickOption: (key: string, optionIndex: number) => void;
   /** 请求从左侧网页拾取来源元素 */
   onPickLeftWeb: (key: string) => void;
+  /** 正在从「提取结果」拾取护照字段的 key */
+  passportPickingKey: string | null;
+  /** 请求从「提取结果」面板拾取护照字段 */
+  onPickPassportField: (key: string) => void;
   /** 试跑（App 端解析左侧值并执行控件脚本） */
   onTest: (testKey: string, widget: WidgetDef, binding: WidgetBinding) => void;
   /** 日历镜像：每个卡片当前显示的年月（与网页真实日历同步） */
@@ -216,18 +220,23 @@ function BindingRow({
   recordFields,
   pickKey,
   leftPickingKey,
+  passportPickingKey,
   onChange,
   onPickLeftWeb,
+  onPickPassportField,
 }: {
   binding: WidgetBinding;
   excelFields: string[];
   recordFields: Record<string, string>;
   pickKey: string;
   leftPickingKey: string | null;
+  passportPickingKey: string | null;
   onChange: (b: WidgetBinding) => void;
   onPickLeftWeb: (key: string) => void;
+  onPickPassportField: (key: string) => void;
 }) {
   const pickingThis = leftPickingKey === pickKey;
+  const passportPickingThis = passportPickingKey === pickKey;
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center gap-1">
@@ -304,12 +313,24 @@ function BindingRow({
       )}
       {binding.leftSource === "passport" && (
         <div className="flex items-center gap-1 pl-1">
-          <input
-            value={binding.leftField}
-            onChange={(e) => onChange({ ...binding, leftField: e.target.value })}
-            placeholder="护照提取字段名（如 birth_date）"
-            className="h-5 flex-1 rounded border border-slate-200 bg-white px-1 text-[9px] text-slate-600 outline-none"
-          />
+          <button
+            onClick={() => onPickPassportField(pickKey)}
+            className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] transition-colors ${
+              passportPickingThis
+                ? "animate-pulse bg-violet-500 text-white"
+                : binding.leftField
+                ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                : "bg-slate-200 text-slate-600 hover:bg-slate-300"
+            }`}
+          >
+            <Crosshair className="h-2.5 w-2.5" />
+            {passportPickingThis ? "点击提取结果字段…" : binding.leftField ? "重选提取字段" : "拾取提取字段"}
+          </button>
+          {binding.leftField && !passportPickingThis && (
+            <span className="truncate text-[9px] text-emerald-600" title={binding.leftField}>
+              {binding.leftField}
+            </span>
+          )}
         </div>
       )}
       {binding.leftSource === "manual" && (
@@ -416,7 +437,7 @@ function MockOptionWidget({
   // inline 模式：直接显示选项按钮组
   if (isInline) {
     return (
-      <div className="flex flex-col gap-1.5">
+      <div className="mock-option-widget flex flex-col gap-1.5">
         <div className="text-[9px] text-slate-400">
           直接选项组（{options.length} 个选项，匹配左侧值自动点击）
         </div>
@@ -537,7 +558,7 @@ function MockOptionWidget({
 
   // 下拉展开模式
   return (
-    <div className="flex flex-col gap-1">
+    <div className="mock-option-widget flex flex-col gap-1">
       <div className="text-[9px] text-slate-400">模拟预览（点击选项标注别名）</div>
       {/* 触发框 */}
       <MockTriggerBox label={selectedIdx !== null ? options[selectedIdx]?.text || triggerLabel : triggerLabel} />
@@ -718,7 +739,7 @@ function MockCalendarWidget({
   };
 
   return (
-    <div className="flex flex-col gap-1">
+    <div className="mock-calendar-widget flex flex-col gap-1">
       {/* 触发框 */}
       <MockTriggerBox label={selectedDay ? `${displayYear}-${String(displayMonth + 1).padStart(2, '0')}-${String(selectedDay).padStart(2, '0')}` : triggerLabel} icon={<CalendarDays className="h-3 w-3" />} />
       {/* 日历面板 */}
@@ -1010,6 +1031,8 @@ export default function WidgetExtractPanel(props: Props) {
     onPickRole,
     onPickOption,
     onPickLeftWeb,
+    passportPickingKey,
+    onPickPassportField,
     onTest,
     calendarState,
     calendarBusyKey,
@@ -1029,7 +1052,7 @@ export default function WidgetExtractPanel(props: Props) {
   const draftReady = draftBinding.leftField.trim().length > 0;
 
   return (
-    <div className="flex flex-col gap-2 px-1 py-1">
+    <div className="widget-extract-panel flex flex-col gap-2 px-1 py-1">
       {/* 日历引导式拾取提示条 */}
       {calGuide && (
         <div className="flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 ring-1 ring-amber-200">
@@ -1238,8 +1261,10 @@ export default function WidgetExtractPanel(props: Props) {
             recordFields={recordFields}
             pickKey="draft"
             leftPickingKey={leftPickingKey}
+            passportPickingKey={passportPickingKey}
             onChange={onDraftBindingChange}
             onPickLeftWeb={onPickLeftWeb}
+            onPickPassportField={onPickPassportField}
           />
           <WidgetCardBody
             widget={draft}
@@ -1339,8 +1364,10 @@ export default function WidgetExtractPanel(props: Props) {
               recordFields={recordFields}
               pickKey={key}
               leftPickingKey={leftPickingKey}
+              passportPickingKey={passportPickingKey}
               onChange={(b) => onUpdateSavedBinding(mapping.right_selector, b)}
               onPickLeftWeb={onPickLeftWeb}
+              onPickPassportField={onPickPassportField}
             />
             <WidgetCardBody
               widget={widget}
