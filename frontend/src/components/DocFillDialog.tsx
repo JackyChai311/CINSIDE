@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, FileText, Loader2, MoveRight, X } from "lucide-react";
+import { ChevronDown, ChevronRight, FileText, Loader2, MoveRight, X, AlertTriangle } from "lucide-react";
 import type { FieldMapping } from "../types";
 import { FIELD_LABELS } from "../types";
+import { extractMethodLabel } from "../utils/formatNormalize";
 
 export interface DocFillItem {
   field: string;
@@ -15,6 +16,7 @@ interface Props {
     method: string;
     text: string;
     fields: Record<string, string>;
+    fallback?: { from: string; to: string; reason: string } | null;
   };
   /** 当前字段映射：通过 left_field 找到右侧网页输入框 */
   mappings: FieldMapping[];
@@ -56,8 +58,7 @@ export default function DocFillDialog({ data, mappings, filling, onConfirm, onCa
     .filter((r) => r.fillable && checked[r.field] && (values[r.field] || "").trim())
     .map((r) => ({ field: r.field, value: (values[r.field] || "").trim(), selector: r.selector }));
 
-  const methodLabel =
-    data.method === "vision_ocr" ? "Vision OCR（图片）" : data.method === "markitdown" ? "MarkItDown" : data.method;
+  const methodLabel = extractMethodLabel(data.method);
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm">
@@ -81,6 +82,19 @@ export default function DocFillDialog({ data, mappings, filling, onConfirm, onCa
             <X className="h-4 w-4" />
           </button>
         </div>
+
+        {/* 引擎回退提示 */}
+        {data.fallback && (
+          <div className="flex shrink-0 items-start gap-1.5 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[11px] leading-relaxed text-amber-800">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <div>
+              <span className="font-semibold">{extractMethodLabel(data.fallback.from)}</span>
+              {" 失败"}{data.fallback.reason ? `：${data.fallback.reason}` : ""}
+              {" → 已自动切换至 "}
+              <span className="font-semibold">{extractMethodLabel(data.fallback.to)}</span>
+            </div>
+          </div>
+        )}
 
         {/* 字段列表（可编辑） */}
         <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
