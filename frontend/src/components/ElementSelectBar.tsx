@@ -44,6 +44,8 @@ export interface CustomTextEntry {
   source?: "doc" | "manual";
   /** 创建时间戳：提取元素面板内按设置先后排序编号（FIFO） */
   createdAt?: number;
+  /** 本条目的工作流：review=审查对比，entry=录入填入；未设置时跟随全局 currentLoopStepType */
+  workflow?: "review" | "entry";
 }
 
 interface Props {
