@@ -2,7 +2,7 @@ import { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import {
   X, Plus, Scissors, Copy, Clipboard, Trash2, ChevronDown, ChevronRight,
   GitBranch, Split, Repeat, MessageSquare, Save, RotateCcw, CornerDownRight,
-  ZoomIn, ZoomOut, MousePointer2,
+  ZoomIn, ZoomOut, MousePointer2, CirclePause, AlertOctagon,
 } from "lucide-react";
 import type { WorkflowTemplate, FlowGraph, FlowNode, FlowBranch } from "../types";
 import {
@@ -616,6 +616,17 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
     });
   };
 
+  /** 循环切换选中节点的断点：无 → 强制 → 条件 → 无 */
+  const handleCycleBreakpoint = useCallback(() => {
+    if (!selectedId) return;
+    commit((g) => {
+      const loc = findNode(g.nodes, selectedId);
+      if (!loc || loc.node.kind !== "step") return;
+      const cur = loc.node.breakpoint;
+      loc.node.breakpoint = cur === undefined ? "always" : cur === "always" ? "on-error" : undefined;
+    });
+  }, [selectedId, commit]);
+
   const handleAddCaseBranch = () => {
     if (!selectedId) return;
     commit((g) => {
@@ -646,7 +657,25 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
   };
 
   const handleSave = () => {
-    const updated: WorkflowTemplate = { ...template, flowGraph: graph, updatedAt: Date.now() };
+    // 同步流程图断点到 PickedMark：遍历所有 step 节点，按 markId 写回 breakpoint
+    const bpMap = new Map<string, "always" | "on-error" | undefined>();
+    const collectBp = (nodes: FlowNode[]) => {
+      for (const n of nodes) {
+        if (n.kind === "step" && n.markId) bpMap.set(n.markId, n.breakpoint);
+        if (n.branches) for (const b of n.branches) collectBp(b.nodes);
+      }
+    };
+    collectBp(graph.nodes);
+
+    const syncMark = (m: { id: string; breakpoint?: "always" | "on-error" }) => {
+      if (bpMap.has(m.id)) m.breakpoint = bpMap.get(m.id);
+    };
+    const tpl: WorkflowTemplate = JSON.parse(JSON.stringify(template));
+    tpl.dataSourceMarks?.forEach(syncMark);
+    tpl.reviewMarks?.forEach(syncMark);
+    tpl.entryMarks?.forEach(syncMark);
+
+    const updated: WorkflowTemplate = { ...tpl, flowGraph: graph, updatedAt: Date.now() };
     saveSkill(updated);
     onSave(updated);
     onClose();
@@ -733,6 +762,19 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
           className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100 disabled:opacity-40"><Clipboard className="h-3.5 w-3.5" /> 粘贴</button>
         <button onClick={handleDelete} disabled={!selectedId || selectedLoc?.node.kind === "loopback"}
           className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-rose-600 hover:bg-rose-50 disabled:opacity-40"><Trash2 className="h-3.5 w-3.5" /> 删除</button>
+        {selectedLoc?.node.kind === "step" && (
+          <button onClick={handleCycleBreakpoint} title="循环切换断点：无→强制→条件→无"
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] ${
+              selectedLoc.node.breakpoint === "always"
+                ? "bg-rose-100 text-rose-700 hover:bg-rose-200"
+                : selectedLoc.node.breakpoint === "on-error"
+                ? "bg-amber-100 text-amber-700 hover:bg-amber-200"
+                : "text-slate-600 hover:bg-slate-100"
+            }`}>
+            {selectedLoc.node.breakpoint === "on-error" ? <AlertOctagon className="h-3.5 w-3.5" /> : <CirclePause className="h-3.5 w-3.5" />}
+            {selectedLoc.node.breakpoint === "always" ? "强制断点" : selectedLoc.node.breakpoint === "on-error" ? "条件断点" : "断点"}
+          </button>
+        )}
         {selectedLoc?.node.kind === "case" && (
           <button onClick={handleAddCaseBranch} className="flex items-center gap-1 rounded-md bg-sky-100 px-2 py-1 text-[11px] text-sky-700 hover:bg-sky-200"><Plus className="h-3.5 w-3.5" /> 增加分支</button>
         )}
@@ -1120,6 +1162,24 @@ function LaidNodeView(props: {
          style={{ transform: `translate(${x}px, ${y}px)` }}
          className="cursor-pointer">
         {shape}
+        {node.kind === "step" && node.breakpoint && (
+          <g style={{ pointerEvents: "none" }}>
+            <circle cx={10} cy={10} r={7}
+              fill={node.breakpoint === "always" ? "#ef4444" : "#f59e0b"}
+              stroke="white" strokeWidth={2} />
+            <circle cx={10} cy={10} r={10}
+              fill="none"
+              stroke={node.breakpoint === "always" ? "#ef4444" : "#f59e0b"}
+              strokeWidth={1.5}
+              opacity={0.4}>
+              <animate attributeName="r" values="7;12;7" dur="1.8s" repeatCount="indefinite" />
+              <animate attributeName="opacity" values="0.5;0;0.5" dur="1.8s" repeatCount="indefinite" />
+            </circle>
+            <text x={10} y={13.5} textAnchor="middle" fontSize={9} fontWeight="bold" fill="white" style={{ userSelect: "none" }}>
+              {node.breakpoint === "always" ? "!" : "?"}
+            </text>
+          </g>
+        )}
         <foreignObject x={textX} y={textY} width={textW} height={textH}>
           <div className="flex h-full w-full items-center justify-center px-1 text-center">
             {isEditing ? (
