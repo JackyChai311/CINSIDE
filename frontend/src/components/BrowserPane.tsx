@@ -105,6 +105,8 @@ interface Props {
   credentialCount?: number;
   /** 是否有覆盖面板激活（此时需要保持 BrowserView 隐藏，显示毛玻璃背景） */
   overlayActive?: boolean;
+  /** 网页亮度（0.3~2.0，默认 1.0） */
+  brightness?: number;
 }
 
 interface BrowserTab {
@@ -121,6 +123,7 @@ export interface PickedElementInfo {
   type: string;
   text: string;
   isContentEditable?: boolean;
+  role?: string;
   rect: { x: number; y: number; width: number; height: number };
   /** 链接地址（A 元素或其最近的祖先 A），文档提取用 */
   href?: string;
@@ -196,6 +199,7 @@ export default function BrowserPane({
   onOpenCredentials,
   credentialCount = 0,
   overlayActive = false,
+  brightness = 1.0,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -432,6 +436,21 @@ export default function BrowserPane({
     else window.electronAPI.viewLoad(side, currentUrl);
   }, [currentUrl, side, detachedSide]);
 
+  // 应用网页亮度（通过 IPC 注入 CSS filter 到 BrowserView）
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    const val = Math.max(0.3, Math.min(2.0, Number(brightness) || 1.0));
+    if (detachedSide) {
+      // 脱离窗口没有独立 brightness IPC，用 executeJS 直接设置
+      window.electronAPI.detachedViewExecuteJS?.(
+        detachedSide,
+        `document.documentElement.style.filter=${JSON.stringify(Math.abs(val - 1) < 0.01 ? "" : `brightness(${val})`)};void 0;`
+      ).catch(() => {});
+    } else {
+      window.electronAPI.viewSetBrightness(side, val);
+    }
+  }, [brightness, side, detachedSide]);
+
   // 脱离模式：监听 BrowserView 就绪事件
   // 分离窗口的 BrowserView 在 did-finish-load 后才创建（异步），可能晚于首次 sync()
   // 收到 ready 事件后重新触发 sync 和 URL 加载，解决分离后不显示内容的问题
@@ -496,6 +515,7 @@ export default function BrowserPane({
           type: p.type,
           text: p.text,
           isContentEditable: p.isContentEditable,
+          role: p.role,
           rect: p.rect,
           href: p.href,
           src: p.src,
@@ -514,6 +534,7 @@ export default function BrowserPane({
           type: el.type as string,
           text: el.text as string,
           isContentEditable: !!el.isContentEditable,
+          role: el.role as string | undefined,
           rect: el.rect as PickedElementInfo["rect"],
           href: el.href as string | undefined,
           src: el.src as string | undefined,
@@ -566,6 +587,7 @@ export default function BrowserPane({
           type: p.type,
           text: p.text,
           isContentEditable: p.isContentEditable,
+          role: p.role,
           rect: p.rect,
         });
       }
@@ -802,7 +824,7 @@ export default function BrowserPane({
 
   return (
     <div
-      className={`relative flex h-full flex-col overflow-hidden rounded-lg bg-white/40 backdrop-blur-xl ring-1 ${STATUS_RING[verifyStatus]} ${picking ? "picking-breath" : ""} transition-[box-shadow,background-color] duration-300`}
+      className={`relative flex h-full flex-col overflow-hidden rounded-lg bg-white/80 ring-1 ${STATUS_RING[verifyStatus]} ${picking ? "picking-breath" : ""} transition-[box-shadow,background-color] duration-300`}
     >
       {/* 顶部：标题 + URL/Tab融合区域 + 操作（紧凑单行） */}
       <div className="glass-frame flex items-center gap-2 border-b border-white/40 px-2 py-1">
@@ -923,7 +945,7 @@ export default function BrowserPane({
                                 <span
                                   data-close-btn
                                   onClick={(e) => closeTab(tab.id, e)}
-                                  className="ml-0.5 rounded p-0.5 opacity-0 pointer-events-none transition-opacity hover:bg-slate-200 group-hover:opacity-100 group-hover:pointer-events-auto"
+                                  className="ml-0.5 rounded p-0.5 text-slate-400 opacity-0 pointer-events-none transition-all hover:bg-slate-200 hover:text-slate-600 group-hover:opacity-100 group-hover:pointer-events-auto"
                                 >
                                   <X className="h-2.5 w-2.5" />
                                 </span>
@@ -1150,7 +1172,10 @@ export default function BrowserPane({
           if (f && /\.(xlsx|xls|csv)$/i.test(f.name)) onExcelDrop(f);
         } : undefined}
       >
-        <div ref={containerRef} className="absolute inset-0 bg-white">
+        <div
+          ref={containerRef}
+          className={`absolute inset-0 bg-white${currentUrl ? " pointer-events-none" : ""}`}
+        >
           {!window.electronAPI && (
             <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-xs text-slate-400">
               <Globe className="h-8 w-8 text-slate-300" />
