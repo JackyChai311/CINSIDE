@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
-import { Compass, Eye, EyeOff, Loader2, Maximize2, Minus, Plus, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, X } from "lucide-react";
+import { CheckCircle2, Compass, Download, Eye, EyeOff, Loader2, Maximize2, Minus, Moon, Package, Palette, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, Sun, X, XCircle } from "lucide-react";
 import { api } from "../api/client";
-import type { AppSettings } from "../types";
+import type { AppSettings, DepsStatus } from "../types";
 
 interface Props {
   initial: AppSettings;
   onClose: () => void;
   onSaved: (s: AppSettings) => void;
   onScaleChange?: (scale: number) => void;
+  onBrightnessChange?: (brightness: number) => void;
+  onAppearanceChange?: (theme: string, accent: string) => void;
 }
 
 const DEFAULTS: AppSettings = {
@@ -21,9 +23,22 @@ const DEFAULTS: AppSettings = {
   prevent_accidental_close: false,
   ui_scale: 1.0,
   beginner_mode: true,
+  theme: "light",
+  accent: "indigo",
+  browser_brightness: 1.0,
 };
 
-export default function SettingsModal({ initial, onClose, onSaved, onScaleChange }: Props) {
+// 可选主色调：名称 → 展示色（与 index.css 中 [data-accent] 对应）
+const ACCENTS: { key: string; label: string; color: string }[] = [
+  { key: "indigo", label: "靛蓝", color: "#6366f1" },
+  { key: "sky", label: "天蓝", color: "#0ea5e9" },
+  { key: "emerald", label: "翡翠绿", color: "#10b981" },
+  { key: "rose", label: "玫红", color: "#f43f5e" },
+  { key: "violet", label: "紫罗兰", color: "#8b5cf6" },
+  { key: "amber", label: "琥珀", color: "#f59e0b" },
+];
+
+export default function SettingsModal({ initial, onClose, onSaved, onScaleChange, onBrightnessChange, onAppearanceChange }: Props) {
   const [settings, setSettings] = useState<AppSettings>({ ...DEFAULTS, ...initial });
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -31,11 +46,61 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // 依赖与工具状态
+  const [depsStatus, setDepsStatus] = useState<DepsStatus | null>(null);
+  const [pipInstalling, setPipInstalling] = useState(false);
+  const [pipMessage, setPipMessage] = useState<{ ok: boolean; message: string } | null>(null);
+  const [umiDownloading, setUmiDownloading] = useState(false);
+  const [umiDownloadMsg, setUmiDownloadMsg] = useState<{ ok: boolean; message: string } | null>(null);
+
   useEffect(() => {
     api.getSettings()
       .then((s) => setSettings((prev) => ({ ...prev, ...s })))
       .catch(() => {});
+    // 获取依赖状态
+    refreshDepsStatus();
   }, []);
+
+  const refreshDepsStatus = async () => {
+    try {
+      const status = await api.getDepsStatus();
+      setDepsStatus(status);
+    } catch {
+      // 后端可能未启动或接口不可用，静默忽略
+    }
+  };
+
+  const handleInstallPythonDeps = async () => {
+    setPipInstalling(true);
+    setPipMessage(null);
+    try {
+      const r = await api.installPythonDeps();
+      setPipMessage({ ok: r.ok, message: r.message });
+      if (r.ok) {
+        await refreshDepsStatus();
+      }
+    } catch (e: any) {
+      setPipMessage({ ok: false, message: e.message || "安装失败" });
+    } finally {
+      setPipInstalling(false);
+    }
+  };
+
+  const handleDownloadUmiOcr = async () => {
+    setUmiDownloading(true);
+    setUmiDownloadMsg(null);
+    try {
+      const r = await api.downloadUmiOcr();
+      setUmiDownloadMsg({ ok: r.ok, message: r.message });
+      if (r.ok) {
+        await refreshDepsStatus();
+      }
+    } catch (e: any) {
+      setUmiDownloadMsg({ ok: false, message: e.message || "下载失败" });
+    } finally {
+      setUmiDownloading(false);
+    }
+  };
 
   const update = (patch: Partial<AppSettings>) => {
     // 单一 AI 配置：保持三组值同步
@@ -52,6 +117,10 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
     setSettings(next);
     setTestResult(null);
     setError(null);
+    // 主题/主色调：点击即生效，不等待保存按钮
+    if ("theme" in patch || "accent" in patch) {
+      onAppearanceChange?.(next.theme || "light", next.accent || "indigo");
+    }
   };
 
   const handleTest = async () => {
@@ -67,6 +136,13 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
     } finally {
       setTesting(false);
     }
+  };
+
+  const handleClose = () => {
+    // 取消时恢复原始主题外观和亮度（因为点击/拖动已即时生效）
+    onAppearanceChange?.(initial.theme || "light", initial.accent || "indigo");
+    onBrightnessChange?.(initial.browser_brightness ?? 1.0);
+    onClose();
   };
 
   const handleSave = async () => {
@@ -93,7 +169,7 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
             <h2 className="text-sm font-semibold">设置</h2>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
           >
             <X className="h-4 w-4" />
@@ -278,6 +354,85 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
             </label>
           </div>
 
+          {/* 主题外观：明暗 + 主色调 */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+            <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-slate-700">
+              <Palette className="h-3.5 w-3.5 text-brand-600" />
+              主题外观
+            </div>
+            <div className="space-y-3">
+              {/* 明暗切换 */}
+              <div>
+                <label className="mb-1.5 block text-[10px] font-medium text-slate-500">明暗主题</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => update({ theme: "light" })}
+                    className={[
+                      "flex h-9 items-center justify-center gap-1.5 rounded-lg border text-xs font-medium transition-colors",
+                      settings.theme !== "dark"
+                        ? "border-brand-400 bg-brand-50 text-brand-700 ring-1 ring-brand-300"
+                        : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50",
+                    ].join(" ")}
+                  >
+                    <Sun className="h-3.5 w-3.5" />
+                    浅色
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => update({ theme: "dark" })}
+                    className={[
+                      "flex h-9 items-center justify-center gap-1.5 rounded-lg border text-xs font-medium transition-colors",
+                      settings.theme === "dark"
+                        ? "border-brand-400 bg-brand-50 text-brand-700 ring-1 ring-brand-300"
+                        : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50",
+                    ].join(" ")}
+                  >
+                    <Moon className="h-3.5 w-3.5" />
+                    深色
+                  </button>
+                </div>
+              </div>
+              {/* 主色调 */}
+              <div>
+                <label className="mb-1.5 block text-[10px] font-medium text-slate-500">主色调</label>
+                <div className="flex flex-wrap gap-2">
+                  {ACCENTS.map((a) => {
+                    const active = settings.accent === a.key;
+                    return (
+                      <button
+                        key={a.key}
+                        type="button"
+                        title={a.label}
+                        onClick={() => update({ accent: a.key })}
+                        className={[
+                          "group flex items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] font-medium transition-all",
+                          active
+                            ? "border-transparent"
+                            : "border-transparent text-slate-500 hover:bg-slate-100",
+                        ].join(" ")}
+                        style={active ? {
+                          backgroundColor: `${a.color}1f`,
+                          color: a.color,
+                        } : undefined}
+                      >
+                        <span
+                          className="h-3.5 w-3.5 rounded-full transition-transform"
+                          style={{
+                            backgroundColor: a.color,
+                            boxShadow: active ? `0 0 0 2px ${a.color}55` : undefined,
+                            transform: active ? "scale(1.1)" : undefined,
+                          }}
+                        />
+                        <span className={active ? "" : "group-hover:text-slate-700"}>{a.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* UI 缩放 */}
           <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
             <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-slate-700">
@@ -308,7 +463,7 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
                     value={settings.ui_scale || 1.0}
                     onChange={(e) => {
                       const next = parseFloat(e.target.value);
-                      update({ ui_scale: next });
+                      setSettings((s) => ({ ...s, ui_scale: next }));
                       onScaleChange?.(next);
                       try { localStorage.setItem("cinside-ui-scale", next.toString()); } catch {}
                     }}
@@ -351,6 +506,208 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
             </div>
           </div>
 
+          {/* 网页亮度 */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+            <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-slate-700">
+              <Sun className="h-3.5 w-3.5 text-brand-600" />
+              网页亮度
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = Math.max(0.3, Math.round(((settings.browser_brightness ?? 1.0) - 0.05) * 20) / 20);
+                    update({ browser_brightness: next });
+                    onBrightnessChange?.(next);
+                  }}
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+                  disabled={(settings.browser_brightness ?? 1.0) <= 0.3}
+                >
+                  <Minus className="h-3.5 w-3.5" />
+                </button>
+                <div className="flex-1">
+                  <input
+                    type="range"
+                    min="0.3"
+                    max="2.0"
+                    step="0.05"
+                    value={settings.browser_brightness ?? 1.0}
+                    onChange={(e) => {
+                      const next = parseFloat(e.target.value);
+                      setSettings((s) => ({ ...s, browser_brightness: next }));
+                      onBrightnessChange?.(next);
+                    }}
+                    className="w-full accent-brand-600"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = Math.min(2.0, Math.round(((settings.browser_brightness ?? 1.0) + 0.05) * 20) / 20);
+                    update({ browser_brightness: next });
+                    onBrightnessChange?.(next);
+                  }}
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+                  disabled={(settings.browser_brightness ?? 1.0) >= 2.0}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+                <span className="w-12 text-right text-sm font-semibold tabular-nums text-slate-700">
+                  {Math.round((settings.browser_brightness ?? 1.0) * 100)}%
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    update({ browser_brightness: 1.0 });
+                    onBrightnessChange?.(1.0);
+                  }}
+                  className="flex h-7 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                  title="重置为100%"
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  重置
+                </button>
+              </div>
+              <p className="text-[10px] text-slate-400">
+                调整 BrowserPane 内嵌网页的亮度（30%~200%），暗色主题下可降低网页亮度减轻刺眼感
+              </p>
+            </div>
+          </div>
+
+          {/* 依赖与工具：Python 包 + UMI-OCR */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                <Package className="h-3.5 w-3.5 text-brand-600" />
+                依赖与外部工具
+              </div>
+              <button
+                type="button"
+                onClick={refreshDepsStatus}
+                className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] text-slate-400 hover:bg-slate-200 hover:text-slate-600"
+                title="刷新状态"
+              >
+                <RefreshCw className="h-2.5 w-2.5" />
+                刷新
+              </button>
+            </div>
+
+            {/* Python 依赖 */}
+            <div className="mb-3 rounded-lg border border-slate-200 bg-white p-2.5">
+              <div className="mb-1.5 flex items-center justify-between">
+                <span className="text-[10px] font-semibold text-slate-600">Python 文档解析依赖</span>
+                {depsStatus ? (
+                  depsStatus.python_all_installed ? (
+                    <span className="flex items-center gap-0.5 rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700">
+                      <CheckCircle2 className="h-2.5 w-2.5" />
+                      全部就绪
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-0.5 rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-medium text-amber-700">
+                      <XCircle className="h-2.5 w-2.5" />
+                      有缺失
+                    </span>
+                  )
+                ) : (
+                  <Loader2 className="h-3 w-3 animate-spin text-slate-400" />
+                )}
+              </div>
+              {depsStatus?.python_deps.map((dep) => (
+                <div key={dep.key} className="flex items-center gap-1.5 py-0.5 text-[10px]">
+                  {dep.installed ? (
+                    <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-500" />
+                  ) : (
+                    <XCircle className="h-3 w-3 shrink-0 text-rose-400" />
+                  )}
+                  <span className={dep.installed ? "text-slate-500" : "text-rose-600 font-medium"}>
+                    {dep.name}
+                  </span>
+                </div>
+              ))}
+              {!depsStatus?.python_all_installed && (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleInstallPythonDeps}
+                    disabled={pipInstalling}
+                    className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                  >
+                    {pipInstalling ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                    {pipInstalling ? "安装中（可能需要1-2分钟）…" : "一键安装缺失依赖"}
+                  </button>
+                  {pipMessage && (
+                    <div className={`mt-1.5 whitespace-pre-line rounded px-2 py-1 text-[10px] ${pipMessage.ok ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
+                      {pipMessage.message}
+                    </div>
+                  )}
+                </>
+              )}
+              {pipMessage && depsStatus?.python_all_installed && (
+                <div className={`mt-1.5 whitespace-pre-line rounded px-2 py-1 text-[10px] ${pipMessage.ok ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
+                  {pipMessage.message}
+                </div>
+              )}
+            </div>
+
+            {/* UMI-OCR */}
+            <div className="rounded-lg border border-slate-200 bg-white p-2.5">
+              <div className="mb-1.5 flex items-center justify-between">
+                <span className="text-[10px] font-semibold text-slate-600">UMI-OCR（本地离线 OCR）</span>
+                {depsStatus ? (
+                  depsStatus.umi_ocr.installed ? (
+                    <span className={`flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium ${depsStatus.umi_ocr.service_online ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                      <CheckCircle2 className="h-2.5 w-2.5" />
+                      {depsStatus.umi_ocr.service_online ? "服务在线" : "已安装"}
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-0.5 rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-medium text-slate-500">
+                      <XCircle className="h-2.5 w-2.5" />
+                      未安装
+                    </span>
+                  )
+                ) : (
+                  <Loader2 className="h-3 w-3 animate-spin text-slate-400" />
+                )}
+              </div>
+              {depsStatus?.umi_ocr.path && (
+                <p className="mb-1.5 truncate text-[9px] text-slate-400" title={depsStatus.umi_ocr.path}>
+                  📁 {depsStatus.umi_ocr.path}
+                </p>
+              )}
+              <p className="mb-2 text-[9px] leading-relaxed text-slate-400">
+                UMI-OCR 是免费开源的离线 OCR 软件（基于 PaddleOCR），无需 API Key 即可识别图片文字。
+                下载安装后需在软件内开启「HTTP 接口服务」（默认端口 1224）。
+              </p>
+              <button
+                type="button"
+                onClick={handleDownloadUmiOcr}
+                disabled={umiDownloading}
+                className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-brand-600 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-brand-700 disabled:opacity-60"
+              >
+                {umiDownloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                {umiDownloading ? "下载安装中（约100MB，请耐心等待）…" : depsStatus?.umi_ocr.installed ? "重新下载安装 UMI-OCR" : "一键下载安装 UMI-OCR"}
+              </button>
+              {umiDownloadMsg && (
+                <div className={`mt-1.5 whitespace-pre-line rounded px-2 py-1 text-[10px] ${umiDownloadMsg.ok ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
+                  {umiDownloadMsg.message}
+                </div>
+              )}
+              <p className="mt-1.5 text-[9px] text-slate-400">
+                💡 如果 GitHub 下载慢，可手动从
+                <a
+                  href="https://hiroi-sora.lanzoul.com/s/umi-ocr"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mx-0.5 text-brand-500 underline hover:text-brand-600"
+                >
+                  蓝奏云镜像
+                </a>
+                下载解压后，在文件处理设置中选择 Umi-OCR.exe。
+              </p>
+            </div>
+          </div>
+
           {error && (
             <div className="rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div>
           )}
@@ -359,7 +716,7 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
         {/* footer */}
         <div className="flex shrink-0 items-center justify-end gap-2 border-t border-slate-100 px-5 py-4">
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="rounded-lg px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100"
           >
             取消
