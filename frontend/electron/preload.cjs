@@ -119,6 +119,22 @@ contextBridge.exposeInMainWorld("electronAPI", {
   checkLocalFileExists: (rootPath, relativePath) => ipcRenderer.invoke("check-local-file-exists", rootPath, relativePath),
   // === 导出文件：弹保存对话框并写入磁盘 ===
   saveExportedFile: (defaultName, base64) => ipcRenderer.invoke("save-exported-file", defaultName, base64),
+  // === 幻灯片任务：选择 PPT 文件 ===
+  pickPptFiles: () => ipcRenderer.invoke("pick-ppt-files"),
+  pickPptDirectory: () => ipcRenderer.invoke("pick-ppt-directory"),
+  // 参考资料：选择 PPT/PDF 文件（支持多选）
+  pickReferenceFiles: () => ipcRenderer.invoke("pick-reference-files"),
+  // 拖拽放入的文件：通过 File 对象获取真实磁盘路径
+  // Electron 32+ 使用 webUtils.getPathForFile，旧版回退到 file.path
+  getPathForFile: (file) => {
+    try {
+      const { webUtils } = require("electron");
+      if (webUtils && typeof webUtils.getPathForFile === "function") {
+        return webUtils.getPathForFile(file);
+      }
+    } catch (_) {}
+    return file && file.path ? file.path : "";
+  },
   onDownloadCaptured: (callback) => {
     const handler = (_e, data) => callback(data);
     ipcRenderer.on("download-captured", handler);
