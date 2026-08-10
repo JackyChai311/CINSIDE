@@ -47,7 +47,7 @@ const COMMON = `
   }
   function __wsRealClick(el) {
     if (!el) return;
-    try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (e) {}
+    try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); } catch (e) {}
     var rect = null;
     try { rect = el.getBoundingClientRect(); } catch (e) {}
     var cx = rect ? Math.round(rect.left + rect.width / 2) : 0;
@@ -964,7 +964,7 @@ export function buildCalendarSetScript(widget: WidgetDef, y: number, m: number, 
       var r4 = trigger.getBoundingClientRect();
       var cx4 = Math.round(r4.left + r4.width/2), cy4 = Math.round(r4.top + r4.height/2);
       var mopts4 = { bubbles: true, cancelable: true, view: view4, clientX: cx4, clientY: cy4, button: 0, buttons: 1 };
-      try { trigger.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch(e) {}
+      try { trigger.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); } catch(e) {}
       try { trigger.dispatchEvent(new MouseEvent('mousedown', mopts4)); } catch(e) {}
       try { if (typeof trigger.focus === 'function') trigger.focus({ preventScroll: false }); } catch(e) {}
       await __wsWait(120);
