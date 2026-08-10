@@ -2694,6 +2694,102 @@ app.whenReady().then(() => {
     return { canceled: false, rootPath: rootPath, files: files };
   });
 
+  // 幻灯片任务：选择多个 PPT 文件
+  ipcMain.handle("pick-ppt-files", async () => {
+    const { dialog } = require("electron");
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "选择 PPT 文件",
+      properties: ["openFile", "multiSelections"],
+      filters: [
+        { name: "PowerPoint 文件", extensions: ["ppt", "pptx"] },
+      ],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true, files: [] };
+    }
+    const files = result.filePaths.map((fp) => {
+      let size = 0;
+      try { size = fs.statSync(fp).size; } catch (e) { /* ignore */ }
+      return {
+        file_path: fp,
+        file_name: path.basename(fp),
+        size: size,
+      };
+    });
+    debugLog(`[ppt] picked ${files.length} PPT files`);
+    return { canceled: false, files: files };
+  });
+
+  // 幻灯片任务：选择文件夹（递归扫描 PPT）
+  ipcMain.handle("pick-ppt-directory", async () => {
+    const { dialog } = require("electron");
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "选择包含 PPT 文件的文件夹",
+      properties: ["openDirectory"],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true, rootPath: "", files: [] };
+    }
+    const rootPath = result.filePaths[0];
+    const files = [];
+    function scanDir(dir, depth) {
+      if (depth > 6) return;
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          scanDir(fullPath, depth + 1);
+        } else if (entry.isFile()) {
+          const ext = path.extname(entry.name).toLowerCase();
+          if (ext !== ".ppt" && ext !== ".pptx") continue;
+          let stat;
+          try { stat = fs.statSync(fullPath); } catch (e) { continue; }
+          const relativePath = path.relative(rootPath, fullPath).replace(/\\/g, "/");
+          files.push({
+            relativePath: relativePath,
+            name: entry.name,
+            size: stat.size,
+            ext: ext,
+            file_path: fullPath,
+          });
+        }
+      }
+    }
+    scanDir(rootPath, 0);
+    debugLog(`[ppt] picked directory: ${rootPath}, ${files.length} PPT files`);
+    return { canceled: false, rootPath: rootPath, files: files };
+  });
+
+  // 参考资料：选择 PPT/PDF 文件（多选）
+  ipcMain.handle("pick-reference-files", async () => {
+    const { dialog } = require("electron");
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "选择参考文件（PPT / PDF）",
+      properties: ["openFile", "multiSelections"],
+      filters: [
+        { name: "演示与文档", extensions: ["ppt", "pptx", "pdf"] },
+        { name: "PowerPoint", extensions: ["ppt", "pptx"] },
+        { name: "PDF", extensions: ["pdf"] },
+      ],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true, files: [] };
+    }
+    const files = result.filePaths.map((fp) => {
+      let size = 0;
+      try { size = fs.statSync(fp).size; } catch (e) { /* ignore */ }
+      return {
+        file_path: fp,
+        file_name: path.basename(fp),
+        size,
+        ext: path.extname(fp).toLowerCase().replace(/^\./, ""),
+      };
+    });
+    debugLog(`[ref] picked ${files.length} reference files`);
+    return { canceled: false, files };
+  });
+
   // 读取本地文件，返回 dataUrl（base64）+ 文件名 + mime
   // 参数: rootPath(根目录绝对路径), relativePath(相对路径，用 / 分隔)
   ipcMain.handle("read-local-doc-file", (_event, rootPath, relativePath) => {
