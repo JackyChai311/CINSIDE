@@ -5,28 +5,37 @@ import {
   CalendarDays,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Columns2,
+  Crosshair,
   Database,
   Eye,
   ExternalLink,
   FileText,
+  Globe,
   Keyboard,
+  Layers,
   List,
   Loader2,
   MinusCircle,
   MousePointerClick,
   MoveRight,
-  PanelRightOpen,
-  PanelRightClose,
   Play,
   Plus,
+  RotateCcw,
+  RotateCw,
   Save,
+  ScanLine,
   Settings2,
   Table2,
   Trash2,
   Type,
+  Upload,
   X,
   XCircle,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import type {
   AppMode,
@@ -40,11 +49,13 @@ import type {
   VerificationReport,
   VerificationStep,
 } from "../types";
+import { api } from "../api/client";
 import {
   FIELD_LABELS,
   MATCH_LABELS,
   OVERALL_LABELS,
 } from "../types";
+import { extractMethodLabel, isUmiMethod, isVisionMethod } from "../utils/formatNormalize";
 
 /** 提取元素汇总项：字段对比设置态「提取元素」小卡片（文件提取步骤 + 自定义文本 + 控件，按设置时间 FIFO） */
 export interface ExtractSummaryItem {
@@ -96,11 +107,21 @@ interface Props {
   activeDocIndex?: number;
   onSelectDocIndex?: (i: number) => void;
   docExtracting?: boolean;
+  /** 文件/护照 OCR 引擎：vision=识图AI，umi=本地UMI-OCR */
+  ocrEngine?: string;
+  /** 切换 OCR 引擎（识图AI ↔ UMI-OCR） */
+  onChangeOcrEngine?: (engine: "vision" | "umi") => void;
   switchToDocSignal?: number;
+  /** 外部信号：递增时切换字段对比面板的「步骤设置/结果显示」模式（L 快捷键） */
+  fieldSetupToggleSignal?: number;
   addingStepMode?: "review" | "entry" | null;
   onPickExtractedField?: (side: "left" | "right", field: string, value: string) => void;
   /** 本地文件提取配置内容（有值时"文件处理"卡片显示它，替代正常内容） */
   docLocalConfigContent?: React.ReactNode;
+  /** 文件配置是否处于"选择来源"阶段（choose 模式下保留外层"文件处理"头部） */
+  docConfigChooseMode?: boolean;
+  /** 退出文件来源选择（choose 模式下外层头部的关闭按钮） */
+  onExitDocChoose?: () => void;
   /** 聚焦面板模式："field"=只显示字段对比，"doc"=只显示文件处理，"doc-extract"=文件处理+提取元素两栏，"field-doc"=字段对比+文件处理两栏，null=三面板 */
   focusPanel?: "field" | "doc" | "doc-extract" | "field-doc" | null;
   /** 字段对比设置模式数据：前置点击 marks */
@@ -129,10 +150,24 @@ interface Props {
   postClickActive?: boolean;
   /** 开始添加文件提取步骤 */
   onStartAddDocExtract?: () => void;
+  /** 轻量打开文件提取来源选择面板（不退出其他设置模式，用于空面板自动展示） */
+  onAutoOpenDocChoose?: () => void;
+  /** 直接选择网页提取来源 */
+  onChooseDocWeb?: () => void;
+  /** 直接选择本地文件提取来源 */
+  onChooseDocLocal?: () => void;
   /** 是否正在文件提取模式 */
   docExtractActive?: boolean;
   /** 切换提取步骤的录入/审核模式（用于文件提取和自定义文本面板） */
   onSwitchStepMode?: (mode: "review" | "entry") => void;
+  /** 退出添加步骤模式（完成录入/审核步骤设置） */
+  onExitAddingStepMode?: () => void;
+  /** 点击字段对比面板时触发（激活仅面板内可用的快捷键） */
+  onFieldPanelActive?: () => void;
+  /** 当前双侧元素已选好、可以保存映射 */
+  canSaveMapping?: boolean;
+  /** 确认保存当前映射（ENTER 快捷键） */
+  onConfirmMapping?: () => void;
   /** 字段对比设置模式数据：已配置的审查映射 */
   reviewMappings?: FieldMapping[];
   /** 删除一个 picked mark（前置/收尾点击） */
@@ -147,6 +182,8 @@ interface Props {
   onSaveToBatch?: () => void;
   /** 命名保存为 LOOP 模板 */
   onRequestSaveLoop?: () => void;
+  /** 应用已保存的 LOOP 模板 */
+  onRequestApplyLoop?: () => void;
   /** 直接执行当前配置（临时运行，不保存） */
   onDirectRun?: () => void;
   /** 是否有可保存/执行的步骤（控制按钮禁用态） */
@@ -171,6 +208,14 @@ interface Props {
   extractStepSummary?: ExtractSummaryItem[];
   /** 控件提取面板内容（点击展开选项/日历控件，有值时优先于自定义文本显示） */
   widgetExtractContent?: React.ReactNode;
+  /** 控件提取结果字段（已保存控件解析出的绑定值，显示在文件处理面板「提取结果」中） */
+  widgetResultFields?: Array<{ key: string; label: string; value: string; kind: "option" | "calendar" }>;
+  /** 正在从「提取结果」拾取护照字段的 key（非空时字段卡片可点击） */
+  widgetPassportPickingKey?: string | null;
+  /** 用户在「提取结果」点击某个护照字段 → 完成控件绑定 */
+  onResolvePassportField?: (fieldKey: string) => void;
+  /** 取消护照字段拾取 */
+  onCancelPassportPicking?: () => void;
   /** 控件 TAB 列表：每个控件一个 TAB（浏览器标签页风格） */
   widgetTabs?: Array<{ id: string; label: string; kind: "option" | "calendar"; isDraft?: boolean; isBound?: boolean }>;
   /** 添加控件回调（TAB 栏 + 按钮） */
@@ -179,6 +224,10 @@ interface Props {
   onAddCustomText?: () => void;
   /** 外部信号：当为 true 时，自动切换"提取元素"面板到设置模式（控件提取） */
   widgetSetupSignal?: boolean;
+  /** 外部信号：递增/变化时自动进入左右分栏模式（控件绑定左网页取值时保持控件面板可见） */
+  splitWidgetRequest?: number;
+  /** 文件处理分屏模式：为 true 时控件提取不隐藏文件处理面板，三栏同时可见 */
+  docSplitView?: boolean;
   /** 数据源记录（用于卡片显示名字+学号） */
   records?: ApplicantRecord[];
   /** 点击人物卡片跳转到该记录 */
@@ -213,9 +262,13 @@ export default function ResultsPanel({
   activeDocIndex = 0,
   onSelectDocIndex,
   docExtracting = false,
+  ocrEngine = "vision",
+  onChangeOcrEngine,
   addingStepMode = null,
   onPickExtractedField,
   docLocalConfigContent,
+  docConfigChooseMode = false,
+  onExitDocChoose,
   focusPanel = null,
   preClickMarks = [],
   processClickMarks = [],
@@ -235,10 +288,18 @@ export default function ResultsPanel({
   onStartAddPostClick,
   postClickActive = false,
   onStartAddDocExtract,
+  onAutoOpenDocChoose,
+  onChooseDocWeb,
+  onChooseDocLocal,
   docExtractActive = false,
   onSwitchStepMode,
+  onExitAddingStepMode,
+  onFieldPanelActive,
+  canSaveMapping = false,
+  onConfirmMapping,
   onSaveToBatch,
   onRequestSaveLoop,
+  onRequestApplyLoop,
   onDirectRun,
   canSaveLoop = false,
   hasCheckedBatch = false,
@@ -251,13 +312,20 @@ export default function ResultsPanel({
   extractCounts,
   extractStepSummary = [],
   widgetExtractContent,
+  widgetResultFields = [],
+  widgetPassportPickingKey = null,
+  onResolvePassportField,
+  onCancelPassportPicking,
   widgetTabs = [],
   onAddWidget,
   onAddCustomText,
   widgetSetupSignal = false,
+  splitWidgetRequest = 0,
+  docSplitView = false,
   records = [],
   onSelectRecord,
   switchToDocSignal,
+  fieldSetupToggleSignal,
   execPhase = "idle",
   currentMarkOrder = null,
   activeVerifyIdx = -1,
@@ -299,6 +367,8 @@ export default function ResultsPanel({
           activeDocIndex={activeDocIndex}
           onSelectDocIndex={onSelectDocIndex}
           docExtracting={docExtracting}
+          ocrEngine={ocrEngine}
+          onChangeOcrEngine={onChangeOcrEngine}
           shots={shots}
           running={running}
           steps={steps}
@@ -306,6 +376,8 @@ export default function ResultsPanel({
           addingStepMode={addingStepMode}
           onPickExtractedField={onPickExtractedField}
           docLocalConfigContent={docLocalConfigContent}
+          docConfigChooseMode={docConfigChooseMode}
+          onExitDocChoose={onExitDocChoose}
           focusPanel={focusPanel}
           preClickMarks={preClickMarks}
           processClickMarks={processClickMarks}
@@ -322,9 +394,16 @@ export default function ResultsPanel({
           onStartAddProcessClick={onStartAddProcessClick}
           onStartAddPostClick={onStartAddPostClick}
           onStartAddDocExtract={onStartAddDocExtract}
+          onAutoOpenDocChoose={onAutoOpenDocChoose}
+          onChooseDocWeb={onChooseDocWeb}
+          onChooseDocLocal={onChooseDocLocal}
           onSwitchStepMode={onSwitchStepMode}
+          onExitAddingStepMode={onExitAddingStepMode}
+          canSaveMapping={canSaveMapping}
+          onConfirmMapping={onConfirmMapping}
           onSaveToBatch={onSaveToBatch}
           onRequestSaveLoop={onRequestSaveLoop}
+          onRequestApplyLoop={onRequestApplyLoop}
           onDirectRun={onDirectRun}
           canSaveLoop={canSaveLoop}
           hasCheckedBatch={hasCheckedBatch}
@@ -337,13 +416,20 @@ export default function ResultsPanel({
           extractCounts={extractCounts}
           extractStepSummary={extractStepSummary}
           widgetExtractContent={widgetExtractContent}
+          widgetResultFields={widgetResultFields}
+          widgetPassportPickingKey={widgetPassportPickingKey}
+          onResolvePassportField={onResolvePassportField}
+          onCancelPassportPicking={onCancelPassportPicking}
           widgetTabs={widgetTabs}
           onAddWidget={onAddWidget}
           onAddCustomText={onAddCustomText}
           widgetSetupSignal={widgetSetupSignal}
+          splitWidgetRequest={splitWidgetRequest}
+          docSplitView={docSplitView}
           records={records}
           onSelectRecord={onSelectRecord}
           switchToDocSignal={switchToDocSignal}
+          fieldSetupToggleSignal={fieldSetupToggleSignal}
           execPhase={execPhase}
           currentMarkOrder={currentMarkOrder}
           activeVerifyIdx={activeVerifyIdx}
@@ -517,24 +603,25 @@ function CompareTab({
   );
 }
 
-// ============ 文档对比（功能1：网页 PDF/图片 → MarkItDown/OCR → 左右对比） ============
+// ============ 文档对比（功能1：网页 PDF/图片 → OCR/文档解析 → 左右对比） ============
 function DocCompareTab({
   docExtract,
   extracting,
+  ocrEngine = "vision",
 }: {
   docExtract: DocExtractState | null;
   extracting: boolean;
+  ocrEngine?: string;
 }) {
   const [showFullText, setShowFullText] = useState(false);
+  const engineLabel = ocrEngine === "umi" ? "UMI-OCR" : "AI Vision";
 
   if (extracting) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 px-6 py-12 text-center">
         <div className="h-8 w-8 animate-spin rounded-full border-2 border-brand-200 border-t-brand-600" />
         <p className="text-xs text-slate-500">
-          正在提取文档文字…
-          <br />
-          <span className="text-[10px] text-slate-400">MarkItDown（PDF）/ Vision OCR（图片）</span>
+          正在使用 {engineLabel} 识别文档文字…
         </p>
       </div>
     );
@@ -550,16 +637,20 @@ function DocCompareTab({
     );
   }
 
-  const methodBadge =
-    docExtract.method === "vision_ocr" ? (
-      <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700">
-        Vision OCR
-      </span>
-    ) : (
-      <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-medium text-sky-700">
-        MarkItDown
+  const methodBadge = (() => {
+    const m = docExtract.method;
+    const label = extractMethodLabel(m);
+    const cls = isVisionMethod(m)
+      ? "bg-violet-100 text-violet-700"
+      : isUmiMethod(m)
+      ? "bg-emerald-100 text-emerald-700"
+      : "bg-sky-100 text-sky-700";
+    return (
+      <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${cls}`}>
+        {label}
       </span>
     );
+  })();
 
   const rows: SideCompareRow[] = docExtract.entries.map((e) => ({
     key: e.field,
@@ -630,6 +721,8 @@ function ReportTab({
   activeDocIndex,
   onSelectDocIndex,
   docExtracting,
+  ocrEngine = "vision",
+  onChangeOcrEngine,
   shots,
   running,
   steps,
@@ -637,6 +730,8 @@ function ReportTab({
   addingStepMode,
   onPickExtractedField,
   docLocalConfigContent,
+  docConfigChooseMode = false,
+  onExitDocChoose,
   focusPanel = null,
   preClickMarks = [],
   processClickMarks = [],
@@ -656,10 +751,18 @@ function ReportTab({
   onStartAddPostClick,
   postClickActive = false,
   onStartAddDocExtract,
+  onAutoOpenDocChoose,
+  onChooseDocWeb,
+  onChooseDocLocal,
   docExtractActive = false,
   onSwitchStepMode,
+  onExitAddingStepMode,
+  onFieldPanelActive,
+  canSaveMapping = false,
+  onConfirmMapping,
   onSaveToBatch,
   onRequestSaveLoop,
+  onRequestApplyLoop,
   onDirectRun,
   canSaveLoop = false,
   hasCheckedBatch = false,
@@ -672,13 +775,20 @@ function ReportTab({
   extractCounts,
   extractStepSummary = [],
   widgetExtractContent,
+  widgetResultFields = [],
+  widgetPassportPickingKey = null,
+  onResolvePassportField,
+  onCancelPassportPicking,
   widgetTabs = [],
   onAddWidget,
   onAddCustomText,
   widgetSetupSignal = false,
+  splitWidgetRequest = 0,
+  docSplitView = false,
   records = [],
   onSelectRecord,
   switchToDocSignal,
+  fieldSetupToggleSignal,
   execPhase = "idle",
   currentMarkOrder = null,
   activeVerifyIdx = -1,
@@ -694,6 +804,10 @@ function ReportTab({
   activeDocIndex: number;
   onSelectDocIndex?: (i: number) => void;
   docExtracting: boolean;
+  /** 文件/护照 OCR 引擎：vision=识图AI，umi=本地UMI-OCR */
+  ocrEngine?: string;
+  /** 切换 OCR 引擎（识图AI ↔ UMI-OCR） */
+  onChangeOcrEngine?: (engine: "vision" | "umi") => void;
   shots: ScreenshotEvent[];
   running: boolean;
   steps: VerificationStep[];
@@ -702,6 +816,10 @@ function ReportTab({
   onPickExtractedField?: (side: "left" | "right", field: string, value: string) => void;
   /** 本地文件提取配置内容（有值时"文件处理"卡片显示它，替代正常内容） */
   docLocalConfigContent?: React.ReactNode;
+  /** 文件配置是否处于"选择来源"阶段（choose 模式下保留外层"文件处理"头部） */
+  docConfigChooseMode?: boolean;
+  /** 退出文件来源选择（choose 模式下外层头部的关闭按钮） */
+  onExitDocChoose?: () => void;
   /** 聚焦面板模式："field"=只显示字段对比，"doc"=只显示文件处理，"doc-extract"=文件处理+提取元素两栏，"field-doc"=字段对比+文件处理两栏，null=三面板 */
   focusPanel?: "field" | "doc" | "doc-extract" | "field-doc" | null;
   /** 字段对比设置模式数据：前置点击 marks */
@@ -730,10 +848,24 @@ function ReportTab({
   postClickActive?: boolean;
   /** 开始添加文件提取步骤 */
   onStartAddDocExtract?: () => void;
+  /** 轻量打开文件提取来源选择面板（不退出其他设置模式，用于空面板自动展示） */
+  onAutoOpenDocChoose?: () => void;
+  /** 直接选择网页提取来源 */
+  onChooseDocWeb?: () => void;
+  /** 直接选择本地文件提取来源 */
+  onChooseDocLocal?: () => void;
   /** 是否正在文件提取模式 */
   docExtractActive?: boolean;
   /** 切换提取步骤的录入/审核模式（用于文件提取和自定义文本面板） */
   onSwitchStepMode?: (mode: "review" | "entry") => void;
+  /** 退出添加步骤模式（完成录入/审核步骤设置） */
+  onExitAddingStepMode?: () => void;
+  /** 点击字段对比面板时触发（激活仅面板内可用的快捷键） */
+  onFieldPanelActive?: () => void;
+  /** 当前双侧元素已选好、可以保存映射 */
+  canSaveMapping?: boolean;
+  /** 确认保存当前映射（ENTER 快捷键） */
+  onConfirmMapping?: () => void;
   /** 字段对比设置模式数据：已配置的审查映射 */
   reviewMappings?: FieldMapping[];
   /** 删除一个 picked mark（前置/收尾点击） */
@@ -748,6 +880,8 @@ function ReportTab({
   onSaveToBatch?: () => void;
   /** 命名保存为 LOOP 模板 */
   onRequestSaveLoop?: () => void;
+  /** 应用已保存的 LOOP 模板 */
+  onRequestApplyLoop?: () => void;
   /** 直接执行当前配置（临时运行，不保存） */
   onDirectRun?: () => void;
   /** 是否有可保存/执行的步骤（控制按钮禁用态） */
@@ -772,6 +906,14 @@ function ReportTab({
   extractStepSummary?: ExtractSummaryItem[];
   /** 控件提取面板内容（点击展开选项/日历控件，有值时优先于自定义文本显示） */
   widgetExtractContent?: React.ReactNode;
+  /** 控件提取结果字段（已保存控件解析出的绑定值，显示在文件处理面板「提取结果」中） */
+  widgetResultFields?: Array<{ key: string; label: string; value: string; kind: "option" | "calendar" }>;
+  /** 正在从「提取结果」拾取护照字段的 key（非空时字段卡片可点击） */
+  widgetPassportPickingKey?: string | null;
+  /** 用户在「提取结果」点击某个护照字段 → 完成控件绑定 */
+  onResolvePassportField?: (fieldKey: string) => void;
+  /** 取消护照字段拾取 */
+  onCancelPassportPicking?: () => void;
   /** 控件 TAB 列表：每个控件一个 TAB（浏览器标签页风格） */
   widgetTabs?: Array<{ id: string; label: string; kind: "option" | "calendar"; isDraft?: boolean; isBound?: boolean }>;
   /** 添加控件回调（TAB 栏 + 按钮） */
@@ -780,12 +922,18 @@ function ReportTab({
   onAddCustomText?: () => void;
   /** 外部信号：当为 true 时，自动切换"提取元素"面板到设置模式（控件提取） */
   widgetSetupSignal?: boolean;
+  /** 外部信号：递增/变化时自动进入左右分栏模式（控件绑定左网页取值时保持控件面板可见） */
+  splitWidgetRequest?: number;
+  /** 文件处理分屏模式：为 true 时控件提取不隐藏文件处理面板，三栏同时可见 */
+  docSplitView?: boolean;
   /** 数据源记录（用于卡片显示名字+学号） */
   records?: ApplicantRecord[];
   /** 点击人物卡片跳转到该记录 */
   onSelectRecord?: (recordId: string) => void;
   /** 外部信号：递增时切换到文件处理面板的结果模式（显示已提取文件） */
   switchToDocSignal?: number;
+  /** 外部信号：递增时切换字段对比面板的「步骤设置/结果显示」模式（L 快捷键） */
+  fieldSetupToggleSignal?: number;
   // ============ 执行时光标动画相关 ============
   /** 执行阶段：idle=未执行，marks=执行点击/输入，verify=逐字段审查，done=完成 */
   execPhase?: "idle" | "marks" | "verify" | "done";
@@ -812,6 +960,79 @@ function ReportTab({
   const [fieldSetupMode, setFieldSetupMode] = useState(false);
   /** 文件处理面板模式开关：true=步骤设置版，false=结果显示版 */
   const [docSetupMode, setDocSetupMode] = useState(false);
+  /** 文件处理面板中提取结果展开/收起（默认展开，方便二审查看提取的字段和全文） */
+  const [showExtractResult, setShowExtractResult] = useState(true);
+  /** 护照字段拾取时自动展开提取结果 */
+  useEffect(() => {
+    if (widgetPassportPickingKey) setShowExtractResult(true);
+  }, [widgetPassportPickingKey]);
+  /** 提取全文展开/收起 */
+  const [showFullText, setShowFullText] = useState(false);
+  /** 内嵌文件预览的旋转和缩放（切换文件时重置） */
+  const [filePreviewRotation, setFilePreviewRotation] = useState(0);
+  const [filePreviewZoom, setFilePreviewZoom] = useState(1);
+  /** UMI-OCR 连通性状态 */
+  const [umiStatus, setUmiStatus] = useState<"idle" | "checking" | "available" | "unavailable">("idle");
+  const [umiStatusMsg, setUmiStatusMsg] = useState("");
+  const [umiLaunching, setUmiLaunching] = useState(false);
+
+  // 切换 OCR 引擎时自动检测 UMI-OCR 连通性
+  const checkUmiStatus = async () => {
+    setUmiStatus("checking");
+    setUmiStatusMsg("正在检测 UMI-OCR…");
+    try {
+      const res = await api.testUmiOcr();
+      if (res.ok) {
+        setUmiStatus("available");
+        setUmiStatusMsg(res.message || "UMI-OCR 可用");
+      } else {
+        setUmiStatus("unavailable");
+        setUmiStatusMsg(res.message || "UMI-OCR 不可用");
+      }
+    } catch {
+      setUmiStatus("unavailable");
+      setUmiStatusMsg("检测请求失败，请确认后端已启动");
+    }
+  };
+
+  // 挂载时如果默认引擎就是 umi，自动验证在线状态
+  useEffect(() => {
+    if (ocrEngine === "umi" && umiStatus === "idle") {
+      checkUmiStatus();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ocrEngine]);
+
+  const handleOcrEngineSwitch = async (engine: "vision" | "umi") => {
+    onChangeOcrEngine?.(engine);
+    if (engine === "umi") {
+      checkUmiStatus();
+    } else {
+      setUmiStatus("idle");
+      setUmiStatusMsg("");
+    }
+  };
+
+  // 一键启动 UMI-OCR
+  const handleLaunchUmi = async () => {
+    setUmiLaunching(true);
+    setUmiStatusMsg("正在启动 UMI-OCR…");
+    try {
+      const res = await api.launchUmiOcr();
+      if (res.ok) {
+        setUmiStatus("available");
+        setUmiStatusMsg(res.message || "UMI-OCR 已启动");
+      } else {
+        setUmiStatus("unavailable");
+        setUmiStatusMsg(res.message || "启动失败");
+      }
+    } catch {
+      setUmiStatus("unavailable");
+      setUmiStatusMsg("启动请求失败，请确认后端已启动");
+    } finally {
+      setUmiLaunching(false);
+    }
+  };
   /** 提取元素面板模式开关：true=设置（自定义字段），false=结果（提取内容/DEMO） */
   const [extractSetupMode, setExtractSetupMode] = useState(false);
   /** 提取元素面板当前激活的大分类：doc=文件提取 / custom=自定义文本 / widget=控件提取（切换显示，不滚动） */
@@ -820,8 +1041,12 @@ function ReportTab({
   const [activeWidgetTabId, setActiveWidgetTabId] = useState<string | null>(null);
   /** 提取元素面板左右分栏模式：true=左半显示文件/自定义文本，右半显示控件提取 */
   const [splitWidgetMode, setSplitWidgetMode] = useState(false);
+  /** 用户主动点击「控件提取」按钮时强制显示控件面板（即使暂无控件内容，也显示空状态以引导添加） */
+  const [forceWidgetView, setForceWidgetView] = useState(false);
   /** 左右分栏时左侧宽度百分比（默认 50%） */
   const [splitLeftPct, setSplitLeftPct] = useState(50);
+  /** 控件提取模式下手动展开文件处理面板（docSplitView 由外部控制，此状态为用户在面板内手动展开） */
+  const [filePanelManuallyOpen, setFilePanelManuallyOpen] = useState(false);
   /** 提取元素滚动容器 ref + widget节 ref（用于控件子TAB滚动定位） */
   const extractScrollRef = useRef<HTMLDivElement | null>(null);
   const extractSectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -829,23 +1054,76 @@ function ReportTab({
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const splitDraggingRef = useRef(false);
 
-  // 确定当前实际显示的大分类（兜底：默认显示统一字段面板，点击控件TAB时才切到控件）
-  const currentCategory = useMemo<"doc" | "custom" | "widget">(() => {
-    const hasWidget = !!(widgetExtractContent || widgetTabs.length > 0);
-    if (activeCategory === "widget" && hasWidget) return "widget";
-    // 默认始终返回 custom（统一字段面板），不再切换到 doc/widget
-    return "custom";
-  }, [activeCategory, widgetExtractContent, widgetTabs.length]);
+  // 两侧是否有实际内容：文件/自定义字段、控件提取
+  const fieldCount = (extractCounts?.doc ?? 0) + (extractCounts?.custom ?? 0);
+  const hasFields = fieldCount > 0;
+  const hasWidget = !!(widgetExtractContent || widgetTabs.length > 0 || widgetSetupSignal);
+  // 真正进入左右分栏的前提：两侧都有内容；否则即使请求了分栏也回退为单栏
+  const effectiveSplit = splitWidgetMode && hasFields && hasWidget;
 
-  /** 点击大分类 TAB：切换分类（不滚动，直接切换显示） */
-  const switchCategory = useCallback((cat: "doc" | "custom" | "widget") => {
-    setActiveCategory(cat);
-    // 切换到控件分类时，重置滚动到顶部并默认选中第一个控件
-    if (cat === "widget") {
-      const container = extractScrollRef.current;
-      if (container) container.scrollTo({ top: 0, behavior: "auto" });
+  // 外部 docSplitView 为 true 时同步展开文件面板（保证分屏中控件提取时文件面板可见）
+  // 用户可在面板内手动收起/展开，filePanelManuallyOpen 作为唯一控制面板可见性的状态
+  useEffect(() => {
+    if (docSplitView) setFilePanelManuallyOpen(true);
+  }, [docSplitView]);
+
+  // 文件处理面板是否实际可见（手动展开状态）
+  const filePanelVisible = filePanelManuallyOpen;
+
+  // 确定当前实际显示的大分类：
+  // - 用户明确切到 widget 且有控件内容（或强制查看控件面板）→ widget
+  // - 其它情况遵循 activeCategory（默认 custom）
+  const currentCategory = useMemo<"doc" | "custom" | "widget">(() => {
+    const hw = !!(widgetExtractContent || widgetTabs.length > 0 || widgetSetupSignal);
+    if (activeCategory === "widget" && (hw || forceWidgetView)) return "widget";
+    return "custom";
+  }, [activeCategory, widgetExtractContent, widgetTabs.length, widgetSetupSignal, forceWidgetView]);
+  // 控件面板是否可见（分栏时右侧始终可见；单栏时取决于 currentCategory）
+  const widgetVisible = effectiveSplit || currentCategory === "widget";
+
+  // 记录用户是否手动切换过分类（手动切换后不再自动跳回 widget）
+  const userPickedCategoryRef = useRef(false);
+
+  /**
+   * 标题栏「控件提取」按钮的切换逻辑：
+   * - 分栏中 → 收起分栏，回到文本面板
+   * - 控件单栏 → 切回文本面板
+   * - 文本单栏 + 两侧都有内容 → 进入分栏
+   * - 文本单栏 + 仅一侧有内容（或都没有）→ 切到控件面板（空状态也显示，引导添加）
+   */
+  const toggleWidgetPanel = useCallback(() => {
+    userPickedCategoryRef.current = true;
+    if (effectiveSplit) {
+      setSplitWidgetMode(false);
+      setActiveCategory("custom");
+      setForceWidgetView(false);
+    } else if (currentCategory === "widget") {
+      setActiveCategory("custom");
+      setForceWidgetView(false);
+    } else {
+      // 当前在文本面板
+      setShowExtractPanel(true);
+      setExtractSetupMode(true);
+      if (hasFields && hasWidget) {
+        // 两侧都有实际内容 → 分栏
+        setSplitWidgetMode(true);
+      } else {
+        // 仅一侧有内容或都没有 → 切到控件单栏（forceWidgetView 允许空状态显示）
+        setActiveCategory("widget");
+        setForceWidgetView(true);
+        const container = extractScrollRef.current;
+        if (container) container.scrollTo({ top: 0, behavior: "auto" });
+      }
     }
-  }, []);
+  }, [effectiveSplit, currentCategory, hasFields, hasWidget]);
+
+  // 当没有字段内容但出现了控件内容时，自动切到 widget 单栏（避免空面板占位）；
+  // 用户手动切回 custom（如想添加文本）后不再自动跳回
+  useEffect(() => {
+    if (hasWidget && !hasFields && !userPickedCategoryRef.current) {
+      setActiveCategory("widget");
+    }
+  }, [hasWidget, hasFields]);
 
   /** 点击控件子 TAB 时平滑滚动到对应控件卡片 */
   const scrollToWidgetTab = useCallback((tabId: string) => {
@@ -892,11 +1170,11 @@ function ReportTab({
 
   // 进入左右分栏模式时，如果当前在 widget 分类，自动将左侧切到 doc 或 custom
   useEffect(() => {
-    if (splitWidgetMode && activeCategory === "widget") {
+    if (effectiveSplit && activeCategory === "widget") {
       if (docFieldsContent !== undefined) setActiveCategory("doc");
       else if (customTextContent !== undefined) setActiveCategory("custom");
     }
-  }, [splitWidgetMode, activeCategory, docFieldsContent, customTextContent]);
+  }, [effectiveSplit, activeCategory, docFieldsContent, customTextContent]);
   // 聚焦字段对比面板时（用户正在添加前置/收尾点击或审查步骤），自动切换到设置模式
   useEffect(() => {
     if (focusPanel === "field" || focusPanel === "field-doc") setFieldSetupMode(true);
@@ -905,6 +1183,10 @@ function ReportTab({
   useEffect(() => {
     if (focusPanel === "doc" || focusPanel === "doc-extract" || focusPanel === "field-doc") setDocSetupMode(true);
   }, [focusPanel]);
+  // choose 来源选择模式激活时，自动切到"设置"态（选择来源卡片即为设置页）
+  useEffect(() => {
+    if (docConfigChooseMode) setDocSetupMode(true);
+  }, [docConfigChooseMode]);
   // doc-extract 模式自动展开提取元素面板到设置态
   useEffect(() => {
     if (focusPanel === "doc-extract") {
@@ -920,6 +1202,21 @@ function ReportTab({
   useEffect(() => {
     if (widgetSetupSignal) setExtractSetupMode(true);
   }, [widgetSetupSignal]);
+  // 外部请求进入左右分栏（控件绑定左网页取值时）：仅当两侧都有内容时才分栏；
+  // 若文件/自定义没有内容，则只切到控件单栏，避免留一个空白面板
+  useEffect(() => {
+    if (!splitWidgetRequest) return;
+    setShowExtractPanel(true);
+    setExtractSetupMode(true);
+    const fieldsHasContent = (extractCounts?.doc ?? 0) + (extractCounts?.custom ?? 0) > 0;
+    const widgetHasContent = widgetTabs.length > 0 || !!widgetSetupSignal;
+    if (fieldsHasContent && widgetHasContent) {
+      setSplitWidgetMode(true);
+    } else {
+      setSplitWidgetMode(false);
+      setActiveCategory("widget");
+    }
+  }, [splitWidgetRequest, extractCounts, widgetTabs.length, widgetSetupSignal]);
   // 外部请求切换提取元素 TAB/控件：切换分类，若指定控件则滚动定位
   useEffect(() => {
     if (!extractTabRequest) return;
@@ -939,6 +1236,12 @@ function ReportTab({
       setFieldSetupMode(false);
     }
   }, [switchToDocSignal]);
+  // 外部信号：L 快捷键切换字段对比面板的「步骤设置/结果显示」模式
+  useEffect(() => {
+    if (fieldSetupToggleSignal != null && fieldSetupToggleSignal > 0) {
+      setFieldSetupMode((v) => !v);
+    }
+  }, [fieldSetupToggleSignal]);
   // 运行开始时，自动将所有面板切到"结果"态
   useEffect(() => {
     if (running) {
@@ -1128,6 +1431,7 @@ function ReportTab({
   // 三栏宽度（百分比）
   const [leftWidth, setLeftWidth] = useState(32);
   const [midWidth, setMidWidth] = useState(36);
+  const [dragging, setDragging] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<null | "left" | "right">(null);
   const liveScrollRef = useRef<HTMLDivElement>(null);
@@ -1136,6 +1440,7 @@ function ReportTab({
     return (e: React.MouseEvent) => {
       e.preventDefault();
       dragRef.current = which;
+      setDragging(true);
       document.body.style.cursor = "col-resize";
       document.body.style.userSelect = "none";
     };
@@ -1157,6 +1462,7 @@ function ReportTab({
     };
     const onUp = () => {
       dragRef.current = null;
+      setDragging(false);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
     };
@@ -1740,15 +2046,22 @@ function ReportTab({
   const safeDocIdx = docExtracts.length > 0 ? Math.min(activeDocIndex, docExtracts.length - 1) : 0;
   const docExtract = docExtracts[safeDocIdx] || null;
 
+  // 切换文件时重置预览旋转和缩放
+  useEffect(() => {
+    setFilePreviewRotation(0);
+    setFilePreviewZoom(1);
+  }, [docExtract?.file_url, docExtract?.filename]);
+
   // 文件处理内容：放置从网页下载的 PDF / JPG / JPEG 文件
   // 点击「+文件提取」→ 点击网页下载按钮 → 文件下载到此处 → 自动旋转到正面 + 裁剪白边 → OCR 提取
   let fileProcessContent: React.ReactNode;
   if (docExtracting) {
+    const engineLabel = ocrEngine === "umi" ? "UMI-OCR" : "AI Vision";
     fileProcessContent = (
       <div className="flex h-full min-h-[100px] flex-col items-center justify-center gap-2 text-[11px] text-slate-400">
         <div className="h-6 w-6 animate-spin rounded-full border-2 border-brand-200 border-t-brand-600" />
-        <div>正在下载并处理文件…</div>
-        <div className="text-[10px] text-slate-400">自动旋转到正面 · 裁剪白边 · OCR 识别</div>
+        <div>正在使用 {engineLabel} 识别…</div>
+        <div className="text-[10px] text-slate-400">自动旋转到正面 · 裁剪白边 · {engineLabel}</div>
       </div>
     );
   } else if (showDocSample) {
@@ -1765,7 +2078,7 @@ function ReportTab({
         <div className="mb-2 flex flex-wrap items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50/60 px-2 py-1.5">
           <FileText className="h-3.5 w-3.5 shrink-0 text-slate-500" />
           <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-slate-700">passport_zhangsan.jpg</span>
-          <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-medium text-violet-700">Vision OCR</span>
+          <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-medium text-violet-700">AI Vision</span>
         </div>
         {/* 预处理后的图片占位（DEMO 用彩色块示意） */}
         <div className="mb-2">
@@ -1825,42 +2138,84 @@ function ReportTab({
   } else {
     // 判断文件类型
     const fileUrl = docExtract?.file_url || docExtract?.source || "";
-    const isImageFile = /\.(png|jpe?g|webp|gif|bmp|tiff?)(\?|#|$)/i.test(fileUrl) || docExtract?.method === "vision_ocr";
-    const isPdfFile = /\.pdf(\?|#|$)/i.test(fileUrl) || (!isImageFile && docExtract?.method === "markitdown");
+    const isImageFile = /\.(png|jpe?g|webp|gif|bmp|tiff?)(\?|#|$)/i.test(fileUrl)
+      || (!!docExtract?.method && docExtract.method !== "markitdown" && docExtract.method !== "pdf_ocr" && docExtract.method !== "pdf_umi_ocr");
+    const isPdfFile = /\.pdf(\?|#|$)/i.test(fileUrl) || docExtract?.method === "pdf_ocr" || docExtract?.method === "pdf_umi_ocr" || (!isImageFile && docExtract?.method === "markitdown");
 
     // 文件预览区：优先显示预处理后的图片（base64），其次显示原始图片 URL，PDF 显示图标占位
     let filePreview: React.ReactNode = null;
+    const previewImgSrc = docExtract?.processed_image
+      ? `data:image/jpeg;base64,${docExtract.processed_image}`
+      : (isImageFile && fileUrl) ? fileUrl : null;
     if (docExtract) {
-      if (docExtract.processed_image) {
-        // 预处理后的图片（已自动旋转 + 裁剪白边）- 填充可用空间
+      if (previewImgSrc) {
+        // 图片预览（预处理后或原始图片）：支持旋转和缩放
+        const isRotated = filePreviewRotation === 90 || filePreviewRotation === 270;
         filePreview = (
           <div className="mb-2 flex min-h-0 flex-1 flex-col">
-            <div className="mb-1 flex items-center gap-1 text-[9px] font-medium text-emerald-600">
-              <CheckCircle2 className="h-3 w-3" />
-              已处理：自动旋转到正面 + 裁剪白边
+            {docExtract.processed_image && (
+              <div className="mb-1 flex items-center gap-1 text-[9px] font-medium text-emerald-600">
+                <CheckCircle2 className="h-3 w-3" />
+                已处理：自动旋转到正面 + 裁剪白边
+              </div>
+            )}
+            {/* 旋转/缩放工具栏 */}
+            <div className="mb-1 flex items-center gap-0.5 self-end rounded bg-slate-100/80 p-0.5">
+              <button
+                onClick={() => setFilePreviewRotation((r) => (r - 90 + 360) % 360)}
+                className="rounded p-0.5 text-slate-500 hover:bg-white hover:text-slate-700"
+                title="向左旋转 90°"
+              >
+                <RotateCcw className="h-3 w-3" />
+              </button>
+              <button
+                onClick={() => setFilePreviewRotation((r) => (r + 90) % 360)}
+                className="rounded p-0.5 text-slate-500 hover:bg-white hover:text-slate-700"
+                title="向右旋转 90°"
+              >
+                <RotateCw className="h-3 w-3" />
+              </button>
+              <div className="mx-0.5 h-3 w-px bg-slate-300" />
+              <button
+                onClick={() => setFilePreviewZoom((z) => Math.max(0.25, +(z - 0.25).toFixed(2)))}
+                className="rounded p-0.5 text-slate-500 hover:bg-white hover:text-slate-700"
+                title="缩小"
+              >
+                <ZoomOut className="h-3 w-3" />
+              </button>
+              <button
+                onClick={() => { setFilePreviewZoom(1); setFilePreviewRotation(0); }}
+                className="rounded px-1 text-[9px] font-medium text-slate-500 hover:bg-white hover:text-slate-700"
+                title="重置缩放和旋转"
+              >
+                {Math.round(filePreviewZoom * 100)}%
+              </button>
+              <button
+                onClick={() => setFilePreviewZoom((z) => Math.min(5, +(z + 0.25).toFixed(2)))}
+                className="rounded p-0.5 text-slate-500 hover:bg-white hover:text-slate-700"
+                title="放大"
+              >
+                <ZoomIn className="h-3 w-3" />
+              </button>
             </div>
-            <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-slate-200 bg-slate-50">
-              <img
-                src={`data:image/jpeg;base64,${docExtract.processed_image}`}
-                alt={docExtract.filename}
-                className="h-full w-full object-contain"
-              />
-            </div>
-          </div>
-        );
-      } else if (isImageFile && fileUrl) {
-        // 原始图片 URL（未预处理或预处理失败）
-        filePreview = (
-          <div className="mb-2 flex min-h-0 flex-1 flex-col">
-            <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-slate-200 bg-slate-50">
-              <img
-                src={fileUrl}
-                alt={docExtract.filename}
-                className="h-full w-full object-contain"
-                onError={(e) => {
-                  (e.target as HTMLImageElement).style.display = "none";
-                }}
-              />
+            <div className="min-h-0 flex-1 overflow-auto rounded-md border border-slate-200 bg-slate-50 p-1">
+              <div className="flex h-full min-h-[120px] items-center justify-center">
+                <img
+                  src={previewImgSrc}
+                  alt={docExtract.filename}
+                  className={[
+                    "max-w-full rounded object-contain transition-transform duration-150",
+                    isRotated ? "max-h-none" : "max-h-full",
+                  ].join(" ")}
+                  style={{
+                    transform: `rotate(${filePreviewRotation}deg) scale(${filePreviewZoom})`,
+                    transformOrigin: "center center",
+                  }}
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).style.display = "none";
+                  }}
+                />
+              </div>
             </div>
           </div>
         );
@@ -1888,19 +2243,34 @@ function ReportTab({
 
     // 顶部文件信息条
     const fileInfo = docExtract ? (
-      <div className="mb-2 flex flex-wrap items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50/60 px-2 py-1.5">
-        <FileText className="h-3.5 w-3.5 shrink-0 text-slate-500" />
-        <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-slate-700" title={docExtract.source}>
-          {docExtract.filename}
-        </span>
-        <span className={[
-          "rounded-full px-1.5 py-0.5 text-[9px] font-medium",
-          docExtract.method === "vision_ocr"
-            ? "bg-violet-100 text-violet-700"
-            : "bg-sky-100 text-sky-700",
-        ].join(" ")}>
-          {docExtract.method === "vision_ocr" ? "Vision OCR" : "MarkItDown"}
-        </span>
+      <div className="mb-2">
+        <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50/60 px-2 py-1.5">
+          <FileText className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+          <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-slate-700" title={docExtract.source}>
+            {docExtract.filename}
+          </span>
+          <span className={[
+            "rounded-full px-1.5 py-0.5 text-[9px] font-medium",
+            isVisionMethod(docExtract.method)
+              ? "bg-violet-100 text-violet-700"
+              : isUmiMethod(docExtract.method)
+              ? "bg-emerald-100 text-emerald-700"
+              : "bg-sky-100 text-sky-700",
+          ].join(" ")}>
+            {extractMethodLabel(docExtract.method)}
+          </span>
+        </div>
+        {docExtract.fallback && (
+          <div className="mt-1 flex items-start gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[9px] leading-relaxed text-amber-800">
+            <AlertTriangle className="mt-0.5 h-2.5 w-2.5 shrink-0" />
+            <div>
+              <span className="font-semibold">{extractMethodLabel(docExtract.fallback.from)}</span>
+              {" 失败"}{docExtract.fallback.reason ? `：${docExtract.fallback.reason}` : ""}
+              {" → 已自动切换至 "}
+              <span className="font-semibold">{extractMethodLabel(docExtract.fallback.to)}</span>
+            </div>
+          </div>
+        )}
       </div>
     ) : null;
 
@@ -1944,6 +2314,109 @@ function ReportTab({
       </div>
     ) : null;
 
+    // 提取结果（文件字段 + 控件字段 + 全文）：可展开/收起，始终绑定在文件预览下方
+    const extractFields = docExtract?.fields
+      ? Object.entries(docExtract.fields)
+          .filter(([, v]) => v && String(v).trim())
+          .sort((a, b) => {
+            const fieldOrder = ["name", "passport_no", "nationality", "birth_date", "gender", "passport_issue", "passport_expiry", "issue_authority", "email", "phone"];
+            const ia = fieldOrder.indexOf(a[0]);
+            const ib = fieldOrder.indexOf(b[0]);
+            return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+          })
+      : [];
+    const widgetFields = widgetResultFields.filter((w) => w.value && String(w.value).trim());
+    const hasExtractText = !!(docExtract?.text && docExtract.text.trim().length > 0);
+    const totalFieldCount = extractFields.length + widgetFields.length;
+    const hasExtractResult = docExtract ? (extractFields.length > 0 || hasExtractText) : widgetFields.length > 0;
+    const extractResultBlock = hasExtractResult ? (
+      <div className="mb-2 rounded-md border border-violet-200 bg-violet-50/30">
+        <button
+          onClick={() => setShowExtractResult((v) => !v)}
+          className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[11px] font-semibold text-violet-700 hover:bg-violet-100/50 rounded-t-md"
+        >
+          <Database className="h-3 w-3 shrink-0" />
+          <span>提取结果</span>
+          {totalFieldCount > 0 && (
+            <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-medium text-violet-600">
+              {totalFieldCount} 项
+            </span>
+          )}
+          {widgetFields.length > 0 && (
+            <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-medium text-amber-600">
+              控件 {widgetFields.length}
+            </span>
+          )}
+          {hasExtractText && (
+            <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-medium text-slate-500">
+              {docExtract.text!.length} 字
+            </span>
+          )}
+          <ChevronDown className={`ml-auto h-3 w-3 shrink-0 transition-transform ${showExtractResult ? "" : "-rotate-90"}`} />
+        </button>
+        {showExtractResult && (
+          <div className="space-y-1.5 border-t border-violet-100 px-2 py-1.5">
+            {widgetPassportPickingKey && (
+              <div className="flex items-center gap-1 rounded border border-violet-300 bg-violet-50 px-1.5 py-1 text-[9px] text-violet-600">
+                <Crosshair className="h-3 w-3 shrink-0 animate-pulse" />
+                <span className="flex-1">点击下方字段以绑定到控件</span>
+                <button
+                  onClick={onCancelPassportPicking}
+                  className="rounded px-1 text-violet-400 hover:bg-violet-100 hover:text-violet-600"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            )}
+            {totalFieldCount > 0 && (
+              <div className="grid grid-cols-2 gap-1.5">
+                {extractFields.map(([field, value]) => (
+                  <div
+                    key={field}
+                    onClick={widgetPassportPickingKey ? () => onResolvePassportField?.(field) : undefined}
+                    className={[
+                      "rounded border bg-white px-1.5 py-1",
+                      widgetPassportPickingKey
+                        ? "cursor-pointer border-violet-300 ring-1 ring-violet-200 transition-colors hover:border-violet-400 hover:bg-violet-50 hover:ring-violet-300"
+                        : "border-slate-200",
+                    ].join(" ")}
+                  >
+                    <div className="text-[9px] font-medium text-slate-400">{FIELD_LABELS[field] || field}</div>
+                    <div className="truncate text-[11px] font-medium text-slate-700" title={String(value)}>{String(value)}</div>
+                  </div>
+                ))}
+                {widgetFields.map((w) => (
+                  <div key={w.key} className="rounded border border-amber-200 bg-amber-50/40 px-1.5 py-1">
+                    <div className="flex items-center gap-0.5 text-[9px] font-medium text-amber-600">
+                      {w.kind === "calendar" ? <CalendarDays className="h-2.5 w-2.5 shrink-0" /> : <List className="h-2.5 w-2.5 shrink-0" />}
+                      <span className="truncate">{w.label}</span>
+                    </div>
+                    <div className="truncate text-[11px] font-medium text-slate-700" title={w.value}>{w.value}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {hasExtractText && (
+              <div className="rounded border border-slate-200 bg-white">
+                <button
+                  onClick={() => setShowFullText((v) => !v)}
+                  className="flex w-full items-center justify-between px-2 py-1 text-left text-[10px] font-medium text-slate-500 hover:bg-slate-50"
+                >
+                  <span>提取全文（{docExtract.text!.length} 字符）</span>
+                  <ChevronDown className={`h-3 w-3 transition-transform ${showFullText ? "" : "-rotate-90"}`} />
+                </button>
+                {showFullText && (
+                  <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all border-t border-slate-100 bg-slate-50/50 px-2 py-1.5 font-mono text-[10px] leading-relaxed text-slate-600">
+                    {docExtract.text}
+                  </pre>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    ) : null;
+
     // AI视野截图网格
     const shotsBlock = shots.length > 0 ? (
       <div>
@@ -1971,13 +2444,14 @@ function ReportTab({
       <div className="flex h-full min-h-0 flex-col">
         {fileInfo}
         {filePreview}
-        {(compareBlock || shotsBlock) && (
-          <div className={`shrink-0 ${filePreview ? "max-h-[35%] overflow-auto" : ""}`}>
+        {(extractResultBlock || compareBlock || shotsBlock) && (
+          <div className={`shrink-0 space-y-2 ${filePreview ? "max-h-[45%] overflow-auto" : ""}`}>
+            {extractResultBlock}
             {compareBlock}
             {shotsBlock}
           </div>
         )}
-        {!fileInfo && !compareBlock && !shotsBlock && (
+        {!fileInfo && !extractResultBlock && !compareBlock && !shotsBlock && (
           <div className="flex h-full min-h-[140px] flex-col items-center justify-center gap-2 text-center text-[11px] text-slate-400">
             <FileText className="h-8 w-8 text-slate-200" />
             <div>点击「+文件提取」后下载的</div>
@@ -2039,10 +2513,11 @@ function ReportTab({
   };
   let extractedContent: React.ReactNode;
   if (docExtracting) {
+    const engineLabel = ocrEngine === "umi" ? "UMI-OCR" : "AI Vision";
     extractedContent = (
       <div className="flex h-full min-h-[100px] items-center justify-center gap-2 text-[11px] text-slate-400">
         <div className="h-4 w-4 animate-spin rounded-full border-2 border-brand-200 border-t-brand-600" />
-        提取中…
+        {engineLabel} 识别中…
       </div>
     );
   } else if (showDocSample) {
@@ -2135,6 +2610,10 @@ function ReportTab({
     ? (!isSetupMode || showExtractPanel || !!customTextContent || !!widgetExtractContent || !!docFieldsContent || extractSetupMode)
     : isDocExtractFocus;
 
+  // 文件处理面板在布局中是否实际可见（综合 focus 状态、三栏模式、控件模式、手动展开）
+  const filePanelActuallyVisible = isDocFocus || isDocExtractFocus || isFieldDocFocus
+    || (isAll && !(isWidgetMode && !isDocExtractFocus && !filePanelVisible));
+
   // 横向滚动容器的滚轮处理：垂直滚轮 → 水平滚动
   const handleHorizontalWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     const target = e.currentTarget;
@@ -2160,15 +2639,20 @@ function ReportTab({
               className={[
                 "ml-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
                 bindInputActive
-                  ? "bg-red-500 text-white shadow-sm animate-pulse"
-                  : bindStepCount > 0
-                  ? "bg-indigo-100 text-indigo-600 hover:bg-indigo-200 hover:text-indigo-700"
+                  ? "bg-red-600 text-white shadow-md ring-2 ring-red-300"
                   : "bg-indigo-100 text-indigo-600 hover:bg-indigo-200 hover:text-indigo-700",
               ].join(" ")}
-              title={bindInputActive ? "绑定输入框/点击进行中：点左/右侧输入框=绑定Excel列，点按钮=真实点击（再次点击关闭）" : "开始绑定输入框/点击（点输入框自动绑定Excel列并填入第一行值）"}
+              title={bindInputActive ? "绑定输入框/点击进行中（再次点击关闭）" : "开始绑定输入框/点击（点输入框自动绑定Excel列并填入第一行值）"}
             >
-              <Keyboard className="h-2.5 w-2.5" />
-              绑定输入框
+              {bindInputActive ? (
+                <span className="relative flex h-2 w-2 shrink-0">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-75" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
+                </span>
+              ) : (
+                <Keyboard className="h-2.5 w-2.5" />
+              )}
+              {bindInputActive ? "绑定中" : "绑定输入框"}
               {bindStepCount > 0 && (
                 <span className={bindInputActive ? "rounded bg-white/30 px-1 text-[8px] leading-tight" : "rounded bg-indigo-200/70 px-1 text-[8px] leading-tight"}>{bindStepCount}</span>
               )}
@@ -2180,13 +2664,20 @@ function ReportTab({
               className={[
                 "inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
                 preClickActive
-                  ? "bg-red-500 text-white shadow-sm animate-pulse"
+                  ? "bg-red-600 text-white shadow-md ring-2 ring-red-300"
                   : "bg-indigo-100 text-indigo-600 hover:bg-indigo-200 hover:text-indigo-700",
               ].join(" ")}
               title={preClickActive ? "前置点击添加中（再次点击关闭）" : "添加前置点击（搜索按钮、开始按钮等）"}
             >
-              <Plus className="h-2.5 w-2.5" />
-              添加前置点击
+              {preClickActive ? (
+                <span className="relative flex h-2 w-2 shrink-0">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-75" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
+                </span>
+              ) : (
+                <Plus className="h-2.5 w-2.5" />
+              )}
+              {preClickActive ? "前置点击中" : "添加前置点击"}
             </button>
           )}
         </div>
@@ -2256,72 +2747,6 @@ function ReportTab({
         )}
       </div>
 
-      {/* 过程点击分组 —— 点击NEXT等中间步骤，位于前置设置与收尾点击之间 */}
-      <div className="shrink-0">
-        <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold text-teal-700">
-          <MousePointerClick className="h-3.5 w-3.5" />
-          过程点击
-          <span className="rounded-full bg-teal-100 px-1.5 py-0.5 text-[9px] font-semibold text-teal-600">{processClickMarks.length}</span>
-          {fieldSetupMode && onStartAddProcessClick && !running && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onStartAddProcessClick(); }}
-              className={[
-                "ml-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
-                processClickActive
-                  ? "bg-red-500 text-white shadow-sm animate-pulse"
-                  : "bg-teal-100 text-teal-600 hover:bg-teal-200 hover:text-teal-700",
-              ].join(" ")}
-              title={processClickActive ? "过程点击添加中（再次点击关闭）" : "添加过程点击（NEXT、下一步等中间步骤）"}
-            >
-              <Plus className="h-2.5 w-2.5" />
-              添加过程点击
-            </button>
-          )}
-        </div>
-        {processClickMarks.length === 0 ? (
-          <div className="flex gap-2 pt-1.5">
-            <div className="flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/80 px-2.5 py-2">
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-200 text-[13px] font-bold text-slate-500">?</span>
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="text-[11px] font-bold text-slate-500">点击</span>
-                <span className="line-clamp-2 text-[12px] font-medium leading-tight text-slate-400">点击 NEXT 等中间步骤…</span>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
-            {processClickMarks.map((m) => (
-              <div
-                key={m.id}
-                onClick={() => onPreviewMark?.(m)}
-                className="group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-xl border-2 border-teal-200 bg-teal-50/30 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md"
-                title={`点击 · ${m.label}（点击在网页定位）`}
-              >
-                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-teal-500 to-cyan-600 text-[12px] font-bold text-white shadow-sm">{m.order}</span>
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5 pr-5">
-                  <span className="text-[10px] font-bold text-teal-600">点击</span>
-                  <span className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-700">{m.label}</span>
-                </div>
-                {onRemoveMark && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (window.confirm("确定要删除这个过程点击吗？")) {
-                        onRemoveMark(m.id);
-                      }
-                    }}
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-5 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
-                    title="删除"
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
       {/* 审查映射分组 —— 小卡片从左到右排列 */}
       <div className="shrink-0">
         <div className="mb-1.5 flex flex-wrap items-center gap-1.5 text-[11px] font-bold text-emerald-700">
@@ -2361,29 +2786,34 @@ function ReportTab({
                   </button>
                 </div>
               )}
-              {onStartAddDocExtract && (() => {
-                return (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowExtractPanel(true);
-                      setExtractSetupMode(true);
-                      switchCategory("doc");
-                      onStartAddDocExtract();
-                    }}
-                    className={[
-                      "inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
-                      docExtractActive
-                        ? "bg-red-500 text-white shadow-sm animate-pulse"
-                        : "bg-emerald-100 text-emerald-600 hover:bg-emerald-200 hover:text-emerald-700",
-                    ].join(" ")}
-                    title={docExtractActive ? "文件提取模式激活中（再次点击关闭）" : "添加文件提取步骤（网页下载/本地文件识别）"}
-                  >
-                    <FileText className="h-2.5 w-2.5" />
-                    文件提取
-                  </button>
-                );
-              })()}
+              {/* 确定映射：匹配好一对即可确认（未匹配时禁用） */}
+              {!running && onConfirmMapping && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); if (canSaveMapping) onConfirmMapping(); }}
+                  disabled={!canSaveMapping}
+                  className={[
+                    "ml-1 inline-flex items-center gap-1 rounded-md px-2.5 py-0.5 text-[10px] font-bold transition-all",
+                    canSaveMapping
+                      ? "bg-gradient-to-r from-emerald-500 to-teal-500 text-white shadow-md hover:from-emerald-600 hover:to-teal-600 hover:shadow-lg active:scale-95 animate-pulse"
+                      : "cursor-not-allowed bg-slate-100 text-slate-300",
+                  ].join(" ")}
+                  title={canSaveMapping ? "确认保存当前映射（快捷键：Enter）" : "请先匹配左侧字段与右侧字段"}
+                >
+                  <CheckCircle2 className="h-3 w-3" />
+                  确定映射
+                  <kbd className="ml-0.5 rounded bg-white/25 px-1 py-px text-[8px] font-mono">Enter</kbd>
+                </button>
+              )}
+              {addingStepMode && onExitAddingStepMode && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onExitAddingStepMode(); }}
+                  className="ml-auto inline-flex items-center gap-0.5 rounded-md bg-emerald-500 px-2 py-0.5 text-[9px] font-bold text-white shadow-sm transition-all hover:bg-emerald-600 active:scale-95"
+                  title="完成步骤设置，退出拾取模式"
+                >
+                  <CheckCircle2 className="h-2.5 w-2.5" />
+                  完成
+                </button>
+              )}
             </>
           )}
         </div>
@@ -2448,60 +2878,87 @@ function ReportTab({
         )}
       </div>
 
+      {/* 过程点击分组 —— 点击NEXT等中间步骤，位于审查映射与收尾点击之间 */}
+      <div className="shrink-0">
+        <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold text-teal-700">
+          <MousePointerClick className="h-3.5 w-3.5" />
+          过程点击
+          <span className="rounded-full bg-teal-100 px-1.5 py-0.5 text-[9px] font-semibold text-teal-600">{processClickMarks.length}</span>
+          {fieldSetupMode && onStartAddProcessClick && !running && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onStartAddProcessClick(); }}
+              className={[
+                "ml-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
+                processClickActive
+                  ? "bg-red-600 text-white shadow-md ring-2 ring-red-300"
+                  : "bg-teal-100 text-teal-600 hover:bg-teal-200 hover:text-teal-700",
+              ].join(" ")}
+              title={processClickActive ? "过程点击添加中（再次点击关闭）" : "添加过程点击（NEXT、下一步等中间步骤）"}
+            >
+              {processClickActive ? (
+                <span className="relative flex h-2 w-2 shrink-0">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-75" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
+                </span>
+              ) : (
+                <Plus className="h-2.5 w-2.5" />
+              )}
+              {processClickActive ? "过程点击中" : "添加过程点击"}
+            </button>
+          )}
+        </div>
+        {processClickMarks.length === 0 ? (
+          <div className="flex gap-2 pt-1.5">
+            <div className="flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/80 px-2.5 py-2">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-200 text-[13px] font-bold text-slate-500">?</span>
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className="text-[11px] font-bold text-slate-500">点击</span>
+                <span className="line-clamp-2 text-[12px] font-medium leading-tight text-slate-400">点击 NEXT 等中间步骤…</span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
+            {processClickMarks.map((m) => (
+              <div
+                key={m.id}
+                onClick={() => onPreviewMark?.(m)}
+                className="group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-xl border-2 border-teal-200 bg-teal-50/30 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md"
+                title={`点击 · ${m.label}（点击在网页定位）`}
+              >
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-teal-500 to-cyan-600 text-[12px] font-bold text-white shadow-sm">{m.order}</span>
+                <div className="flex min-w-0 flex-1 flex-col gap-0.5 pr-5">
+                  <span className="text-[10px] font-bold text-teal-600">点击</span>
+                  <span className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-700">{m.label}</span>
+                </div>
+                {onRemoveMark && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (window.confirm("确定要删除这个过程点击吗？")) {
+                        onRemoveMark(m.id);
+                      }
+                    }}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-5 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
+                    title="删除"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* 提取元素分组 —— 文件提取/自定义文本/控件小卡片，按设置先后 FIFO 排列（全局观察） */}
       <div className="shrink-0">
         <div className="mb-1.5 flex flex-wrap items-center gap-1.5 text-[11px] font-bold text-violet-700">
           <Eye className="h-3.5 w-3.5" />
           提取元素
           <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-semibold text-violet-600">{extractStepSummary.length}</span>
-          {fieldSetupMode && !running && (
-            <>
-              {onAddWidget && (() => {
-                return (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowExtractPanel(true);
-                      setExtractSetupMode(true);
-                      switchCategory("widget");
-                      onAddWidget("option");
-                    }}
-                    className={[
-                      "ml-0.5 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
-                      widgetSetupSignal
-                        ? "bg-red-500 text-white shadow-sm animate-pulse"
-                        : "bg-violet-100 text-violet-600 hover:bg-violet-200 hover:text-violet-700",
-                    ].join(" ")}
-                    title={widgetSetupSignal ? "控件提取模式激活中（再次点击关闭）" : "添加控件提取（下拉选项等展开型控件）"}
-                  >
-                    <MousePointerClick className="h-2.5 w-2.5" />
-                    控件提取
-                  </button>
-                );
-              })()}
-              {onAddCustomText && (() => {
-                return (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowExtractPanel(true);
-                      setExtractSetupMode(true);
-                      onAddCustomText();
-                    }}
-                    className={[
-                      "inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
-                      customTextMode
-                        ? "bg-red-500 text-white shadow-sm animate-pulse"
-                        : "bg-sky-100 text-sky-600 hover:bg-sky-200 hover:text-sky-700",
-                    ].join(" ")}
-                    title={customTextMode ? "自定义文本模式激活中（再次点击关闭）" : "添加自定义文本字段"}
-                  >
-                    <Type className="h-2.5 w-2.5" />
-                    自定义文本
-                  </button>
-                );
-              })()}
-            </>
+          {fieldSetupMode && !running && extractStepSummary.length > 0 && (
+            <span className="ml-1 text-[9px] font-normal text-violet-400">点击卡片可定位预览</span>
           )}
         </div>
         {extractStepSummary.length === 0 ? (
@@ -2601,13 +3058,20 @@ function ReportTab({
               className={[
                 "ml-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
                 postClickActive
-                  ? "bg-red-500 text-white shadow-sm animate-pulse"
+                  ? "bg-red-600 text-white shadow-md ring-2 ring-red-300"
                   : "bg-amber-100 text-amber-600 hover:bg-amber-200 hover:text-amber-700",
               ].join(" ")}
               title={postClickActive ? "收尾点击添加中（再次点击关闭）" : "添加收尾点击（提交按钮等）"}
             >
-              <Plus className="h-2.5 w-2.5" />
-              添加收尾点击
+              {postClickActive ? (
+                <span className="relative flex h-2 w-2 shrink-0">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-75" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
+                </span>
+              ) : (
+                <Plus className="h-2.5 w-2.5" />
+              )}
+              {postClickActive ? "收尾点击中" : "添加收尾点击"}
             </button>
           )}
         </div>
@@ -2663,9 +3127,11 @@ function ReportTab({
       <div className="min-h-0 flex-1 flex flex-col gap-1.5 lg:flex-row lg:gap-0 lg:h-full">
         {/* 字段对比卡片 —— 最左侧，向右展开/向左回收 */}
         <div
+          onClick={() => onFieldPanelActive?.()}
+          onFocusCapture={() => onFieldPanelActive?.()}
           className={[
-            "flex max-h-[55vh] flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full",
-            "transition-[flex-basis,opacity,max-width,grow] duration-300 ease-out",
+            "flex min-w-0 max-h-[55vh] flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full lg:max-h-none",
+            dragging ? "" : "transition-[flex-basis,opacity,max-width,flex-grow] duration-300 ease-out",
             isFieldFocus ? "flex-1" : (isAll || isFieldDocFocus) ? "" : "lg:border-0 lg:px-0 lg:mx-0",
           ].join(" ")}
           style={{
@@ -2700,12 +3166,29 @@ function ReportTab({
                 设置卡片流
               </button>
             )}
+            {onRequestApplyLoop && fieldSetupMode && (
+              <button
+                onClick={() => { if (!running) onRequestApplyLoop?.(); }}
+                disabled={running}
+                className={[
+                  "ml-auto flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold transition-all",
+                  running
+                    ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                    : "bg-teal-600 text-white hover:bg-teal-700 shadow-sm",
+                ].join(" ")}
+                title="应用已保存的 LOOP 模板，加载其所有步骤"
+              >
+                <Layers className="h-2.5 w-2.5" />
+                应用LOOP
+              </button>
+            )}
             {onRequestSaveLoop && fieldSetupMode && (
               <button
                 onClick={() => { if (!running) onRequestSaveLoop?.(); }}
                 disabled={running || !canSaveLoop}
                 className={[
-                  "ml-auto flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold transition-all",
+                  onRequestApplyLoop ? "ml-1" : "ml-auto",
+                  "flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold transition-all",
                   (running || !canSaveLoop)
                     ? "cursor-not-allowed bg-slate-200 text-slate-400"
                     : "bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm",
@@ -2757,29 +3240,44 @@ function ReportTab({
           )}
         </div>
 
-        {/* 左/中 拖拽分隔条 —— 聚焦模式或控件提取模式下隐藏 */}
+        {/* 左/中 拖拽分隔条 —— 聚焦模式或控件提取模式下隐藏（文件面板可见时仍显示） */}
         <div
           className={[
             "group relative hidden shrink-0 cursor-col-resize items-center justify-center lg:flex",
             "transition-opacity duration-200",
-            ((isAll && !isWidgetMode) || isFieldDocFocus) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
+            ((isAll && (!isWidgetMode || filePanelVisible)) || isFieldDocFocus) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
           ].join(" ")}
-          style={{ width: ((isAll && !isWidgetMode) || isFieldDocFocus) ? 6 : 0 }}
+          style={{ width: ((isAll && (!isWidgetMode || filePanelVisible)) || isFieldDocFocus) ? 6 : 0 }}
           onMouseDown={onMouseDown("left")}
         >
           <div className="h-full w-px bg-slate-200 transition-colors group-hover:bg-brand-400" />
           <div className="absolute h-8 w-1 rounded-full bg-slate-300 opacity-0 transition-opacity group-hover:opacity-100" />
         </div>
 
-        {/* 文件处理卡片 —— 2面板时在右半向左展开/向右回收；3面板时在中间左右展开/向中心回收；控件提取模式下隐藏 */}
+        {/* 控件模式下文件面板收起时的展开按钮 */}
+        {isWidgetMode && !isDocExtractFocus && !filePanelVisible && (
+          <button
+            onClick={() => setFilePanelManuallyOpen(true)}
+            className="group relative z-20 flex shrink-0 cursor-pointer items-center justify-center lg:flex"
+            style={{ width: 10 }}
+            title="展开文件处理面板"
+          >
+            <div className="h-full w-px bg-slate-200 transition-colors group-hover:bg-emerald-400" />
+            <div className="absolute flex h-10 w-4 items-center justify-center rounded-r bg-emerald-50 text-emerald-500 opacity-60 shadow-sm ring-1 ring-emerald-200 transition-all group-hover:opacity-100">
+              <ChevronRight className="h-3 w-3" />
+            </div>
+          </button>
+        )}
+
+        {/* 文件处理卡片 —— 2面板时在右半向左展开/向右回收；3面板时在中间左右展开/向中心回收；控件提取模式下隐藏（手动展开或doc-extract分屏中除外） */}
         <div
           className={[
-            "relative flex max-h-[55vh] flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full",
-            "transition-[flex-basis,opacity,max-width] duration-300 ease-out",
-            (isDocFocus || isDocExtractFocus || isFieldDocFocus) ? "flex-1" : (isAll && !isWidgetMode) ? "" : "lg:border-0 lg:px-0 lg:mx-0",
+            "relative flex min-w-0 max-h-[55vh] flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full lg:max-h-none",
+            dragging ? "" : "transition-[flex-basis,opacity,max-width] duration-300 ease-out",
+            (isDocFocus || isDocExtractFocus || isFieldDocFocus) ? "flex-1" : (isAll && !(isWidgetMode && !isDocExtractFocus && !filePanelVisible)) ? "" : "lg:border-0 lg:px-0 lg:mx-0",
           ].join(" ")}
           style={{
-            flexBasis: isFieldFocus || isWidgetMode
+            flexBasis: isFieldFocus || (isWidgetMode && !isDocExtractFocus && !filePanelVisible)
               ? "0%"
               : isDocFocus
                 ? undefined
@@ -2791,35 +3289,20 @@ function ReportTab({
                       ? (showExtract ? `${midWidth}%` : undefined)
                       : "0%",
             flexShrink: 0,
-            flexGrow: (isDocFocus || isDocExtractFocus || isFieldDocFocus || (isAll && !isWidgetMode && !showExtract)) ? 1 : 0,
-            opacity: isWidgetMode ? 0 : 1,
-            maxWidth: isWidgetMode ? 0 : undefined,
-            pointerEvents: isWidgetMode ? "none" : undefined,
+            flexGrow: (isDocFocus || isDocExtractFocus || isFieldDocFocus || (isAll && !(isWidgetMode && !isDocExtractFocus && !filePanelVisible) && !showExtract)) ? 1 : 0,
+            opacity: (isWidgetMode && !isDocExtractFocus && !filePanelVisible) ? 0 : 1,
+            maxWidth: (isWidgetMode && !isDocExtractFocus && !filePanelVisible) ? 0 : undefined,
+            pointerEvents: (isWidgetMode && !isDocExtractFocus && !filePanelVisible) ? "none" : undefined,
             willChange: "opacity, max-width",
             contain: "layout style",
           }}
         >
-          {/* 展开/收起「提取元素」面板按钮 —— 仅步骤设置模式下显示（结果模式始终展开三栏），贴在文件处理面板右边缘外侧 */}
-          {isAll && isSetupMode && (
-            <button
-              onClick={() => setShowExtractPanel((v) => !v)}
-              className={[
-                "absolute top-1/2 z-20 flex -translate-y-1/2 translate-x-1/2 items-center justify-center rounded-l-md border border-r-0 py-1 transition-all",
-                showExtractPanel
-                  ? "border-violet-200 bg-violet-100 text-violet-700 hover:bg-violet-200"
-                  : "border-emerald-200 bg-emerald-50 text-emerald-600 hover:bg-emerald-100",
-              ].join(" ")}
-              style={{ right: 0 }}
-              title={showExtractPanel ? "收起「提取元素」面板" : "展开「提取元素」面板"}
-            >
-              {showExtractPanel ? <PanelRightClose className="h-3.5 w-3.5" /> : <PanelRightOpen className="h-3.5 w-3.5" />}
-            </button>
-          )}
-          {docLocalConfigContent ? (
-            /* 配置模式：直接渲染配置内容（组件自带标题条和底部按钮） */
+          {docLocalConfigContent && !docConfigChooseMode ? (
+            /* 配置模式（web/local）：直接渲染配置内容（组件自带标题条和底部按钮） */
             <div className="flex min-h-0 flex-1 min-w-[200px] flex-col overflow-hidden">{docLocalConfigContent}</div>
           ) : (
             <>
+              {/* 文件处理标题栏：choose 模式和普通模式共用 */}
               <div className="flex shrink-0 items-center gap-1.5 border-b border-emerald-200 bg-emerald-50/60 px-2 py-1 text-[11px] font-semibold text-emerald-800">
                 <FileText className="h-3.5 w-3.5 text-emerald-600" />
                 文件处理
@@ -2828,10 +3311,74 @@ function ReportTab({
                     {docExtracts.length} 个文件
                   </span>
                 )}
+                {/* OCR 识别引擎切换：识图AI（Vision LLM） ↔ UMI-OCR（本地离线） */}
+                {onChangeOcrEngine && (
+                  <div className="ml-1 flex shrink-0 items-center gap-1">
+                    <div
+                      className="flex items-center gap-0 rounded-md bg-slate-100/80 p-0.5 ring-1 ring-slate-200"
+                      title="护照/图片识别引擎：识图AI（在线Vision）或 UMI-OCR（本地离线）"
+                    >
+                      {([["vision", "识图AI"], ["umi", "UMI-OCR"]] as const).map(([val, label]) => (
+                        <button
+                          key={val}
+                          onClick={(e) => { e.stopPropagation(); if (ocrEngine !== val) handleOcrEngineSwitch(val); }}
+                          className={[
+                            "flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-semibold transition-all",
+                            ocrEngine === val
+                              ? "bg-emerald-500 text-white shadow-sm"
+                              : "text-slate-500 hover:bg-white/70 hover:text-emerald-700",
+                          ].join(" ")}
+                        >
+                          {val === "vision" ? <Eye className="h-2.5 w-2.5" /> : <ScanLine className="h-2.5 w-2.5" />}
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    {/* UMI-OCR 状态指示灯 */}
+                    {ocrEngine === "umi" && umiStatus !== "idle" && (
+                      umiStatus === "unavailable" ? (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleLaunchUmi(); }}
+                          disabled={umiLaunching}
+                          className="flex items-center gap-0.5 rounded bg-rose-600 px-1 py-0.5 text-[8px] font-medium text-white transition-colors hover:bg-rose-700 disabled:opacity-50"
+                          title={umiStatusMsg + "（点击一键启动）"}
+                        >
+                          {umiLaunching ? <Loader2 className="h-2 w-2 animate-spin" /> : <Play className="h-2 w-2" />}
+                          {umiLaunching ? "启动中" : "启动"}
+                        </button>
+                      ) : (
+                        <span
+                          className={[
+                            "flex items-center gap-0.5 rounded px-1 py-0.5 text-[8px] font-medium",
+                            umiStatus === "checking" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700",
+                          ].join(" ")}
+                          title={umiStatusMsg}
+                        >
+                          {umiStatus === "checking" && <Loader2 className="h-2 w-2 animate-spin" />}
+                          {umiStatus === "available" && <CheckCircle2 className="h-2 w-2" />}
+                          {umiStatus === "checking" ? "检测中" : "在线"}
+                        </span>
+                      )
+                    )}
+                  </div>
+                )}
+                {/* 控件提取模式下手动收起文件处理面板（非choose模式） */}
+                {isWidgetMode && !isDocExtractFocus && filePanelManuallyOpen && !docConfigChooseMode && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setFilePanelManuallyOpen(false); }}
+                    className="ml-auto flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium text-emerald-500/70 transition-colors hover:bg-emerald-100 hover:text-emerald-700"
+                    title="收起文件处理面板"
+                  >
+                    <ChevronLeft className="h-3 w-3" />
+                    收起
+                  </button>
+                )}
+                {/* 设置/结果切换按钮：choose 模式和普通模式都显示 */}
                 <button
                   onClick={() => setDocSetupMode((v) => !v)}
                   className={[
-                    "ml-auto flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
+                    (isWidgetMode && !isDocExtractFocus && filePanelManuallyOpen && !docConfigChooseMode) ? "" : "ml-auto",
+                    "flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
                     docSetupMode
                       ? "bg-emerald-200 text-emerald-700"
                       : "text-emerald-500/70 hover:bg-emerald-100 hover:text-emerald-700",
@@ -2841,7 +3388,22 @@ function ReportTab({
                   {docSetupMode ? <Settings2 className="h-3 w-3" /> : <FileText className="h-3 w-3" />}
                   {docSetupMode ? "设置" : "结果"}
                 </button>
+                {/* choose 模式：设置/结果按钮后显示关闭按钮 */}
+                {docConfigChooseMode && onExitDocChoose && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onExitDocChoose(); }}
+                    className="rounded p-0.5 text-emerald-400 transition-colors hover:bg-emerald-100 hover:text-emerald-700"
+                    title="退出文件提取"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
               </div>
+              {/* choose 模式且处于"设置"态：显示来源选择卡片（隐藏了自带标题栏）；点击"结果"则切换到下方普通视图 */}
+              {docLocalConfigContent && docConfigChooseMode && docSetupMode ? (
+                <div className="flex min-h-0 flex-1 min-w-[200px] flex-col overflow-hidden">{docLocalConfigContent}</div>
+              ) : (
+                <>
               {/* 多文件 TAB 切换栏 */}
               {docExtracts.length > 1 && onSelectDocIndex && (
                 <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-slate-100 bg-slate-50/50 px-1 py-0.5">
@@ -2865,24 +3427,45 @@ function ReportTab({
               )}
               <div className="min-h-0 flex-1 min-w-[200px] overflow-y-auto overflow-x-hidden p-1.5">
                 {docSetupMode && !docLocalConfigContent ? (
-                  <div className="flex h-full min-h-[120px] flex-col items-center justify-center gap-2 text-center text-[11px] text-slate-400">
-                    <Settings2 className="h-8 w-8 text-slate-200" />
-                    <span>点击「+文件提取」开始配置文件提取步骤</span>
+                  <div className="flex h-full min-h-[140px] flex-col gap-2">
+                    <div className="rounded-md border border-sky-100 bg-sky-50/50 px-2 py-1 text-[9px] leading-relaxed text-sky-700">
+                      请选择文件提取的来源方式：
+                    </div>
+                    <div className="grid flex-1 grid-cols-2 gap-2">
+                      <button
+                        onClick={() => onChooseDocWeb?.()}
+                        className="flex flex-col items-center justify-center gap-1.5 rounded-md border-2 border-teal-200 bg-white px-2 py-3 text-center transition-all hover:border-teal-400 hover:bg-teal-50"
+                      >
+                        <Globe className="h-6 w-6 text-teal-600" />
+                        <span className="text-[11px] font-semibold text-slate-700">网页提取</span>
+                        <span className="text-[9px] leading-tight text-slate-500">点击网页图片/PDF<br/>LOOP 自动下载提取</span>
+                      </button>
+                      <button
+                        onClick={() => onChooseDocLocal?.()}
+                        className="flex flex-col items-center justify-center gap-1.5 rounded-md border-2 border-teal-200 bg-white px-2 py-3 text-center transition-all hover:border-teal-400 hover:bg-teal-50"
+                      >
+                        <Upload className="h-6 w-6 text-teal-600" />
+                        <span className="text-[11px] font-semibold text-slate-700">本地文件</span>
+                        <span className="text-[9px] leading-tight text-slate-500">选择文件夹按字段匹配<br/>如学号.jpg/pdf/png</span>
+                      </button>
+                    </div>
                   </div>
                 ) : fileProcessContent}
               </div>
+                </>
+              )}
             </>
           )}
         </div>
 
-        {/* 中/右 拖拽分隔条 —— 仅三栏模式（showExtract且非doc-extract聚焦、非控件提取模式）下显示 */}
+        {/* 中/右 拖拽分隔条 —— 仅三栏模式（showExtract且非doc-extract聚焦、非控件提取模式）下显示；文件面板可见时控件提取也显示 */}
         <div
           className={[
             "group relative hidden shrink-0 cursor-col-resize items-center justify-center lg:flex",
             "transition-opacity duration-200",
-            (showExtract && isAll && !isWidgetMode) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
+            (showExtract && isAll && (!isWidgetMode || filePanelVisible)) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
           ].join(" ")}
-          style={{ width: (showExtract && isAll && !isWidgetMode) ? 6 : 0 }}
+          style={{ width: (showExtract && isAll && (!isWidgetMode || filePanelVisible)) ? 6 : 0 }}
           onMouseDown={onMouseDown("right")}
         >
           <div className="h-full w-px bg-slate-200 transition-colors group-hover:bg-brand-400" />
@@ -2892,8 +3475,8 @@ function ReportTab({
         {/* 提取元素卡片 —— 最右侧，向左展开/向右回收（默认隐藏，通过文件处理面板左侧按钮开启）；控件提取模式下和字段对比平分空间 */}
         <div
           className={[
-            "flex max-h-[55vh] min-w-0 flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full",
-            "transition-[flex-basis,opacity,max-width] duration-300 ease-out",
+            "flex max-h-[55vh] min-w-0 flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm lg:h-full lg:max-h-none",
+            dragging ? "" : "transition-[flex-basis,opacity,max-width] duration-300 ease-out",
             showExtract ? "flex-1" : "lg:border-0 lg:px-0 lg:mx-0",
           ].join(" ")}
           style={{
@@ -2903,7 +3486,7 @@ function ReportTab({
                 ? "0%"
                 : isDocExtractFocus
                   ? "50%"
-                  : isWidgetMode
+                  : (isWidgetMode && !filePanelVisible)
                     ? (showExtract ? "50%" : "0%")
                     : showExtract ? "30%" : "0%",
             flexShrink: 0,
@@ -2922,44 +3505,55 @@ function ReportTab({
             )}
             {extractSetupMode && (
               <div className="ml-3 flex shrink-0 items-center gap-1">
-                {/* 统一模式：只显示来源图例 + 数量，不显示 doc/custom 切换 TAB */}
-                <div className="flex items-center gap-1.5 rounded-md bg-violet-100/70 px-2 py-0.5 text-[9px] font-medium ring-1 ring-violet-200/80">
-                  <span className="inline-flex items-center gap-0.5 text-violet-600">
-                    <span className="h-2 w-2 rounded-full bg-violet-500" />
-                    文件{(extractCounts?.doc ?? 0) > 0 && <b>{extractCounts?.doc}</b>}
-                  </span>
-                  <span className="inline-flex items-center gap-0.5 text-sky-600">
-                    <span className="h-2 w-2 rounded-full bg-sky-500" />
-                    自定义{(extractCounts?.custom ?? 0) > 0 && <b>{extractCounts?.custom}</b>}
-                  </span>
-                </div>
-                {(widgetExtractContent || widgetTabs.length > 0) && !splitWidgetMode && (
-                  <button
-                    onClick={() => switchCategory("widget")}
-                    className={[
-                      "flex items-center gap-0.5 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
-                      currentCategory === "widget"
-                        ? "bg-violet-600 text-white shadow-sm"
-                        : "bg-white/80 text-violet-600 hover:bg-white ring-1 ring-violet-200/50",
-                    ].join(" ")}
-                    title="控件提取"
-                  >
-                    <MousePointerClick className="h-3 w-3 shrink-0" />
-                    <span className="truncate">控件提取</span>
-                    {widgetTabs.length > 0 && (
-                      <span
-                        className={`ml-0.5 inline-flex h-3.5 min-w-3.5 shrink-0 items-center justify-center rounded-full px-0.5 text-[8px] font-bold ${
-                          currentCategory === "widget" ? "bg-white text-violet-700" : "bg-violet-500 text-white"
-                        }`}
-                      >
-                        {widgetTabs.length}
-                      </span>
-                    )}
-                  </button>
+                {/* 统一模式：有字段内容时才显示来源图例 + 数量 */}
+                {hasFields && (
+                  <div className="flex items-center gap-1.5 rounded-md bg-violet-100/70 px-2 py-0.5 text-[9px] font-medium ring-1 ring-violet-200/80">
+                    <span className="inline-flex items-center gap-0.5 text-violet-600">
+                      <span className="h-2 w-2 rounded-full bg-violet-500" />
+                      文件{(extractCounts?.doc ?? 0) > 0 && <b>{extractCounts?.doc}</b>}
+                    </span>
+                    <span className="inline-flex items-center gap-0.5 text-sky-600">
+                      <span className="h-2 w-2 rounded-full bg-sky-500" />
+                      自定义{(extractCounts?.custom ?? 0) > 0 && <b>{extractCounts?.custom}</b>}
+                    </span>
+                  </div>
                 )}
+                {/* 控件提取切换按钮：始终显示，点击切换面板；两侧都有内容时进入分屏 */}
+                <button
+                  onClick={toggleWidgetPanel}
+                  className={[
+                    "flex items-center gap-0.5 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
+                    currentCategory === "widget" || effectiveSplit
+                      ? "bg-violet-600 text-white shadow-sm"
+                      : "bg-white/80 text-violet-600 hover:bg-white ring-1 ring-violet-200/50",
+                  ].join(" ")}
+                  title={
+                    effectiveSplit
+                      ? "收起分栏，回到文本面板"
+                      : currentCategory === "widget"
+                        ? "切换回文件/自定义字段"
+                        : hasFields && hasWidget
+                          ? "切换到控件提取（两侧有内容，将分屏显示）"
+                          : "切换到控件提取"
+                  }
+                >
+                  <MousePointerClick className="h-3 w-3 shrink-0" />
+                  <span className="truncate">控件提取</span>
+                  {widgetTabs.length > 0 && (
+                    <span
+                      className={`ml-0.5 inline-flex h-3.5 min-w-3.5 shrink-0 items-center justify-center rounded-full px-0.5 text-[8px] font-bold ${
+                        currentCategory === "widget" || effectiveSplit
+                          ? "bg-white text-violet-700"
+                          : "bg-violet-500 text-white"
+                      }`}
+                    >
+                      {widgetTabs.length}
+                    </span>
+                  )}
+                </button>
               </div>
             )}
-            {extractSetupMode && !splitWidgetMode && onSwitchStepMode && (
+            {extractSetupMode && !effectiveSplit && onSwitchStepMode && (
               <div className="ml-2 flex shrink-0 items-center gap-0 rounded-md bg-violet-100/70 p-0.5 ring-1 ring-violet-200/80">
                 <button
                   onClick={() => onSwitchStepMode("review")}
@@ -2990,19 +3584,19 @@ function ReportTab({
                 </button>
               </div>
             )}
-            {extractSetupMode && (
+            {extractSetupMode && hasFields && hasWidget && (
               <button
                 onClick={() => setSplitWidgetMode((v) => !v)}
                 className={[
                   "ml-1 flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors",
-                  splitWidgetMode
+                  effectiveSplit
                     ? "bg-red-500 text-white shadow-sm animate-pulse"
                     : "text-violet-500/70 hover:bg-violet-100 hover:text-violet-700",
                 ].join(" ")}
-                title={splitWidgetMode ? "取消左右分栏" : "左右分栏：左侧显示文件/自定义文本，右侧显示控件提取"}
+                title={effectiveSplit ? "取消左右分栏" : "左右分栏：左侧显示文件/自定义文本，右侧显示控件提取"}
               >
                 <Columns2 className="h-3 w-3" />
-                {splitWidgetMode ? "合并" : "分栏"}
+                {effectiveSplit ? "合并" : "分栏"}
               </button>
             )}
             <button
@@ -3024,7 +3618,7 @@ function ReportTab({
             className="min-h-0 flex-1 flex min-w-[200px] overflow-hidden"
           >
             {extractSetupMode ? (
-              splitWidgetMode ? (
+              effectiveSplit ? (
                 /* ===== 左右分栏模式：左侧文件/自定义文本，右侧控件提取 ===== */
                 <>
                   {/* 左侧：统一字段面板（文件提取紫色 + 自定义文本蓝色，不再切换 TAB） */}
@@ -3043,7 +3637,7 @@ function ReportTab({
                         自定义{(extractCounts?.custom ?? 0) > 0 && <b className="text-[9px]">{extractCounts?.custom}</b>}
                       </span>
                     </div>
-                    <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
+                    <div className="min-h-0 flex-1 overflow-hidden">
                       {unifiedFieldsContent}
                     </div>
                   </div>
@@ -3148,7 +3742,7 @@ function ReportTab({
                 /* ===== 普通模式：非控件时显示统一字段面板，控件模式时显示控件提取 ===== */
                 <div
                   ref={extractScrollRef}
-                  className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden scroll-smooth"
+                  className={`min-h-0 flex-1 overflow-x-hidden scroll-smooth ${currentCategory === "widget" ? "overflow-y-auto" : "overflow-hidden"}`}
                 >
                   {currentCategory === "widget" ? (
                     <div className="p-1.5">
@@ -3200,7 +3794,47 @@ function ReportTab({
                             <div className="flex min-h-[100px] flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-violet-200/70 bg-violet-50/20 py-4 text-center text-[10px] text-slate-400">
                               <MousePointerClick className="h-5 w-5 text-violet-200" />
                               <div className="text-violet-500">暂无提取的控件</div>
-                              <div>点击上方「+ 选项控件」或「日历控件」快照</div>
+                              {onAddWidget ? (
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    onClick={() => onAddWidget("option")}
+                                    className="rounded bg-violet-500 px-2 py-0.5 text-[9px] font-medium text-white transition-colors hover:bg-violet-600"
+                                  >
+                                    + 选项控件
+                                  </button>
+                                  <button
+                                    onClick={() => onAddWidget("calendar")}
+                                    className="rounded bg-violet-400 px-2 py-0.5 text-[9px] font-medium text-white transition-colors hover:bg-violet-500"
+                                  >
+                                    + 日历控件
+                                  </button>
+                                </div>
+                              ) : (
+                                <div>点击上方「+ 选项控件」或「日历控件」快照</div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      ) : forceWidgetView ? (
+                        /* 用户主动点击「控件提取」但尚无控件内容：显示空状态引导 */
+                        <div className="flex min-h-[140px] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-violet-200/70 bg-violet-50/20 py-6 text-center">
+                          <MousePointerClick className="h-8 w-8 text-violet-200" />
+                          <div className="text-xs font-medium text-violet-600">控件提取</div>
+                          <div className="text-[10px] text-slate-400">提取网页中的下拉选项、日历等展开型控件</div>
+                          {onAddWidget && (
+                            <div className="mt-1 flex items-center gap-1.5">
+                              <button
+                                onClick={() => onAddWidget("option")}
+                                className="rounded-md bg-violet-500 px-3 py-1 text-[10px] font-medium text-white transition-colors hover:bg-violet-600"
+                              >
+                                + 选项控件
+                              </button>
+                              <button
+                                onClick={() => onAddWidget("calendar")}
+                                className="rounded-md bg-violet-400 px-3 py-1 text-[10px] font-medium text-white transition-colors hover:bg-violet-500"
+                              >
+                                + 日历控件
+                              </button>
                             </div>
                           )}
                         </div>
