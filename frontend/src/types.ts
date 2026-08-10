@@ -361,6 +361,8 @@ export interface PickedMark {
   widget?: WidgetDef | null;
   /** 弹窗内拾取的元素：执行时 JS/高亮路由到弹窗 BrowserView 而非主 view */
   inPopup?: boolean;
+  /** 断点类型：always=强制断点（每次到此暂停等人操作），on-error=条件断点（AI检测到错误时暂停） */
+  breakpoint?: "always" | "on-error";
 }
 
 /** 教学模式状态：人类教 AI 自动化流程的阶段 */
@@ -409,6 +411,8 @@ export interface FlowNode {
   color?: string;
   /** 折叠状态（分支节点有效）：true = 折叠不显示内部节点 */
   collapsed?: boolean;
+  /** 断点类型：always=强制断点，on-error=条件断点（AI出错时暂停） */
+  breakpoint?: "always" | "on-error";
 
   // --- step 类型专用：引用原模板中的 PickedMark ---
   /** 引用阶段: data=数据源, review=审查, entry=录入 */
