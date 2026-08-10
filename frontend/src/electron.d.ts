@@ -149,6 +149,14 @@ export interface ElectronAPI {
   checkLocalFileExists: (rootPath: string, relativePath: string) => Promise<{ exists: boolean }>;
   saveExportedFile: (defaultName: string, base64: string) => Promise<{ ok: boolean; canceled?: boolean; path?: string; size?: number; error?: string }>;
 
+  // === 幻灯片任务：选择 PPT 文件 ===
+  pickPptFiles: () => Promise<{ canceled: boolean; files: Array<{ file_path: string; file_name: string; size: number }> }>;
+  pickPptDirectory: () => Promise<{ canceled: boolean; rootPath: string; files: Array<{ relativePath: string; name: string; size: number; ext: string; file_path: string }> }>;
+  /** 参考资料：选择 PPT/PDF 文件（支持多选） */
+  pickReferenceFiles: () => Promise<{ canceled: boolean; files: Array<{ file_path: string; file_name: string; size: number; ext: string }> }>;
+  /** 获取拖拽放入的 File 对象对应的真实磁盘路径 */
+  getPathForFile: (file: File) => string;
+
   // 接收 BrowserView 内部消息
   onViewMessage: (callback: (msg: ViewMessage) => void) => () => void;
 
