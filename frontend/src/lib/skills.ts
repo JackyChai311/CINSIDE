@@ -61,3 +61,13 @@ export function getSkillById(id: string): WorkflowTemplate | null {
   const skills = loadSkills();
   return skills.find((s) => s.id === id) || null;
 }
+
+/** 导入一个模板（通常来自分享码），返回导入后的模板 */
+export function importSkill(tpl: WorkflowTemplate): WorkflowTemplate {
+  return saveSkill(tpl);
+}
+
+/** 判断本地是否已存在同 ID 的模板 */
+export function hasSkill(id: string): boolean {
+  return loadSkills().some((s) => s.id === id);
+}
