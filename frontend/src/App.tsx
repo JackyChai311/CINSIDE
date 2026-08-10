@@ -28,6 +28,7 @@ import {
   PanelLeftClose,
   Play,
   Plus,
+  RefreshCw,
   Repeat2,
   Save,
   Settings2,
@@ -45,7 +46,23 @@ import {
 import { api, subscribeTask } from "./api/client";
 import appIconPng from "./assets/app-icon.png";
 import DocExportDialog from "./components/DocExportDialog";
-import splashSvg from "./assets/splash.svg";
+function LogoWordmark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 520 120" width="100%" height="100%" className={className} aria-label="CINSIDE">
+      <text x="10" y="90"
+            fontFamily="Arial Black, Impact, 'Segoe UI', sans-serif"
+            fontSize="80"
+            fontWeight="900"
+            fill="currentColor">CINSIDE</text>
+      <rect x="420" y="20" width="6" height="70" fill="#8a2be2" rx="1">
+        <animate attributeName="opacity" values="1;0;1" dur="1s" repeatCount="indefinite" />
+      </rect>
+      <rect x="435" y="80" width="30" height="6" fill="#8a2be2" rx="1">
+        <animate attributeName="opacity" values="1;0;1" dur="1s" repeatCount="indefinite" />
+      </rect>
+    </svg>
+  );
+}
 import type {
   AppConfig,
   AppMode,
@@ -73,7 +90,7 @@ import type {
 } from "./types";
 import { FIELD_LABELS, OVERALL_LABELS, OVERALL_STYLES } from "./types";
 import type { CalendarRole, WidgetDef } from "./types";
-import { normalizeText, parseDateCandidates, valuesEquivalent } from "./utils/formatNormalize";
+import { normalizeText, parseDateCandidates, valuesEquivalent, isUmiMethod, extractMethodLabel } from "./utils/formatNormalize";
 import WidgetExtractPanel, { type WidgetBinding, type WidgetTestResult } from "./components/WidgetExtractPanel";
 import {
   buildCalendarPanelFromSeedScript,
@@ -243,9 +260,15 @@ const DEFAULT_SETTINGS: AppSettings = {
   browser_use_llm_base: "",
   browser_use_llm_key: "",
   browser_use_llm_model: "",
+  ocr_engine: "vision",
+  umi_ocr_host: "127.0.0.1",
+  umi_ocr_port: 1224,
   prevent_accidental_close: false,
   ui_scale: 1.0,
   beginner_mode: true,
+  theme: "light",
+  accent: "indigo",
+  browser_brightness: 1.0,
 };
 
 type VerifyStatus = "idle" | "scanning" | "match" | "mismatch";
@@ -288,9 +311,6 @@ function useApplyUiScale() {
     const handleWheel = (e: WheelEvent) => {
       if (!ctrlPressed) return;
       if ((window as any).__cinsideFlowEditorOpen) return;
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
       const delta = e.deltaY < 0 ? 0.05 : -0.05;
       const next = Math.max(0.6, Math.min(1.6, Math.round((current + delta) * 20) / 20));
       if (next !== current) {
@@ -315,14 +335,14 @@ function useApplyUiScale() {
     window.addEventListener("keydown", handleKeyDown, true);
     window.addEventListener("keyup", handleKeyUp, true);
     window.addEventListener("blur", handleBlur);
-    window.addEventListener("wheel", handleWheel, { capture: true, passive: false });
+    window.addEventListener("wheel", handleWheel, { passive: true });
     window.addEventListener("storage", handleStorage);
 
     return () => {
       window.removeEventListener("keydown", handleKeyDown, true);
       window.removeEventListener("keyup", handleKeyUp, true);
       window.removeEventListener("blur", handleBlur);
-      window.removeEventListener("wheel", handleWheel, { capture: true } as EventListenerOptions);
+      window.removeEventListener("wheel", handleWheel);
       window.removeEventListener("storage", handleStorage);
     };
   }, []);
@@ -399,7 +419,7 @@ function DetachedLeftPanel() {
 }
 
 // ============ 脱离模式：底部核验结果面板 ============
-function DetachedBottomPanel() {
+function DetachedBottomPanel({ onFieldPanelActive, fieldSetupToggleSignal }: { onFieldPanelActive?: () => void; fieldSetupToggleSignal?: number }) {
   useApplyUiScale();
   const [record, setRecord] = useState<ApplicantRecord | null>(null);
   const [mappings, setMappings] = useState<FieldMapping[]>([]);
@@ -679,6 +699,8 @@ function DetachedBottomPanel() {
               records={record ? [record] : []}
               onSelectRecord={(id) => window.electronAPI?.panelSendAction("select-record", id)}
               selectMode={selectMode}
+              onFieldPanelActive={onFieldPanelActive}
+              fieldSetupToggleSignal={fieldSetupToggleSignal}
             />
             {/* 步骤设置面板：下面板分离后，TeachingGuide 在此渲染（而非主窗口）（仅新手模式） */}
             {beginnerMode && teachingPhase !== "idle" && !selectMode && (
@@ -710,12 +732,23 @@ function DetachedBrowserPanel({ detachSide }: { detachSide: "browser-left" | "br
   const [url, setUrl] = useState<string>("");
   const [picking, setPicking] = useState(false);
   const [popupActive, setPopupActive] = useState(false);
+  const [brightness, setBrightness] = useState<number>(1.0);
   const side: ViewSide = detachSide === "browser-left" ? "left" : "right";
   const title = detachSide === "browser-left" ? "数据源网页" : "学校系统";
 
   useEffect(() => {
     document.title = title;
   }, [title]);
+
+  // 拉取设置中的网页亮度
+  useEffect(() => {
+    api.getSettings()
+      .then((s) => {
+        const v = Number(s.browser_brightness);
+        if (!isNaN(v) && v > 0) setBrightness(Math.max(0.3, Math.min(2.0, v)));
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!window.electronAPI) return;
@@ -768,6 +801,7 @@ function DetachedBrowserPanel({ detachSide }: { detachSide: "browser-left" | "br
           onPickedElement={handlePickedElement}
           detachedSide={detachSide}
           popupActive={popupActive}
+          brightness={brightness}
           enableTabs={detachSide === "browser-right"}
           onClosePopup={() => window.electronAPI?.popupClose(side)}
         />
@@ -838,12 +872,30 @@ function DetachedExcelPanel() {
 export default function App() {
   const [records, setRecords] = useState<ApplicantRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** 点击字段对比面板后置 true，激活仅面板内可用的快捷键（W/R/T/F/E/G/Q） */
+  const [fieldPanelActive, setFieldPanelActive] = useState(false);
+  /** L 快捷键信号：递增时切换字段对比面板的「步骤设置/结果显示」模式 */
+  const [fieldSetupToggleSignal, setFieldSetupToggleSignal] = useState(0);
   // LOOP 分段提取：Excel 行范围框选（0-based 闭区间）与人物卡片生成状态
   // 人物卡片只在用户框选好 LOOP 行范围后一键生成，而非上传 Excel 即全量生成
   const [rowRange, setRowRange] = useState<{ start: number; end: number } | null>(null);
   const [cardsGenerated, setCardsGenerated] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+
+  // 切换文档/护照 OCR 识别引擎（识图AI ↔ UMI-OCR），即时保存到后端
+  const handleChangeOcrEngine = useCallback(async (engine: "vision" | "umi") => {
+    const next = { ...settings, ocr_engine: engine };
+    setSettings(next);
+    setConfig((c) => (c ? { ...c, settings: next } : c));
+    // 切换引擎后清除后台OCR缓存，避免复用到旧引擎的结果
+    bgOcrResultRef.current = null;
+    try {
+      await api.saveSettings(next);
+    } catch (e) {
+      console.error("[ocrEngine] 保存失败", e);
+    }
+  }, [settings]);
   // 整体UI缩放（Ctrl+滚轮调控，范围0.6~1.6，步长0.05）
   const [uiScale, setUiScale] = useState<number>(() => {
     try {
@@ -856,6 +908,10 @@ export default function App() {
   });
   const uiScaleRef = useRef(uiScale);
   uiScaleRef.current = uiScale;
+  const brightnessRafRef = useRef<number>(0);
+  const scaleRafRef = useRef<number>(0);
+  const pendingBrightnessRef = useRef<number>(1.0);
+  const pendingScaleRef = useRef<number>(1.0);
   const ctrlPressedRef = useRef(false);
   const [loadingRecords, setLoadingRecords] = useState(false);
   const [backendReady, setBackendReady] = useState(!window.electronAPI);
@@ -945,6 +1001,8 @@ const sourceFieldLabelRef = useRef<string>("");
   // 底部审查面板的高度比例（百分比），审查流操作时自动收窄
   const [bottomPanelHeight, setBottomPanelHeight] = useState<number>(20);
   const vDraggingRef = useRef(false);
+  // 双击最大化前的高度记录（用于还原）
+  const prevBottomHeightRef = useRef<number | null>(null);
 
   // 教学侧边面板：宽度比例（百分比）和左右位置
   const [teachingPanelWidth, setTeachingPanelWidth] = useState<number>(33);
@@ -981,6 +1039,8 @@ const sourceFieldLabelRef = useRef<string>("");
   const [mappings, setMappings] = useState<FieldMapping[]>([]);
   const mappingsRef = useRef<FieldMapping[]>([]);
   mappingsRef.current = mappings;
+  // ElementSelectBar 通知：当前双侧已选好、可以保存映射
+  const [canSaveMapping, setCanSaveMapping] = useState(false);
 
   // 头像提取模式（左侧浏览器拾取头像元素）
   const [avatarMode, setAvatarMode] = useState(false);
@@ -1053,6 +1113,8 @@ docExtractSourceRef.current = docExtractSource;
 const [docExtractSplitView, setDocExtractSplitView] = useState(false);
 const docExtractSplitViewRef = useRef(docExtractSplitView);
 docExtractSplitViewRef.current = docExtractSplitView;
+// 标记下一次 addingDocExtractMode 变 false 时不要重置分屏（用于从分屏中添加控件时保持文件处理面板可见）
+const preserveSplitViewRef = useRef(false);
 // 源文件预览（嵌套在文件提取配置面板里的持久预览窗口；字段送「提取元素」后仍保留）
 const [docSourcePreview, setDocSourcePreview] = useState<{
   imageUrl: string;
@@ -1061,11 +1123,19 @@ const [docSourcePreview, setDocSourcePreview] = useState<{
 } | null>(null);
 const docSourcePreviewRef = useRef(docSourcePreview);
 docSourcePreviewRef.current = docSourcePreview;
-// 退出文件提取模式时自动关闭两栏分屏并清空预览
+// 退出文件提取模式时自动关闭两栏分屏并清空预览（从分屏中添加控件时除外）
 useEffect(() => {
   if (!addingDocExtractMode) {
-    setDocExtractSplitView(false);
+    if (!preserveSplitViewRef.current) {
+      setDocExtractSplitView(false);
+    }
+    preserveSplitViewRef.current = false;
     setDocSourcePreview(null);
+    // 清除网页提取内嵌结果，防止退出模式后浮动审查面板（DocExtractReviewPanel）
+    // 因条件 !(addingDocExtractMode && docExtractSource === "web") 变 true 而弹
+    // 出到右侧 BrowserPane 位置形成"分身"。提取结果已保存在 docExtractsByRecord 中。
+    setDocExtractPanel(null);
+    setSameNameImages(null);
   }
 }, [addingDocExtractMode]);
 // 网页下载提取过程的反馈状态（idle=等待, downloading=下载中, preview=预览就绪, ocr=OCR中, success=提取成功, post-click=添加收尾点击中, error=失败）
@@ -1086,7 +1156,8 @@ docWebStatusRef.current = docWebStatus;
 // 暂存已下载但尚未触发 OCR 的文件数据（预览后点击「录入提取」才消费）
 const pendingWebFileRef = useRef<{ dataUrl: string; filename: string; size: number; side: "left" | "right" } | null>(null);
 // 后台OCR预提取结果缓存（LOOP模式下下载后立即开OCR，结果缓存供triggerWebExtract复用）
-const bgOcrResultRef = useRef<{ dataUrl: string; result: Awaited<ReturnType<typeof api.extractDocumentFile>> } | null>(null);
+// engine 字段记录缓存结果使用的 OCR 引擎，切换引擎后缓存自动失效
+const bgOcrResultRef = useRef<{ dataUrl: string; engine: string; result: Awaited<ReturnType<typeof api.extractDocumentFile>> } | null>(null);
 // 保底机制：等待人工确认文件的 Promise resolve
 const fallbackWaitResolveRef = useRef<((file: { filename: string; dataUrl: string; size: number; mime: string } | null) => void) | null>(null);
 // LOOP执行时当前记录的开头点击步骤数（供保底机制回退页面用）
@@ -1122,6 +1193,8 @@ const requestExtractTab = useCallback((tab: "doc" | "custom" | "widget", widgetT
   setExtractTabRequest({ tab, widgetTabId, ts: Date.now() });
   setExtractTabOrder((prev) => (prev.includes(tab) ? prev : [...prev, tab]));
 }, []);
+// 控件绑定左网页取值时，请求提取元素面板进入左右分栏（保持控件面板可见）
+const [splitWidgetRequest, setSplitWidgetRequest] = useState(0);
 // 控件提取模式：点击展开型控件（选项控件/日历控件）的提取、标注与绑定
 const [widgetExtractMode, setWidgetExtractMode] = useState(false);
 const widgetExtractModeRef = useRef(false);
@@ -1157,6 +1230,8 @@ const [calPanelPickFailed, setCalPanelPickFailed] = useState(false);
 const [calPanelPickMode, setCalPanelPickMode] = useState<"idle" | "await-open" | "picking">("idle");
 const calPanelPickModeRef = useRef<"idle" | "await-open" | "picking">("idle");
 calPanelPickModeRef.current = calPanelPickMode;
+// Enter 键快捷保存映射：ElementSelectBar 在 canSave 时将 handleSave 挂到此 ref
+const mappingSaveTriggerRef = useRef<(() => void) | null>(null);
 const calFailTriggerRef = useRef<{ selector: string; label: string; kind: "option" | "calendar"; side?: "left" | "right" } | null>(null);
 // 手动面板兜底当前针对的控件类型（UI 文案/图标分支用）
 const [panelPickKind, setPanelPickKind] = useState<"option" | "calendar" | null>(null);
@@ -1168,6 +1243,10 @@ widgetOptionPickingKeyRef.current = widgetOptionPickingKey;
 const [widgetLeftPickingKey, setWidgetLeftPickingKey] = useState<string | null>(null);
 const widgetLeftPickingKeyRef = useRef<string | null>(null);
 widgetLeftPickingKeyRef.current = widgetLeftPickingKey;
+// 正在从「提取结果」拾取护照字段的 key（"draft" 或 "saved:<selector>"）
+const [widgetPassportPickingKey, setWidgetPassportPickingKey] = useState<string | null>(null);
+const widgetPassportPickingKeyRef = useRef<string | null>(null);
+widgetPassportPickingKeyRef.current = widgetPassportPickingKey;
 // 控件试跑结果 / 执行中
 const [widgetTestResults, setWidgetTestResults] = useState<Record<string, WidgetTestResult>>({});
 const [widgetTestBusyKey, setWidgetTestBusyKey] = useState<string | null>(null);
@@ -1175,15 +1254,26 @@ const [widgetTestBusyKey, setWidgetTestBusyKey] = useState<string | null>(null);
 const [widgetCalendarState, setWidgetCalendarState] = useState<Record<string, { year: number; month: number } | null>>({});
 const [widgetCalendarBusyKey, setWidgetCalendarBusyKey] = useState<string | null>(null);
 // 文件提取审查面板数据（原图 + 提取字段框 + 同名图片对比）
-const [docExtractPanel, setDocExtractPanel] = useState<{
+/** 单个引擎的提取结果（用于双引擎对比） */
+type DocPanelResult = {
   imageUrl: string;
   filename: string;
   method: string;
   text: string;
   fields: Record<string, string>;
+  fallback?: { from: string; to: string; reason: string } | null;
+};
+
+const [docExtractPanel, setDocExtractPanel] = useState<(DocPanelResult & {
   side: "left" | "right";
   workflow: "entry" | "review";
-} | null>(null);
+  /** 原始文件 dataUrl，用于切换引擎重新提取 */
+  sourceDataUrl: string;
+  /** 目标字段列表 */
+  targetFields: string[];
+  /** 备用引擎结果（UMI 与 Vision 互相切换时保存另一引擎结果） */
+  altResult?: DocPanelResult | null;
+}) | null>(null);
 // docExtractPanel 更新时同步源文件预览（仅非空时；null 不清空，保留最后一次的预览）
 useEffect(() => {
   if (docExtractPanel) {
@@ -1376,6 +1466,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   /** 流程图编辑器：正在编辑的模板 */
   const [editingFlowTemplate, setEditingFlowTemplate] = useState<WorkflowTemplate | null>(null);
   const [showSaveSkill, setShowSaveSkill] = useState(false);
+  const [showApplyLoop, setShowApplyLoop] = useState(false);
   const [saveSkillRunAfter, setSaveSkillRunAfter] = useState(false); // 保存后是否立即执行
   const [skillVersion, setSkillVersion] = useState(0); // 递增触发刷新
 
@@ -1394,7 +1485,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     }
   }, []);
 
-  // ============ 功能1：网页文档提取（PDF/图片 → MarkItDown/OCR → 左右对比） ============
+  // ============ 功能1：网页文档提取（PDF/图片 → OCR/文档解析 → 左右对比） ============
   const [docPickMode, setDocPickMode] = useState(false); // 文档拾取模式：点击右侧网页的 PDF 链接/图片
   const docPickModeRef = useRef(docPickMode);
   docPickModeRef.current = docPickMode;
@@ -1414,6 +1505,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     method: string;
     text: string;
     fields: Record<string, string>;
+    fallback?: { from: string; to: string; reason: string } | null;
   } | null>(null);
   const [docFileExtracting, setDocFileExtracting] = useState(false);
   const [docFilling, setDocFilling] = useState(false);
@@ -1483,7 +1575,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           var el = null;
           try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(selector))}); } catch(e) { el = null; }
           if (!el) return { ok: false, reason: 'not_found' };
-          try { el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' }); } catch(e) {}
+          try { el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); } catch(e) {}
           var orig = el.style.outline;
           var origOffset = el.style.outlineOffset;
           var origShadow = el.style.boxShadow;
@@ -1793,7 +1885,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 var el = null;
                 try { el = __cinsideDeepQuery(${JSON.stringify(sel)}); } catch(e) { el = null; }
                 if (!el) return { ok: false, reason: 'not_found' };
-                el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+                el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
                 // 短暂闪烁（橙色outline直接设在元素上，滚动时自动跟随）
                 var orig = el.style.outline;
                 var origOffset = el.style.outlineOffset;
@@ -2169,6 +2261,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setCardPool([]);
     setCardLoopMap({});
     setRunCursor(null);
+    // 清理已删除卡片绑定的文件提取结果，避免内存泄漏
+    setDocExtractsByRecord({});
+    setDocExtractPanel(null);
+    setSameNameImages(null);
   }, []);
 
   // ============ 任务队列操作 ============
@@ -2297,29 +2393,55 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setRightViewMode("web");
   };
 
+  // 加载后端配置（含已保存的设置）；后端启动有延迟，需在就绪后重新拉取
+  const loadConfig = useCallback(async () => {
+    try {
+      const c = await api.getConfig();
+      setConfig(c);
+      const loaded = c.settings || DEFAULT_SETTINGS;
+      setSettings(loaded);
+      // 同步 UI 缩放到已保存值（localStorage 可能与后端不一致，以后端为准）
+      if (typeof loaded.ui_scale === "number" && loaded.ui_scale !== uiScaleRef.current) {
+        const s = Math.max(0.6, Math.min(1.6, loaded.ui_scale));
+        setUiScale(s);
+        uiScaleRef.current = s;
+        try { localStorage.setItem("cinside-ui-scale", s.toString()); } catch {}
+      }
+    } catch {
+      /* 后端未就绪，等待 onBackendReady / 健康检查轮询后重试 */
+    }
+  }, []);
+
   useEffect(() => {
-    api.getConfig()
-      .then((c) => {
-        setConfig(c);
-        setSettings(c.settings || DEFAULT_SETTINGS);
-      })
-      .catch(() => {});
+    loadConfig();
     refreshRecords();
 
     if (window.electronAPI) {
-      window.electronAPI.backendStatus().then(setBackendReady);
+      window.electronAPI.backendStatus().then((ready) => {
+        if (ready) {
+          setBackendReady(true);
+          loadConfig();
+          refreshRecords();
+        }
+      });
       window.electronAPI.onBackendReady(() => {
         setBackendReady(true);
+        loadConfig();
         refreshRecords();
       });
     }
 
     // 兜底：轮询健康检查，防止 IPC 事件丢失或后端为上一实例残留
+    let configLoaded = false;
     const poll = setInterval(async () => {
       try {
         const res = await fetch("http://localhost:8000/api/health", { signal: AbortSignal.timeout(2000) });
         if (res.ok) {
           setBackendReady(true);
+          if (!configLoaded) {
+            configLoaded = true;
+            loadConfig();
+          }
           clearInterval(poll);
         }
       } catch {
@@ -2327,12 +2449,23 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       }
     }, 2000);
     return () => clearInterval(poll);
-  }, []);
+  }, [loadConfig]);
 
   // 防误关设置变化时同步给主进程
   useEffect(() => {
     window.electronAPI?.setPreventClose(!!settings.prevent_accidental_close);
   }, [settings.prevent_accidental_close]);
+
+  // 主题外观：明暗 + 主色调 → 应用到根元素 data 属性
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.add("no-transitions");
+    root.setAttribute("data-theme", settings.theme === "dark" ? "dark" : "light");
+    root.setAttribute("data-accent", settings.accent || "indigo");
+    void root.offsetWidth;
+    const raf = requestAnimationFrame(() => root.classList.remove("no-transitions"));
+    return () => cancelAnimationFrame(raf);
+  }, [settings.theme, settings.accent]);
 
   // ============ 整体UI缩放：Ctrl+滚轮调控 ============
   useEffect(() => {
@@ -2351,15 +2484,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const handleBlur = () => {
       ctrlPressedRef.current = false;
     };
-    // 滚轮事件：Ctrl按下时调整整体UI缩放
+    // 滚轮事件：Ctrl按下时调整整体UI缩放（passive，不阻塞 BrowserView 滚轮）
     const handleWheel = (e: WheelEvent) => {
       if (!ctrlPressedRef.current) return;
       // 流程图编辑器打开时，让其内部自己处理缩放，不触发整体UI缩放
       if ((window as any).__cinsideFlowEditorOpen) return;
-      // 阻止默认的页面缩放/滚动行为
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
       
       const current = uiScaleRef.current;
       // 向上滚动放大，向下滚动缩小，步长0.05
@@ -2391,18 +2520,17 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       }
     };
 
-    // capture=true 确保在事件冒泡到BrowserPane之前优先处理
     window.addEventListener("keydown", handleKeyDown, true);
     window.addEventListener("keyup", handleKeyUp, true);
     window.addEventListener("blur", handleBlur);
-    window.addEventListener("wheel", handleWheel, { capture: true, passive: false });
+    window.addEventListener("wheel", handleWheel, { passive: true });
     window.addEventListener("storage", handleStorage);
 
     return () => {
       window.removeEventListener("keydown", handleKeyDown, true);
       window.removeEventListener("keyup", handleKeyUp, true);
       window.removeEventListener("blur", handleBlur);
-      window.removeEventListener("wheel", handleWheel, { capture: true } as EventListenerOptions);
+      window.removeEventListener("wheel", handleWheel);
       window.removeEventListener("storage", handleStorage);
     };
   }, []);
@@ -2521,17 +2649,22 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     });
 
     const removeCaptured = window.electronAPI.onDownloadCaptured((data) => {
-      // 仅在文件提取教学模式中处理
-      if (!addingDocExtractModeRef.current) return;
-      rlog(`[download-captured] side=${data.side}, filename=${data.filename}, size=${data.size}`);
+      const inDocExtract = addingDocExtractModeRef.current;
+      const inNavClick = addingClickModeRef.current && (addingClickPhaseRef.current === "pre" || addingClickPhaseRef.current === "mid");
+      // 仅在文件提取教学模式 或 前置/过程点击模式 中处理
+      if (!inDocExtract && !inNavClick) return;
+      rlog(`[download-captured] side=${data.side}, filename=${data.filename}, size=${data.size}, inDocExtract=${inDocExtract}, inNavClick=${inNavClick}`);
 
-      // 将最后一个 开头点击(docExtractClick, phase=pre, 且尚未升级为docExtract) 标记升级为下载触发步骤
+      // 将最后一个导航点击（前置/过程点击 或 文件提取开头/过程点击，且尚未升级为docExtract）标记升级为下载触发步骤
+      // 注意排除 panelAction 标记（如「录入提取」面板按钮步骤），避免多文件序列中被错误升级
       setPickedMarks((prev) => {
         const marks = [...prev];
         for (let i = marks.length - 1; i >= 0; i--) {
-          if (marks[i].docExtractClick && marks[i].docExtractClickPhase !== "post" && !marks[i].docExtract) {
+          const m = marks[i];
+          const isNavClick = (m.docExtractClick && m.docExtractClickPhase !== "post") || m.clickPhase === "pre" || m.clickPhase === "mid";
+          if (isNavClick && !m.docExtract && !m.panelAction) {
             marks[i] = {
-              ...marks[i],
+              ...m,
               docExtract: true,
               docSource: "web-download",
               label: `文件下载提取 · ${data.filename}`,
@@ -2541,6 +2674,19 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         }
         return marks;
       });
+
+      // 若来自前置/过程点击模式：自动进入文件提取网页模式并打开「文件处理+提取元素」分屏预览
+      if (!inDocExtract) {
+        setAddingDocExtractMode(true);
+        setDocExtractSource("web");
+        setDocExtractSplitView(true);
+        setBottomPanelOpen(true);
+        // 重置文件提取面板状态（从点击模式自动进入时初始化）
+        setDocExtractPanel(null);
+        setSameNameImages(null);
+        bgOcrResultRef.current = null;
+        setSuccessToast(`检测到下载「${data.filename}」，已自动开启文件预览`);
+      }
 
       // 先做轻量预览（不跑 OCR），预览就绪后用户点击「录入提取」再触发 OCR
       const file = dataUrlToFile(data.dataUrl, data.filename);
@@ -2772,6 +2918,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setWidgetPickKind(null);
     setWidgetRolePickingKey(null);
     setWidgetLeftPickingKey(null);
+    setWidgetPassportPickingKey(null);
     setWidgetDraft(null);
     setWidgetSnapshotError(null);
     setCalPanelPickMode("idle");
@@ -2787,7 +2934,38 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setLeftPicked(null);
     window.electronAPI?.viewStopPicking("left").catch(() => {});
     window.electronAPI?.viewStopPicking("right").catch(() => {});
+    // 关闭下载捕获（前置/过程点击模式开启的），避免残留
+    window.electronAPI?.setDownloadCapture("left", false).catch(() => {});
+    window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
   }, []);
+
+  /** 刷新工作区：清空网页高光/光标、步骤设置、字段对比，但不刷新 Excel 记录 */
+  const refreshWorkspace = useCallback(() => {
+    rlog("[refreshWorkspace] 清空光标/步骤/字段对比");
+    // 退出所有设置模式（停止拾取、关闭下载捕获等）
+    exitAllSetupModes();
+    // 清空网页高光
+    window.electronAPI?.viewHighlightBoxes("left", []).catch(() => {});
+    window.electronAPI?.viewHighlightBoxes("right", []).catch(() => {});
+    // 清空步骤标记与映射
+    setPickedMarks([]);
+    setMappings([]);
+    setRightPicked(null);
+    setLeftPicked(null);
+    // 清空提取相关状态（注意：文件提取结果 docExtractsByRecord / docExtractPanel / sameNameImages
+    // 与人物卡片绑定，不在刷新时清空，仅在删除卡片或手动移除文件时清理）
+    setCustomTextEntries([]);
+    sourceFieldValueRef.current = "";
+    sourceFieldLabelRef.current = "";
+    // 清空验证结果与步骤
+    setSteps([]);
+    setShots([]);
+    setResult(null);
+    setReport(null);
+    setLoopReports([]);
+    setError(null);
+    setSuccessToast("已清空光标、步骤设置和字段对比");
+  }, [exitAllSetupModes, setSuccessToast]);
 
   // 教学模式向导：开始灵活绑定（左右侧皆可）
   // 进入「灵活绑定」模式后：点任意侧输入框 = 绑定选中的 Excel 列并真实填入第一行值；
@@ -2858,6 +3036,14 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // 教学模式向导：添加审查步骤到 LOOP 循环体
   // 审查映射流程（先右后左）：右侧选核对元素 → 左侧选来源（网页/Excel）→ 保存映射
   const startAddingReviewSteps = useCallback(() => {
+    // Toggle：已在审查模式则退出
+    if (addingStepModeRef.current === "review") {
+      rlog("[startAddingReviewSteps] 已在审查模式，退出所有设置模式");
+      exitAllSetupModes();
+      return;
+    }
+    // 先退出其他模式（前置/过程/收尾点击、录入步骤等），保证互斥
+    exitAllSetupModes();
     rlog("[startAddingReviewSteps] 进入审查步骤添加模式（先右后左）");
     setCurrentLoopStepType("review");
     setTeachingPhase("review");
@@ -2875,11 +3061,19 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       window.electronAPI?.viewStopPicking("left").catch(() => {});
       window.electronAPI?.viewStartPicking("right");
     }, 300);
-  }, [setError, selectMode]);
+  }, [setError, selectMode, exitAllSetupModes]);
 
   // 教学模式向导：添加录入步骤到 LOOP 循环体
   // 录入映射流程（先左后右）：左侧选来源（网页/Excel）→ 右侧选输入框 → 保存映射
   const startAddingEntrySteps = useCallback(() => {
+    // Toggle：已在录入模式则退出
+    if (addingStepModeRef.current === "entry") {
+      rlog("[startAddingEntrySteps] 已在录入模式，退出所有设置模式");
+      exitAllSetupModes();
+      return;
+    }
+    // 先退出其他模式（前置/过程/收尾点击、审查步骤等），保证互斥
+    exitAllSetupModes();
     rlog("[startAddingEntrySteps] 进入录入步骤添加模式（先左后右）");
     setCurrentLoopStepType("entry");
     setTeachingPhase("entry");
@@ -2897,7 +3091,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       window.electronAPI?.viewStopPicking("right").catch(() => {});
       window.electronAPI?.viewStartPicking("left");
     }, 300);
-  }, [setError, selectMode]);
+  }, [setError, selectMode, exitAllSetupModes]);
 
   // 切换当前步骤类型（审查/录入），用于混合模式复杂任务
   const switchLoopStepType = useCallback((type: "review" | "entry") => {
@@ -2934,6 +3128,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setInputTarget(null);
     setNextClickLabel(null);
     setAddingClickMode(false);
+    setCanSaveMapping(false);
+    mappingSaveTriggerRef.current = null;
     // 提取元素面板：清空 FIFO TAB 顺序（新一轮步骤设置重新排队）
     setExtractTabOrder([]);
     // 同时退出文件提取模式（审查子步骤），停止右侧拾取
@@ -2955,8 +3151,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       setWidgetPickKind(null);
       setWidgetRolePickingKey(null);
       setWidgetLeftPickingKey(null);
+      setWidgetPassportPickingKey(null);
       setWidgetDraft(null);
       setWidgetSnapshotError(null);
+      // 若从文件处理分屏中添加控件，保存步骤后退出分屏，恢复三栏默认布局
+      setDocExtractSplitView(false);
       window.electronAPI?.viewStopPicking("left").catch(() => {});
       window.electronAPI?.viewStopPicking("right").catch(() => {});
     }
@@ -2964,6 +3163,18 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setRightPicked(null);
     setLeftPicked(null);
   }, []);
+
+  // 统一的人物卡片选择 handler：选中卡片 + 退出设置模式 + 切换到结果视图，
+  // 确保点击卡片时文件处理面板显示该卡片绑定的提取文件和字段
+  const handleSelectCard = useCallback((id: string) => {
+    setSelectedId(id);
+    setBottomPanelOpen(true);
+    exitAddingStepMode();
+    setDocExtractSplitView(false);
+    setDocExtractPanel(null);
+    setDocSourcePreview(null);
+    setDocSignal((s) => s + 1);
+  }, [exitAddingStepMode]);
 
   // === 自定义文本模式 ===
   const toggleCustomText = useCallback(() => {
@@ -2976,6 +3187,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setCustomTextMode(true);
     // 提取元素面板自动切到「自定义文本」TAB
     requestExtractTab("custom");
+    // 自动放置一个空白例子，用户无需先点「添加文本」
+    setCustomTextEntries((prev) => {
+      const hasManual = prev.some((e) => e.source !== "doc");
+      if (hasManual) return prev;
+      const id = `ct-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      return [...prev, { id, name: "", text: "", source: "manual" as const, createdAt: Date.now() }];
+    });
   }, [exitAllSetupModes]);
 
   const addCustomTextEntry = useCallback(() => {
@@ -3002,23 +3220,34 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     requestExtractTab("doc");
     setDocExtractPanel(null);
     setSameNameImages(null);
+    // 提取完成：重置来源字段值，后续绑定输入框时恢复使用 LOOP/Excel 字段
+    sourceFieldValueRef.current = "";
+    sourceFieldLabelRef.current = "";
     // 关闭内联结果视图，切换到「文件处理+提取元素」两栏分屏模式
     setDocExtractSplitView(true);
     setBottomPanelOpen(true);
     setSuccessToast(`已送 ${entries.length} 个字段到「提取元素」面板，请逐个拾取关联网页元素后保存为步骤`);
   }, [setSuccessToast]);
 
-  /** 网页模式：预览就绪后用户点击「录入提取」触发 OCR 识别（若后台已预提取则直接复用） */
-  const triggerWebExtract = useCallback(() => {
+  /** 网页模式：预览就绪后用户点击「录入提取」触发 OCR 识别（若后台已预提取则直接复用）
+   *  overrideRecordId：批量执行时显式传入当前记录 id（避免闭包中 selected 过期导致字段提交到错误记录） */
+  const triggerWebExtract = useCallback((overrideRecordId?: string) => {
     const pending = pendingWebFileRef.current;
     if (!pending) return;
+    const rid = overrideRecordId || selected?.record_id || "_default";
     // 进入 OCR 阶段
     setDocWebStatus({ phase: "ocr", filename: pending.filename });
 
-    // 检查是否有后台预提取的OCR结果可以直接复用
+    // 计算目标字段列表（缓存路径和非缓存路径都需要）
+    const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
+    const targetFields = mappedFields.length > 0
+      ? mappedFields
+      : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender", "passport_issue", "issue_authority"];
+
+    // 检查是否有后台预提取的OCR结果可以直接复用（引擎必须一致，否则视为缓存失效）
     const cached = bgOcrResultRef.current;
-    if (cached && cached.dataUrl === pending.dataUrl) {
-      rlog(`[triggerWebExtract] 复用后台OCR缓存结果: ${pending.filename}`);
+    if (cached && cached.dataUrl === pending.dataUrl && cached.engine === (settings.ocr_engine || "vision")) {
+      rlog(`[triggerWebExtract] 复用后台OCR缓存结果: ${pending.filename} (engine=${cached.engine})`);
       const result = cached.result;
       const newExtract: DocExtractState = {
         filename: result.filename,
@@ -3030,15 +3259,14 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         file_url: pending.dataUrl,
         processed_image: result.processed_image,
         mrz_warnings: result.mrz_warnings,
+        fallback: result.fallback,
       };
-      const rid = selected?.record_id || "_default";
       setDocExtractsByRecord((prev) => {
         const arr = prev[rid] || [];
         const filtered = arr.filter((e) => e.file_url !== newExtract.file_url);
         return { ...prev, [rid]: [...filtered, newExtract] };
       });
       setActiveDocIndex(999);
-      setDocSignal((s) => s + 1);
       setDocExtractPanel({
         imageUrl: toPreviewImageUrl(pending.dataUrl, result.processed_image),
         filename: result.filename,
@@ -3047,7 +3275,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         fields: result.fields,
         side: pending.side,
         workflow: pending.side === "left" ? "entry" : "review",
+        fallback: result.fallback,
+        sourceDataUrl: pending.dataUrl,
+        targetFields,
+        altResult: null,
       });
+      setDocExtractActiveTab("primary");
       setDocWebStatus({ phase: "success", filename: result.filename, size: pending.size });
       setSuccessToast(`文件提取完成：${result.filename}`);
       pendingWebFileRef.current = null;
@@ -3057,10 +3290,6 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
     // 没有缓存，正常执行OCR
     const file = dataUrlToFile(pending.dataUrl, pending.filename);
-    const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
-    const targetFields = mappedFields.length > 0
-      ? mappedFields
-      : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender", "passport_issue", "issue_authority"];
     api.extractDocumentFile(file, targetFields)
       .then((result) => {
         const newExtract: DocExtractState = {
@@ -3073,15 +3302,14 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           file_url: pending.dataUrl,
           processed_image: result.processed_image,
           mrz_warnings: result.mrz_warnings,
+          fallback: result.fallback,
         };
-        const rid = selected?.record_id || "_default";
         setDocExtractsByRecord((prev) => {
           const arr = prev[rid] || [];
           const filtered = arr.filter((e) => e.file_url !== newExtract.file_url);
           return { ...prev, [rid]: [...filtered, newExtract] };
         });
         setActiveDocIndex(999);
-        setDocSignal((s) => s + 1);
         setDocExtractPanel({
           imageUrl: toPreviewImageUrl(pending.dataUrl, result.processed_image),
           filename: result.filename,
@@ -3090,7 +3318,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           fields: result.fields,
           side: pending.side,
           workflow: pending.side === "left" ? "entry" : "review",
+          fallback: result.fallback,
+          sourceDataUrl: pending.dataUrl,
+          targetFields,
+          altResult: null,
         });
+        setDocExtractActiveTab("primary");
         setDocWebStatus({ phase: "success", filename: result.filename, size: pending.size });
         setSuccessToast(`文件提取完成：${result.filename}`);
         // 清空暂存
@@ -3102,6 +3335,107 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         setError(`文件提取失败: ${msg}`);
       });
   }, [mappings, selected, setSuccessToast, setError]);
+
+  /** 双引擎对比：当前激活的 Tab（primary=主结果，alt=备用引擎结果） */
+  const [docExtractActiveTab, setDocExtractActiveTab] = useState<"primary" | "alt">("primary");
+  /** 双引擎对比：备用引擎重新提取中 */
+  const [docAltExtracting, setDocAltExtracting] = useState(false);
+
+  /**
+   * 用另一引擎重新提取（双引擎对比）：
+   * - 若当前主结果是 UMI，点击后用 Vision 重新提取，结果存入 altResult
+   * - 若当前主结果是 Vision，点击后用 UMI 重新提取，结果存入 altResult
+   * 支持两种来源：dataUrl（本地上传/下载捕获）和 web URL（网页直提）
+   */
+  const reExtractWithAltEngine = useCallback(() => {
+    const panel = docExtractPanel;
+    if (!panel || !panel.sourceDataUrl || docAltExtracting) return;
+
+    // 判断当前主结果使用的引擎，决定备用引擎
+    const currentIsUmi = isUmiMethod(panel.method);
+    const altEngine: "umi" | "vision" = currentIsUmi ? "vision" : "umi";
+
+    setDocAltExtracting(true);
+
+    const source = panel.sourceDataUrl;
+    const isDataUrl = source.startsWith("data:");
+    const apiCall = isDataUrl
+      ? api.extractDocumentFile(dataUrlToFile(source, panel.filename), panel.targetFields, altEngine)
+      : api.extractDocumentUrl(source, panel.targetFields, panel.filename, altEngine);
+
+    apiCall
+      .then((result) => {
+        const altResult: DocPanelResult = {
+          imageUrl: toPreviewImageUrl(source, result.processed_image),
+          filename: result.filename,
+          method: result.method,
+          text: result.text,
+          fields: result.fields,
+          fallback: result.fallback,
+        };
+        setDocExtractPanel((prev) => prev ? { ...prev, altResult } : prev);
+        setDocExtractActiveTab("alt");
+        setSuccessToast(`${extractMethodLabel(result.method)} 提取完成，可切换对比`);
+      })
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        setError(`${extractMethodLabel(altEngine === "umi" ? "umi_ocr" : "vision_ocr")} 提取失败: ${msg}`);
+      })
+      .finally(() => {
+        setDocAltExtracting(false);
+      });
+  }, [docExtractPanel, docAltExtracting, setSuccessToast, setError]);
+
+  /** 「录入提取」按钮点击入口：文件提取网页模式教学中，先记录为一个过程点击步骤
+   *  （panelAction=doc-web-extract，执行时回放=再次调用 triggerWebExtract 提交文件字段），再执行提取 */
+  const handleTriggerWebExtractClick = useCallback(() => {
+    const pending = pendingWebFileRef.current;
+    if (
+      addingDocExtractModeRef.current &&
+      docExtractSourceRef.current === "web" &&
+      docWebStatusRef.current?.phase === "preview" &&
+      pending
+    ) {
+      const side = pending.side;
+      const workflow: "entry" | "review" = side === "left" ? "entry" : "review";
+      // 判断是否处于过程/前置点击模式中（从过程点击触发下载后自动进入文件提取的情况）
+      const inNavClick = addingClickModeRef.current &&
+        (addingClickPhaseRef.current === "pre" || addingClickPhaseRef.current === "mid");
+      addPickedMark({
+        side,
+        source: "web",
+        selector: "panel://doc-web-extract",
+        label: `文件提取过程点击 · 录入提取（${pending.filename}）`,
+        workflow,
+        action: "click",
+        recordId: selected?.record_id,
+        docExtractClick: true,
+        docExtractClickPhase: "mid",
+        panelAction: "doc-web-extract",
+        clickPhase: inNavClick ? (addingClickPhaseRef.current as "pre" | "mid") : "mid",
+        inPopup: false,
+      });
+      setSuccessToast("已记录过程点击：录入提取（执行时将自动点击该按钮提交文件字段）");
+    }
+    triggerWebExtract();
+  }, [triggerWebExtract, addPickedMark, selected, setSuccessToast]);
+
+  /** 网页提取失败后重试：根据失败阶段决定重试策略 */
+  const retryWebExtract = useCallback(() => {
+    const status = docWebStatusRef.current;
+    if (status?.phase !== "error") return;
+    const pending = pendingWebFileRef.current;
+    if (pending) {
+      // 文件已下载但 OCR/提取失败 → 清除缓存，重新执行 OCR
+      bgOcrResultRef.current = null;
+      rlog(`[retryWebExtract] 重试 OCR 提取: ${pending.filename}`);
+      triggerWebExtract();
+    } else {
+      // 下载阶段失败 → 重置为 idle，让用户重新点击网页元素触发下载
+      rlog(`[retryWebExtract] 下载失败，重置状态等待重新点击`);
+      setDocWebStatus({ phase: "idle" });
+    }
+  }, [triggerWebExtract]);
 
   const removeCustomTextEntry = useCallback((id: string) => {
     setCustomTextEntries((prev) => prev.filter((e) => e.id !== id));
@@ -3160,7 +3494,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const docEntries = useMemo(() => customTextEntries.filter((e) => e.source === "doc"), [customTextEntries]);
   const manualEntries = useMemo(() => customTextEntries.filter((e) => e.source !== "doc"), [customTextEntries]);
 
-  // 自定义文本/文件提取条目共用渲染器（「提取元素」面板的两个 TAB 共用；序号 = 该类别内设置顺序 FIFO）
+  // 自定义文本/文件提取条目共用渲染器（统一面板：紫色=文件提取，蓝色=自定义文本；序号全局 FIFO 连续编号）
   const renderExtractEntries = useCallback((
     list: CustomTextEntry[],
     opts: {
@@ -3176,10 +3510,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       onWidgetPickCancel?: () => void;
     }
   ) => {
-    // 按 createdAt FIFO 排序（无时间戳的排最后）
+    // 按 createdAt FIFO 排序（无时间戳的排最后）；序号在整个列表内连续编号
     const sorted = [...list].sort((a, b) => (a.createdAt ?? Number.MAX_SAFE_INTEGER) - (b.createdAt ?? Number.MAX_SAFE_INTEGER));
+    const readyCount = sorted.filter((e) => e.text && e.selector && !e.saved).length;
     return (
-    <div className="flex h-full flex-col gap-2 overflow-y-auto px-2 py-1.5">
+    <div className="flex h-full flex-col">
+      {/* 可滚动区域：提示条 + 条目列表 + 添加按钮 */}
+      <div className="flex-1 overflow-y-auto overflow-x-hidden px-2 py-1.5 flex flex-col gap-2 scroll-smooth">
       {opts.widgetPickActive && (
         <div className="mb-0.5 flex items-center gap-1.5 rounded-md bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-700 ring-1 ring-amber-200">
           <Crosshair className="h-3 w-3" />
@@ -3362,17 +3699,20 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         </div>
         );
       })}
-      <div className="mt-auto flex shrink-0 items-center gap-1.5 pt-1">
-        {opts.showAdd && !opts.widgetPickActive && (
-          <button
-            onClick={addCustomTextEntry}
-            className="inline-flex items-center gap-0.5 rounded-md bg-sky-500 px-2 py-0.5 text-[10px] font-medium text-white transition-all hover:bg-sky-600"
-          >
-            <Plus className="h-2.5 w-2.5" />
-            添加文本
-          </button>
-        )}
-        {sorted.some((e) => e.text && e.selector && !e.saved) && (
+      {/* 内联添加按钮：紧贴在最后一个条目下方，点击新增空白例子 */}
+      {opts.showAdd && !opts.widgetPickActive && (
+        <button
+          onClick={addCustomTextEntry}
+          className="flex w-full shrink-0 items-center justify-center gap-1 rounded-lg border-2 border-dashed border-sky-200 bg-sky-50/30 py-2 text-[10px] font-medium text-sky-500 transition-all hover:border-sky-400 hover:bg-sky-50 hover:text-sky-600"
+        >
+          <Plus className="h-3 w-3" />
+          添加文本
+        </button>
+      )}
+      </div>
+      {/* 固定底部栏：保存按钮 + 就绪计数，不随条目滚动 */}
+      <div className="flex shrink-0 items-center gap-1.5 border-t border-slate-100 px-2 py-1">
+        {readyCount > 0 && (
           <button
             onClick={saveCustomTextSteps}
             className="inline-flex items-center gap-0.5 rounded-md bg-brand-600 px-2 py-0.5 text-[10px] font-medium text-white transition-all hover:bg-brand-700"
@@ -3382,7 +3722,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           </button>
         )}
         <span className="ml-auto text-[9px] text-slate-400">
-          {sorted.filter((e) => e.text && e.selector && !e.saved).length}/{sorted.length} 已就绪
+          {readyCount}/{sorted.length} 已就绪
         </span>
       </div>
     </div>
@@ -3584,6 +3924,20 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   }, [pickedMarks, removePickedMark, addingDocExtractMode, addingClickMode, bindInputSide]);
 
   // ============ 文件提取模式（审查步骤子步骤）：选择来源 → 网页提取/本地文件提取 → OCR ============
+  // 轻量打开"选择文件提取来源"面板（不退出其他设置模式，用于文件面板为空时自动展示）
+  const openDocChoosePanel = useCallback(() => {
+    if (addingDocExtractModeRef.current) return;
+    setAddingDocExtractMode(true);
+    setDocExtractSource("choose");
+    setDocLocalFiles([]);
+    setDocFileBindField(selectedExcelColumn || null);
+    setPendingAction("none");
+    setPickTarget(null);
+    setNextClickLabel(null);
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+  }, [selectedExcelColumn]);
+
   // 开始文件提取（toggle：已激活则退出所有模式）
   const startAddDocExtract = useCallback(() => {
     // Toggle：如果已在文件提取模式，退出所有
@@ -3734,6 +4088,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       setDocLocalDirFiles([]);
       setDocLocalSamplePath(null);
       setDocLocalPattern(null);
+      // 保存后切换到结果模式，方便用户查看已提取文件
+      setDocSignal((s) => s + 1);
+      setBottomPanelOpen(true);
       return;
     }
     // 兼容旧模式：多选文件
@@ -3766,6 +4123,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setDocExtractSource(null);
     setDocLocalFiles([]);
     setDocFileBindField(null);
+    // 保存后切换到结果模式，方便用户查看已提取文件
+    setDocSignal((s) => s + 1);
+    setBottomPanelOpen(true);
   }, [docLocalRootPath, docLocalPattern, docLocalSamplePath, docLocalDirFiles.length, docFileBindField, docLocalFiles, addingStepMode, selected, addPickedMark, setError, setSuccessToast]);
 
   const exitAddDocExtractMode = useCallback(() => {
@@ -3783,6 +4143,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setDocSourcePreview(null);
     setSameNameImages(null);
     pendingWebFileRef.current = null;
+    // 切换 ResultsPanel 到结果模式：重置 fieldSetupMode / docSetupMode，
+    // 确保已提取的文件和字段在文件处理面板中可见（绑定到当前人物卡片）
+    setDocSignal((s) => s + 1);
+    setBottomPanelOpen(true);
     window.electronAPI?.viewStopPicking("left").catch(() => {});
     window.electronAPI?.viewStopPicking("right").catch(() => {});
     window.electronAPI?.popupStopPicking("left").catch(() => {});
@@ -4115,6 +4479,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       type: info.type,
       docExtractClick: true,
       docExtractClickPhase: isPostPhase ? "mid" : "pre",
+      clickPhase: isPostPhase ? "mid" : "pre",
       inPopup: !!info.fromPopup,
     });
     // 真实点击该元素（让网页导航/响应）
@@ -4214,6 +4579,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           file_url: url,
           processed_image: result.processed_image,
           mrz_warnings: result.mrz_warnings,
+          fallback: result.fallback,
         };
         const rid = selected?.record_id || "_default";
         setDocExtractsByRecord((prev) => {
@@ -4232,7 +4598,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           fields: result.fields,
           side,
           workflow,
+          fallback: result.fallback,
+          sourceDataUrl: url,
+          targetFields,
+          altResult: null,
         });
+        setDocExtractActiveTab("primary");
         rlog(`[docExtract] 提取完成: ${result.filename} (${result.method})`);
       })
       .catch((e) => {
@@ -4323,6 +4694,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setNextClickLabel(phase === "pre" ? "前置点击" : phase === "mid" ? "过程点击" : "收尾点击");
     setPendingAction("click");
     setPickTarget(null);
+    // 前置/过程点击模式下同时开启下载捕获：点击到下载元素时自动打开文件处理预览
+    if (phase === "pre" || phase === "mid") {
+      window.electronAPI?.setDownloadCapture("left", true).catch(() => {});
+      window.electronAPI?.setDownloadCapture("right", true).catch(() => {});
+      rlog(`[startAddClickStep] ${phase}点击模式：已开启下载捕获（点击下载会自动开文件预览）`);
+    }
     setTimeout(() => {
       if (addingClickModeRef.current) {
         // 默认两侧都激活，用户想点哪侧就点哪侧；若显式传 side 则只激活那一侧
@@ -4339,6 +4716,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setNextClickLabel(null);
     setPendingAction("none");
     setPickTarget(null);
+    // 关闭下载捕获（前置/过程点击模式开启的）
+    window.electronAPI?.setDownloadCapture("left", false).catch(() => {});
+    window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
   }, []);
 
   // 教学完成：把 pickedMarks 按当前 appMode 保存为模板
@@ -4689,6 +5069,40 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   }, [checkedIds]);
 
   /**
+   * 应用已保存的 LOOP 模板到当前步骤设置：
+   * 清空现有步骤与映射，加载模板中的所有 marks 和 mappings，
+   * 自动进入设置模式以便用户查看/编辑步骤。
+   */
+  const handleApplyLoop = useCallback((tpl: WorkflowTemplate) => {
+    setShowApplyLoop(false);
+    // 清空当前工作区（退出拾取模式、清空高光、步骤、映射等）
+    refreshWorkspace();
+    // 切换到模板对应的模式
+    setAppMode(tpl.mode);
+    // 合并模板中的所有步骤，重新编号 order 和生成新 id（避免与历史状态冲突）
+    const now = Date.now();
+    const mergedMarks: PickedMark[] = [
+      ...tpl.dataSourceMarks,
+      ...tpl.reviewMarks,
+      ...tpl.entryMarks,
+    ].map((m, i) => ({
+      ...m,
+      id: `mk-${now}-${i}`,
+      order: i + 1,
+    }));
+    setPickedMarks(mergedMarks);
+    // 恢复字段映射
+    if (tpl.mappings && tpl.mappings.length > 0) {
+      setMappings(tpl.mappings);
+    }
+    // 同步当前工作模板引用（便于后续保存/运行）
+    setWorkflowTemplate(tpl);
+    workflowTemplateRef.current = tpl;
+    lastTemplateRef.current = tpl;
+    setSuccessToast(`已应用 LOOP 模板：${tpl.name}（${mergedMarks.length} 个步骤）`);
+  }, [refreshWorkspace, setSuccessToast]);
+
+  /**
    * 勾选卡片后点"自定义"：进入「步骤设置 · 元素选择」模式
    * 以勾选的第一张卡片作为教学样本（selectedId 切到它，输入框绑定时填入它的数据）
    * 教学完成后（finishTeaching）自动把 LOOP 关联到这批勾选的卡片
@@ -4976,6 +5390,71 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       // 确保下载捕获已开启
       window.electronAPI?.setDownloadCapture(side, true).catch(() => {});
     });
+  }, []);
+
+  // 检测并抓取"点击后直接预览图片"的页面（无下载按钮的场景）：
+  // 弹窗或同标签页跳转到图片URL时，主动按URL下载，返回文件数据；非直览页返回 null
+  const grabDirectPreviewFile = useCallback(async (side: "left" | "right"): Promise<{ filename: string; dataUrl: string; size: number; mime: string } | null> => {
+    if (!window.electronAPI) return null;
+    // 给页面跳转/弹窗加载留时间
+    await new Promise((r) => setTimeout(r, 1500));
+    const detectScript = `
+      (function() {
+        try {
+          var ct = (document.contentType || '').toLowerCase();
+          var url = location.href;
+          var isImgDoc = ct.indexOf('image/') === 0;
+          var imgEl = null;
+          if (document.body) {
+            var visibleKids = [];
+            for (var i = 0; i < document.body.children.length; i++) {
+              var k = document.body.children[i];
+              var tag = (k.tagName || '').toUpperCase();
+              if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'META') continue;
+              visibleKids.push(k);
+            }
+            // Chrome 内置图片查看器：body 只含一个 img
+            if (visibleKids.length === 1 && (visibleKids[0].tagName || '').toUpperCase() === 'IMG') {
+              isImgDoc = true;
+              imgEl = visibleKids[0];
+            }
+            // URL 以图片扩展名结尾且页面仅一张图，也按直览页处理
+            if (!isImgDoc && /\\.(jpg|jpeg|png|gif|bmp|webp)([?#].*)?$/i.test(url)) {
+              var imgs = document.body.getElementsByTagName('img');
+              if (imgs.length === 1) { isImgDoc = true; imgEl = imgs[0]; }
+            }
+          }
+          if (!isImgDoc) return { ok: false };
+          var imgUrl = (imgEl && (imgEl.currentSrc || imgEl.src)) || url;
+          if (!/^https?:/i.test(imgUrl)) return { ok: false };
+          return { ok: true, url: imgUrl };
+        } catch(e) { return { ok: false }; }
+      })();
+    `;
+    // 1) 先查弹窗（window.open / target=_blank 打开的图片预览）
+    try {
+      const popupRes = (await window.electronAPI.popupExecuteJS(side, detectScript)) as { ok?: boolean; url?: string } | undefined;
+      if (popupRes && popupRes.ok && popupRes.url) {
+        const dl = await window.electronAPI.viewDownloadSingleUrl(side, popupRes.url, 20000);
+        if (dl?.ok && dl.dataUrl) {
+          window.electronAPI.popupClose(side).catch(() => {});
+          return { filename: dl.filename || "image.jpg", dataUrl: dl.dataUrl, size: dl.size || 0, mime: dl.mime || "image/jpeg" };
+        }
+      }
+    } catch { /* 无弹窗或检测失败，继续查主视图 */ }
+    // 2) 再查主视图（同标签页跳转到图片）
+    try {
+      const mainRes = (await window.electronAPI.viewExecuteJS(side, detectScript)) as { ok?: boolean; url?: string } | undefined;
+      if (mainRes && mainRes.ok && mainRes.url) {
+        const dl = await window.electronAPI.viewDownloadSingleUrl(side, mainRes.url, 20000);
+        if (dl?.ok && dl.dataUrl) {
+          // 同标签页跳转：抓取后返回上一页，保证 LOOP 后续步骤仍在原页面执行
+          window.electronAPI.viewGoBack(side).catch(() => {});
+          return { filename: dl.filename || "image.jpg", dataUrl: dl.dataUrl, size: dl.size || 0, mime: dl.mime || "image/jpeg" };
+        }
+      }
+    } catch { /* 检测失败按无直览页处理 */ }
+    return null;
   }, []);
 
   /** ============ 文件提取保底机制 ============ */
@@ -5347,6 +5826,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
     // click 动作：真实点击
     if (mark.action === "click") {
+      // === 面板动作：文件提取配置面板的「录入提取」按钮（非网页元素，直接调用前端提取逻辑提交文件字段） ===
+      if (mark.panelAction === "doc-web-extract") {
+        rlog(`[executeMark] 面板动作: 录入提取（提交文件字段到当前记录 ${record.record_id}）`);
+        triggerWebExtract(record.record_id);
+        return;
+      }
       // === 文件上传步骤：从运行时槽位取文件 → 可选压缩/转格式 → DataTransfer 填入 file input ===
       if (mark.docUpload) {
         console.log(`[executeMark] DOC-UPLOAD side=${side}, selector=${mark.selector}, sourceMarkId=${mark.uploadSourceMarkId || "last"}`);
@@ -5471,7 +5956,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               fields: result.fields,
               side,
               workflow: side === "left" ? "entry" : "review",
+              fallback: result.fallback,
+              sourceDataUrl: readResult.dataUrl,
+              targetFields,
+              altResult: null,
             });
+            setDocExtractActiveTab("primary");
           } catch (e) {
             rlog(`[executeMark] 本地文件 OCR 失败: ${e instanceof Error ? e.message : String(e)}`);
           }
@@ -5527,8 +6017,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             rlog(`[executeMark] 预览已开启，后台开始OCR: ${fileData.filename}`);
             const result = await api.extractDocumentFile(file, targetFields);
 
-            // 3. 缓存OCR结果（供triggerWebExtract复用，避免重复提取）
-            bgOcrResultRef.current = { dataUrl: fileData.dataUrl, result };
+            // 3. 缓存OCR结果（供triggerWebExtract复用，避免重复提取；记录引擎以便切换引擎后缓存失效）
+            bgOcrResultRef.current = { dataUrl: fileData.dataUrl, engine: settings.ocr_engine || "vision", result };
 
             // 4. 设置提取面板（OCR结果就绪）
             setDocExtractPanel({
@@ -5539,7 +6029,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               fields: result.fields,
               side,
               workflow: side === "left" ? "entry" : "review",
+              fallback: result.fallback,
+              sourceDataUrl: fileData.dataUrl,
+              targetFields,
+              altResult: null,
             });
+            setDocExtractActiveTab("primary");
             setDocWebStatus({ phase: "success", filename: result.filename, size: fileData.size });
             return result.text || "";
           };
@@ -5595,9 +6090,21 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             }
           };
 
-          // 3. 等待下载完成
+          // 3. 等待下载完成（先检测图片直览页：点击后直接预览图片、无下载按钮的场景）
           let downloadData: { filename: string; dataUrl: string; size: number; mime: string } | null = null;
           try {
+            const directFile = await grabDirectPreviewFile(side);
+            if (directFile) {
+              rlog(`[executeMark] 检测到图片预览页，直接抓取下载: ${directFile.filename}`);
+              const directOcrText = await showPreviewAndBgOcr(directFile);
+              if (!verifyFileMatchesRecord(directOcrText, record)) {
+                rlog(`[executeMark] 抓取的图片与该记录不匹配，触发保底机制`);
+                setDocWebStatus({ phase: "fallback-scanning", message: "抓取的图片与该学生不匹配，启动保底机制..." });
+                await runFallbackAndWait();
+              }
+              window.electronAPI?.setDownloadCapture(side, false).catch(() => {});
+              return;
+            }
             downloadData = await waitForDownload(side, 30000);
             rlog(`[executeMark] 下载完成: ${downloadData.filename} (${downloadData.size} bytes)`);
             // 4. 立即开预览 + 后台OCR提取
@@ -5629,7 +6136,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             var el = null;
             try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(mark.selector))}); } catch(e) { el = null; }
             if (!el) return { ok: false, reason: 'not_found' };
-            el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+            el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
             var linkEl = (el.closest && el.closest('a')) || (el.tagName === 'A' ? el : null);
             var imgEl = (el.tagName === 'IMG') ? el : (el.querySelector ? el.querySelector('img') : null);
             var url = '';
@@ -5667,7 +6174,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               fields: result.fields,
               side,
               workflow: side === "left" ? "entry" : "review",
+              fallback: result.fallback,
+              sourceDataUrl: docUrl,
+              targetFields,
+              altResult: null,
             });
+            setDocExtractActiveTab("primary");
           })
           .catch((e) => {
             rlog(`[executeMark] 文件提取失败: ${e instanceof Error ? e.message : String(e)}`);
@@ -5710,12 +6222,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         var el = null;
         try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(mark.selector))}); } catch(e) { el = null; }
         if (!el) return { ok: false, reason: 'not_found' };
-        el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+        el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
         return { ok: true };
       })();
     `;
     await window.electronAPI.viewExecuteJS(side, script);
-  }, [performInputValue, performRealClick, mappings, waitElementAppear, getRecordDocFields, waitForDownload]);
+  }, [performInputValue, performRealClick, mappings, waitElementAppear, getRecordDocFields, waitForDownload, triggerWebExtract, grabDirectPreviewFile]);
 
   // ============ 前端字段比对：执行完workflow后，直接从右侧BrowserView读取字段值与期望比对 ============
   // 不调用后端 startConfigurableVerify（它会通过Playwright重新导航页面，破坏LOOP当前状态）
@@ -6039,9 +6551,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           }
         }
         // 如果当前mark是doc web-download，额外加上开头点击步骤数（docExtractClickPhase !== "post"的）
+        // 排除 panelAction 标记（「录入提取」是面板动作，不会导致网页导航，不计入回退页数）
         if (mark.docSource === "web-download") {
           const docPreClicks = allMarks.filter(
-            (m, idx) => idx < mi && m.docExtractClick && m.docExtractClickPhase !== "post"
+            (m, idx) => idx < mi && m.docExtractClick && m.docExtractClickPhase !== "post" && !m.panelAction
           ).length;
           executedPreClicks += docPreClicks;
         }
@@ -6832,7 +7345,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     [selected, docCompareVal]
   );
 
-  /** 功能1 主流程：下载网页文档 URL → MarkItDown/OCR → 生成对比 → 切到文档tab */
+  /** 功能1 主流程：下载网页文档 URL → OCR/文档解析 → 生成对比 → 切到文档tab */
   const runDocExtractFromUrl = useCallback(
     async (url: string) => {
       setDocExtracting(true);
@@ -6855,6 +7368,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           file_url: url,
           processed_image: result.processed_image,
           mrz_warnings: result.mrz_warnings,
+          fallback: result.fallback,
         };
         const rid = selected?.record_id || "_default";
         setDocExtractsByRecord((prev) => {
@@ -6913,6 +7427,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           method: result.method,
           text: result.text,
           fields: result.fields,
+          fallback: result.fallback,
         });
         rlog(`[doc-fill] 文件提取完成: ${result.filename} (${result.method})，${Object.keys(result.fields).length} 个字段`);
       } catch (e) {
@@ -7284,10 +7799,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // ============ 键盘快捷键：S（输入）/ 空格（点击）/ R（撤销） ============
   // 用 ref 持有最新的状态和回调，handler 只在挂载时注册一次，
   // 避免状态变化时频繁 add/remove listener 导致按键"丢失"
+  const toggleWidgetExtractRef = useRef<() => void>(() => {});
   const kbStateRef = useRef({
     pickedMarks, avatarMode, selectMode, pendingAction,
     showSettings, replaying, addingClickMode, nextClickLabel: null as string | null,
+    fieldPanelActive: false, addingStepMode: null as "entry" | "review" | null,
     addingDocExtractMode: false, bindInputSide: null as null | "left" | "right" | "both",
+    customTextMode: false,
     removePickedMark, enterSelectMode, exitAvatarMode, exitSelectMode,
     setError, setInputTarget, setPendingAction, setPickTarget,
     setPendingInputValue, setPendingInputField,
@@ -7296,12 +7814,19 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setDocLocalFiles: (_v: any) => {}, setDocFileBindField: (_v: any) => {},
     setRightPicked: (_v: any) => {}, setLeftPicked: (_v: any) => {},
     commitInput, undoLastStep: () => {},
+    startAddingEntrySteps: () => {}, startAddingReviewSteps: () => {},
+    toggleCustomText: () => {}, startAddDocExtract: () => {},
+    addCustomTextEntry: () => {},
+    startAddClickStepPost: () => {}, startAddClickStepPhase: (_p: "pre" | "mid" | "post") => {}, toggleWidgetExtract: () => {},
+    toggleFieldSetup: () => {},
     undoDocExtractClick: async () => {}, docExtractGoBack: async () => {},
   });
   kbStateRef.current = {
     pickedMarks, avatarMode, selectMode, pendingAction,
     showSettings, replaying, addingClickMode, nextClickLabel,
+    fieldPanelActive, addingStepMode,
     addingDocExtractMode, bindInputSide,
+    customTextMode,
     removePickedMark, enterSelectMode, exitAvatarMode, exitSelectMode,
     setError, setInputTarget, setPendingAction, setPickTarget,
     setPendingInputValue, setPendingInputField,
@@ -7309,18 +7834,45 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setAddingDocExtractMode, setDocExtractSource, setDocLocalFiles, setDocFileBindField,
     setRightPicked, setLeftPicked,
     commitInput, undoLastStep,
+    startAddingEntrySteps, startAddingReviewSteps,
+    toggleCustomText, startAddDocExtract,
+    addCustomTextEntry,
+    startAddClickStepPost: () => startAddClickStep("post"), startAddClickStepPhase: (p) => startAddClickStep(p), toggleWidgetExtract: () => toggleWidgetExtractRef.current(),
+    toggleFieldSetup: () => setFieldSetupToggleSignal((v) => v + 1),
     undoDocExtractClick, docExtractGoBack,
   };
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       const s = kbStateRef.current;
       if (s.showSettings) return;
       if (s.replaying) return;
-
       const key = e.key;
+      // 表单字段中：不拦截字母键，保证正常输入
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      // 步骤设置快捷键：进入步骤设置模式（selectMode）或点击过字段面板后即可用。
+      // 放在按钮检查之前，确保焦点在面板按钮上时也能响应。
+      if (s.selectMode || s.fieldPanelActive) {
+        if (key === "l" || key === "L") { e.preventDefault(); s.toggleFieldSetup(); return; }
+        if (key === "q" || key === "Q") { e.preventDefault(); const inStepMode = s.addingStepMode === "entry" || s.addingStepMode === "review"; s.startAddClickStepPhase(inStepMode ? "mid" : "pre"); return; }
+        if (key === "w" || key === "W") { e.preventDefault(); s.startAddingEntrySteps(); return; }
+        if (key === "r" || key === "R") { e.preventDefault(); s.startAddingReviewSteps(); return; }
+        if (key === "t" || key === "T") {
+          e.preventDefault();
+          if (!s.customTextMode) {
+            s.toggleCustomText();
+          } else {
+            s.addCustomTextEntry();
+          }
+          return;
+        }
+        if (key === "f" || key === "F") { e.preventDefault(); s.startAddDocExtract(); return; }
+        if (key === "e" || key === "E") { e.preventDefault(); s.startAddClickStepPost(); return; }
+        if (key === "g" || key === "G") { e.preventDefault(); s.toggleWidgetExtract(); return; }
+      }
+      // 焦点在按钮上：忽略 S/Space 等通用快捷键（避免与按钮交互冲突）
+      if (t && t.tagName === "BUTTON") return;
       if (key === "s" || key === "S") {
         e.preventDefault();
         // S 输入模式：先点 Excel/网页取值，再点右侧目标输入框，最后 Enter 完成
@@ -7359,9 +7911,6 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         s.setNextClickLabel(null);
         s.setAddingClickMode(false);
         s.setPendingAction("click");
-      } else if (key === "r" || key === "R") {
-        e.preventDefault();
-        s.undoLastStep();
       } else if (s.addingDocExtractMode && docExtractSourceRef.current === "web") {
         // 文件提取网页模式专用快捷键（Ctrl+Z撤销/Backspace返回/任意键恢复光标）
         const curPhase = docWebStatusRef.current?.phase;
@@ -7383,6 +7932,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         }
         if (handled) return;
         // 未处理的键（如Escape）继续往下走
+      } else if ((e.ctrlKey || e.metaKey) && (key === "z" || key === "Z")) {
+        // Ctrl+Z：全局撤销（文件提取网页模式内的 Ctrl+Z 优先由上方分支处理）
+        e.preventDefault();
+        s.undoLastStep();
       }
       if (key === "Escape") {
         // 两级退出（与 Enter 等价）：
@@ -7458,13 +8011,20 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           return;
         }
       } else if (key === "Enter") {
-        // 两级退出（与 Esc 等价）：
+        // 快捷键优先级：
+        // 0. 映射配置中双侧已选好 → Enter 直接保存映射（最高优先）
         // 1. 文件提取配置模式 → 退出文件提取配置
         // 2. S 输入模式 → 完成填入并回到"搭建节点"状态（保持 selectMode）
         // 3. 教学"搜索"阶段 → 跳过搜索进入确认人物
         // 4. 点击模式 → 退出点击模式
         // 5. selectMode/avatarMode → 完全退出
         e.preventDefault();
+        if (mappingSaveTriggerRef.current) {
+          const fn = mappingSaveTriggerRef.current;
+          mappingSaveTriggerRef.current = null;
+          fn();
+          return;
+        }
         if (s.addingDocExtractMode) {
           s.setAddingDocExtractMode(false);
           s.setDocExtractSource(null);
@@ -7512,6 +8072,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     if (!window.electronAPI) return;
     const off = window.electronAPI.onViewMessage((msg) => {
       if (msg.payload?.kind !== "enter-pressed") return;
+      // 映射配置中双侧已选好 → Enter 直接保存映射（最高优先，与主窗口 Enter 一致）
+      if (mappingSaveTriggerRef.current) {
+        const fn = mappingSaveTriggerRef.current;
+        mappingSaveTriggerRef.current = null;
+        fn();
+        return;
+      }
       // click 模式下按 Enter：搜索阶段→跳过，其他→退出；input 模式下 commitInput
       if (pendingActionRef.current === "click") {
         if (nextClickLabelRef.current === "搜索") {
@@ -8073,8 +8640,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 教学模式向导：连续绑定右侧输入框
     // ⚠️ 绑定流程检查必须在 setRightPicked/setPickTarget 之前，否则会干扰绑定流程的状态
     const currentNextClickLabel = nextClickLabelRef.current;
-    // 放宽输入框判断：标准 input/textarea/select + contenteditable + role=textbox
-    const isInputLike = /^(input|textarea|select)$/i.test(info.tag || "") || !!info.isContentEditable || /^(text|search|email|tel|url|number|password)$/i.test(info.type || "");
+    // 放宽输入框判断：标准 input/textarea/select + contenteditable + role=textbox/searchbox + input type 兜底
+    const isInputLike = /^(input|textarea|select)$/i.test(info.tag || "") || !!info.isContentEditable || /^(text|search|email|tel|url|number|password)$/i.test(info.type || "") || /^(textbox|searchbox|combobox|spinbutton)$/i.test(info.role || "");
     // ⚠️ 右侧是填入目标，不在此处捕获来源字段值——来源值只在左侧 (onLeftPicked) 捕获，
     // 否则点击右侧按钮/链接等非输入元素会覆盖左侧已捕获的来源值，导致填入按钮文字而非字段值。
     // addingStepMode 下走普通映射流程，不触发教学模式直接创建 mark
@@ -8129,7 +8696,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           }
         }, 300);
       } else {
-        // 非输入框：真实点击并记录为点击步骤
+        // 非输入框：真实点击并记录为前置点击步骤
         rlog("[onRightPicked] ✅ 绑定模式真实点击右侧元素:", info.selector);
         await performRealClick("right", info.selector);
         addPickedMark({
@@ -8140,6 +8707,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           value: info.value,
           workflow: activePhase || "data-source",
           action: "click",
+          clickPhase: "pre",
           recordId: selected?.record_id,
           rect: info.rect,
           tag: info.tag,
@@ -8524,7 +9092,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           }
         }, 300);
       } else {
-        // 非输入框：真实点击并记录为点击步骤
+        // 非输入框：真实点击并记录为前置点击步骤
         rlog("[onLeftPicked] ✅ 绑定模式真实点击左侧元素:", info.selector);
         performRealClick("left", info.selector);
         addPickedMark({
@@ -8535,6 +9103,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           value: info.value,
           workflow: activePhase || "data-source",
           action: "click",
+          clickPhase: "pre",
           recordId: selected?.record_id,
           rect: info.rect,
           tag: info.tag,
@@ -8754,6 +9323,34 @@ type: info.type,
     setMappings((prev) => prev.filter((_, i) => i !== index));
   };
 
+  // 非新手模式（字段对比面板直接拾取）：ElementSelectBar 不渲染，无法驱动 onCanSaveChange /
+  // mappingSaveTriggerRef，因此在此根据两侧拾取状态计算 canSaveMapping 并挂载保存触发器，
+  // 确保"确定映射"按钮及 Enter 快捷键在映射完成后可用。
+  useEffect(() => {
+    if (settings.beginner_mode !== false) return; // 新手模式由 ElementSelectBar 自行驱动
+    const canSave = Boolean(rightPicked && leftPicked);
+    setCanSaveMapping(canSave);
+    if (canSave && rightPicked) {
+      mappingSaveTriggerRef.current = () => {
+        saveMapping({
+          right_selector: rightPicked.selector,
+          right_label: rightPicked.label || rightPicked.selector,
+          left_source: leftPicked?.tag === "excel-cell" ? "excel"
+            : leftPicked?.tag === "doc-extract" ? "passport"
+            : "database",
+          left_field: leftPicked?.selector || "",
+          verify_method: undefined,
+        });
+      };
+    } else {
+      mappingSaveTriggerRef.current = null;
+    }
+    return () => {
+      mappingSaveTriggerRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.beginner_mode, rightPicked, leftPicked]);
+
   // 删除提取元素步骤：根据 kind 和 id 路由到对应的数据源
   const removeExtractStep = useCallback((id: string, kind: "doc" | "custom" | "widget") => {
     if (kind === "widget") {
@@ -8777,17 +9374,17 @@ type: info.type,
   }, [removePickedMark, removeCustomTextEntry]);
 
   // ============ 控件提取模式（点击展开型控件：选项 / 日历） ============
+  // 一步到位：直接启动选项控件拾取（与绿色按钮等效），无需先开分配再点击
   const toggleWidgetExtract = useCallback(() => {
+    // toggle：已在控件提取模式 → 退出；否则直接启动拾取
     if (widgetExtractModeRef.current) {
-      rlog("[toggleWidgetExtract] 已在控件提取模式，退出所有设置模式");
       exitAllSetupModes();
       return;
     }
-    exitAllSetupModes();
-    setWidgetExtractMode(true);
-    // 提取元素面板自动切到「控件提取」TAB
-    requestExtractTab("widget");
-  }, [exitAllSetupModes]);
+    startWidgetPick("option");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  toggleWidgetExtractRef.current = toggleWidgetExtract;
 
   /**
    * 将控件草稿提交到 mappings 列表（使其出现在「已保存控件」中）。
@@ -8859,34 +9456,40 @@ type: info.type,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** 开始拾取控件触发框（左右两侧网页均可） */
+  /** 开始拾取控件触发框（左右两侧网页均可），不 toggle —— 始终启动新一轮拾取 */
   const startWidgetPick = useCallback((kind: "option" | "calendar") => {
-    if (widgetExtractModeRef.current) {
-      rlog("[startWidgetPick] 已在控件提取模式，退出所有设置模式");
-      exitAllSetupModes();
-      return;
-    }
-    exitAllSetupModes();
     // 若日历引导式拾取进行中，先取消并丢弃不完整 draft（引导未完成不应保存）
+    const wasInSplitView = docExtractSplitViewRef.current;
+    if (wasInSplitView) {
+      // 从「文件处理+提取元素」分屏中添加控件：保持分屏，让控件在提取元素面板内分栏出现
+      preserveSplitViewRef.current = true;
+    }
     if (calPickStepIdxRef.current !== null) {
+      exitAllSetupModes();
       setCalPickStepIdx(null);
       setWidgetRolePickingKey(null);
       setCalDayCellPicks([]);
       window.electronAPI?.viewSetMarqueeMode?.("right", false);
       window.electronAPI?.viewSetMarqueeMode?.("left", false);
-      window.electronAPI?.viewStopPicking("right").catch(() => {});
-      window.electronAPI?.viewStopPicking("left").catch(() => {});
       setWidgetDraft(null);
       setWidgetDraftBinding({ leftSource: "excel", leftField: "" });
     } else {
       // 如果有未保存的草稿，先自动保存（避免添加新控件时丢失前一个）
       const existingDraft = widgetDraftRef.current;
+      exitAllSetupModes();
       if (existingDraft) {
         commitWidgetDraft(existingDraft, widgetDraftBindingRef.current, { createMark: !!widgetDraftBindingRef.current.leftField.trim() });
-        setWidgetDraft(null);
-        setWidgetDraftBinding({ leftSource: "excel", leftField: "" });
       }
+      setWidgetDraft(null);
+      setWidgetDraftBinding({ leftSource: "excel", leftField: "" });
     }
+    // 分屏模式下恢复分屏状态（exitAllSetupModes 会清除 addingDocExtractMode，但我们要保持文件处理面板可见）
+    if (wasInSplitView) {
+      setDocExtractSplitView(true);
+    }
+    // 停止当前拾取（重新开始）
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
     setWidgetSnapshotError(null);
     setWidgetPickKind(kind);
     // 清理手动面板点选兜底状态（新一轮提取）
@@ -8903,12 +9506,21 @@ type: info.type,
     // 确保提取元素面板展开、widget TAB 在 FIFO 顺序中
     requestExtractTab("widget");
     setWidgetExtractMode(true);
+    // 分屏模式下自动触发提取元素面板内部左右分栏（左侧文件字段，右侧控件提取）
+    if (wasInSplitView) {
+      setSplitWidgetRequest(Date.now());
+      // 重置分屏保持标记：若 addingDocExtractMode 未发生变化（已经是 false），
+      // 监听 addingDocExtractMode 的 useEffect 不会触发；用 setTimeout 确保
+      // 在该 effect 执行之后再清除标记，避免误重置分屏
+      setTimeout(() => { preserveSplitViewRef.current = false; }, 0);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [exitAllSetupModes]);
 
   const cancelWidgetPick = useCallback(() => {
     setWidgetPickKind(null);
     setWidgetLeftPickingKey(null);
+    setWidgetPassportPickingKey(null);
     setCalPanelPickMode("idle");
     setCalPanelPickFailed(false);
     setPanelPickKind(null);
@@ -9312,10 +9924,19 @@ type: info.type,
   /** 请求从左侧网页拾取来源元素 */
   const pickWidgetLeftWeb = useCallback((key: string) => {
     setWidgetLeftPickingKey(key);
-    // 自动切到统一字段视图，方便用户选择面板字段卡片
-    requestExtractTab("custom");
+    // 自动进入左右分栏：右侧保留控件面板，左侧显示字段卡片（可选）并可直接点击左侧网页取值，
+    // 避免取值时把控件界面切走而需要手动点「分栏」
+    setSplitWidgetRequest(Date.now());
     window.electronAPI?.viewStopPicking("right").catch(() => {});
     window.electronAPI?.viewStartPicking("left").catch(() => {});
+  }, []);
+
+  /** 请求从「提取结果」面板拾取护照字段（光标可点选） */
+  const pickWidgetPassportField = useCallback((key: string) => {
+    setWidgetPassportPickingKey(key);
+    // 确保文件处理面板可见（两栏分屏）
+    setDocExtractSplitView(true);
+    setBottomPanelOpen(true);
   }, []);
 
   /** 请求重选单个选项按钮（inline 选项用）：直接在右侧网页拾取对应按钮元素 */
@@ -9530,6 +10151,34 @@ type: info.type,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, getRecordDocFields]);
 
+  /** 用户在「提取结果」面板点击了某个护照字段 → 完成控件绑定 */
+  const resolveWidgetPassportField = useCallback((fieldKey: string) => {
+    const key = widgetPassportPickingKeyRef.current;
+    if (!key) return;
+    setWidgetPassportPickingKey(null);
+    const binding: WidgetBinding = {
+      leftSource: "passport",
+      leftField: fieldKey,
+    };
+    if (key === "draft") {
+      setWidgetDraftBinding((prev) => ({ ...prev, ...binding }));
+    } else {
+      updateSavedWidgetBinding(key.replace(/^saved:/, ""), binding);
+    }
+    // 拾取完成后自动试跑
+    setTimeout(() => {
+      if (key === "draft" && widgetDraftRef.current) {
+        testWidget("draft", widgetDraftRef.current, { ...widgetDraftBinding, ...binding });
+      } else {
+        const savedKey = key.replace(/^saved:/, "");
+        const found = mappingsRef.current.find(m => m.right_selector === savedKey && m.widget);
+        if (found?.widget) {
+          testWidget(key, found.widget, binding);
+        }
+      }
+    }, 200);
+  }, [widgetDraftBinding, testWidget, updateSavedWidgetBinding]);
+
   /** 把控件绑定到「提取元素」面板中的自定义文本/文件字段条目（点击字段卡片取值） */
   const onWidgetPickExtractEntry = useCallback((entry: CustomTextEntry) => {
     const key = widgetLeftPickingKeyRef.current;
@@ -9695,7 +10344,7 @@ type: info.type,
     const off = window.electronAPI.onPanelAction((action, payload) => {
       switch (action) {
         case "select-record":
-          if (typeof payload === "string") setSelectedId(payload);
+          if (typeof payload === "string") handleSelectCard(payload);
           break;
         case "refresh-records":
           refreshRecords();
@@ -9897,6 +10546,7 @@ type: info.type,
               cardsGenerated,
               rowRange,
               hasCheckedBatch: checkedIds.size > 0,
+              beginnerMode: settings.beginner_mode !== false,
             });
           }
           break;
@@ -9904,7 +10554,7 @@ type: info.type,
       }
     });
     return off;
-  }, [refreshRecords, clearRecords, removeMapping, removePickedMark, clearPickedMarks, replayAll, stopReplay, advanceToReviewPhase, abortTeaching, goBackTeachingPhase, browserLeftDetached, browserRightDetached, bottomDetached, leftUrl, rightUrl, selectMode, pickTarget, avatarMode, pendingAction, teachingPhase, selected, mappings, result, report, loopReports, steps, shots, running, pickedMarks, replaying, replayCursor, rightPicked, leftPicked, selectedExcelColumn, bindInputSide, nextClickLabel, addingStepMode, addingClickMode, addingDocExtractMode, cardsGenerated, rowRange, pickLeftFromWeb, pickLeftFromExcel, resetMappingRound, saveMapping, startBindBothInputs, exitBindInputs, startConfirmPerson, startAddingReviewSteps, startAddingEntrySteps, exitAddingStepMode, startAddClickStep, exitAddClickMode, undoLastStep, startAddDocExtract, exitAddDocExtractMode, requestDocFileExtract, exitSelectMode, setShowSaveSkill, setSaveSkillRunAfter, handleQuickSaveLoop, handleSaveToBatch]);
+  }, [refreshRecords, clearRecords, removeMapping, removePickedMark, clearPickedMarks, replayAll, stopReplay, advanceToReviewPhase, abortTeaching, goBackTeachingPhase, browserLeftDetached, browserRightDetached, bottomDetached, leftUrl, rightUrl, selectMode, pickTarget, avatarMode, pendingAction, teachingPhase, selected, mappings, result, report, loopReports, steps, shots, running, pickedMarks, replaying, replayCursor, rightPicked, leftPicked, selectedExcelColumn, bindInputSide, nextClickLabel, addingStepMode, addingClickMode, addingDocExtractMode, cardsGenerated, rowRange, pickLeftFromWeb, pickLeftFromExcel, resetMappingRound, saveMapping, startBindBothInputs, exitBindInputs, startConfirmPerson, startAddingReviewSteps, startAddingEntrySteps, exitAddingStepMode, handleSelectCard, startAddClickStep, exitAddClickMode, undoLastStep, startAddDocExtract, exitAddDocExtractMode, requestDocFileExtract, exitSelectMode, setShowSaveSkill, setSaveSkillRunAfter, handleQuickSaveLoop, handleSaveToBatch]);
 
   // Excel 拾取：把字段包装成 PickedElementInfo，并打 tag 区分来源
   const onExcelPicked = (info: ExcelPickedField) => {
@@ -10040,14 +10690,14 @@ type: info.type,
   useEffect(() => {
     const api = window.electronAPI;
     if (!api) return;
-    const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel || executionPanelOpen || !!showCredentialsPanel || !!showBlockPanel;
+    const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel || showApplyLoop || executionPanelOpen || !!showCredentialsPanel || !!showBlockPanel;
     if (anyModalOpen) {
       api.modalOverlayEnter();
       return () => {
         api.modalOverlayExit();
       };
     }
-  }, [showSettings, docFillData, showSaveSkill, showSkillPanel, executionPanelOpen, showCredentialsPanel, showBlockPanel]);
+  }, [showSettings, docFillData, showSaveSkill, showSkillPanel, showApplyLoop, executionPanelOpen, showCredentialsPanel, showBlockPanel]);
 
   // ============ 核验 ============
   const start = async () => {
@@ -10204,6 +10854,38 @@ type: info.type,
     [mappings]
   );
 
+  // 控件提取结果字段：解析每个已保存控件的绑定值，用于在文件处理面板「提取结果」中统一展示
+  const widgetResultFields = useMemo(() => {
+    const fields: Array<{ key: string; label: string; value: string; kind: "option" | "calendar" }> = [];
+    for (const { mapping, widget } of savedWidgets) {
+      const label = widget.triggerLabel || mapping.right_label || (widget.kind === "option" ? "选项控件" : "日历控件");
+      let value = "";
+      switch (mapping.left_source) {
+        case "manual":
+          value = mapping.left_field || "";
+          break;
+        case "excel":
+          value = (selected?.fields as Record<string, string> | undefined)?.[mapping.left_field] || "";
+          break;
+        case "database":
+          value = mapping.left_field || "";
+          break;
+        case "passport":
+          value = currentDocExtract?.fields?.[mapping.left_field] || "";
+          break;
+      }
+      if (value && String(value).trim()) {
+        fields.push({
+          key: `widget_${mapping.right_selector}`,
+          label,
+          value: String(value),
+          kind: widget.kind,
+        });
+      }
+    }
+    return fields;
+  }, [savedWidgets, selected, currentDocExtract]);
+
   // 控件提取面板内容（渲染在 ResultsPanel 的「提取元素」卡片设置模式中）
   const widgetExtractContent = useMemo(() => {
     if (!widgetExtractMode && !widgetDraft && savedWidgets.length === 0) return null;
@@ -10234,6 +10916,8 @@ type: info.type,
         onPickRole={pickWidgetRole}
         onPickOption={pickWidgetOption}
         onPickLeftWeb={pickWidgetLeftWeb}
+        passportPickingKey={widgetPassportPickingKey}
+        onPickPassportField={pickWidgetPassportField}
         onTest={testWidget}
         calendarState={widgetCalendarState}
         calendarBusyKey={widgetCalendarBusyKey}
@@ -10294,13 +10978,13 @@ type: info.type,
   // 脱离模式：根据 URL query param 渲染独立面板窗口
   const detachMode = getDetachMode();
   if (detachMode === "left") return <DetachedLeftPanel />;
-  if (detachMode === "bottom") return <DetachedBottomPanel />;
+  if (detachMode === "bottom") return <DetachedBottomPanel onFieldPanelActive={() => setFieldPanelActive(true)} fieldSetupToggleSignal={fieldSetupToggleSignal} />;
   if (detachMode === "browser-left") return <DetachedBrowserPanel detachSide="browser-left" />;
   if (detachMode === "browser-right") return <DetachedBrowserPanel detachSide="browser-right" />;
   if (detachMode === "browser-excel") return <DetachedExcelPanel />;
 
   // 是否有模态/覆盖面板打开（此时需要隐藏 BrowserView，显示毛玻璃背景）
-  const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel || executionPanelOpen || !!showCredentialsPanel || !!showBlockPanel;
+  const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel || showApplyLoop || executionPanelOpen || !!showCredentialsPanel || !!showBlockPanel;
 
   return (
     <div className="flex h-full flex-col">
@@ -10324,11 +11008,7 @@ type: info.type,
             alt="CINSIDE icon"
             className="h-5 w-5"
           />
-          <img
-            src={splashSvg}
-            alt="CINSIDE"
-            className="h-5"
-          />
+          <LogoWordmark className="h-5 logo-wordmark" />
         </div>
         {/* UPDATER */}
         <div className="flex items-center gap-2" style={{WebkitAppRegion:"no-drag"}as React.CSSProperties}>
@@ -10413,10 +11093,10 @@ type: info.type,
         {/* SKILL 管理按钮 */}
         <button
           onClick={() => setShowSkillPanel(true)}
-          className="flex shrink-0 items-center gap-1 rounded-md bg-white/70 px-2 py-0.5 text-[11px] font-medium text-indigo-600 ring-1 ring-indigo-200 transition-all hover:bg-indigo-50 hover:text-indigo-700"
+          className="flex shrink-0 items-center gap-1 rounded-md bg-white/70 px-2 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-indigo-200 transition-all hover:bg-indigo-50 hover:text-slate-800"
           title="查看已保存的 Loop 模板并执行"
         >
-          <Sparkles className="h-3 w-3" />
+          <Sparkles className="h-3 w-3 text-indigo-500" />
           查看保存Loop
         </button>
 
@@ -10427,18 +11107,18 @@ type: info.type,
             "flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium ring-1 transition-all",
             dockOpen
               ? "bg-emerald-600 text-white ring-emerald-500 hover:bg-emerald-700"
-              : "bg-white/70 text-emerald-700 ring-emerald-200 hover:bg-emerald-50",
+              : "bg-white/70 text-slate-700 ring-emerald-200 hover:bg-emerald-50 hover:text-slate-800",
           ].join(" ")}
           title="站外循环：在屏幕边缘挂一个悬浮条，设置「提取源」和「操作页」后 AI 自主循环填写；数据痕迹见下方「站外循环记录」"
         >
-          <Bot className="h-3 w-3" />
+          <Bot className={`h-3 w-3 ${dockOpen ? "" : "text-emerald-600"}`} />
           {dockOpen ? "站外循环已开" : "站外循环"}
         </button>
 
         <div className="flex-1" />
 
-        {/* pendingAction 状态指示器（S 输入 / 空格点击） */}
-        {pendingAction !== "none" && (
+        {/* pendingAction 状态指示器（仅 S 输入模式显示；点击模式不显示提示） */}
+        {pendingAction === "input" && (
           <div className={[
             "flex shrink-0 items-center gap-1.5 rounded-md px-2 py-0.5 text-[11px] font-medium animate-glow-pulse",
             pendingAction === "input"
@@ -10474,22 +11154,6 @@ type: info.type,
               <X className="h-2.5 w-2.5" />
             </button>
           </div>
-        )}
-
-        {/* 快捷键提示：空闲时显示 S/Space/R/Enter 帮助 */}
-        {!replaying && (
-          pickedMarks.length > 0 ? (
-            <div className="hidden shrink-0 items-center gap-1 text-[10px] text-slate-400 lg:flex">
-              <kbd className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[9px]">S</kbd>
-              <span>输入</span>
-              <kbd className="ml-1 rounded bg-slate-100 px-1 py-0.5 font-mono text-[9px]">Space</kbd>
-              <span>点击</span>
-              <kbd className="ml-1 rounded bg-slate-100 px-1 py-0.5 font-mono text-[9px]">R</kbd>
-              <span>撤销</span>
-              <kbd className="ml-1 rounded bg-slate-100 px-1 py-0.5 font-mono text-[9px]">Enter</kbd>
-              <span>完成</span>
-            </div>
-          ) : null
         )}
 
         {/* 教学模式 / 录入流操作开关（仅录入模式显示"录入流操作"，LOOP/审查模式显示"教学模式"） */}
@@ -10732,6 +11396,14 @@ type: info.type,
         )}
 
         <button
+          onClick={refreshWorkspace}
+          className="rounded-md p-1 text-slate-400 hover:bg-white/70 hover:text-slate-600"
+          title="刷新：清空光标、步骤设置和字段对比（不刷新Excel）"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+        </button>
+
+        <button
           onClick={() => setShowSettings(true)}
           className="rounded-md p-1 text-slate-400 hover:bg-white/70 hover:text-slate-600"
           title="设置"
@@ -10780,7 +11452,7 @@ type: info.type,
             <LeftPanel
               records={cardRecords}
               selectedId={selectedId}
-              onSelect={setSelectedId}
+              onSelect={handleSelectCard}
               onRefresh={refreshRecords}
               onClear={clearRecords}
               recordResults={recordResults}
@@ -10889,6 +11561,7 @@ type: info.type,
                   url={leftUrl}
                   onUrlChange={setLeftUrl}
                   overlayActive={anyModalOpen}
+                  brightness={settings.browser_brightness ?? 1.0}
                   enableTabs={true}
                   enableViewSwitch={true}
                   viewMode={leftViewMode}
@@ -11035,6 +11708,7 @@ type: info.type,
                   url={rightUrl}
                   onUrlChange={setRightUrl}
                   overlayActive={anyModalOpen}
+                  brightness={settings.browser_brightness ?? 1.0}
                   enableTabs={true}
                   enableViewSwitch={true}
                   viewMode={rightViewMode}
@@ -11184,7 +11858,7 @@ type: info.type,
             )}
           </div>
 
-          {/* 垂直可拖拽分隔条：仅在审查面板可见时显示 */}
+          {/* 垂直可拖拽分隔条：仅在审查面板可见时显示；双击最大化/还原 */}
           {bottomPanelOpen && !bottomDetached && (
             <div
               className="relative z-10 h-1.5 shrink-0 cursor-row-resize select-none"
@@ -11194,7 +11868,16 @@ type: info.type,
                 document.body.style.cursor = "row-resize";
                 document.body.style.userSelect = "none";
               }}
-              title="拖拽调整审查面板高度"
+              onDoubleClick={() => {
+                if (prevBottomHeightRef.current !== null) {
+                  setBottomPanelHeight(prevBottomHeightRef.current);
+                  prevBottomHeightRef.current = null;
+                } else {
+                  prevBottomHeightRef.current = bottomPanelHeight;
+                  setBottomPanelHeight(80);
+                }
+              }}
+              title="拖拽调整高度，双击最大化/还原"
             >
               <div className="absolute inset-x-0 top-1/2 h-0.5 -translate-y-1/2 bg-slate-200 hover:bg-brand-300" />
             </div>
@@ -11314,6 +11997,8 @@ type: info.type,
                     widgetExtractMode={widgetExtractMode}
                     widgetCount={savedWidgets.length}
                     onToggleWidgetExtract={toggleWidgetExtract}
+                    saveTriggerRef={mappingSaveTriggerRef}
+                    onCanSaveChange={setCanSaveMapping}
                   />
                 </div>
               )}
@@ -11351,16 +12036,23 @@ type: info.type,
                   activeDocIndex={safeDocIndex}
                   onSelectDocIndex={setActiveDocIndex}
                   docExtracting={docExtracting}
+                  ocrEngine={settings.ocr_engine || "vision"}
+                  onChangeOcrEngine={handleChangeOcrEngine}
                   switchToDocSignal={docSignal}
                   addingStepMode={addingStepMode}
+                  onFieldPanelActive={() => setFieldPanelActive(true)}
+                  fieldSetupToggleSignal={fieldSetupToggleSignal}
                   onPickExtractedField={onPickExtractedField}
                   docLocalConfigContent={addingDocExtractMode && (docExtractSource === "choose" || docExtractSource === "local" || docExtractSource === "web") ? (
                     <DocLocalExtractConfig
                       mode={docExtractSource}
+                      hideHeader={docExtractSource === "choose"}
                       excelFields={excelFields}
                       selectedExcelColumn={selectedExcelColumn}
                       docFileBindField={docFileBindField}
                       onSetDocFileBindField={setDocFileBindField}
+                      ocrEngine={(settings.ocr_engine as "vision" | "umi") || "vision"}
+                      onChangeOcrEngine={handleChangeOcrEngine}
                       onChooseWeb={chooseDocExtractWeb}
                       onChooseLocal={chooseDocExtractLocal}
                       onExitChoose={exitAddDocExtractMode}
@@ -11382,7 +12074,7 @@ type: info.type,
                       onConfirm={confirmDocLocalExtract}
                       // 网页模式内嵌提取结果（替代外部弹窗）
                       webResult={docExtractSource === "web" ? docExtractPanel : null}
-                      onCloseWebResult={() => { setDocExtractPanel(null); setSameNameImages(null); }}
+                      onCloseWebResult={() => { setDocExtractPanel(null); setSameNameImages(null); sourceFieldValueRef.current = ""; sourceFieldLabelRef.current = ""; setDocExtractActiveTab("primary"); setDocAltExtracting(false); }}
                       webSameNameImages={sameNameImages}
                       webFindingSameName={findingSameName}
                       onFindSameName={findSameNameImages}
@@ -11392,11 +12084,19 @@ type: info.type,
                       onQuickUploadDoc={(fileData) => startQuickUpload(fileData)}
                       onToast={(msg) => setSuccessToast(msg)}
                       onError={(msg) => setError(msg)}
+                      // 双引擎对比
+                      webAltResult={docExtractSource === "web" ? docExtractPanel?.altResult ?? null : null}
+                      webActiveTab={docExtractActiveTab}
+                      onSwitchWebTab={setDocExtractActiveTab}
+                      onReExtractAlt={reExtractWithAltEngine}
+                      webAltExtracting={docAltExtracting}
                       // 源文件预览（字段送「提取元素」后仍保留显示）
                       sourcePreview={docSourcePreview}
                       onCloseSourcePreview={() => setDocSourcePreview(null)}
                       // 预览就绪后点击触发 OCR
-                      onTriggerWebExtract={triggerWebExtract}
+                      onTriggerWebExtract={handleTriggerWebExtractClick}
+                      // 提取失败后重试
+                      onRetryWebExtract={retryWebExtract}
                       // 保底机制人工审查
                       onSelectFallbackFile={selectFallbackFile}
                       onConfirmFallbackFile={() => {
@@ -11407,13 +12107,31 @@ type: info.type,
                           const status = docWebStatusRef.current;
                           const fallbackSide = status.phase === "fallback-review" ? status.side : "right";
                           if (!fallbackWaitResolveRef.current && !batchRunning) {
-                            // 非LOOP模式，走手动提取流程
+                            // 非LOOP模式，走手动提取流程 —— 先记录面板点击为过程点击
                             pendingWebFileRef.current = {
                               dataUrl: file.dataUrl,
                               filename: file.filename,
                               size: file.size,
                               side: fallbackSide,
                             };
+                            const inNavClick = addingClickModeRef.current &&
+                              (addingClickPhaseRef.current === "pre" || addingClickPhaseRef.current === "mid");
+                            const workflow: "entry" | "review" = fallbackSide === "left" ? "entry" : "review";
+                            addPickedMark({
+                              side: fallbackSide,
+                              source: "web",
+                              selector: "panel://doc-web-extract-fallback",
+                              label: `文件提取过程点击 · 确认选择并提取（${file.filename}）`,
+                              workflow,
+                              action: "click",
+                              recordId: selected?.record_id,
+                              docExtractClick: true,
+                              docExtractClickPhase: "mid",
+                              panelAction: "doc-web-extract",
+                              clickPhase: inNavClick ? (addingClickPhaseRef.current as "pre" | "mid") : "mid",
+                              inPopup: false,
+                            });
+                            setSuccessToast("已记录过程点击：确认选择并提取");
                             triggerWebExtract();
                           }
                         }
@@ -11436,7 +12154,8 @@ type: info.type,
                     />
                   ) : undefined}
                   focusPanel={
-                    docExtractSplitView ? "doc-extract" as const
+                    docExtractSplitView
+                      ? null
                     : addingDocExtractMode ? (settings.beginner_mode === false ? null : (docExtractSource === "choose" ? "doc" as const : "field-doc" as const))
                     : customTextMode ? null
                     : widgetExtractMode ? null
@@ -11450,13 +12169,18 @@ type: info.type,
                   onStartAddPreClick={() => startAddClickStep("pre")}
                   onStartBindInputs={startBindBothInputs}
                   bindInputActive={!!bindInputSide}
-                  bindStepCount={0}
+                  bindStepCount={pickedMarks.filter((m) => m.action === "input" || (m.action === "click" && m.clickPhase === "pre")).length}
                   preClickActive={addingClickMode && addingClickPhase === "pre"}
                   onStartAddProcessClick={() => startAddClickStep("mid")}
                   processClickActive={addingClickMode && addingClickPhase === "mid"}
                   onStartAddPostClick={() => startAddClickStep("post")}
                   postClickActive={addingClickMode && addingClickPhase === "post"}
                   onStartAddDocExtract={startAddDocExtract}
+                  onAutoOpenDocChoose={openDocChoosePanel}
+                  onChooseDocWeb={chooseDocExtractWeb}
+                  onChooseDocLocal={chooseDocExtractLocal}
+                  docConfigChooseMode={addingDocExtractMode && docExtractSource === "choose"}
+                  onExitDocChoose={exitAddDocExtractMode}
                   docExtractActive={addingDocExtractMode}
                   onSwitchStepMode={(mode) => {
                     if (addingStepModeRef.current === mode) {
@@ -11464,8 +12188,20 @@ type: info.type,
                       exitAllSetupModes();
                       return;
                     }
+                    // 先退出所有其他模式（互斥），再走完整激活流程：
+                    // startAdding* 会设置 selectMode/pickTarget/teachingPhase 并激活网页拾取光标
                     exitAllSetupModes();
-                    setAddingStepMode(mode);
+                    if (mode === "entry") startAddingEntrySteps();
+                    else startAddingReviewSteps();
+                  }}
+                  onExitAddingStepMode={exitAddingStepMode}
+                  canSaveMapping={canSaveMapping}
+                  onConfirmMapping={() => {
+                    if (mappingSaveTriggerRef.current) {
+                      const fn = mappingSaveTriggerRef.current;
+                      mappingSaveTriggerRef.current = null;
+                      fn();
+                    }
                   }}
                   reviewMappings={mappings}
                   onRemoveMark={removePickedMark}
@@ -11486,6 +12222,7 @@ type: info.type,
                   }}
                   onSaveToBatch={handleSaveToBatch}
                   onRequestSaveLoop={() => { setSaveSkillRunAfter(false); setShowSaveSkill(true); }}
+                  onRequestApplyLoop={() => setShowApplyLoop(true)}
                   onDirectRun={finishTeachingAndRunBatch}
                   canSaveLoop={pickedMarks.filter(m => m.action === "input" || m.action === "click").length > 0}
                   hasCheckedBatch={checkedIds.size > 0}
@@ -11502,18 +12239,18 @@ type: info.type,
                   }}
                   extractStepSummary={extractStepSummary}
                   widgetExtractContent={widgetExtractContent}
+                  widgetResultFields={widgetResultFields}
+                  widgetPassportPickingKey={widgetPassportPickingKey}
+                  onResolvePassportField={resolveWidgetPassportField}
+                  onCancelPassportPicking={() => setWidgetPassportPickingKey(null)}
                   widgetTabs={widgetTabs}
                   onAddWidget={startWidgetPick}
                   onAddCustomText={toggleCustomText}
                   widgetSetupSignal={widgetExtractMode}
+                  splitWidgetRequest={splitWidgetRequest}
+                  docSplitView={docExtractSplitView}
                   records={records}
-                  onSelectRecord={(id) => {
-                    setSelectedId(id);
-                    setBottomPanelOpen(true);
-                    exitAddingStepMode();
-                    setDocExtractSplitView(false);
-                    setDocSignal((s) => s + 1);
-                  }}
+                  onSelectRecord={handleSelectCard}
                   execPhase={execPhase}
                   currentMarkOrder={batchMarkCursor?.markOrder ?? null}
                   activeVerifyIdx={verifyFieldIdx}
@@ -11634,6 +12371,8 @@ type: info.type,
                     widgetExtractMode={widgetExtractMode}
                     widgetCount={savedWidgets.length}
                     onToggleWidgetExtract={toggleWidgetExtract}
+                    saveTriggerRef={mappingSaveTriggerRef}
+                    onCanSaveChange={setCanSaveMapping}
                   />
                 </div>
               )}
@@ -11715,6 +12454,8 @@ type: info.type,
                 widgetExtractMode={widgetExtractMode}
                 widgetCount={savedWidgets.length}
                 onToggleWidgetExtract={toggleWidgetExtract}
+                saveTriggerRef={mappingSaveTriggerRef}
+                onCanSaveChange={setCanSaveMapping}
               />
             </div>
           )}
@@ -11725,12 +12466,46 @@ type: info.type,
       {showSettings && (
         <SettingsModal
           initial={{ ...settings, ui_scale: uiScale }}
-          onClose={() => setShowSettings(false)}
+          onClose={() => {
+            // 关闭时取消未执行的 rAF，避免拖拽回调在弹窗关闭后才触发
+            if (brightnessRafRef.current) { cancelAnimationFrame(brightnessRafRef.current); brightnessRafRef.current = 0; }
+            if (scaleRafRef.current) { cancelAnimationFrame(scaleRafRef.current); scaleRafRef.current = 0; }
+            setShowSettings(false);
+          }}
           onScaleChange={(scale) => {
-            setUiScale(scale);
-            uiScaleRef.current = scale;
-            try { localStorage.setItem("cinside-ui-scale", scale.toString()); } catch {}
-            window.dispatchEvent(new Event("resize"));
+            // rAF 节流：拖拽滑块时每帧最多应用一次 zoom，避免高频 setZoomFactor + resize 卡顿
+            pendingScaleRef.current = scale;
+            if (scaleRafRef.current) return;
+            scaleRafRef.current = requestAnimationFrame(() => {
+              scaleRafRef.current = 0;
+              const s = pendingScaleRef.current;
+              setUiScale(s);
+              uiScaleRef.current = s;
+              try { localStorage.setItem("cinside-ui-scale", s.toString()); } catch {}
+              window.dispatchEvent(new Event("resize"));
+            });
+          }}
+          onAppearanceChange={(theme, accent) => {
+            // 即时生效：直接写入 DOM，不等待保存
+            // 临时禁用所有过渡，避免数百个 transition-all 元素同时动画导致卡顿
+            const root = document.documentElement;
+            root.classList.add("no-transitions");
+            root.setAttribute("data-theme", theme === "dark" ? "dark" : "light");
+            root.setAttribute("data-accent", accent || "indigo");
+            // 强制重排后下一帧恢复过渡
+            void root.offsetWidth;
+            requestAnimationFrame(() => root.classList.remove("no-transitions"));
+          }}
+          onBrightnessChange={(val) => {
+            // rAF 节流 + 直接 IPC：拖拽时每帧最多调用一次，不经过 setSettings 避免整个 App 树重渲染
+            pendingBrightnessRef.current = val;
+            if (brightnessRafRef.current) return;
+            brightnessRafRef.current = requestAnimationFrame(() => {
+              brightnessRafRef.current = 0;
+              const v = pendingBrightnessRef.current;
+              window.electronAPI?.viewSetBrightness?.("left", v);
+              window.electronAPI?.viewSetBrightness?.("right", v);
+            });
           }}
           onSaved={(s) => {
             setSettings(s);
@@ -11826,6 +12601,8 @@ type: info.type,
           onClose={() => {
             setDocExtractPanel(null);
             setSameNameImages(null);
+            sourceFieldValueRef.current = "";
+            sourceFieldLabelRef.current = "";
           }}
           sameNameImages={sameNameImages}
           findingSameName={findingSameName}
@@ -11884,12 +12661,14 @@ type: info.type,
         />
       )}
 
-      {/* ============ SKILL 管理面板 ============ */}
+      {/* ============ SKILL 管理面板（含应用 LOOP 模式） ============ */}
       <SkillPanel
-        open={showSkillPanel}
-        onClose={() => setShowSkillPanel(false)}
-        onRunSkill={handleRunSkill}
-        onEditFlow={(tpl) => { setEditingFlowTemplate(tpl); setShowSkillPanel(false); }}
+        open={showSkillPanel || showApplyLoop}
+        applyMode={showApplyLoop && !showSkillPanel}
+        onClose={() => { setShowSkillPanel(false); setShowApplyLoop(false); }}
+        onRunSkill={(tpl) => { setShowSkillPanel(false); handleRunSkill(tpl); }}
+        onApplySkill={handleApplyLoop}
+        onEditFlow={(tpl) => { setEditingFlowTemplate(tpl); setShowSkillPanel(false); setShowApplyLoop(false); }}
         onSkillsChange={() => setSkillVersion((v) => v + 1)}
       />
 
