@@ -53,6 +53,25 @@ PYTHON_DEPS = [
 TOOLS_DIR = _USER_DATA_DIR / "tools"
 UMI_OCR_INSTALL_DIR = TOOLS_DIR / "Umi-OCR"
 
+# Remotion 视频渲染工具（npm 包，安装在独立目录）
+REMOTION_INSTALL_DIR = TOOLS_DIR / "remotion"
+REMOTION_PACKAGES = [
+    "remotion",
+    "@remotion/cli",
+    "@remotion/renderer",
+    "@remotion/bundler",
+    "react",
+    "react-dom",
+]
+REMOTION_MARKER_FILE = REMOTION_INSTALL_DIR / "node_modules" / "remotion" / "package.json"
+
+# OfficeCLI 文档操作工具（npm 包 @officecli/officecli，安装在独立目录）
+OFFICECLI_INSTALL_DIR = TOOLS_DIR / "officecli"
+OFFICECLI_PACKAGE = "@officecli/officecli"
+OFFICECLI_MARKER_FILE = (
+    OFFICECLI_INSTALL_DIR / "node_modules" / "@officecli" / "officecli" / "package.json"
+)
+
 # 下载进度回调类型：(downloaded_bytes: int, total_bytes: int) -> None
 ProgressCb = Callable[[int, int], None]
 
@@ -726,10 +745,178 @@ def download_and_install_umi_ocr_stream():
         yield event
 
 
+# ─── Remotion 视频渲染工具 ───────────────────────────────────────
+
+def check_remotion_installed() -> dict:
+    """检查 Remotion 是否已安装（通过 node_modules 中的标记文件）。"""
+    installed = REMOTION_MARKER_FILE.exists()
+    version = ""
+    if installed:
+        try:
+            import json
+            data = json.loads(REMOTION_MARKER_FILE.read_text(encoding="utf-8"))
+            version = data.get("version", "")
+        except Exception:
+            pass
+    return {
+        "installed": installed,
+        "path": str(REMOTION_INSTALL_DIR),
+        "version": version,
+    }
+
+
+def install_remotion() -> tuple[bool, str]:
+    """通过 npm 在独立目录中安装 Remotion 及其渲染所需依赖。
+
+    Returns:
+        (success, message)
+    """
+    import shutil
+    import subprocess
+
+    npm = shutil.which("npm")
+    if not npm:
+        return False, "未找到 npm，请先安装 Node.js（建议 v18+）"
+
+    try:
+        REMOTION_INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+
+        # 如果没有 package.json，先初始化
+        pkg_json = REMOTION_INSTALL_DIR / "package.json"
+        if not pkg_json.exists():
+            init = subprocess.run(
+                [npm, "init", "-y"],
+                cwd=str(REMOTION_INSTALL_DIR),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if init.returncode != 0:
+                return False, f"npm init 失败：{init.stderr.strip() or init.stdout.strip()}"
+
+        # 安装 Remotion 及渲染依赖
+        install_cmd = [npm, "install", *REMOTION_PACKAGES]
+        result = subprocess.run(
+            install_cmd,
+            cwd=str(REMOTION_INSTALL_DIR),
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "").strip()
+            return False, f"npm install 失败：{err[-500:]}"
+
+        # 验证标记文件
+        if not REMOTION_MARKER_FILE.exists():
+            return False, "安装已完成但未找到 remotion 包文件，请检查网络或重试"
+
+        version = ""
+        try:
+            import json
+            data = json.loads(REMOTION_MARKER_FILE.read_text(encoding="utf-8"))
+            version = data.get("version", "")
+        except Exception:
+            pass
+
+        msg = "Remotion 安装成功"
+        if version:
+            msg += f"（v{version}）"
+        return True, msg
+
+    except subprocess.TimeoutExpired:
+        return False, "安装超时（超过 10 分钟），请检查网络后重试"
+    except Exception as e:
+        return False, f"安装 Remotion 时出错：{e}"
+
+
+def check_officecli_installed() -> dict:
+    """检查 OfficeCLI 是否已安装（通过 node_modules 中的标记文件）。"""
+    installed = OFFICECLI_MARKER_FILE.exists()
+    version = ""
+    if installed:
+        try:
+            import json
+            data = json.loads(OFFICECLI_MARKER_FILE.read_text(encoding="utf-8"))
+            version = data.get("version", "")
+        except Exception:
+            pass
+    return {
+        "installed": installed,
+        "path": str(OFFICECLI_INSTALL_DIR),
+        "version": version,
+    }
+
+
+def install_officecli() -> tuple[bool, str]:
+    """通过 npm 在独立目录中安装 @officecli/officecli。
+
+    Returns:
+        (success, message)
+    """
+    npm = shutil.which("npm")
+    if not npm:
+        return False, "未找到 npm，请先安装 Node.js（建议 v18+）"
+
+    try:
+        OFFICECLI_INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+
+        # 如果没有 package.json，先初始化
+        pkg_json = OFFICECLI_INSTALL_DIR / "package.json"
+        if not pkg_json.exists():
+            init = subprocess.run(
+                [npm, "init", "-y"],
+                cwd=str(OFFICECLI_INSTALL_DIR),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if init.returncode != 0:
+                return False, f"npm init 失败：{init.stderr.strip() or init.stdout.strip()}"
+
+        # 安装 @officecli/officecli
+        result = subprocess.run(
+            [npm, "install", OFFICECLI_PACKAGE],
+            cwd=str(OFFICECLI_INSTALL_DIR),
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "").strip()
+            return False, f"npm install 失败：{err[-500:]}"
+
+        # 验证标记文件
+        if not OFFICECLI_MARKER_FILE.exists():
+            return False, "安装已完成但未找到 officecli 包文件，请检查网络或重试"
+
+        version = ""
+        try:
+            import json
+            data = json.loads(OFFICECLI_MARKER_FILE.read_text(encoding="utf-8"))
+            version = data.get("version", "")
+        except Exception:
+            pass
+
+        msg = "OfficeCLI 安装成功"
+        if version:
+            msg += f"（v{version}）"
+        return True, msg
+
+    except subprocess.TimeoutExpired:
+        return False, "安装超时（超过 10 分钟），请检查网络后重试"
+    except Exception as e:
+        return False, f"安装 OfficeCLI 时出错：{e}"
+
+
 def get_all_deps_status() -> dict:
     """返回所有依赖和工具的综合状态（供前端一次请求获取）。"""
     python_deps = check_all_python_deps()
     umi_ocr = check_umi_ocr_installed()
+    remotion = check_remotion_installed()
+    officecli = check_officecli_installed()
 
     python_all_installed = all(d["installed"] for d in python_deps)
     umi_online = False
@@ -759,5 +946,7 @@ def get_all_deps_status() -> dict:
             **umi_ocr,
             "service_online": umi_online,
         },
+        "remotion": remotion,
+        "officecli": officecli,
         "tools_dir": str(TOOLS_DIR),
     }
