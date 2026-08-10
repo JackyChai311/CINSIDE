@@ -67,6 +67,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   viewHide: (side) => ipcRenderer.invoke("view-hide", side),
   viewHideAll: () => ipcRenderer.invoke("view-hide-all"),
   viewSetZoom: (side, factor) => ipcRenderer.invoke("view-set-zoom", side, factor),
+  viewSetBrightness: (side, value) => ipcRenderer.invoke("view-set-brightness", side, value),
 
   // 在指定 view 中执行 JS
   viewExecuteJS: (side, script) => ipcRenderer.invoke("view-execute-js", side, script),
@@ -109,6 +110,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // === 文件提取保底机制 ===
   viewGetDownloadableLinks: (side) => ipcRenderer.invoke("view-get-downloadable-links", side),
   viewBatchDownloadUrls: (side, urls, timeoutMs) => ipcRenderer.invoke("view-batch-download-urls", side, urls, timeoutMs),
+  // 图片直览页抓取：点击后直接预览图片（无下载按钮）时，按 URL 主动下载
+  viewDownloadSingleUrl: (side, url, timeoutMs) => ipcRenderer.invoke("view-download-single-url", side, url, timeoutMs),
 
   // === 本地文件提取：选择目录 + 读取文件 ===
   pickLocalDirectory: () => ipcRenderer.invoke("pick-local-directory"),
