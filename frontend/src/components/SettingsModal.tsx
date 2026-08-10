@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Compass, Download, Eye, EyeOff, Loader2, Maximize2, Minus, Moon, Package, Palette, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, Sun, X, XCircle } from "lucide-react";
+import { CheckCircle2, Compass, Download, Eye, EyeOff, Film, Loader2, Maximize2, Minus, Moon, Package, Palette, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, Sun, X, XCircle } from "lucide-react";
 import { api } from "../api/client";
 import type { AppSettings, DepsStatus } from "../types";
 
@@ -60,6 +60,8 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
     message: string;
     mirror: string;
   } | null>(null);
+  const [remotionInstalling, setRemotionInstalling] = useState(false);
+  const [remotionMsg, setRemotionMsg] = useState<{ ok: boolean; message: string } | null>(null);
 
   useEffect(() => {
     api.getSettings()
@@ -244,6 +246,22 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
       }
     } finally {
       setUmiDownloading(false);
+    }
+  };
+
+  const handleInstallRemotion = async () => {
+    setRemotionInstalling(true);
+    setRemotionMsg(null);
+    try {
+      const r = await api.installRemotion();
+      setRemotionMsg({ ok: r.ok, message: r.message });
+      if (r.ok) {
+        await refreshDepsStatus();
+      }
+    } catch (e: any) {
+      setRemotionMsg({ ok: false, message: e.message || "安装失败" });
+    } finally {
+      setRemotionInstalling(false);
     }
   };
 
@@ -885,6 +903,70 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
                 下载解压后，在文件处理设置中选择 Umi-OCR.exe。
               </p>
             </div>
+          </div>
+
+          {/* Remotion 视频渲染引擎 —— 最下方 */}
+          <div className="rounded-xl border border-brand-200 bg-brand-50/40 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                <Film className="h-3.5 w-3.5 text-brand-600" />
+                Remotion（PPT 转视频渲染引擎）
+              </div>
+              {depsStatus ? (
+                depsStatus.remotion.installed ? (
+                  <span className="flex items-center gap-0.5 rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700">
+                    <CheckCircle2 className="h-2.5 w-2.5" />
+                    已安装{depsStatus.remotion.version ? ` v${depsStatus.remotion.version}` : ""}
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-0.5 rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-medium text-slate-500">
+                    <XCircle className="h-2.5 w-2.5" />
+                    未安装
+                  </span>
+                )
+              ) : (
+                <Loader2 className="h-3 w-3 animate-spin text-slate-400" />
+              )}
+            </div>
+            {depsStatus?.remotion.path && (
+              <p className="mb-2 truncate text-[9px] text-slate-400" title={depsStatus.remotion.path}>
+                📁 {depsStatus.remotion.path}
+              </p>
+            )}
+            <p className="mb-3 text-[9px] leading-relaxed text-slate-400">
+              Remotion 是基于 React 的可编程视频渲染框架，用于将 PPT 自动合成为视频。
+              首次使用需通过 npm 下载安装（需要 Node.js 环境，约 100-200MB）。
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleInstallRemotion}
+                disabled={remotionInstalling}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-brand-600 px-3 py-2 text-[11px] font-medium text-white hover:bg-brand-700 disabled:opacity-60"
+              >
+                {remotionInstalling ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                {remotionInstalling
+                  ? "安装中…"
+                  : depsStatus?.remotion.installed
+                    ? "重新下载安装 Remotion"
+                    : "一键下载 Remotion"}
+              </button>
+              <button
+                type="button"
+                onClick={refreshDepsStatus}
+                disabled={remotionInstalling}
+                className="flex items-center justify-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-[11px] font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-60"
+                title="检查 Remotion 是否已安装"
+              >
+                <ShieldCheck className="h-3 w-3" />
+                检查
+              </button>
+            </div>
+            {remotionMsg && (
+              <div className={`mt-2 whitespace-pre-line rounded px-2 py-1 text-[10px] ${remotionMsg.ok ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
+                {remotionMsg.message}
+              </div>
+            )}
           </div>
 
           {error && (
