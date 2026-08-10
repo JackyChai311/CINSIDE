@@ -1,7 +1,9 @@
 import { useCallback, useMemo, useRef, useState, type DragEvent, type ClipboardEvent, type ChangeEvent } from "react";
-import { Check, Play, Pencil, Trash2, X, Sparkles, GitBranch, ImagePlus, Search, Layers } from "lucide-react";
+import { Check, Play, Pencil, Trash2, X, Sparkles, GitBranch, ImagePlus, Search, Layers, Share2, KeyRound, Copy, Download, Loader2, Wifi, WifiOff } from "lucide-react";
 import type { WorkflowTemplate, AppMode } from "../types";
-import { loadSkills, deleteSkill, updateSkillMeta, getDefaultIcons } from "../lib/skills";
+import { loadSkills, deleteSkill, updateSkillMeta, getDefaultIcons, importSkill } from "../lib/skills";
+import { encodeShareCode, decodeShareCode } from "../lib/skillShare";
+import { api } from "../api/client";
 
 interface SkillPanelProps {
   open: boolean;
@@ -48,6 +50,23 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const pendingSkillId = useRef<string | null>(null);
 
+  // 分享码状态
+  const [shareSkill, setShareSkill] = useState<WorkflowTemplate | null>(null);
+  const [shareCode, setShareCode] = useState("");
+  const [shareEncoding, setShareEncoding] = useState(false);
+  const [shareError, setShareError] = useState("");
+  const [shareCopied, setShareCopied] = useState(false);
+  const [shareMode, setShareMode] = useState<"online" | "offline">("online");
+  const [shareOnlineCode, setShareOnlineCode] = useState("");
+  const [shareOfflineCode, setShareOfflineCode] = useState("");
+  const [shareOnlineError, setShareOnlineError] = useState("");
+  // 导入码状态
+  const [importOpen, setImportOpen] = useState(false);
+  const [importCode, setImportCode] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState("");
+  const [importSuccess, setImportSuccess] = useState("");
+
   const refresh = () => {
     setSkills(loadSkills());
     onSkillsChange?.();
@@ -56,6 +75,170 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
   const handleDelete = (id: string) => {
     deleteSkill(id);
     refresh();
+  };
+
+  const handleShare = async (skill: WorkflowTemplate) => {
+    setShareSkill(skill);
+    setShareCode("");
+    setShareError("");
+    setShareCopied(false);
+    setShareOnlineCode("");
+    setShareOfflineCode("");
+    setShareOnlineError("");
+    setShareMode("online");
+    setShareEncoding(true);
+
+    // 同时发起：GitHub 联网短码 + 离线码（离线码作为兜底，立即可用）
+    const offlinePromise = encodeShareCode(skill).then((code) => {
+      setShareOfflineCode(code);
+      return code;
+    }).catch(() => "");
+
+    try {
+      const resp = await api.createShare(skill);
+      if (resp.ok && resp.code) {
+        setShareOnlineCode(resp.code);
+        setShareCode(resp.code);
+      } else {
+        setShareOnlineError(resp.error || "联网分享不可用");
+        setShareMode("offline");
+      }
+    } catch (e: any) {
+      setShareOnlineError(e?.message || "联网分享失败");
+      setShareMode("offline");
+    }
+
+    try {
+      const offline = await offlinePromise;
+      if (!shareOnlineCode) {
+        setShareCode(offline);
+      }
+    } catch {
+      // 离线码也失败才报错
+      if (!shareOnlineCode) {
+        setShareError("生成分享码失败");
+      }
+    } finally {
+      setShareEncoding(false);
+    }
+  };
+
+  const switchShareMode = (mode: "online" | "offline") => {
+    setShareMode(mode);
+    setShareCode(mode === "online" ? shareOnlineCode : shareOfflineCode);
+    setShareCopied(false);
+  };
+
+  const handleCopyCode = async () => {
+    if (!shareCode) return;
+    try {
+      await navigator.clipboard.writeText(shareCode);
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 2000);
+    } catch {
+      const ta = document.getElementById("share-code-area") as HTMLTextAreaElement | null;
+      ta?.select();
+      document.execCommand("copy");
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 2000);
+    }
+  };
+
+  const closeShare = () => {
+    setShareSkill(null);
+    setShareCode("");
+    setShareError("");
+    setShareCopied(false);
+    setShareOnlineCode("");
+    setShareOfflineCode("");
+    setShareOnlineError("");
+  };
+
+  const openImport = () => {
+    setImportOpen(true);
+    setImportCode("");
+    setImportError("");
+    setImportSuccess("");
+  };
+
+  const buildTemplateFromShareData = (data: any): WorkflowTemplate => {
+    const now = Date.now();
+    return {
+      id: `tpl_${now}_${Math.random().toString(36).slice(2, 8)}`,
+      name: String(data?.name || "未命名模板"),
+      description: data?.description,
+      icon: data?.icon,
+      iconImage: data?.iconImage,
+      createdAt: now,
+      updatedAt: now,
+      mode: data?.mode || "loop",
+      dataSourceMarks: Array.isArray(data?.dataSourceMarks) ? data.dataSourceMarks : [],
+      reviewMarks: Array.isArray(data?.reviewMarks) ? data.reviewMarks : [],
+      entryMarks: Array.isArray(data?.entryMarks) ? data.entryMarks : [],
+      mappings: Array.isArray(data?.mappings) ? data.mappings : undefined,
+      flowGraph: data?.flowGraph,
+      hasSearchSteps: !!data?.hasSearchSteps,
+      hasSubmitStep: !!data?.hasSubmitStep,
+    };
+  };
+
+  const handleImport = async () => {
+    const code = importCode.trim();
+    if (!code) {
+      setImportError("请粘贴分享码");
+      return;
+    }
+    setImporting(true);
+    setImportError("");
+    setImportSuccess("");
+    try {
+      let template: WorkflowTemplate | null = null;
+
+      // CSG: 开头 = GitHub 联网短码
+      if (code.toUpperCase().startsWith("CSG:")) {
+        const resp = await api.fetchShare(code);
+        if (!resp.ok || !resp.template) {
+          setImportError(resp.error || "获取分享失败");
+          return;
+        }
+        template = buildTemplateFromShareData(resp.template);
+      } else if (code.toUpperCase().startsWith("CSL1:")) {
+        // CSL1: 开头 = 离线 base64 码
+        const result = await decodeShareCode(code);
+        if (!result.ok || !result.template) {
+          setImportError(result.error || "解析分享码失败");
+          return;
+        }
+        template = result.template;
+      } else if (/^[0-9a-f]{20,}$/i.test(code)) {
+        // 纯 hex（gist ID），尝试联网获取
+        const resp = await api.fetchShare(`CSG:${code}`);
+        if (resp.ok && resp.template) {
+          template = buildTemplateFromShareData(resp.template);
+        } else {
+          setImportError(resp.error || "未找到该分享码对应的卡片");
+          return;
+        }
+      } else {
+        setImportError("无法识别的分享码格式（应以 CSG: 或 CSL1: 开头）");
+        return;
+      }
+
+      if (template) {
+        importSkill(template);
+        refresh();
+        setImportSuccess(`已导入：${template.name}`);
+        setTimeout(() => {
+          setImportOpen(false);
+          setImportCode("");
+          setImportSuccess("");
+        }, 1200);
+      }
+    } catch (e: any) {
+      setImportError(e?.message || "导入失败");
+    } finally {
+      setImporting(false);
+    }
   };
 
   const startEdit = (skill: WorkflowTemplate) => {
@@ -220,8 +403,16 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
               </p>
             </div>
             <button
+              onClick={openImport}
+              className="flex items-center gap-1.5 rounded-xl bg-white/60 px-3 py-2 text-[12px] font-medium text-slate-600 shadow-sm ring-1 ring-white/20 backdrop-blur-sm transition-all hover:bg-white hover:text-violet-600 hover:ring-violet-200 dark:bg-slate-900/40 dark:text-slate-300 dark:ring-white/5 dark:hover:bg-slate-800/60 dark:hover:text-violet-300"
+              title="输入分享密钥导入 LOOP 卡片"
+            >
+              <KeyRound className="h-3.5 w-3.5" />
+              导入密钥
+            </button>
+            <button
               onClick={onClose}
-              className="ml-auto flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-all hover:bg-white/10 hover:text-slate-600 dark:hover:text-slate-200"
+              className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-all hover:bg-white/10 hover:text-slate-600 dark:hover:text-slate-200"
               title="关闭"
             >
               <X className="h-5 w-5" />
@@ -461,6 +652,13 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                             </div>
                             <div className="flex shrink-0 items-center gap-1">
                               <button
+                                onClick={(e) => { e.stopPropagation(); handleShare(skill); }}
+                                className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-sky-50 hover:text-sky-500 dark:hover:bg-sky-500/10 dark:hover:text-sky-400 opacity-70 group-hover:opacity-100"
+                                title="生成分享密钥"
+                              >
+                                <Share2 className="h-3.5 w-3.5" />
+                              </button>
+                              <button
                                 onClick={(e) => { e.stopPropagation(); startEdit(skill); }}
                                 className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-300 opacity-70 group-hover:opacity-100"
                                 title="编辑"
@@ -540,6 +738,13 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                             </div>
                             <div className="flex shrink-0 items-center gap-1">
                               <button
+                                onClick={(e) => { e.stopPropagation(); handleShare(skill); }}
+                                className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-sky-50 hover:text-sky-500 dark:hover:bg-sky-500/10 dark:hover:text-sky-400 opacity-70 group-hover:opacity-100"
+                                title="生成分享密钥"
+                              >
+                                <Share2 className="h-3.5 w-3.5" />
+                              </button>
+                              <button
                                 onClick={(e) => { e.stopPropagation(); startEdit(skill); }}
                                 className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-300 opacity-70 group-hover:opacity-100"
                                 title="编辑"
@@ -599,6 +804,188 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
           onChange={handleFileChange}
         />
       </div>
+
+      {/* 分享密钥模态框 */}
+      {shareSkill && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          onClick={closeShare}
+        >
+          <div
+            className="w-[min(560px,calc(100vw-2rem))] rounded-2xl bg-white p-6 shadow-2xl ring-1 ring-black/5 dark:bg-slate-800 dark:ring-white/10"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-400 to-cyan-500 text-white shadow-md shadow-sky-500/25">
+                <Share2 className="h-5 w-5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-base font-bold text-slate-800 dark:text-slate-100">分享 LOOP 卡片</h3>
+                <p className="mt-0.5 text-[12px] text-slate-500 dark:text-slate-400">
+                  将下方密钥发给他人，对方在「导入密钥」中粘贴即可获得「{shareSkill.name}」
+                </p>
+              </div>
+              <button
+                onClick={closeShare}
+                className="flex h-8 w-8 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-4">
+              {shareEncoding ? (
+                <div className="flex items-center justify-center gap-2 rounded-xl bg-slate-50 py-8 text-[13px] text-slate-400 dark:bg-slate-900/40">
+                  <Loader2 className="h-4 w-4 animate-spin text-sky-500" />
+                  正在生成分享密钥…
+                </div>
+              ) : shareError ? (
+                <div className="rounded-xl bg-rose-50 py-6 text-center text-[13px] text-rose-600 dark:bg-rose-500/10 dark:text-rose-400">
+                  {shareError}
+                </div>
+              ) : (
+                <>
+                  {/* 在线/离线切换 */}
+                  {(shareOnlineCode || shareOnlineError) && shareOfflineCode && (
+                    <div className="mb-3 flex gap-1 rounded-xl bg-slate-100 p-1 dark:bg-slate-900/50">
+                      <button
+                        onClick={() => switchShareMode("online")}
+                        disabled={!shareOnlineCode}
+                        className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-medium transition-all ${
+                          shareMode === "online"
+                            ? "bg-white text-sky-600 shadow-sm dark:bg-slate-700 dark:text-sky-400"
+                            : "text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                        } ${!shareOnlineCode ? "cursor-not-allowed opacity-40" : ""}`}
+                      >
+                        <Wifi className="h-3.5 w-3.5" />
+                        联网短码
+                      </button>
+                      <button
+                        onClick={() => switchShareMode("offline")}
+                        className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-medium transition-all ${
+                          shareMode === "offline"
+                            ? "bg-white text-violet-600 shadow-sm dark:bg-slate-700 dark:text-violet-400"
+                            : "text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                        }`}
+                      >
+                        <WifiOff className="h-3.5 w-3.5" />
+                        离线码
+                      </button>
+                    </div>
+                  )}
+
+                  {shareMode === "online" && shareOnlineError && !shareOnlineCode && (
+                    <div className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-[11px] text-amber-700 dark:bg-amber-500/10 dark:text-amber-400">
+                      联网分享不可用：{shareOnlineError}
+                    </div>
+                  )}
+
+                  {shareMode === "online" && shareOnlineCode && (
+                    <div className="mb-2 flex items-center gap-1.5 text-[11px] text-emerald-600 dark:text-emerald-400">
+                      <Wifi className="h-3 w-3" />
+                      联网短码 · 对方只需联网即可导入，无需其他配置
+                    </div>
+                  )}
+                  {shareMode === "offline" && (
+                    <div className="mb-2 flex items-center gap-1.5 text-[11px] text-slate-400">
+                      <WifiOff className="h-3 w-3" />
+                      离线码 · 无需联网，但密钥较长
+                    </div>
+                  )}
+
+                  <textarea
+                    id="share-code-area"
+                    readOnly
+                    value={shareCode}
+                    rows={shareMode === "online" ? 2 : 5}
+                    className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50 p-3 font-mono text-[11px] leading-relaxed text-slate-700 outline-none dark:border-white/10 dark:bg-slate-900/50 dark:text-slate-300"
+                    onFocus={(e) => e.currentTarget.select()}
+                    onClick={(e) => (e.currentTarget as HTMLTextAreaElement).select()}
+                  />
+                  <div className="mt-2 flex items-center justify-between text-[11px] text-slate-400">
+                    <span>
+                      {shareMode === "online" ? `短码长度：${shareCode.length} 字符` : `密钥长度：${(shareCode.length / 1024).toFixed(1)} KB`}
+                    </span>
+                    <span>已自动剥离本地文件内容</span>
+                  </div>
+                  <button
+                    onClick={handleCopyCode}
+                    className={`mt-3 flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-[13px] font-semibold text-white shadow-md transition-all active:scale-[0.98] ${
+                      shareCopied
+                        ? "bg-emerald-500 shadow-emerald-500/25"
+                        : shareMode === "online"
+                          ? "bg-gradient-to-r from-sky-500 to-cyan-500 shadow-sky-500/25 hover:shadow-lg hover:shadow-sky-500/30"
+                          : "bg-gradient-to-r from-violet-500 to-indigo-500 shadow-violet-500/25 hover:shadow-lg hover:shadow-violet-500/30"
+                    }`}
+                  >
+                    {shareCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                    {shareCopied ? "已复制到剪贴板" : "复制密钥"}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 导入密钥模态框 */}
+      {importOpen && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          onClick={() => !importing && setImportOpen(false)}
+        >
+          <div
+            className="w-[min(560px,calc(100vw-2rem))] rounded-2xl bg-white p-6 shadow-2xl ring-1 ring-black/5 dark:bg-slate-800 dark:ring-white/10"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 text-white shadow-md shadow-violet-500/25">
+                <KeyRound className="h-5 w-5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-base font-bold text-slate-800 dark:text-slate-100">导入 LOOP 卡片</h3>
+                <p className="mt-0.5 text-[12px] text-slate-500 dark:text-slate-400">
+                  粘贴他人分享的密钥（CSG: 联网短码 或 CSL1: 离线码），即可获取 LOOP 卡片
+                </p>
+              </div>
+              <button
+                onClick={() => !importing && setImportOpen(false)}
+                className="flex h-8 w-8 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-4">
+              <textarea
+                value={importCode}
+                onChange={(e) => { setImportCode(e.target.value); setImportError(""); }}
+                placeholder="在此粘贴分享密钥（CSG: 联网短码 或 CSL1: 离线码）…"
+                rows={5}
+                disabled={importing}
+                className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50 p-3 font-mono text-[11px] leading-relaxed text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-violet-300 focus:ring-2 focus:ring-violet-400/20 dark:border-white/10 dark:bg-slate-900/50 dark:text-slate-300 dark:placeholder:text-slate-600"
+              />
+              {importError && (
+                <p className="mt-2 text-[12px] text-rose-500">{importError}</p>
+              )}
+              {importSuccess && (
+                <p className="mt-2 flex items-center gap-1 text-[12px] text-emerald-600 dark:text-emerald-400">
+                  <Check className="h-3.5 w-3.5" />
+                  {importSuccess}
+                </p>
+              )}
+              <button
+                onClick={handleImport}
+                disabled={importing || !importCode.trim()}
+                className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-violet-500 to-indigo-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-md shadow-violet-500/25 transition-all hover:shadow-lg hover:shadow-violet-500/30 active:scale-[0.98] disabled:opacity-50"
+              >
+                {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                {importing ? "正在导入…" : "导入卡片"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
