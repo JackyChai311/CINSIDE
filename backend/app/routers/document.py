@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import logging
+import traceback
 from typing import Optional
 
 import httpx
@@ -13,6 +15,17 @@ from pydantic import BaseModel
 
 from ..services.document_extract import extract_document, preview_document
 from ..services.doc_convert import convert_document
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_err_msg(e: Exception, fallback: str = "未知错误") -> str:
+    """确保异常消息不为空，方便前端展示。"""
+    msg = str(e).strip()
+    if msg:
+        return msg
+    # 空消息时用异常类型名作为兜底
+    return f"{fallback}（{type(e).__name__}）"
 
 router = APIRouter(prefix="/api/document", tags=["document"])
 
@@ -99,19 +112,27 @@ async def preview_from_url(body: PreviewUrlBody):
 async def extract_upload(
     file: UploadFile = File(...),
     fields: Optional[str] = Form(default=None),
+    engine: Optional[str] = Form(default=None),
 ):
-    """上传本地文件（图片/PDF/Office），提取文字 + 可选字段结构化。"""
+    """上传本地文件（图片/PDF/Office），提取文字 + 可选字段结构化。
+
+    engine: 可选，临时指定 OCR 引擎（"umi" 或 "vision"），不传则用全局设置。
+    """
     content = await file.read()
     if not content:
         raise HTTPException(400, "empty file")
     if len(content) > 30 * 1024 * 1024:
         raise HTTPException(400, "文件过大（>30MB）")
     try:
-        result = await extract_document(content, file.filename or "upload.bin", _parse_fields(fields))
+        result = await extract_document(content, file.filename or "upload.bin", _parse_fields(fields), engine=engine)
     except RuntimeError as e:
-        raise HTTPException(500, str(e))
+        msg = _safe_err_msg(e, "提取失败")
+        logger.warning("文档提取 RuntimeError: %s\n%s", msg, traceback.format_exc())
+        raise HTTPException(500, msg)
     except Exception as e:
-        raise HTTPException(400, f"提取失败: {e}")
+        msg = _safe_err_msg(e, "提取失败")
+        logger.error("文档提取异常: %s\n%s", msg, traceback.format_exc())
+        raise HTTPException(400, f"提取失败: {msg}")
     return result
 
 
@@ -119,6 +140,7 @@ class ExtractUrlBody(BaseModel):
     url: str
     filename: Optional[str] = None
     fields: Optional[str] = None  # 逗号分隔的目标字段
+    engine: Optional[str] = None  # 临时指定 OCR 引擎（"umi" 或 "vision"）
 
 
 @router.post("/extract-url")
@@ -170,11 +192,15 @@ async def extract_from_url(body: ExtractUrlBody):
         filename = f"download{ext}"
 
     try:
-        result = await extract_document(content, filename, _parse_fields(body.fields))
+        result = await extract_document(content, filename, _parse_fields(body.fields), engine=body.engine)
     except RuntimeError as e:
-        raise HTTPException(500, str(e))
+        msg = _safe_err_msg(e, "提取失败")
+        logger.warning("URL文档提取 RuntimeError: %s\n%s", msg, traceback.format_exc())
+        raise HTTPException(500, msg)
     except Exception as e:
-        raise HTTPException(400, f"提取失败: {e}")
+        msg = _safe_err_msg(e, "提取失败")
+        logger.error("URL文档提取异常: %s\n%s", msg, traceback.format_exc())
+        raise HTTPException(400, f"提取失败: {msg}")
     return result
 
 
