@@ -265,7 +265,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   umi_ocr_port: 1224,
   prevent_accidental_close: false,
   ui_scale: 1.0,
-  beginner_mode: true,
+  beginner_mode: false,
   theme: "light",
   accent: "indigo",
   browser_brightness: 1.0,
