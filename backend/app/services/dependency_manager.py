@@ -488,6 +488,244 @@ def download_and_install_umi_ocr(progress_cb: ProgressCb | None = None) -> tuple
         ), ""
 
 
+def download_and_install_umi_ocr_stream():
+    """流式版本：yield 进度事件字典，供 SSE endpoint 使用。
+
+    在后台线程中执行下载，通过队列实时推送进度到生成器。
+
+    事件格式：
+      {"stage": "fetching",    "message": "..."}
+      {"stage": "downloading", "downloaded": n, "total": n, "mirror": "...", "message": "..."}
+      {"stage": "extracting",  "message": "..."}
+      {"stage": "done",        "ok": true, "message": "...", "exe_path": "..."}
+      {"stage": "error",       "ok": false, "message": "..."}
+    """
+    import queue
+    import threading
+
+    q: queue.Queue = queue.Queue()
+    SENTINEL = {"_done": True}
+
+    def _worker():
+        """后台线程：执行下载并通过队列推送进度。"""
+        try:
+            q.put({"stage": "fetching", "message": "正在获取最新版本信息…"})
+
+            # 用短超时获取版本信息，失败立即用已知版本兜底
+            release_info = None
+            try:
+                with httpx.Client(timeout=6.0, trust_env=True, follow_redirects=True) as client:
+                    resp = client.get(
+                        UMI_OCR_REPO_API,
+                        headers={"Accept": "application/vnd.github+json"},
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    assets = []
+                    for a in data.get("assets", []):
+                        assets.append({
+                            "name": a.get("name", ""),
+                            "browser_download_url": a.get("browser_download_url", ""),
+                            "size": a.get("size", 0),
+                        })
+                    if assets:
+                        release_info = {"tag_name": data.get("tag_name", ""), "assets": assets}
+            except Exception:
+                pass
+
+            if not release_info:
+                # 兜底：使用内置已知版本
+                tag = _KNOWN_LATEST_TAG
+                base = f"https://github.com/hiroi-sora/Umi-OCR/releases/download/{tag}"
+                release_info = {
+                    "tag_name": tag,
+                    "assets": [
+                        {
+                            "name": a["name"],
+                            "browser_download_url": f"{base}/{a['name']}",
+                            "size": a.get("size", 0),
+                        }
+                        for a in _KNOWN_LATEST_ASSETS
+                    ],
+                }
+
+            tag = release_info["tag_name"]
+            asset = _select_umi_ocr_asset(release_info["assets"])
+
+            if not asset:
+                tag = _KNOWN_LATEST_TAG
+                base = f"https://github.com/hiroi-sora/Umi-OCR/releases/download/{tag}"
+                asset = {
+                    "name": _KNOWN_LATEST_ASSETS[0]["name"],
+                    "browser_download_url": f"{base}/{_KNOWN_LATEST_ASSETS[0]['name']}",
+                    "size": _KNOWN_LATEST_ASSETS[0]["size"],
+                }
+
+            asset_name = asset["name"]
+            download_url = asset["browser_download_url"]
+            total_size = int(asset.get("size", 0))
+
+            get_tools_dir()
+            if UMI_OCR_INSTALL_DIR.exists():
+                shutil.rmtree(UMI_OCR_INSTALL_DIR, ignore_errors=True)
+            UMI_OCR_INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+
+            # 镜像优先（国内 GitHub 直连经常超时），直连作为后备
+            all_candidates = _build_download_candidates(download_url)
+            # 把镜像排到前面：GitHub 直连放最后
+            mirror_candidates = [(l, u) for l, u in all_candidates if "GitHub 直连" not in l]
+            direct_candidates = [(l, u) for l, u in all_candidates if "GitHub 直连" in l]
+            candidates = mirror_candidates + direct_candidates
+
+            archive_path = TOOLS_DIR / asset_name
+            used_label = ""
+            errors: list[str] = []
+
+            for i, (label, url) in enumerate(candidates):
+                try:
+                    q.put({
+                        "stage": "downloading",
+                        "downloaded": 0,
+                        "total": total_size,
+                        "mirror": label,
+                        "message": f"正在通过{label}下载（{total_size / (1024*1024):.0f} MB）…",
+                    })
+
+                    last_emitted_pct = -1
+
+                    def _on_progress(downloaded: int, total: int, _label=label):
+                        nonlocal last_emitted_pct
+                        if total > 0:
+                            pct = int(downloaded * 100 / total)
+                            if pct >= last_emitted_pct + 2:
+                                last_emitted_pct = pct
+                                q.put({
+                                    "stage": "downloading",
+                                    "downloaded": downloaded,
+                                    "total": total,
+                                    "mirror": _label,
+                                    "message": f"正在通过{_label}下载… {pct}%",
+                                })
+
+                    # 短连接超时（8s），读超时给足（300s）
+                    with httpx.Client(
+                        timeout=httpx.Timeout(300.0, connect=8.0),
+                        trust_env=True,
+                        follow_redirects=True,
+                    ) as client:
+                        with client.stream("GET", url) as resp:
+                            resp.raise_for_status()
+                            stream_total = int(resp.headers.get("content-length", 0)) or total_size
+                            downloaded = 0
+                            with open(archive_path, "wb") as f:
+                                for chunk in resp.iter_bytes(chunk_size=1024 * 256):
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    _on_progress(downloaded, stream_total)
+
+                    if archive_path.exists() and archive_path.stat().st_size > 1024 * 1024:
+                        used_label = label
+                        final_size = archive_path.stat().st_size
+                        q.put({
+                            "stage": "downloading",
+                            "downloaded": final_size,
+                            "total": final_size,
+                            "mirror": label,
+                            "message": "下载完成，正在解压…",
+                        })
+                        break
+                    errors.append(f"{label}：下载文件过小或为空")
+                    if archive_path.exists():
+                        archive_path.unlink(missing_ok=True)
+                except Exception as e:
+                    errors.append(f"{label}：{e}")
+                    if archive_path.exists():
+                        archive_path.unlink(missing_ok=True)
+
+                if i < len(candidates) - 1:
+                    next_label = candidates[i + 1][0]
+                    q.put({
+                        "stage": "downloading",
+                        "downloaded": 0,
+                        "total": total_size,
+                        "mirror": next_label,
+                        "message": f"{label}失败，正在尝试{next_label}…",
+                    })
+
+            if not used_label:
+                raise RuntimeError("所有下载通道均失败：\n" + "\n".join(errors))
+
+            q.put({"stage": "extracting", "message": "正在解压安装包，请稍候…"})
+            _extract_archive(archive_path, UMI_OCR_INSTALL_DIR)
+
+            try:
+                archive_path.unlink()
+            except Exception:
+                pass
+
+            exe_path = _get_umi_ocr_exe_in_dir(UMI_OCR_INSTALL_DIR)
+            if not exe_path:
+                for item in UMI_OCR_INSTALL_DIR.rglob("Umi-OCR.exe"):
+                    if item.is_file():
+                        exe_path = item
+                        break
+
+            if not exe_path:
+                q.put({
+                    "stage": "error",
+                    "ok": False,
+                    "message": (
+                        f"UMI-OCR {tag} 下载解压完成，但未找到 Umi-OCR.exe。\n"
+                        f"解压目录：{UMI_OCR_INSTALL_DIR}"
+                    ),
+                })
+                return
+
+            exe_str = str(exe_path)
+            settings.update_from_dict({"umi_ocr_exe_path": exe_str})
+            try:
+                settings.persist()
+            except Exception:
+                pass
+
+            q.put({
+                "stage": "done",
+                "ok": True,
+                "message": (
+                    f"UMI-OCR {tag} 安装成功！\n"
+                    f"路径已自动保存。使用前请在 UMI-OCR 中开启「HTTP接口服务」（默认端口 1224）。"
+                ),
+                "exe_path": exe_str,
+            })
+
+        except Exception as e:
+            q.put({
+                "stage": "error",
+                "ok": False,
+                "message": (
+                    f"下载安装失败：{e}\n\n"
+                    f"可手动下载：\n"
+                    f"1. 蓝奏云镜像（国内推荐）：{UMI_OCR_MIRROR_URL}\n"
+                    f"2. GitHub Releases：https://github.com/hiroi-sora/Umi-OCR/releases"
+                ),
+            })
+        finally:
+            q.put(SENTINEL)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+    while True:
+        try:
+            event = q.get(timeout=1.0)
+        except Exception:
+            # queue.Empty：继续等，保持生成器活跃
+            continue
+        if "_done" in event:
+            break
+        yield event
+
+
 def get_all_deps_status() -> dict:
     """返回所有依赖和工具的综合状态（供前端一次请求获取）。"""
     python_deps = check_all_python_deps()
