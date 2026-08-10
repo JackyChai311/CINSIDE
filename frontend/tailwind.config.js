@@ -5,11 +5,13 @@ export default {
     extend: {
       colors: {
         brand: {
-          50: "#eef2ff",
-          100: "#e0e7ff",
-          500: "#6366f1",
-          600: "#4f46e5",
-          700: "#4338ca",
+          50: "var(--brand-50, #eef2ff)",
+          100: "var(--brand-100, #e0e7ff)",
+          300: "var(--brand-300, #a5b4fc)",
+          400: "var(--brand-400, #818cf8)",
+          500: "var(--brand-500, #6366f1)",
+          600: "var(--brand-600, #4f46e5)",
+          700: "var(--brand-700, #4338ca)",
         },
       },
       fontFamily: {
