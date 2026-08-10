@@ -596,7 +596,7 @@ export default function LeftPanel({
                     )}
                     {/* 群组头部：展开按钮 + 范围信息 */}
                     {showGroupHeader && (
-                      <div className="relative mb-1 flex items-center gap-1.5 rounded-lg border border-indigo-300 bg-indigo-50/80 px-2 py-1.5 shadow-sm">
+                      <div className="group-header-bar relative mb-1 flex items-center gap-1.5 rounded-lg border border-indigo-300 bg-indigo-50/80 px-2 py-1.5 shadow-sm">
                         <span className="flex items-center gap-1 text-[10px] font-semibold text-indigo-700">
                           <Check className="h-3 w-3" strokeWidth={3} />
                           群组 {firstCheckedIdx + 1}–{lastCheckedIdx + 1}（{checkedIds!.size} 张）
@@ -624,7 +624,7 @@ export default function LeftPanel({
 
                         {/* 浮动操作面板：自定义 / 适配已有循环 */}
                         {showGroupPanel && (
-                          <div className="absolute left-0 right-0 top-full z-[9999] mt-1 rounded-lg border border-slate-200 bg-white p-1.5 shadow-xl">
+                          <div className="group-panel-dropdown absolute left-0 right-0 top-full z-[9999] mt-1 rounded-lg border border-slate-200 bg-white p-1.5 shadow-xl">
                             <div className="mb-1 px-1 text-[9px] font-semibold uppercase tracking-wide text-slate-400">选择执行方式</div>
                             {onRunCheckedLoop && (
                               <button
