@@ -7,6 +7,8 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  CirclePause,
+  AlertOctagon,
   Columns2,
   Crosshair,
   Database,
@@ -23,6 +25,7 @@ import {
   MoveRight,
   Play,
   Plus,
+  RefreshCw,
   RotateCcw,
   RotateCw,
   Save,
@@ -111,6 +114,10 @@ interface Props {
   ocrEngine?: string;
   /** 切换 OCR 引擎（识图AI ↔ UMI-OCR） */
   onChangeOcrEngine?: (engine: "vision" | "umi") => void;
+  /** 文件提取步骤的断点状态：undefined=无断点，"always"=强制断点，"on-error"=条件断点 */
+  docBreakpoint?: "always" | "on-error";
+  /** 循环切换文件提取步骤的断点：无→强制→条件→无 */
+  onToggleDocBreakpoint?: () => void;
   switchToDocSignal?: number;
   /** 外部信号：递增时切换字段对比面板的「步骤设置/结果显示」模式（L 快捷键） */
   fieldSetupToggleSignal?: number;
@@ -186,6 +193,8 @@ interface Props {
   onRequestApplyLoop?: () => void;
   /** 直接执行当前配置（临时运行，不保存） */
   onDirectRun?: () => void;
+  /** 刷新工作区：清空光标、步骤设置和字段对比 */
+  onRefresh?: () => void;
   /** 是否有可保存/执行的步骤（控制按钮禁用态） */
   canSaveLoop?: boolean;
   /** 当前是否有勾选的卡片（控制"保存到这批"按钮显隐） */
@@ -264,6 +273,8 @@ export default function ResultsPanel({
   docExtracting = false,
   ocrEngine = "vision",
   onChangeOcrEngine,
+  docBreakpoint,
+  onToggleDocBreakpoint,
   addingStepMode = null,
   onPickExtractedField,
   docLocalConfigContent,
@@ -301,6 +312,7 @@ export default function ResultsPanel({
   onRequestSaveLoop,
   onRequestApplyLoop,
   onDirectRun,
+  onRefresh,
   canSaveLoop = false,
   hasCheckedBatch = false,
   customTextContent,
@@ -369,6 +381,8 @@ export default function ResultsPanel({
           docExtracting={docExtracting}
           ocrEngine={ocrEngine}
           onChangeOcrEngine={onChangeOcrEngine}
+          docBreakpoint={docBreakpoint}
+          onToggleDocBreakpoint={onToggleDocBreakpoint}
           shots={shots}
           running={running}
           steps={steps}
@@ -723,6 +737,8 @@ function ReportTab({
   docExtracting,
   ocrEngine = "vision",
   onChangeOcrEngine,
+  docBreakpoint,
+  onToggleDocBreakpoint,
   shots,
   running,
   steps,
@@ -764,6 +780,7 @@ function ReportTab({
   onRequestSaveLoop,
   onRequestApplyLoop,
   onDirectRun,
+  onRefresh,
   canSaveLoop = false,
   hasCheckedBatch = false,
   customTextContent,
@@ -808,6 +825,10 @@ function ReportTab({
   ocrEngine?: string;
   /** 切换 OCR 引擎（识图AI ↔ UMI-OCR） */
   onChangeOcrEngine?: (engine: "vision" | "umi") => void;
+  /** 文件提取步骤的断点状态 */
+  docBreakpoint?: "always" | "on-error";
+  /** 循环切换文件提取步骤的断点 */
+  onToggleDocBreakpoint?: () => void;
   shots: ScreenshotEvent[];
   running: boolean;
   steps: VerificationStep[];
@@ -884,6 +905,8 @@ function ReportTab({
   onRequestApplyLoop?: () => void;
   /** 直接执行当前配置（临时运行，不保存） */
   onDirectRun?: () => void;
+  /** 刷新工作区：清空光标、步骤设置和字段对比 */
+  onRefresh?: () => void;
   /** 是否有可保存/执行的步骤（控制按钮禁用态） */
   canSaveLoop?: boolean;
   /** 当前是否有勾选的卡片（控制"保存到这批"按钮显隐） */
@@ -3216,6 +3239,13 @@ function ReportTab({
               </button>
             )}
             <button
+              onClick={(e) => { e.stopPropagation(); onRefresh?.(); }}
+              className="flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+              title="刷新：清空光标、步骤设置和字段对比（不刷新Excel）"
+            >
+              <RefreshCw className="h-3 w-3" />
+            </button>
+            <button
               onClick={() => setFieldSetupMode((v) => !v)}
               className={[
                 "flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
@@ -3361,6 +3391,30 @@ function ReportTab({
                       )
                     )}
                   </div>
+                )}
+                {/* 断点切换：无 → 强制断点 → 条件断点 → 无 */}
+                {onToggleDocBreakpoint && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onToggleDocBreakpoint(); }}
+                    className={[
+                      "flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-semibold transition-all",
+                      docBreakpoint === "always"
+                        ? "bg-rose-500 text-white shadow-sm"
+                        : docBreakpoint === "on-error"
+                        ? "bg-amber-500 text-white shadow-sm"
+                        : "text-emerald-600/70 hover:bg-emerald-100 hover:text-emerald-700",
+                    ].join(" ")}
+                    title={
+                      docBreakpoint === "always"
+                        ? "强制断点：每次 LOOP 跑到此文件处理步骤都会暂停，等人操作后继续（点击切换为条件断点）"
+                        : docBreakpoint === "on-error"
+                        ? "条件断点：AI 检测到文件提取错误/字段不匹配时暂停等人干预（点击取消断点）"
+                        : "断点：LOOP 跑到此文件处理步骤时暂停等人操作（点击设置强制断点）"
+                    }
+                  >
+                    {docBreakpoint === "on-error" ? <AlertOctagon className="h-2.5 w-2.5" /> : <CirclePause className="h-2.5 w-2.5" />}
+                    {docBreakpoint === "always" ? "强制断点" : docBreakpoint === "on-error" ? "条件断点" : "断点"}
+                  </button>
                 )}
                 {/* 控件提取模式下手动收起文件处理面板（非choose模式） */}
                 {isWidgetMode && !isDocExtractFocus && filePanelManuallyOpen && !docConfigChooseMode && (
