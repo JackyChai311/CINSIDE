@@ -6,6 +6,10 @@ import type {
   DocumentConvertResult,
   DocumentExtractResult,
   DocumentPreviewResult,
+  PPTFileSlides,
+  PPTProgressEvent,
+  PPTSection,
+  PPTTextPatch,
   PluginRecord,
   PluginStatus,
   ScreenshotEvent,
@@ -85,6 +89,14 @@ export const api = {
     }),
   downloadUmiOcr: () =>
     jsonFetch<{ ok: boolean; message: string; exe_path: string }>(`${BASE}/config/download-umi-ocr`, {
+      method: "POST",
+    }),
+  installRemotion: () =>
+    jsonFetch<{ ok: boolean; message: string }>(`${BASE}/config/install-remotion`, {
+      method: "POST",
+    }),
+  installOfficecli: () =>
+    jsonFetch<{ ok: boolean; message: string }>(`${BASE}/config/install-officecli`, {
       method: "POST",
     }),
 
@@ -257,6 +269,120 @@ export const api = {
   fetchShare: (code: string) =>
     jsonFetch<{ ok: boolean; template?: unknown; error?: string }>(
       `${BASE}/config/share/fetch?code=${encodeURIComponent(code)}`
+    ),
+
+  // ========== 幻灯片任务（PPT Section 拆并） ==========
+
+  /** 检查 OfficeCLI 状态 */
+  pptStatus: () =>
+    jsonFetch<{ available: boolean; bin_path: string | null; version: string | null }>(
+      `${BASE}/ppt/status`
+    ),
+
+  /** 导入本地 PPT 文件（支持目录扫描） */
+  pptImportLocal: (filePaths: string[], directory?: string) =>
+    jsonFetch<{ files: Array<{ file_path: string; file_name: string; size: number }>; count: number }>(
+      `${BASE}/ppt/import-local`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_paths: filePaths, directory: directory || "" }),
+      }
+    ),
+
+  /** 解析 PPT 幻灯片及文本节点 */
+  pptAnalyze: (filePaths: string[]) =>
+    jsonFetch<{ files: PPTFileSlides[] }>(`${BASE}/ppt/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_paths: filePaths }),
+    }),
+
+  /** AI 识别 section */
+  pptDetectSections: (files: PPTFileSlides[], instruction?: string) =>
+    jsonFetch<{ sections: PPTSection[]; readingScript: string }>(`${BASE}/ppt/detect-sections`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files, instruction: instruction || "" }),
+    }),
+
+  /** 合并 section 为总览 PPT */
+  pptMerge: (sections: PPTSection[]) =>
+    jsonFetch<{ file_path: string; file_name: string; total_slides: number }>(`${BASE}/ppt/merge`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sections }),
+    }),
+
+  /** AI 统一修改内容 */
+  pptModify: (sections: PPTSection[], instruction: string) =>
+    jsonFetch<{ patches: PPTTextPatch[]; count: number }>(`${BASE}/ppt/modify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sections, instruction }),
+    }),
+
+  /** 一键回填到原始 PPT */
+  pptApply: (patches: PPTTextPatch[]) =>
+    jsonFetch<{ applied: number; failed: number; errors: string[] }>(`${BASE}/ppt/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ patches }),
+    }),
+
+  /** 根据文字生成一份新 PPT */
+  pptCreateFromText: (text: string) =>
+    jsonFetch<{ file_path: string; file_name: string; total_slides: number }>(
+      `${BASE}/ppt/create-from-text`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      }
+    ),
+
+  /** SSE 流式解析 PPT，实时进度回调 */
+  pptAnalyzeStream: async (
+    filePaths: string[],
+    onProgress: (ev: PPTProgressEvent) => void
+  ): Promise<PPTFileSlides[]> => {
+    const resp = await fetch(`${BASE}/ppt/analyze-stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_paths: filePaths }),
+    });
+    if (!resp.ok || !resp.body) {
+      throw new Error(`解析失败: HTTP ${resp.status}`);
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() || "";
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith("data:")) continue;
+        try {
+          const ev = JSON.parse(line.slice(5).trim());
+          if (ev.type === "done") return ev.files as PPTFileSlides[];
+          if (ev.type === "error") throw new Error(ev.message || "解析失败");
+          onProgress(ev as PPTProgressEvent);
+        } catch (e) {
+          if (e instanceof Error && e.message !== "Unexpected end of JSON input") throw e;
+        }
+      }
+    }
+    throw new Error("解析流意外结束");
+  },
+
+  /** 获取 PPT 任务使用的 AI 配置（与网页任务共用） */
+  pptAiInfo: () =>
+    jsonFetch<{ shared: boolean; provider: string; model: string; configured: boolean }>(
+      `${BASE}/ppt/ai-info`
     ),
 };
 
