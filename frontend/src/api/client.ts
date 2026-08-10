@@ -2,6 +2,7 @@ import type {
   AppConfig,
   AppSettings,
   ApplicantRecord,
+  DepsStatus,
   DocumentConvertResult,
   DocumentExtractResult,
   DocumentPreviewResult,
@@ -55,6 +56,35 @@ export const api = {
 
   testVision: () =>
     jsonFetch<{ supports_images: boolean; message: string }>(`${BASE}/config/test-vision`, {
+      method: "POST",
+    }),
+
+  testUmiOcr: () =>
+    jsonFetch<{ ok: boolean; message: string; host: string; port: number }>(`${BASE}/config/test-umi-ocr`, {
+      method: "POST",
+    }),
+  launchUmiOcr: () =>
+    jsonFetch<{ ok: boolean; message: string; exe_path: string }>(`${BASE}/config/launch-umi-ocr`, {
+      method: "POST",
+    }),
+  browseUmiOcr: () =>
+    jsonFetch<{ ok: boolean; message: string; path: string }>(`${BASE}/config/browse-umi-ocr`, {
+      method: "POST",
+    }),
+  testMarkitdown: () =>
+    jsonFetch<{ ok: boolean; message: string }>(`${BASE}/config/test-markitdown`, {
+      method: "POST",
+    }),
+
+  // ===== 依赖与工具管理 =====
+  getDepsStatus: () =>
+    jsonFetch<DepsStatus>(`${BASE}/config/deps-status`),
+  installPythonDeps: () =>
+    jsonFetch<{ ok: boolean; message: string }>(`${BASE}/config/install-python-deps`, {
+      method: "POST",
+    }),
+  downloadUmiOcr: () =>
+    jsonFetch<{ ok: boolean; message: string; exe_path: string }>(`${BASE}/config/download-umi-ocr`, {
       method: "POST",
     }),
 
@@ -156,19 +186,20 @@ export const api = {
     });
   },
 
-  /** 上传本地文件（图片/PDF/Office）提取文字 + 字段 */
-  extractDocumentFile: (file: File, fields?: string[]) => {
+  /** 上传本地文件（图片/PDF/Office）提取文字 + 字段；engine 可临时指定 "umi" 或 "vision" */
+  extractDocumentFile: (file: File, fields?: string[], engine?: string) => {
     const fd = new FormData();
     fd.append("file", file);
     if (fields && fields.length > 0) fd.append("fields", fields.join(","));
+    if (engine) fd.append("engine", engine);
     return jsonFetch<DocumentExtractResult>(`${BASE}/document/extract`, {
       method: "POST",
       body: fd,
     });
   },
 
-  /** 从网页 URL 下载 PDF/图片并提取文字 + 字段 */
-  extractDocumentUrl: (url: string, fields?: string[], filename?: string) =>
+  /** 从网页 URL 下载 PDF/图片并提取文字 + 字段；engine 可临时指定 "umi" 或 "vision" */
+  extractDocumentUrl: (url: string, fields?: string[], filename?: string, engine?: string) =>
     jsonFetch<DocumentExtractResult>(`${BASE}/document/extract-url`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -176,6 +207,7 @@ export const api = {
         url,
         filename: filename || null,
         fields: fields && fields.length > 0 ? fields.join(",") : null,
+        engine: engine || null,
       }),
     }),
 
