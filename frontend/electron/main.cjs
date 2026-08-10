@@ -119,6 +119,13 @@ function createWindow() {
   const { Menu } = require("electron");
   Menu.setApplicationMenu(null);
 
+  // 禁用主窗口原生 Ctrl+滚轮/捏合缩放（自定义 UI 缩放由渲染进程控制）。
+  // 这样渲染进程的 wheel 监听器可以使用 passive:true，不会阻塞 BrowserView 的滚轮事件。
+  try {
+    mainWindow.webContents.setLayoutZoomResizingEnabled(false);
+    mainWindow.webContents.setVisualZoomResizingEnabled(false);
+  } catch (_) {}
+
   // 外部链接用系统浏览器打开
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
@@ -267,6 +274,68 @@ function createBrowserViews() {
   }
 }
 
+// ============ 滚轮兜底：部分网站（透明遮罩吞滚轮事件）无法直接滚动页面 ============
+// passive 监听 + 下一帧校验：页面自己滚动了就不插手；没滚动才手动滚动鼠标位置下最深的可滚动元素
+const SCROLL_ASSIST_SCRIPT = `
+(function () {
+  if (window.__cinsideScrollAssistInstalled) return;
+  window.__cinsideScrollAssistInstalled = true;
+  function scrollableRoom(el, delta) {
+    try {
+      if (el.scrollHeight <= el.clientHeight + 2) return false;
+      var oy = getComputedStyle(el).overflowY;
+      if (oy !== 'auto' && oy !== 'scroll' && oy !== 'overlay') return false;
+      if (delta > 0) return el.scrollTop + el.clientHeight < el.scrollHeight - 1;
+      return el.scrollTop > 1;
+    } catch (e) { return false; }
+  }
+  window.addEventListener('wheel', function (e) {
+    if (e.ctrlKey) return; // Ctrl+滚轮走缩放
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return; // 只管纵向滚动
+    var delta = e.deltaY;
+    if (e.deltaMode === 1) delta *= 16;
+    else if (e.deltaMode === 2) delta *= window.innerHeight;
+    if (!delta) return;
+    // 快照事件路径上可滚动元素的当前位置
+    var watched = [];
+    try {
+      var path = e.composedPath ? e.composedPath() : [];
+      for (var i = 0; i < path.length && watched.length < 15; i++) {
+        var n = path[i];
+        if (!n || n.nodeType !== 1) continue;
+        if (n.scrollHeight > n.clientHeight + 2) watched.push({ el: n, top: n.scrollTop });
+      }
+    } catch (err) {}
+    var root = document.scrollingElement || document.documentElement;
+    var rootBefore = root ? root.scrollTop : 0;
+    var cx = e.clientX, cy = e.clientY;
+    requestAnimationFrame(function () {
+      try {
+        // 页面自己滚了（路径上的可滚动元素或根滚动条位置变化）→ 不插手
+        for (var j = 0; j < watched.length; j++) {
+          if (watched[j].el.scrollTop !== watched[j].top) return;
+        }
+        if (root && root.scrollTop !== rootBefore) return;
+        // 从鼠标位置向下找最深的可滚动元素（含被透明遮罩压在下面的内容）
+        var stack = [];
+        try { stack = document.elementsFromPoint(cx, cy) || []; } catch (err) {}
+        for (var s = 0; s < stack.length; s++) {
+          var cur = stack[s];
+          var depth = 0;
+          while (cur && cur.nodeType === 1 && depth < 12) {
+            depth++;
+            if (scrollableRoom(cur, delta)) { cur.scrollTop += delta; return; }
+            cur = cur.parentElement;
+          }
+        }
+        // 兜底滚根元素（overflowY 为 hidden 时尊重网站锁滚动，跳过）
+        if (root && scrollableRoom(root, delta)) root.scrollTop += delta;
+      } catch (err) {}
+    });
+  }, { passive: true });
+})();
+`;
+
 // 把 BrowserView 内部通过 window.__cinsidePostMessage 发回的消息转发到前端
 function attachViewMessageRelay(view, side) {
   // 页面加载完成后注入细滚动条样式 + 拾取模式光标 CSS
@@ -291,6 +360,7 @@ function attachViewMessageRelay(view, side) {
   view.webContents.on("dom-ready", () => {
     // 在 DOM 就绪时立即注入屏蔽规则（比 did-finish-load 早很多，减少导航闪烁）
     applyBlockRules(side);
+    view.webContents.executeJavaScript(SCROLL_ASSIST_SCRIPT).catch(() => {});
     view.webContents.executeJavaScript(`
       (function () {
         if (window.__cinsideRelayInstalled) return;
@@ -307,6 +377,8 @@ function attachViewMessageRelay(view, side) {
         }, { passive: true });
       })();
     `).catch(() => {});
+    // 重新应用亮度（导航后页面重置，filter 会丢失）
+    applyBrightness(view, side);
   });
 
   // 页面内导航（SPA 路由、hash 变化等）后，重注入拾取脚本
@@ -469,6 +541,7 @@ function createPopupView(parentSide, url, win) {
   });
 
   view.webContents.on("dom-ready", () => {
+    view.webContents.executeJavaScript(SCROLL_ASSIST_SCRIPT).catch(() => {});
     view.webContents.executeJavaScript(`
       (function () {
         if (window.__cinsideRelayInstalled) return;
@@ -590,10 +663,24 @@ function closeAllPopupViews() {
 const pickingActive = { left: false, right: false };
 // 跟踪每个 side 的元素屏蔽规则（含 mode），导航/重载后自动重注入
 const blockRulesBySide = { left: [], right: [] };
+// 缓存每个 side 的完整屏蔽 CSS 字符串，导航开始时立即 insertCSS 防闪烁
+const blockCssBySide = { left: "", right: "" };
 // insertCSS 返回的 key，用于移除旧规则
 let blockCssKey = { left: null, right: null };
 // 折叠规则的 JS key，用于移除旧脚本
 let blockJsKey = { left: null, right: null };
+// BrowserPane 亮度（0.3~2.0），导航/重载后自动重新应用
+const browserBrightness = { left: 1.0, right: 1.0 };
+
+function applyBrightness(view, side) {
+  if (!view || !view.webContents || view.webContents.isDestroyed()) return;
+  const val = browserBrightness[side] ?? 1.0;
+  const filter = Math.abs(val - 1.0) < 0.001 ? "" : `brightness(${val})`;
+  // 应用到 body 而非 documentElement，避免在 <html> 上创建新的合成层导致根滚动器滚轮事件失效
+  view.webContents.executeJavaScript(
+    `document.body.style.filter=${JSON.stringify(filter)};void 0;`
+  ).catch(() => {});
+}
 
 function applyBlockRules(side) {
   const view = side === "left" ? leftBrowserView : rightBrowserView;
@@ -603,6 +690,7 @@ function applyBlockRules(side) {
   const rules = blockRulesBySide[side];
   if (!rules || rules.length === 0) {
     // 无规则：移除旧CSS（insertCSS + style标签），并注入清理JS恢复被折叠的元素
+    blockCssBySide[side] = "";
     if (oldCssKey) view.webContents.removeInsertedCSS(oldCssKey).catch(() => {});
     view.webContents.executeJavaScript(
       "(function(){var s=document.getElementById('cinside-block-style');if(s)s.remove();})();"
@@ -683,6 +771,8 @@ function applyBlockRules(side) {
 
   if (cssParts.length > 0) {
     var fullCss = cssParts.join("\n");
+    // 缓存 CSS 字符串（调试/备份用）
+    blockCssBySide[side] = fullCss;
     // 方式1：executeJavaScript 同步注入 <style> 标签 —— 比 insertCSS 更快生效，
     // 在 dom-ready 时能在页面渲染前立即应用 CSS，避免侧边栏先显示再被隐藏的闪烁
     var styleInjectJs = "(function(){\n" +
@@ -694,8 +784,11 @@ function applyBlockRules(side) {
       "  (document.head || document.documentElement).appendChild(style);\n" +
       "})();";
     view.webContents.executeJavaScript(styleInjectJs).catch(() => {});
-    // 方式2：insertCSS 作为持久化备份（防止页面 JS 移除 <style> 标签）
-    view.webContents.insertCSS(fullCss).then(function (key) {
+    // 方式2：insertCSS 作为持久化备份（防止页面 JS 移除 <style> 标签）；
+    // 关键：使用 user origin —— Electron 的 user 样式会跨导航持久应用到该
+    // webContents 的所有后续页面，能确保跳转后新页面在首次渲染前就应用屏蔽/折叠
+    // CSS，避免侧边栏先画出来再被隐藏的闪烁。author origin 不会跨导航持久化。
+    view.webContents.insertCSS(fullCss, { cssOrigin: "user" }).then(function (key) {
       blockCssKey[side] = key;
       if (oldCssKey) {
         view.webContents.removeInsertedCSS(oldCssKey).catch(() => {});
@@ -714,7 +807,10 @@ function applyBlockRules(side) {
       "  var manualSels = " + JSON.stringify(manualCollapseSels) + ";\n" +
       "  var autoDetect = " + (autoSidebarDetect ? "true" : "false") + ";\n" +
       "  var scanTimer = null;\n" +
-      "  function scheduleScan() { if (!scanTimer) scanTimer = setTimeout(doScan, 200); }\n" +
+      "  function scheduleScan() {\n" +
+      "    if (scanTimer) return;\n" +
+      "    scanTimer = setTimeout(doScan, 16);\n" +
+      "  }\n" +
       "  // 强制折叠手动选择的元素\n" +
       "  function forceCollapseManual(el) {\n" +
       "    if (el.dataset.cinsideCollapsed === '1') return;\n" +
@@ -1551,6 +1647,7 @@ const ELEMENT_PICKER_SCRIPT = `
       type: el.getAttribute && el.getAttribute('type') || '',
       accept: (el.getAttribute && el.getAttribute('accept')) || '',
       isContentEditable: !!el.isContentEditable,
+      role: (el.getAttribute && el.getAttribute('role')) || '',
       rect: getRect(el),
       text: (el.innerText || '').trim().slice(0, 120),
       href: linkEl && linkEl.href ? linkEl.href : (el.href || ''),
@@ -1803,6 +1900,7 @@ const ELEMENT_PICKER_SCRIPT = `
         type: el.getAttribute && el.getAttribute('type') || '',
         accept: (el.getAttribute && el.getAttribute('accept')) || '',
         isContentEditable: !!el.isContentEditable,
+        role: (el.getAttribute && el.getAttribute('role')) || '',
         rect: getRect(el),
         text: (el.innerText || '').trim().slice(0, 120),
         href: el.href || '',
@@ -2534,6 +2632,20 @@ app.whenReady().then(() => {
     return { ok: true, files, errors: errors.length > 0 ? errors : undefined };
   });
 
+  // IPC: 下载单个URL并返回文件数据（图片直览页抓取：点击后页面直接预览图片、无下载按钮的场景）
+  ipcMain.handle("view-download-single-url", async (_event, side, url, timeoutMs) => {
+    if (!url || typeof url !== "string") return { ok: false, error: "URL为空" };
+    try {
+      const { filename, buffer, size, mime } = await downloadUrl(url, timeoutMs || 20000, side);
+      const dataUrl = `data:${mime};base64,${buffer.toString("base64")}`;
+      debugLog(`[download] 直览页抓取成功: ${filename} (${size} bytes, ${mime})`);
+      return { ok: true, filename, dataUrl, size, mime };
+    } catch (e) {
+      debugLog(`[download] 直览页抓取失败: ${url} - ${e.message}`);
+      return { ok: false, error: e.message };
+    }
+  });
+
   // ============ 本地文件提取：选择目录 + 读取文件 ============
   // 选择本地文件夹，递归扫描所有文件，返回根目录绝对路径 + 文件相对路径列表
   ipcMain.handle("pick-local-directory", async () => {
@@ -2989,6 +3101,18 @@ ipcMain.handle("view-set-zoom", (_event, side, factor) => {
   } catch (_) {}
 });
 
+// 设置 BrowserView 网页亮度（0.3 ~ 2.0，1.0=原始）
+ipcMain.handle("view-set-brightness", (_event, side, value) => {
+  const clamped = Math.max(0.3, Math.min(2.0, Number(value) || 1.0));
+  browserBrightness[side] = clamped;
+  const view = side === "left" ? leftBrowserView : rightBrowserView;
+  applyBrightness(view, side);
+  // 同步应用到脱离窗口
+  const detKey = side === "left" ? "browser-left" : "browser-right";
+  const detView = detachedPanels[detKey + "_view"];
+  if (detView && !detView.webContents.isDestroyed()) applyBrightness(detView, side);
+});
+
 // 在指定 view 中执行 JS（元素选择脚本等）
 ipcMain.handle("view-execute-js", (_event, side, script) => {
   return executeInView(side, script);
@@ -3237,6 +3361,7 @@ function createDetachedBrowserView(win, side) {
 
   // dom-ready：注入 relay 桥接
   view.webContents.on("dom-ready", () => {
+    view.webContents.executeJavaScript(SCROLL_ASSIST_SCRIPT).catch(() => {});
     view.webContents.executeJavaScript(`
       (function () {
         if (window.__cinsideRelayInstalled) return;
@@ -3353,6 +3478,12 @@ ipcMain.handle("panel-detach", (_event, side) => {
       webSecurity: false,
     },
   });
+
+  // 禁用脱离窗口原生 Ctrl+滚轮缩放（与主窗口一致）
+  try {
+    win.webContents.setLayoutZoomResizingEnabled(false);
+    win.webContents.setVisualZoomResizingEnabled(false);
+  } catch (_) {}
 
   if (isDev) {
     win.loadURL(`http://localhost:5173?detach=${side}`);
