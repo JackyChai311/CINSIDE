@@ -27,6 +27,7 @@ export function buildLinearGraph(tpl: WorkflowTemplate): FlowGraph {
         markPhase: ph.key,
         markId: m.id,
         markSide: m.side,
+        breakpoint: m.breakpoint,
       });
     }
   }
