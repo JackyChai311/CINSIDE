@@ -22,7 +22,7 @@ const DEFAULTS: AppSettings = {
   browser_use_llm_model: "sensenova-6.7-flash-lite",
   prevent_accidental_close: false,
   ui_scale: 1.0,
-  beginner_mode: true,
+  beginner_mode: false,
   theme: "light",
   accent: "indigo",
   browser_brightness: 1.0,
@@ -52,6 +52,14 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
   const [pipMessage, setPipMessage] = useState<{ ok: boolean; message: string } | null>(null);
   const [umiDownloading, setUmiDownloading] = useState(false);
   const [umiDownloadMsg, setUmiDownloadMsg] = useState<{ ok: boolean; message: string } | null>(null);
+  const [umiProgress, setUmiProgress] = useState<{
+    stage: "fetching" | "downloading" | "extracting" | "done" | "error";
+    percent: number;
+    downloadedMB: number;
+    totalMB: number;
+    message: string;
+    mirror: string;
+  } | null>(null);
 
   useEffect(() => {
     api.getSettings()
@@ -89,14 +97,151 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
   const handleDownloadUmiOcr = async () => {
     setUmiDownloading(true);
     setUmiDownloadMsg(null);
+    setUmiProgress({
+      stage: "fetching",
+      percent: 0,
+      downloadedMB: 0,
+      totalMB: 0,
+      message: "正在连接服务器…",
+      mirror: "",
+    });
+
+    const apiHost =
+      typeof window !== "undefined" && window.electronAPI && !window.location.hostname
+        ? "http://localhost:8000"
+        : "";
+
+    // 尝试 SSE 流式下载；如果失败（旧后端/网络问题），回退到 POST 同步下载
+    let sseReceivedData = false;
     try {
-      const r = await api.downloadUmiOcr();
-      setUmiDownloadMsg({ ok: r.ok, message: r.message });
-      if (r.ok) {
-        await refreshDepsStatus();
+      const controller = new AbortController();
+      // 5秒内必须收到第一个字节，否则判定 SSE 不可用，回退 POST
+      const connectTimeout = setTimeout(() => {
+        if (!sseReceivedData) controller.abort();
+      }, 5000);
+
+      const resp = await fetch(`${apiHost}/api/config/download-umi-ocr/stream`, {
+        method: "GET",
+        headers: { Accept: "text/event-stream" },
+        signal: controller.signal,
+      });
+
+      if (!resp.ok || !resp.body) {
+        throw new Error(`SSE unavailable (${resp.status})`);
       }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        sseReceivedData = true;
+        clearTimeout(connectTimeout);
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const jsonStr = trimmed.slice(5).trim();
+          if (!jsonStr) continue;
+
+          try {
+            const event = JSON.parse(jsonStr);
+            const stage = event.stage as string;
+            const downloaded = event.downloaded || 0;
+            const total = event.total || 0;
+            const pct =
+              total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : 0;
+
+            if (stage === "done") {
+              setUmiProgress({
+                stage: "done",
+                percent: 100,
+                downloadedMB: total ? Math.round(total / (1024 * 1024)) : 0,
+                totalMB: total ? Math.round(total / (1024 * 1024)) : 0,
+                message: event.message || "安装完成",
+                mirror: event.mirror || "",
+              });
+              setUmiDownloadMsg({ ok: true, message: event.message });
+              await refreshDepsStatus();
+            } else if (stage === "error") {
+              setUmiProgress({
+                stage: "error",
+                percent: pct,
+                downloadedMB: Math.round(downloaded / (1024 * 1024)),
+                totalMB: Math.round(total / (1024 * 1024)),
+                message: event.message || "下载失败",
+                mirror: event.mirror || "",
+              });
+              setUmiDownloadMsg({ ok: false, message: event.message });
+            } else {
+              setUmiProgress({
+                stage: stage as any,
+                percent: stage === "extracting" ? 100 : pct,
+                downloadedMB: Math.round(downloaded / (1024 * 1024)),
+                totalMB: Math.round(total / (1024 * 1024)),
+                message: event.message || "",
+                mirror: event.mirror || "",
+              });
+            }
+          } catch {
+            // 忽略解析错误
+          }
+        }
+      }
+      clearTimeout(connectTimeout);
     } catch (e: any) {
-      setUmiDownloadMsg({ ok: false, message: e.message || "下载失败" });
+      // SSE 失败且没收到任何数据 → 回退到 POST 同步接口
+      if (!sseReceivedData) {
+        try {
+          setUmiProgress({
+            stage: "downloading",
+            percent: 0,
+            downloadedMB: 0,
+            totalMB: 100,
+            message: "正在下载安装（约100MB，请耐心等待）…",
+            mirror: "",
+          });
+          const r = await api.downloadUmiOcr();
+          setUmiDownloadMsg({ ok: r.ok, message: r.message });
+          if (r.ok) {
+            setUmiProgress({
+              stage: "done",
+              percent: 100,
+              downloadedMB: 100,
+              totalMB: 100,
+              message: "安装完成",
+              mirror: "",
+            });
+            await refreshDepsStatus();
+          } else {
+            setUmiProgress({
+              stage: "error",
+              percent: 0,
+              downloadedMB: 0,
+              totalMB: 0,
+              message: r.message,
+              mirror: "",
+            });
+          }
+        } catch (e2: any) {
+          setUmiDownloadMsg({ ok: false, message: e2.message || "下载失败" });
+          setUmiProgress((prev) =>
+            prev ? { ...prev, stage: "error", message: e2.message || "下载失败" } : prev
+          );
+        }
+      } else {
+        setUmiDownloadMsg({ ok: false, message: e.message || "下载失败" });
+        setUmiProgress((prev) =>
+          prev ? { ...prev, stage: "error", message: e.message || "下载失败" } : prev
+        );
+      }
     } finally {
       setUmiDownloading(false);
     }
@@ -679,16 +824,50 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
                 UMI-OCR 是免费开源的离线 OCR 软件（基于 PaddleOCR），无需 API Key 即可识别图片文字。
                 下载安装后需在软件内开启「HTTP 接口服务」（默认端口 1224）。
               </p>
-              <button
-                type="button"
-                onClick={handleDownloadUmiOcr}
-                disabled={umiDownloading}
-                className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-brand-600 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-brand-700 disabled:opacity-60"
-              >
-                {umiDownloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
-                {umiDownloading ? "下载安装中（约100MB，请耐心等待）…" : depsStatus?.umi_ocr.installed ? "重新下载安装 UMI-OCR" : "一键下载安装 UMI-OCR"}
-              </button>
-              {umiDownloadMsg && (
+              {umiDownloading && umiProgress ? (
+                <div className="w-full space-y-1.5">
+                  <div className="flex items-center justify-between text-[10px] text-slate-500">
+                    <span className="flex items-center gap-1">
+                      <Loader2 className="h-3 w-3 animate-spin text-brand-500" />
+                      {umiProgress.stage === "fetching" && "正在获取版本信息…"}
+                      {umiProgress.stage === "downloading" && (umiProgress.mirror ? `通过 ${umiProgress.mirror} 下载中` : "下载中…")}
+                      {umiProgress.stage === "extracting" && "正在解压安装…"}
+                    </span>
+                    {umiProgress.totalMB > 0 && (
+                      <span className="tabular-nums text-slate-400">
+                        {umiProgress.downloadedMB} / {umiProgress.totalMB} MB
+                      </span>
+                    )}
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                    <div
+                      className={`h-full rounded-full transition-all duration-300 ease-out ${
+                        umiProgress.stage === "extracting"
+                          ? "animate-pulse bg-amber-400"
+                          : "bg-brand-500"
+                      }`}
+                      style={{ width: `${Math.max(2, umiProgress.percent)}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[9px] text-slate-400">
+                    <span className="truncate pr-2">{umiProgress.message}</span>
+                    <span className="shrink-0 tabular-nums font-medium text-brand-500">
+                      {umiProgress.percent}%
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleDownloadUmiOcr}
+                  disabled={umiDownloading}
+                  className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-brand-600 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-brand-700 disabled:opacity-60"
+                >
+                  {umiDownloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                  {umiDownloading ? "下载安装中…" : depsStatus?.umi_ocr.installed ? "重新下载安装 UMI-OCR" : "一键下载安装 UMI-OCR"}
+                </button>
+              )}
+              {umiDownloadMsg && !umiDownloading && (
                 <div className={`mt-1.5 whitespace-pre-line rounded px-2 py-1 text-[10px] ${umiDownloadMsg.ok ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
                   {umiDownloadMsg.message}
                 </div>
