@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState, type DragEvent, type ClipboardEvent, type ChangeEvent } from "react";
-import { Check, Play, Pencil, Trash2, X, Sparkles, GitBranch, ImagePlus, Search } from "lucide-react";
+import { Check, Play, Pencil, Trash2, X, Sparkles, GitBranch, ImagePlus, Search, Layers } from "lucide-react";
 import type { WorkflowTemplate, AppMode } from "../types";
 import { loadSkills, deleteSkill, updateSkillMeta, getDefaultIcons } from "../lib/skills";
 
@@ -9,6 +9,10 @@ interface SkillPanelProps {
   onRunSkill: (tpl: WorkflowTemplate) => void;
   onEditFlow?: (tpl: WorkflowTemplate) => void;
   onSkillsChange?: () => void;
+  /** 应用模式：显示"应用"按钮替代"执行"，点击后将模板步骤加载到当前设置 */
+  applyMode?: boolean;
+  /** 应用模式下点击"应用"按钮的回调 */
+  onApplySkill?: (tpl: WorkflowTemplate) => void;
 }
 
 const MODE_LABELS: Record<AppMode, { label: string; color: string }> = {
@@ -29,7 +33,7 @@ function readFileAsDataURL(file: File | Blob): Promise<string> {
   });
 }
 
-export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSkillsChange }: SkillPanelProps) {
+export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSkillsChange, applyMode, onApplySkill }: SkillPanelProps) {
   const [skills, setSkills] = useState<WorkflowTemplate[]>(() => loadSkills());
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -191,46 +195,52 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-md" onClick={onClose}>
       <div
-        className="w-[min(960px,calc(100vw-2rem))] max-h-[86vh] overflow-hidden rounded-3xl bg-white shadow-2xl ring-1 ring-black/5"
+        className="skill-panel-root w-[min(960px,calc(100vw-2rem))] max-h-[86vh] overflow-hidden rounded-3xl glass-strong shadow-2xl ring-1 ring-white/10"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 头部：标题 + 搜索栏 */}
-        <div className="relative overflow-hidden border-b border-slate-200/70 bg-gradient-to-br from-indigo-50 via-violet-50 to-fuchsia-50 px-5 pt-4 pb-4">
+        <div className={`relative overflow-hidden border-b border-white/10 bg-gradient-to-br px-6 pt-5 pb-5 ${applyMode ? "from-emerald-500/15 via-teal-500/10 to-cyan-500/15" : "from-violet-500/15 via-indigo-500/10 to-fuchsia-500/15"}`}>
           {/* 装饰光斑 */}
-          <div className="pointer-events-none absolute -top-16 -right-12 h-40 w-40 rounded-full bg-indigo-200/40 blur-3xl" />
-          <div className="pointer-events-none absolute -bottom-10 -left-10 h-32 w-32 rounded-full bg-fuchsia-200/40 blur-3xl" />
-          <div className="relative flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-md shadow-indigo-500/30">
-              <Sparkles className="h-5 w-5" />
+          <div className={`pointer-events-none absolute -top-20 -right-16 h-48 w-48 rounded-full blur-3xl ${applyMode ? "bg-emerald-400/20" : "bg-violet-400/20"}`} />
+          <div className={`pointer-events-none absolute -bottom-16 -left-12 h-40 w-40 rounded-full blur-3xl ${applyMode ? "bg-cyan-400/20" : "bg-fuchsia-400/20"}`} />
+          <div className={`pointer-events-none absolute top-1/2 left-1/3 h-24 w-24 -translate-y-1/2 rounded-full blur-2xl ${applyMode ? "bg-teal-400/10" : "bg-indigo-400/10"}`} />
+          <div className="relative flex items-center gap-3.5">
+            <div className={`relative flex h-11 w-11 items-center justify-center rounded-2xl text-white shadow-lg ${applyMode ? "bg-gradient-to-br from-emerald-500 to-teal-600 shadow-emerald-500/25" : "bg-gradient-to-br from-violet-500 to-indigo-600 shadow-violet-500/25"}`}>
+              {applyMode ? <Layers className="h-5 w-5" /> : <Sparkles className="h-5 w-5" />}
+              <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-white/30 to-transparent" />
             </div>
             <div className="min-w-0">
-              <h2 className="font-display text-lg font-bold tracking-tight text-slate-900">循环管理</h2>
-              <p className="text-[11px] text-slate-500">{skills.length} 个技能 · 拖拽到人物卡片可单卡执行 · Ctrl+V / 拖入图片换图标</p>
+              <h2 className="text-xl font-bold tracking-tight text-slate-800 dark:text-slate-100">{applyMode ? "应用 LOOP 模板" : "循环管理"}</h2>
+              <p className="mt-0.5 text-[12px] text-slate-500 dark:text-slate-400">
+                {applyMode
+                  ? `${skills.length} 个模板 · 选择一个将其步骤加载到当前设置`
+                  : `${skills.length} 个技能 · 拖拽到人物卡片可单卡执行 · Ctrl+V / 拖入图片换图标`}
+              </p>
             </div>
             <button
               onClick={onClose}
-              className="ml-auto flex h-8 w-8 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-white/60 hover:text-slate-700"
+              className="ml-auto flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-all hover:bg-white/10 hover:text-slate-600 dark:hover:text-slate-200"
               title="关闭"
             >
-              <X className="h-4 w-4" />
+              <X className="h-5 w-5" />
             </button>
           </div>
           {/* 搜索框 */}
-          <div className="relative mt-3">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <div className="relative mt-4">
+            <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="搜索技能名称或介绍…"
-              className="w-full rounded-xl border border-white/80 bg-white/80 py-2 pl-9 pr-9 text-[13px] text-slate-700 shadow-sm outline-none ring-1 ring-slate-200/60 backdrop-blur transition placeholder:text-slate-400 focus:border-indigo-300 focus:bg-white focus:ring-2 focus:ring-indigo-200"
+              className="w-full rounded-xl border border-white/20 bg-white/60 py-2.5 pl-10 pr-10 text-[13px] text-slate-700 dark:text-slate-200 shadow-sm outline-none backdrop-blur-sm transition placeholder:text-slate-400 focus:border-violet-300/50 focus:bg-white/80 focus:ring-2 focus:ring-violet-400/20 dark:bg-slate-900/40 dark:border-white/5 dark:focus:bg-slate-900/60"
             />
             {search && (
               <button
                 onClick={() => setSearch("")}
-                className="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                className="absolute right-2.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-300"
                 title="清空搜索"
               >
                 <X className="h-3.5 w-3.5" />
@@ -239,25 +249,29 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
           </div>
         </div>
 
-        <div className="max-h-[calc(86vh-138px)] overflow-y-auto p-4">
+        <div className="max-h-[calc(86vh-150px)] overflow-y-auto p-5 scrollbar-thin">
           {filteredSkills.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-16 text-center">
+            <div className="flex flex-col items-center justify-center py-20 text-center">
               {keyword ? (
                 <>
-                  <Search className="mb-3 h-10 w-10 text-slate-200" />
-                  <p className="text-sm text-slate-500">没有找到匹配 "{search}" 的技能</p>
-                  <p className="mt-1 text-[11px] text-slate-400">换个关键词试试，或清空搜索查看全部</p>
+                  <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-100 dark:bg-white/5">
+                    <Search className="h-7 w-7 text-slate-300 dark:text-slate-600" />
+                  </div>
+                  <p className="text-sm font-medium text-slate-500 dark:text-slate-400">没有找到匹配 "{search}" 的技能</p>
+                  <p className="mt-1.5 text-[12px] text-slate-400 dark:text-slate-500">换个关键词试试，或清空搜索查看全部</p>
                 </>
               ) : (
                 <>
-                  <Sparkles className="mb-3 h-10 w-10 text-slate-200" />
-                  <p className="text-sm text-slate-500">还没有保存任何 SKILL</p>
-                  <p className="mt-1 text-[11px] text-slate-400">配置好步骤后，点「保存为 SKILL」即可复用</p>
+                  <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-50 to-indigo-50 dark:from-violet-500/10 dark:to-indigo-500/10">
+                    <Sparkles className="h-7 w-7 text-violet-400" />
+                  </div>
+                  <p className="text-sm font-medium text-slate-500 dark:text-slate-400">还没有保存任何技能</p>
+                  <p className="mt-1.5 text-[12px] text-slate-400 dark:text-slate-500">配置好步骤后，点「保存为技能」即可复用</p>
                 </>
               )}
             </div>
           ) : (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               {filteredSkills.map((skill) => {
                 const modeInfo = MODE_LABELS[skill.mode];
                 const stepCount = skill.dataSourceMarks.length + skill.reviewMarks.length + skill.entryMarks.length;
@@ -270,24 +284,28 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                   <div
                     key={skill.id}
                     className={[
-                      "relative flex items-stretch gap-2.5 overflow-hidden rounded-2xl border bg-white p-4 shadow-sm transition-all",
+                      "group relative flex items-stretch gap-3 overflow-hidden rounded-2xl border bg-white/70 p-0 shadow-sm backdrop-blur-sm transition-all duration-200",
+                      "dark:bg-slate-800/40 dark:border-white/5",
                       isEditing
-                        ? "border-indigo-300 ring-2 ring-indigo-200 items-center"
-                        : "border-slate-200 hover:border-indigo-300 hover:shadow-md",
-                      !isEditing && "cursor-grab active:cursor-grabbing",
-                      isImgDragOver && !isEditing ? "ring-2 ring-indigo-400 border-indigo-400" : "",
+                        ? "border-violet-300/60 ring-2 ring-violet-400/30 items-center dark:border-violet-400/40 dark:ring-violet-500/20"
+                        : applyMode
+                          ? "border-slate-200/60 hover:border-emerald-200/60 hover:shadow-lg hover:shadow-emerald-500/5 hover:-translate-y-0.5 dark:border-white/5 dark:hover:border-emerald-400/30 dark:hover:shadow-black/20 cursor-pointer"
+                          : "border-slate-200/60 hover:border-violet-200/60 hover:shadow-lg hover:shadow-violet-500/5 hover:-translate-y-0.5 dark:border-white/5 dark:hover:border-violet-400/30 dark:hover:shadow-black/20",
+                      !isEditing && !applyMode && "cursor-grab active:cursor-grabbing",
+                      isImgDragOver && !isEditing ? "ring-2 ring-violet-400/50 border-violet-400/50" : "",
                     ].filter(Boolean).join(" ")}
-                    draggable={!isEditing}
-                    onDragStart={(e) => !isEditing && handleDragStart(e, skill)}
-                    onDragOver={(e) => handleCardDragOver(e, skill.id)}
-                    onDragLeave={(e) => handleCardDragLeave(e, skill.id)}
-                    onDrop={(e) => handleCardDrop(e, skill.id)}
+                    draggable={!isEditing && !applyMode}
+                    onDragStart={(e) => !isEditing && !applyMode && handleDragStart(e, skill)}
+                    onDragOver={(e) => !applyMode && handleCardDragOver(e, skill.id)}
+                    onDragLeave={(e) => !applyMode && handleCardDragLeave(e, skill.id)}
+                    onDrop={(e) => !applyMode && handleCardDrop(e, skill.id)}
                     onPaste={(e) => handleCardPaste(e, skill.id)}
+                    onDoubleClick={() => { if (applyMode && !isEditing && onApplySkill) { onApplySkill(skill); } }}
                     tabIndex={0}
                   >
                     {/* 左侧自定义图标图片（非编辑态 + 有图） */}
                     {!isEditing && currentIconImage ? (
-                      <div className="relative -my-4 -ml-4 w-32 shrink-0 overflow-hidden rounded-l-2xl">
+                      <div className="relative -my-0 -ml-0 w-24 shrink-0 overflow-hidden rounded-l-2xl">
                         <img
                           src={currentIconImage}
                           alt=""
@@ -300,9 +318,10 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                             maskRepeat: "no-repeat",
                           }}
                         />
+                        <div className="absolute inset-0 bg-gradient-to-r from-transparent via-transparent to-white/10 dark:to-slate-900/20" />
                         <button
                           onClick={(e) => { e.stopPropagation(); clearSkillIconImage(skill.id); }}
-                          className="absolute right-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-slate-900/60 text-white transition-colors hover:bg-rose-600"
+                          className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-slate-900/60 text-white backdrop-blur-sm transition-all hover:bg-rose-500 opacity-0 group-hover:opacity-100"
                           title="移除图片图标"
                         >
                           <X className="h-3 w-3" />
@@ -312,9 +331,9 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
 
                     {isEditing ? (
                       <>
-                        {/* 编辑态：图标预览区（可点emoji或显示自定义图，支持粘贴/拖入图片） */}
+                        {/* 编辑态：图标预览区 */}
                         <div
-                          className="relative h-10 w-12 shrink-0 overflow-hidden rounded-lg"
+                          className="relative h-12 w-14 shrink-0 overflow-hidden rounded-xl m-4"
                           onPaste={(e) => {
                             const items = e.clipboardData?.items;
                             if (!items) return;
@@ -351,18 +370,12 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                               <img
                                 src={editIconImage}
                                 alt=""
-                                className="h-full w-full object-cover"
-                                style={{
-                                  WebkitMaskImage: "linear-gradient(to right, black 0%, black 70%, transparent 100%)",
-                                  maskImage: "linear-gradient(to right, black 0%, black 70%, transparent 100%)",
-                                  WebkitMaskRepeat: "no-repeat",
-                                  maskRepeat: "no-repeat",
-                                }}
+                                className="h-full w-full object-cover rounded-xl"
                               />
                               <button
                                 onClick={(e) => { e.stopPropagation(); setEditIconImage(null); }}
-                                className="absolute right-0 top-0 flex h-4 w-4 items-center justify-center rounded-full bg-slate-900/70 text-white hover:bg-rose-600"
-                                title="移除图片（保存后还原为 emoji）"
+                                className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-slate-900/70 text-white hover:bg-rose-500 backdrop-blur-sm"
+                                title="移除图片"
                               >
                                 <X className="h-2.5 w-2.5" />
                               </button>
@@ -370,114 +383,124 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                           ) : (
                             <button
                               onClick={() => setShowIconPicker(!showIconPicker)}
-                              className="flex h-full w-full items-center justify-center rounded-lg bg-gradient-to-br from-indigo-50 to-violet-50 text-2xl hover:bg-slate-100"
+                              className="flex h-full w-full items-center justify-center rounded-xl bg-gradient-to-br from-violet-50 to-indigo-50 text-2xl hover:from-violet-100 hover:to-indigo-100 dark:from-violet-500/10 dark:to-indigo-500/10 dark:hover:from-violet-500/20 dark:hover:to-indigo-500/20 transition-all"
                             >
                               {editIcon}
                             </button>
                           )}
                         </div>
-                        <div className="flex-1">
+                        <div className="flex-1 py-4 pr-2">
                           <input
                             autoFocus
                             value={editName}
                             onChange={(e) => setEditName(e.target.value)}
                             onKeyDown={(e) => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") cancelEdit(); }}
-                            className="w-full rounded-md border border-slate-300 px-2 py-1 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-200"
+                            className="w-full rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900/50 px-3 py-1.5 text-sm font-medium text-slate-800 dark:text-slate-200 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-400/20 transition-all"
                           />
                           <textarea
                             value={editDesc}
                             onChange={(e) => setEditDesc(e.target.value.slice(0, 80))}
                             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveEdit(); } if (e.key === "Escape") cancelEdit(); }}
-                            rows={3}
+                            rows={2}
                             maxLength={80}
                             placeholder="填写介绍（最多80字）"
-                            className="mt-1.5 w-full resize-none rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-200"
+                            className="mt-2 w-full resize-none rounded-lg border border-slate-200 dark:border-white/10 bg-white/50 dark:bg-slate-900/30 px-3 py-1.5 text-xs text-slate-600 dark:text-slate-300 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-400/20 transition-all"
                           />
-                          <div className={`mt-0.5 text-right text-[10px] ${editDesc.length >= 80 ? "text-rose-500" : "text-slate-400"}`}>
+                          <div className={`mt-1 text-right text-[10px] ${editDesc.length >= 80 ? "text-rose-500" : "text-slate-400"}`}>
                             {editDesc.length}/80
                           </div>
                           {showIconPicker && !editIconImage && (
-                            <div className="mt-2 flex flex-wrap gap-1">
+                            <div className="mt-2 flex flex-wrap gap-1.5">
                               {getDefaultIcons().map((ic) => (
                                 <button
                                   key={ic}
                                   onClick={() => { setEditIcon(ic); setShowIconPicker(false); }}
-                                  className={`flex h-8 w-8 items-center justify-center rounded-md text-lg transition-all ${editIcon === ic ? "bg-indigo-100 ring-2 ring-indigo-400" : "bg-slate-50 hover:bg-slate-100"}`}
+                                  className={`flex h-9 w-9 items-center justify-center rounded-lg text-xl transition-all ${editIcon === ic ? "bg-violet-100 dark:bg-violet-500/20 ring-2 ring-violet-400" : "bg-slate-50 dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10"}`}
                                 >
                                   {ic}
                                 </button>
                               ))}
                             </div>
                           )}
-                          {editIconImage && (
-                            <div className="mt-1 text-[10px] text-slate-400">已设为图片图标（Ctrl+V/拖入可更换）</div>
-                          )}
                         </div>
-                        <button
-                          onClick={saveEdit}
-                          className="rounded-md p-1.5 text-emerald-600 hover:bg-emerald-50"
-                        >
-                          <Check className="h-4 w-4" />
-                        </button>
-                        <button
-                          onClick={cancelEdit}
-                          className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100"
-                        >
-                          <X className="h-4 w-4" />
-                        </button>
+                        <div className="flex flex-col gap-1 pr-3 py-4">
+                          <button
+                            onClick={saveEdit}
+                            className="flex h-8 w-8 items-center justify-center rounded-lg text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors"
+                          >
+                            <Check className="h-4 w-4" />
+                          </button>
+                          <button
+                            onClick={cancelEdit}
+                            className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 dark:hover:bg-white/10 transition-colors"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        </div>
                       </>
                     ) : currentIconImage ? (
-                      /* 有图非编辑态：右侧标题/描述，底部左为元数据、右为操作按钮 */
+                      /* 有图非编辑态 */
                       <>
-                        <div className="flex min-w-0 flex-1 flex-col py-0.5">
+                        <div className="flex min-w-0 flex-1 flex-col py-4 pr-4 pl-1">
                           <div className="flex min-w-0 items-center gap-2">
-                            <span className="truncate font-display text-[19px] font-bold tracking-tight text-slate-900">{skill.name}</span>
-                            <span className={`shrink-0 rounded px-2 py-0.5 text-[11px] font-medium ${modeInfo.color}`}>
+                            <span className="truncate text-[18px] font-bold tracking-tight text-slate-800 dark:text-slate-100">{skill.name}</span>
+                            <span className={`shrink-0 rounded-md px-2 py-0.5 text-[10px] font-semibold ${modeInfo.color} dark:bg-opacity-20 dark:text-opacity-90`}>
                               {modeInfo.label}
                             </span>
                           </div>
                           <div className="mt-2 flex-1">
                             {skill.description ? (
-                              <p className="line-clamp-2 break-words text-[13px] leading-relaxed text-slate-500">{skill.description}</p>
+                              <p className="line-clamp-2 break-words text-[13px] leading-relaxed text-slate-500 dark:text-slate-400">{skill.description}</p>
                             ) : null}
                           </div>
-                          <div className="mt-2 flex items-end justify-between gap-2">
-                            <div className="flex items-center gap-2 text-[12px] text-slate-400">
-                              <span>{stepCount} 步</span>
-                              <span>·</span>
+                          <div className="mt-3 flex items-end justify-between gap-2">
+                            <div className="flex items-center gap-2 text-[12px] text-slate-400 dark:text-slate-500">
+                              <span className="font-medium">{stepCount} 步</span>
+                              <span className="opacity-50">·</span>
                               <span>{new Date(skill.updatedAt || skill.createdAt).toLocaleDateString("zh-CN")}</span>
                             </div>
                             <div className="flex shrink-0 items-center gap-1">
                               <button
                                 onClick={(e) => { e.stopPropagation(); startEdit(skill); }}
-                                className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
-                                title="编辑标题、介绍和图标"
+                                className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-300 opacity-70 group-hover:opacity-100"
+                                title="编辑"
                               >
                                 <Pencil className="h-3.5 w-3.5" />
                               </button>
                               <button
                                 onClick={(e) => { e.stopPropagation(); handleDelete(skill.id); }}
-                                className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-500"
+                                className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-rose-50 hover:text-rose-500 dark:hover:bg-rose-500/10 dark:hover:text-rose-400 opacity-70 group-hover:opacity-100"
                                 title="删除"
                               >
                                 <Trash2 className="h-3.5 w-3.5" />
                               </button>
                               <button
                                 onClick={(e) => { e.stopPropagation(); onEditFlow?.(skill); }}
-                                className="flex h-7 items-center gap-1 rounded-lg bg-violet-50 px-2 text-[11px] font-medium text-violet-700 ring-1 ring-violet-200 transition-all hover:bg-violet-100"
-                                title="打开流程图编辑器"
+                                className="flex h-8 items-center gap-1.5 rounded-lg bg-violet-50 dark:bg-violet-500/15 px-2.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300 ring-1 ring-violet-200/50 dark:ring-violet-400/20 transition-all hover:bg-violet-100 dark:hover:bg-violet-500/25 hover:ring-violet-300/50"
+                                title="编辑流程"
                               >
                                 <GitBranch className="h-3 w-3" />
                                 流程
                               </button>
-                              <button
-                                onClick={(e) => { e.stopPropagation(); onRunSkill(skill); }}
-                                className="flex h-7 items-center gap-1 rounded-lg bg-brand-600 px-2.5 text-[11px] font-medium text-white shadow-sm transition-all hover:bg-brand-700"
-                                title="批量执行此循环"
-                              >
-                                <Play className="h-3 w-3" />
-                                执行
-                              </button>
+                              {applyMode ? (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); onApplySkill?.(skill); }}
+                                  className="flex h-8 items-center gap-1.5 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 px-3 text-[11px] font-semibold text-white shadow-md shadow-emerald-500/20 transition-all hover:shadow-lg hover:shadow-emerald-500/30 hover:from-emerald-600 hover:to-teal-600 active:scale-95"
+                                  title="应用此模板的步骤到当前设置"
+                                >
+                                  <Layers className="h-3 w-3" />
+                                  应用
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); onRunSkill(skill); }}
+                                  className="flex h-8 items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-500 px-3 text-[11px] font-semibold text-white shadow-md shadow-indigo-500/20 transition-all hover:shadow-lg hover:shadow-indigo-500/30 hover:from-indigo-600 hover:to-violet-600 active:scale-95"
+                                  title="执行"
+                                >
+                                  <Play className="h-3 w-3 fill-current" />
+                                  执行
+                                </button>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -488,63 +511,75 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                         <button
                           onClick={(e) => { e.stopPropagation(); handlePickImage(skill.id); }}
                           onPaste={(e) => handleCardPaste(e, skill.id)}
-                          className="group relative -my-4 -ml-4 flex w-14 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-l-2xl bg-gradient-to-br from-indigo-50 to-violet-50 text-2xl select-none hover:ring-2 hover:ring-indigo-300"
-                          title="点击上传图片，或 Ctrl+V / 拖入图片"
+                          className="group/ico relative -my-0 -ml-0 flex w-20 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-l-2xl bg-gradient-to-br from-violet-50 via-indigo-50 to-fuchsia-50 dark:from-violet-500/10 dark:via-indigo-500/10 dark:to-fuchsia-500/10 text-3xl select-none transition-all hover:from-violet-100 hover:via-indigo-100 hover:to-fuchsia-100 dark:hover:from-violet-500/20 dark:hover:via-indigo-500/20 dark:hover:to-fuchsia-500/20"
+                          title="点击上传图片"
                         >
-                          {currentIcon}
-                          <span className="absolute inset-0 flex items-center justify-center bg-slate-900/50 text-white opacity-0 transition-opacity group-hover:opacity-100">
+                          <div className="relative z-10 transition-transform group-hover/ico:scale-110">{currentIcon}</div>
+                          <div className="absolute inset-0 bg-gradient-to-t from-black/0 via-black/0 to-black/0 group-hover/ico:from-black/10 group-hover/ico:via-black/0 group-hover/ico:to-black/0 transition-all" />
+                          <span className="absolute inset-0 flex items-center justify-center bg-slate-900/60 text-white opacity-0 transition-all group-hover/ico:opacity-100 backdrop-blur-sm">
                             <ImagePlus className="h-5 w-5" />
                           </span>
                         </button>
-                        <div className="flex min-w-0 flex-1 flex-col py-0.5">
+                        <div className="flex min-w-0 flex-1 flex-col py-4 pr-4">
                           <div className="flex items-center gap-2">
-                            <span className="truncate font-display text-lg font-semibold tracking-tight text-slate-900">{skill.name}</span>
-                            <span className={`shrink-0 rounded px-2 py-0.5 text-[11px] font-medium ${modeInfo.color}`}>
+                            <span className="truncate text-[17px] font-bold tracking-tight text-slate-800 dark:text-slate-100">{skill.name}</span>
+                            <span className={`shrink-0 rounded-md px-2 py-0.5 text-[10px] font-semibold ${modeInfo.color} dark:bg-opacity-20 dark:text-opacity-90`}>
                               {modeInfo.label}
                             </span>
                           </div>
                           <div className="mt-1.5 flex-1">
                             {skill.description ? (
-                              <p className="line-clamp-2 break-words text-[13px] leading-relaxed text-slate-500">{skill.description}</p>
+                              <p className="line-clamp-2 break-words text-[13px] leading-relaxed text-slate-500 dark:text-slate-400">{skill.description}</p>
                             ) : null}
                           </div>
-                          <div className="mt-2 flex items-end justify-between gap-2">
-                            <div className="flex items-center gap-2 text-[12px] text-slate-400">
-                              <span>{stepCount} 步</span>
-                              <span>·</span>
+                          <div className="mt-3 flex items-end justify-between gap-2">
+                            <div className="flex items-center gap-2 text-[12px] text-slate-400 dark:text-slate-500">
+                              <span className="font-medium">{stepCount} 步</span>
+                              <span className="opacity-50">·</span>
                               <span>{new Date(skill.updatedAt || skill.createdAt).toLocaleDateString("zh-CN")}</span>
                             </div>
                             <div className="flex shrink-0 items-center gap-1">
                               <button
                                 onClick={(e) => { e.stopPropagation(); startEdit(skill); }}
-                                className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
-                                title="编辑标题、介绍和图标"
+                                className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-300 opacity-70 group-hover:opacity-100"
+                                title="编辑"
                               >
                                 <Pencil className="h-3.5 w-3.5" />
                               </button>
                               <button
                                 onClick={(e) => { e.stopPropagation(); handleDelete(skill.id); }}
-                                className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-500"
+                                className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-rose-50 hover:text-rose-500 dark:hover:bg-rose-500/10 dark:hover:text-rose-400 opacity-70 group-hover:opacity-100"
                                 title="删除"
                               >
                                 <Trash2 className="h-3.5 w-3.5" />
                               </button>
                               <button
                                 onClick={(e) => { e.stopPropagation(); onEditFlow?.(skill); }}
-                                className="flex h-7 items-center gap-1 rounded-lg bg-violet-50 px-2 text-[11px] font-medium text-violet-700 ring-1 ring-violet-200 transition-all hover:bg-violet-100"
-                                title="打开流程图编辑器"
+                                className="flex h-8 items-center gap-1.5 rounded-lg bg-violet-50 dark:bg-violet-500/15 px-2.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300 ring-1 ring-violet-200/50 dark:ring-violet-400/20 transition-all hover:bg-violet-100 dark:hover:bg-violet-500/25 hover:ring-violet-300/50"
+                                title="编辑流程"
                               >
                                 <GitBranch className="h-3 w-3" />
                                 流程
                               </button>
-                              <button
-                                onClick={(e) => { e.stopPropagation(); onRunSkill(skill); }}
-                                className="flex h-7 items-center gap-1 rounded-lg bg-brand-600 px-2.5 text-[11px] font-medium text-white shadow-sm transition-all hover:bg-brand-700"
-                                title="批量执行此循环"
-                              >
-                                <Play className="h-3 w-3" />
-                                执行
-                              </button>
+                              {applyMode ? (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); onApplySkill?.(skill); }}
+                                  className="flex h-8 items-center gap-1.5 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 px-3 text-[11px] font-semibold text-white shadow-md shadow-emerald-500/20 transition-all hover:shadow-lg hover:shadow-emerald-500/30 hover:from-emerald-600 hover:to-teal-600 active:scale-95"
+                                  title="应用此模板的步骤到当前设置"
+                                >
+                                  <Layers className="h-3 w-3" />
+                                  应用
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); onRunSkill(skill); }}
+                                  className="flex h-8 items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-500 px-3 text-[11px] font-semibold text-white shadow-md shadow-indigo-500/20 transition-all hover:shadow-lg hover:shadow-indigo-500/30 hover:from-indigo-600 hover:to-violet-600 active:scale-95"
+                                  title="执行"
+                                >
+                                  <Play className="h-3 w-3 fill-current" />
+                                  执行
+                                </button>
+                              )}
                             </div>
                           </div>
                         </div>
