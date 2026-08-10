@@ -6,6 +6,12 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from ..config import settings
+from ..services.document_extract import ensure_umi_ocr_running, launch_umi_ocr, browse_umi_ocr_executable, check_markitdown_available
+from ..services.dependency_manager import (
+    download_and_install_umi_ocr,
+    get_all_deps_status,
+    install_python_deps,
+)
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -18,6 +24,16 @@ class AppSettings(BaseModel):
     browser_use_llm_base: str = ""
     browser_use_llm_key: str = ""
     browser_use_llm_model: str = ""
+    ocr_engine: str = "vision"
+    umi_ocr_host: str = "127.0.0.1"
+    umi_ocr_port: int = 1224
+    umi_ocr_exe_path: str = ""
+    beginner_mode: bool = True
+    prevent_accidental_close: bool = False
+    ui_scale: float = 1.0
+    theme: str = "light"
+    accent: str = "indigo"
+    browser_brightness: float = 1.0
 
 
 # 1x1 透明 PNG，用来检测模型是否接受 image_url
@@ -87,3 +103,61 @@ async def test_vision():
         return {"supports_images": False, "message": f"模型不支持图片输入或配置错误: {text[:200]}"}
     except Exception as e:
         return {"supports_images": False, "message": f"检测失败: {e}"}
+
+
+@router.post("/test-umi-ocr")
+async def test_umi_ocr():
+    """检测 UMI-OCR 服务是否可用（未运行时尝试自动启动）。"""
+    ok, msg = await ensure_umi_ocr_running()
+    return {"ok": ok, "message": msg, "host": settings.umi_ocr_host, "port": settings.umi_ocr_port}
+
+
+@router.post("/launch-umi-ocr")
+async def api_launch_umi_ocr():
+    """一键启动 UMI-OCR（用户主动点击按钮时调用，允许反复重试）。"""
+    ok, msg = await launch_umi_ocr()
+    return {"ok": ok, "message": msg, "exe_path": settings.umi_ocr_exe_path}
+
+
+@router.post("/browse-umi-ocr")
+async def api_browse_umi_ocr():
+    """弹出系统文件选择对话框，让用户选择 Umi-OCR.exe，并保存路径到配置。"""
+    path = browse_umi_ocr_executable()
+    if not path:
+        return {"ok": False, "message": "已取消选择", "path": ""}
+    # 持久化保存路径
+    settings.update_from_dict({"umi_ocr_exe_path": path})
+    settings.persist()
+    return {"ok": True, "message": f"已选择：{path}", "path": path}
+
+
+@router.post("/test-markitdown")
+async def test_markitdown():
+    """检测 MarkItDown（文档解析）和 PyMuPDF（PDF 渲染）是否可用。"""
+    ok, msg = check_markitdown_available()
+    return {"ok": ok, "message": msg}
+
+
+# ============ 依赖与外部工具管理 ============
+
+@router.get("/deps-status")
+def deps_status():
+    """返回所有 Python 依赖和外部工具（UMI-OCR）的安装状态。"""
+    return get_all_deps_status()
+
+
+@router.post("/install-python-deps")
+def install_python_deps_endpoint():
+    """一键安装/修复所有缺失的 Python 依赖（markitdown、PyMuPDF、pillow-heif）。"""
+    ok, msg = install_python_deps()
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/download-umi-ocr")
+def download_umi_ocr_endpoint():
+    """从 GitHub Release 下载并安装最新版 UMI-OCR 到用户工具目录。
+
+    此操作可能耗时数分钟（下载约 100MB），同步执行，前端需显示加载状态。
+    """
+    ok, msg, exe_path = download_and_install_umi_ocr()
+    return {"ok": ok, "message": msg, "exe_path": exe_path}
