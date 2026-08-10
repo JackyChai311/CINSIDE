@@ -1,7 +1,7 @@
 {
   "name": "cinside-frontend",
   "private": true,
-  "version": "0.5.5",
+  "version": "0.5.6",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
@@ -13,6 +13,7 @@
     "electron:build:portable": "npm run build && npm run build:backend && electron-builder --win portable"
   },
   "dependencies": {
+    "@officecli/officecli": "^1.0.143",
     "electron-updater": "^6.8.9",
     "lucide-react": "^0.408.0",
     "react": "^18.3.1",
@@ -71,6 +72,13 @@
       {
         "from": "../samples",
         "to": "samples",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "node_modules/@officecli/officecli/vendor",
+        "to": "officecli",
         "filter": [
           "**/*"
         ]
