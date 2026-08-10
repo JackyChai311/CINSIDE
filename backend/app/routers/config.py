@@ -1,14 +1,18 @@
 """应用配置读写接口。"""
 from __future__ import annotations
 
+import json
+
 import httpx
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..config import settings
 from ..services.document_extract import ensure_umi_ocr_running, launch_umi_ocr, browse_umi_ocr_executable, check_markitdown_available
 from ..services.dependency_manager import (
     download_and_install_umi_ocr,
+    download_and_install_umi_ocr_stream,
     get_all_deps_status,
     install_python_deps,
 )
@@ -28,7 +32,7 @@ class AppSettings(BaseModel):
     umi_ocr_host: str = "127.0.0.1"
     umi_ocr_port: int = 1224
     umi_ocr_exe_path: str = ""
-    beginner_mode: bool = True
+    beginner_mode: bool = False
     prevent_accidental_close: bool = False
     ui_scale: float = 1.0
     theme: str = "light"
@@ -161,3 +165,51 @@ def download_umi_ocr_endpoint():
     """
     ok, msg, exe_path = download_and_install_umi_ocr()
     return {"ok": ok, "message": msg, "exe_path": exe_path}
+
+
+@router.get("/download-umi-ocr/stream")
+async def download_umi_ocr_stream_endpoint():
+    """SSE 流式下载安装 UMI-OCR，实时推送进度。"""
+    from starlette.concurrency import iterate_in_threadpool
+
+    sync_gen = download_and_install_umi_ocr_stream()
+
+    async def event_stream():
+        async for event in iterate_in_threadpool(sync_gen):
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+# ========== LOOP 卡片分享（GitHub Gist）==========
+
+class ShareCreateRequest(BaseModel):
+    template: dict
+
+
+@router.post("/share/create")
+async def share_create(req: ShareCreateRequest):
+    """创建 GitHub Gist 分享，返回短码。"""
+    from starlette.concurrency import run_in_threadpool
+    from ..services.share_service import create_gist_share
+
+    result = await run_in_threadpool(create_gist_share, req.template)
+    return result
+
+
+@router.get("/share/fetch")
+async def share_fetch(code: str):
+    """根据分享码获取 LOOP 卡片模板。"""
+    from starlette.concurrency import run_in_threadpool
+    from ..services.share_service import get_gist_share
+
+    result = await run_in_threadpool(get_gist_share, code)
+    return result
