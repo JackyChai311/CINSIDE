@@ -153,3 +153,39 @@ export function valuesEquivalent(field: string, a: string, b: string): boolean {
   const nbCompact = nb.replace(/\s+/g, "");
   return naCompact.includes(nbCompact) || nbCompact.includes(naCompact);
 }
+
+// ============ 文档提取方式标签 ============
+
+/** 提取方式 → 用户可见的中文标签 */
+export function extractMethodLabel(method: string): string {
+  switch (method) {
+    case "vision_ocr":
+      return "AI Vision";
+    case "umi_ocr":
+      return "UMI-OCR";
+    case "pdf_ocr":
+      return "AI Vision（PDF扫描件）";
+    case "pdf_umi_ocr":
+      return "UMI-OCR（PDF扫描件）";
+    case "markitdown":
+      return "文档解析";
+    default:
+      return method || "未知";
+  }
+}
+
+/** 是否为 OCR 类提取方式（图片/扫描件走 OCR 引擎） */
+export function isOcrMethod(method: string): boolean {
+  return method === "vision_ocr" || method === "umi_ocr"
+    || method === "pdf_ocr" || method === "pdf_umi_ocr";
+}
+
+/** 是否为本地 UMI-OCR 引擎 */
+export function isUmiMethod(method: string): boolean {
+  return method === "umi_ocr" || method === "pdf_umi_ocr";
+}
+
+/** 是否为 Vision AI 引擎 */
+export function isVisionMethod(method: string): boolean {
+  return method === "vision_ocr" || method === "pdf_ocr";
+}
