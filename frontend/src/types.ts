@@ -164,10 +164,24 @@ export interface UmiOcrStatus {
   service_online: boolean;
 }
 
+export interface RemotionStatus {
+  installed: boolean;
+  path: string;
+  version: string;
+}
+
+export interface OfficecliStatus {
+  installed: boolean;
+  path: string;
+  version: string;
+}
+
 export interface DepsStatus {
   python_deps: PythonDepStatus[];
   python_all_installed: boolean;
   umi_ocr: UmiOcrStatus;
+  remotion: RemotionStatus;
+  officecli: OfficecliStatus;
   tools_dir: string;
 }
 
@@ -752,3 +766,59 @@ export const VERIFY_METHOD_LABELS: Record<string, string> = {
   ocr: "智能匹配",
   contains: "精确匹配",
 };
+
+// ========== 幻灯片任务（PPT Section 拆并） ==========
+
+export interface PPTTextNode {
+  path: string;
+  text: string;
+}
+
+export interface PPTSlideNode {
+  index: number;
+  path: string;
+  title: string;
+  texts: PPTTextNode[];
+}
+
+export interface PPTFileSlides {
+  file_id: string;
+  file_name: string;
+  file_path: string;
+  slides: PPTSlideNode[];
+}
+
+export interface PPTSectionPart {
+  file_id: string;
+  file_name: string;
+  file_path: string;
+  slide_start: number;
+  slide_end: number;
+  slides: PPTSlideNode[];
+}
+
+export interface PPTSection {
+  name: string;
+  parts: PPTSectionPart[];
+}
+
+export interface PPTTextPatch {
+  file_id: string;
+  file_name: string;
+  file_path: string;
+  slide: number;
+  path: string;
+  text: string;
+  new_text: string;
+}
+
+export interface PPTProgressEvent {
+  index: number;
+  total: number;
+  file: string;
+  status: "parsing" | "outline" | "markitdown" | "done" | "error";
+  slides?: number;
+  texts?: number;
+  chars?: number;
+  message?: string;
+}
