@@ -2,18 +2,857 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============ 主题变量（主色调） ============ */
+/* 默认靛蓝；通过 html[data-accent] 切换整套 brand 色 */
+:root {
+  --brand-50: #eef2ff;
+  --brand-100: #e0e7ff;
+  --brand-300: #a5b4fc;
+  --brand-400: #818cf8;
+  --brand-500: #6366f1;
+  --brand-600: #4f46e5;
+  --brand-700: #4338ca;
+}
+html[data-accent="sky"] {
+  --brand-50: #f0f9ff;  --brand-100: #e0f2fe;  --brand-300: #7dd3fc;
+  --brand-400: #38bdf8; --brand-500: #0ea5e9;  --brand-600: #0284c7;  --brand-700: #0369a1;
+}
+html[data-accent="emerald"] {
+  --brand-50: #ecfdf5;  --brand-100: #d1fae5;  --brand-300: #6ee7b7;
+  --brand-400: #34d399; --brand-500: #10b981;  --brand-600: #059669;  --brand-700: #047857;
+}
+html[data-accent="rose"] {
+  --brand-50: #fff1f2;  --brand-100: #ffe4e6;  --brand-300: #fda4af;
+  --brand-400: #fb7185; --brand-500: #f43f5e;  --brand-600: #e11d48;  --brand-700: #be123c;
+}
+html[data-accent="violet"] {
+  --brand-50: #f5f3ff;  --brand-100: #ede9fe;  --brand-300: #c4b5fd;
+  --brand-400: #a78bfa; --brand-500: #8b5cf6;  --brand-600: #7c3aed;  --brand-700: #6d28d9;
+}
+html[data-accent="amber"] {
+  --brand-50: #fffbeb;  --brand-100: #fef3c7;  --brand-300: #fcd34d;
+  --brand-400: #fbbf24; --brand-500: #f59e0b;  --brand-600: #d97706;  --brand-700: #b45309;
+}
+
+/* 主题切换过渡：仅作用于容器背景/边框，避免 color（级联到全部文字）和 box-shadow（与 backdrop-blur 叠加极耗性能）导致卡顿 */
+.glass, .glass-strong, .glass-frame, .panel-solid {
+  transition: background-color .2s ease, border-color .2s ease;
+}
+
+/* 切换主题/主色调瞬间禁用所有过渡，避免数百个 transition-all 按钮同时动画导致卡顿 */
+html.no-transitions,
+html.no-transitions *,
+html.no-transitions *::before,
+html.no-transitions *::after {
+  transition: none !important;
+}
+
+/* LOGO 文字：浅色下黑色，深色下白色（SVG 用 currentColor） */
+.logo-wordmark { color: #0f172a; }
+html[data-theme="dark"] .logo-wordmark { color: #f1f5f9; }
+
 html, body, #root {
   height: 100%;
   margin: 0;
 }
 
-body {
-  /* 渐变背景：浅蓝紫 → 白，给玻璃质感提供底层色彩 */
+/* ============ 深色主题 ============ */
+html[data-theme="dark"] body {
   background:
-    radial-gradient(1200px 800px at 10% 10%, #e0e7ff 0%, transparent 60%),
+    radial-gradient(1200px 800px at 10% 10%, color-mix(in srgb, var(--brand-500) 20%, transparent) 0%, transparent 60%),
+    radial-gradient(1000px 700px at 90% 20%, rgba(244, 63, 94, .10) 0%, transparent 55%),
+    radial-gradient(900px 600px at 50% 100%, color-mix(in srgb, var(--brand-500) 18%, transparent) 0%, transparent 60%),
+    linear-gradient(135deg, #0b1020 0%, #121a30 100%);
+  color: #e2e8f0;
+  color-scheme: dark;
+}
+html[data-theme="dark"] .glass {
+  background-color: rgba(30, 41, 59, .55);
+  border-color: rgba(255, 255, 255, .10);
+  box-shadow: 0 1px 0 0 rgba(255,255,255,.05) inset, 0 8px 32px -8px rgba(0,0,0,.55);
+}
+html[data-theme="dark"] .glass-strong {
+  background-color: rgba(30, 41, 59, .72);
+  border-color: rgba(255, 255, 255, .12);
+  box-shadow: 0 1px 0 0 rgba(255,255,255,.06) inset, 0 12px 40px -10px rgba(0,0,0,.6);
+}
+html[data-theme="dark"] .glass-frame {
+  background-color: rgba(30, 41, 59, .35);
+  border-color: rgba(255, 255, 255, .10);
+  box-shadow: 0 1px 0 0 rgba(255,255,255,.04) inset, 0 4px 20px -6px rgba(0,0,0,.4);
+}
+html[data-theme="dark"] .panel-solid {
+  background-color: #1a2236;
+  border-color: #3a4a66;
+  box-shadow: 0 1px 3px -1px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.5);
+}
+/* 深色下统一覆盖常见浅色工具类（卡片/文字/边框），保证整体观感一致 */
+html[data-theme="dark"] .bg-white { background-color: #1a2236; }
+html[data-theme="dark"] .bg-slate-50 { background-color: rgba(38, 51, 75, .65); }
+html[data-theme="dark"] .bg-slate-50\/50 { background-color: rgba(38, 51, 75, .65); }
+html[data-theme="dark"] .bg-slate-100 { background-color: #26334b; }
+html[data-theme="dark"] .hover\:bg-slate-100:hover { background-color: #2f3d58; }
+html[data-theme="dark"] .hover\:bg-slate-50:hover { background-color: #26334b; }
+html[data-theme="dark"] .bg-slate-200 { background-color: #3a4a66; }
+html[data-theme="dark"] .hover\:bg-slate-200:hover { background-color: #2f3d58; }
+html[data-theme="dark"] .bg-slate-300 { background-color: #4a5d7d; }
+html[data-theme="dark"] .text-slate-800 { color: #f1f5f9; }
+html[data-theme="dark"] .text-slate-700 { color: #e2e8f0; }
+html[data-theme="dark"] .text-slate-600 { color: #cbd5e1; }
+html[data-theme="dark"] .text-slate-500 { color: #94a3b8; }
+html[data-theme="dark"] .text-slate-400 { color: #94a3b8; }
+html[data-theme="dark"] .text-slate-300 { color: #cbd5e1; }
+html[data-theme="dark"] .border-slate-200 { border-color: #3a4a66; }
+html[data-theme="dark"] .border-slate-100 { border-color: #2f3d58; }
+html[data-theme="dark"] .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-color: #3a4a66; }
+html[data-theme="dark"] .ring-slate-200 { --tw-ring-color: #3a4a66; }
+/* 深色下带透明度的浅色背景类（面板 header/容器/表头）——这些是独立类，上面的 .bg-white 覆盖命中不到 */
+html[data-theme="dark"] .bg-white\/95,
+html[data-theme="dark"] .bg-white\/90,
+html[data-theme="dark"] .bg-white\/80,
+html[data-theme="dark"] .bg-white\/70,
+html[data-theme="dark"] .bg-white\/60,
+html[data-theme="dark"] .bg-white\/97 { background-color: #1a2236; }
+html[data-theme="dark"] .bg-white\/40,
+html[data-theme="dark"] .bg-white\/50 { background-color: rgba(30, 41, 59, .45); }
+html[data-theme="dark"] .bg-white\/30 { background-color: rgba(30, 41, 59, .35); }
+html[data-theme="dark"] .bg-white\/20 { background-color: rgba(255, 255, 255, .10); }
+html[data-theme="dark"] .bg-slate-50\/95,
+html[data-theme="dark"] .bg-slate-50\/80 { background-color: #26334b; }
+html[data-theme="dark"] .bg-slate-50\/60,
+html[data-theme="dark"] .bg-slate-50\/50 { background-color: rgba(38, 51, 75, .6); }
+html[data-theme="dark"] .bg-slate-50\/30 { background-color: rgba(38, 51, 75, .35); }
+html[data-theme="dark"] .bg-slate-100\/80 { background-color: #26334b; }
+html[data-theme="dark"] .bg-slate-200\/80 { background-color: #2f3d58; }
+html[data-theme="dark"] .bg-slate-200\/70 { background-color: #2f3d58; }
+html[data-theme="dark"] .bg-slate-400 { background-color: #475569; }
+
+/* —— 彩色浅色底（50/100）→ 深色下改为低透明度同色浸染 —— */
+/* emerald */
+html[data-theme="dark"] .bg-emerald-50,
+html[data-theme="dark"] .bg-emerald-50\/40,
+html[data-theme="dark"] .bg-emerald-50\/50,
+html[data-theme="dark"] .bg-emerald-50\/60,
+html[data-theme="dark"] .bg-emerald-50\/70,
+html[data-theme="dark"] .bg-emerald-50\/80 { background-color: rgba(16, 185, 129, .12); }
+html[data-theme="dark"] .bg-emerald-100 { background-color: rgba(16, 185, 129, .18); }
+html[data-theme="dark"] .bg-emerald-100\/70 { background-color: rgba(16, 185, 129, .15); }
+html[data-theme="dark"] .border-emerald-200 { border-color: rgba(16, 185, 129, .28); }
+html[data-theme="dark"] .text-emerald-900 { color: #6ee7b7; }
+html[data-theme="dark"] .text-emerald-800 { color: #6ee7b7; }
+html[data-theme="dark"] .text-emerald-700 { color: #34d399; }
+html[data-theme="dark"] .border-emerald-100 { border-color: rgba(16, 185, 129, .18); }
+html[data-theme="dark"] .bg-gradient-to-r.from-emerald-50.to-teal-50 {
+  background: linear-gradient(to right, rgba(16, 185, 129, .12) 0%, rgba(20, 184, 166, .10) 100%) !important;
+}
+html[data-theme="dark"] .hover\:bg-emerald-50:hover { background-color: rgba(16, 185, 129, .14); }
+html[data-theme="dark"] .hover\:bg-emerald-100:hover { background-color: rgba(16, 185, 129, .20); }
+/* violet */
+html[data-theme="dark"] .bg-violet-50,
+html[data-theme="dark"] .bg-violet-50\/40,
+html[data-theme="dark"] .bg-violet-50\/60,
+html[data-theme="dark"] .bg-violet-50\/70,
+html[data-theme="dark"] .bg-violet-50\/80 { background-color: rgba(139, 92, 246, .12); }
+html[data-theme="dark"] .bg-violet-100 { background-color: rgba(139, 92, 246, .18); }
+html[data-theme="dark"] .bg-violet-100\/70 { background-color: rgba(139, 92, 246, .15); }
+html[data-theme="dark"] .bg-violet-100\/80 { background-color: rgba(139, 92, 246, .18); }
+html[data-theme="dark"] .border-violet-200,
+html[data-theme="dark"] .border-violet-200\/80 { border-color: rgba(139, 92, 246, .28); }
+html[data-theme="dark"] .text-violet-900 { color: #c4b5fd; }
+html[data-theme="dark"] .text-violet-800 { color: #c4b5fd; }
+html[data-theme="dark"] .text-violet-700 { color: #a78bfa; }
+html[data-theme="dark"] .text-violet-600 { color: #c4b5fd; }
+html[data-theme="dark"] .text-violet-500 { color: #a78bfa; }
+html[data-theme="dark"] .text-violet-500\/70 { color: rgba(196, 181, 253, .85); }
+html[data-theme="dark"] .hover\:text-violet-700:hover { color: #ddd6fe; }
+html[data-theme="dark"] .hover\:bg-violet-50:hover { background-color: rgba(139, 92, 246, .14); }
+html[data-theme="dark"] .hover\:bg-violet-100:hover { background-color: rgba(139, 92, 246, .20); }
+html[data-theme="dark"] .hover\:bg-violet-200:hover { background-color: rgba(139, 92, 246, .30); }
+html[data-theme="dark"] .bg-violet-200 { background-color: rgba(139, 92, 246, .28); }
+html[data-theme="dark"] .bg-gradient-to-r.from-violet-50.to-fuchsia-50 {
+  background: linear-gradient(to right, rgba(139, 92, 246, .12) 0%, rgba(217, 70, 239, .10) 100%) !important;
+}
+html[data-theme="dark"] .bg-violet-50\/50 { background-color: rgba(139, 92, 246, .08); }
+html[data-theme="dark"] .bg-violet-50\/20 { background-color: rgba(139, 92, 246, .06); }
+html[data-theme="dark"] .border-violet-100 { border-color: rgba(139, 92, 246, .18); }
+html[data-theme="dark"] .border-violet-300 { border-color: rgba(139, 92, 246, .35); }
+html[data-theme="dark"] .ring-violet-300 { --tw-ring-color: rgba(139, 92, 246, .35); }
+html[data-theme="dark"] .ring-violet-200\/50 { --tw-ring-color: rgba(139, 92, 246, .22); }
+html[data-theme="dark"] .ring-violet-200\/80 { --tw-ring-color: rgba(139, 92, 246, .28); }
+/* sky */
+html[data-theme="dark"] .bg-sky-50,
+html[data-theme="dark"] .bg-sky-50\/40,
+html[data-theme="dark"] .bg-sky-50\/50,
+html[data-theme="dark"] .bg-sky-50\/60,
+html[data-theme="dark"] .bg-sky-50\/70,
+html[data-theme="dark"] .bg-sky-50\/80 { background-color: rgba(14, 165, 233, .12); }
+html[data-theme="dark"] .bg-sky-100 { background-color: rgba(14, 165, 233, .18); }
+html[data-theme="dark"] .border-sky-100 { border-color: rgba(14, 165, 233, .18); }
+html[data-theme="dark"] .border-sky-200 { border-color: rgba(14, 165, 233, .28); }
+html[data-theme="dark"] .text-sky-800 { color: #7dd3fc; }
+html[data-theme="dark"] .text-sky-700 { color: #38bdf8; }
+html[data-theme="dark"] .text-sky-600 { color: #7dd3fc; }
+html[data-theme="dark"] .text-sky-500 { color: #38bdf8; }
+html[data-theme="dark"] .hover\:text-sky-700:hover { color: #bae6fd; }
+html[data-theme="dark"] .hover\:bg-sky-50:hover { background-color: rgba(14, 165, 233, .14); }
+html[data-theme="dark"] .hover\:bg-sky-100:hover { background-color: rgba(14, 165, 233, .20); }
+html[data-theme="dark"] .hover\:bg-sky-200:hover { background-color: rgba(14, 165, 233, .30); }
+/* indigo */
+html[data-theme="dark"] .bg-indigo-50,
+html[data-theme="dark"] .bg-indigo-50\/40,
+html[data-theme="dark"] .bg-indigo-50\/50,
+html[data-theme="dark"] .bg-indigo-50\/60,
+html[data-theme="dark"] .bg-indigo-50\/70,
+html[data-theme="dark"] .bg-indigo-50\/80 { background-color: rgba(99, 102, 241, .16); }
+html[data-theme="dark"] .bg-indigo-100 { background-color: rgba(99, 102, 241, .18); }
+html[data-theme="dark"] .bg-indigo-200 { background-color: rgba(99, 102, 241, .30); }
+html[data-theme="dark"] .border-indigo-200 { border-color: rgba(99, 102, 241, .28); }
+html[data-theme="dark"] .text-indigo-900 { color: #a5b4fc; }
+html[data-theme="dark"] .text-indigo-800 { color: #a5b4fc; }
+html[data-theme="dark"] .text-indigo-700 { color: #818cf8; }
+html[data-theme="dark"] .border-indigo-100 { border-color: rgba(99, 102, 241, .18); }
+html[data-theme="dark"] .bg-gradient-to-r.from-indigo-50.to-violet-50 {
+  background: linear-gradient(to right, rgba(99, 102, 241, .14) 0%, rgba(139, 92, 246, .10) 100%) !important;
+}
+html[data-theme="dark"] .text-indigo-600 { color: #a5b4fc; }
+html[data-theme="dark"] .hover\:bg-indigo-50:hover,
+html[data-theme="dark"] .hover\:bg-indigo-50\/50:hover { background-color: rgba(99, 102, 241, .20); }
+html[data-theme="dark"] .hover\:bg-indigo-100:hover { background-color: rgba(99, 102, 241, .22); }
+html[data-theme="dark"] .hover\:ring-indigo-200:hover { --tw-ring-color: rgba(99, 102, 241, .40); }
+/* rose */
+html[data-theme="dark"] .bg-rose-50,
+html[data-theme="dark"] .bg-rose-50\/40,
+html[data-theme="dark"] .bg-rose-50\/50,
+html[data-theme="dark"] .bg-rose-50\/60,
+html[data-theme="dark"] .bg-rose-50\/70,
+html[data-theme="dark"] .bg-rose-50\/80 { background-color: rgba(244, 63, 94, .12); }
+html[data-theme="dark"] .bg-rose-100 { background-color: rgba(244, 63, 94, .18); }
+html[data-theme="dark"] .border-rose-200 { border-color: rgba(244, 63, 94, .28); }
+html[data-theme="dark"] .text-rose-800 { color: #fda4af; }
+html[data-theme="dark"] .text-rose-700 { color: #fb7185; }
+html[data-theme="dark"] .hover\:bg-rose-50:hover { background-color: rgba(244, 63, 94, .14); }
+html[data-theme="dark"] .hover\:bg-rose-100:hover { background-color: rgba(244, 63, 94, .20); }
+/* amber */
+html[data-theme="dark"] .bg-amber-50,
+html[data-theme="dark"] .bg-amber-50\/40,
+html[data-theme="dark"] .bg-amber-50\/50,
+html[data-theme="dark"] .bg-amber-50\/60,
+html[data-theme="dark"] .bg-amber-50\/70,
+html[data-theme="dark"] .bg-amber-50\/80,
+html[data-theme="dark"] .bg-amber-50\/90 { background-color: rgba(245, 158, 11, .12); }
+html[data-theme="dark"] .bg-amber-100 { background-color: rgba(245, 158, 11, .18); }
+html[data-theme="dark"] .bg-amber-200 { background-color: rgba(245, 158, 11, .28); }
+html[data-theme="dark"] .border-amber-200 { border-color: rgba(245, 158, 11, .28); }
+html[data-theme="dark"] .border-amber-300 { border-color: rgba(245, 158, 11, .35); }
+html[data-theme="dark"] .text-amber-800 { color: #fcd34d; }
+html[data-theme="dark"] .text-amber-700 { color: #fbbf24; }
+html[data-theme="dark"] .text-amber-600 { color: #fcd34d; }
+html[data-theme="dark"] .text-amber-500 { color: #fbbf24; }
+html[data-theme="dark"] .hover\:bg-amber-50:hover { background-color: rgba(245, 158, 11, .14); }
+html[data-theme="dark"] .hover\:bg-amber-100:hover { background-color: rgba(245, 158, 11, .20); }
+/* teal */
+html[data-theme="dark"] .bg-teal-50,
+html[data-theme="dark"] .bg-teal-50\/40,
+html[data-theme="dark"] .bg-teal-50\/50,
+html[data-theme="dark"] .bg-teal-50\/60,
+html[data-theme="dark"] .bg-teal-50\/70,
+html[data-theme="dark"] .bg-teal-50\/80 { background-color: rgba(20, 184, 166, .12); }
+html[data-theme="dark"] .bg-teal-100 { background-color: rgba(20, 184, 166, .18); }
+html[data-theme="dark"] .border-teal-200 { border-color: rgba(20, 184, 166, .28); }
+html[data-theme="dark"] .text-teal-800 { color: #5eead4; }
+html[data-theme="dark"] .text-teal-700 { color: #2dd4bf; }
+html[data-theme="dark"] .text-teal-600 { color: #5eead4; }
+html[data-theme="dark"] .hover\:bg-teal-50:hover { background-color: rgba(20, 184, 166, .14); }
+html[data-theme="dark"] .hover\:bg-teal-100:hover { background-color: rgba(20, 184, 166, .20); }
+html[data-theme="dark"] .text-teal-900 { color: #5eead4; }
+html[data-theme="dark"] .border-teal-100 { border-color: rgba(20, 184, 166, .18); }
+html[data-theme="dark"] .bg-gradient-to-r.from-teal-50.to-cyan-50 {
+  background: linear-gradient(to right, rgba(20, 184, 166, .12) 0%, rgba(6, 182, 212, .10) 100%) !important;
+}
+/* red */
+html[data-theme="dark"] .bg-red-50,
+html[data-theme="dark"] .bg-red-50\/40,
+html[data-theme="dark"] .bg-red-50\/50,
+html[data-theme="dark"] .bg-red-50\/60,
+html[data-theme="dark"] .bg-red-50\/70,
+html[data-theme="dark"] .bg-red-50\/80 { background-color: rgba(239, 68, 68, .12); }
+html[data-theme="dark"] .bg-red-100 { background-color: rgba(239, 68, 68, .18); }
+html[data-theme="dark"] .border-red-200 { border-color: rgba(239, 68, 68, .28); }
+html[data-theme="dark"] .text-red-800 { color: #fca5a5; }
+html[data-theme="dark"] .text-red-700 { color: #f87171; }
+html[data-theme="dark"] .text-red-600 { color: #fca5a5; }
+/* green */
+html[data-theme="dark"] .bg-green-50,
+html[data-theme="dark"] .bg-green-50\/40,
+html[data-theme="dark"] .bg-green-50\/50,
+html[data-theme="dark"] .bg-green-50\/60,
+html[data-theme="dark"] .bg-green-50\/70,
+html[data-theme="dark"] .bg-green-50\/80 { background-color: rgba(34, 197, 94, .12); }
+html[data-theme="dark"] .bg-green-100 { background-color: rgba(34, 197, 94, .18); }
+html[data-theme="dark"] .border-green-200 { border-color: rgba(34, 197, 94, .28); }
+html[data-theme="dark"] .text-green-800 { color: #86efac; }
+html[data-theme="dark"] .text-green-700 { color: #4ade80; }
+html[data-theme="dark"] .text-green-600 { color: #86efac; }
+/* blue */
+html[data-theme="dark"] .bg-blue-50,
+html[data-theme="dark"] .bg-blue-50\/40,
+html[data-theme="dark"] .bg-blue-50\/50,
+html[data-theme="dark"] .bg-blue-50\/60,
+html[data-theme="dark"] .bg-blue-50\/70,
+html[data-theme="dark"] .bg-blue-50\/80 { background-color: rgba(59, 130, 246, .12); }
+html[data-theme="dark"] .bg-blue-100 { background-color: rgba(59, 130, 246, .18); }
+html[data-theme="dark"] .bg-blue-100\/80 { background-color: rgba(59, 130, 246, .22); }
+html[data-theme="dark"] .border-blue-200 { border-color: rgba(59, 130, 246, .28); }
+html[data-theme="dark"] .text-blue-800 { color: #93c5fd; }
+html[data-theme="dark"] .text-blue-700 { color: #60a5fa; }
+html[data-theme="dark"] .text-blue-600 { color: #93c5fd; }
+/* orange */
+html[data-theme="dark"] .bg-orange-50,
+html[data-theme="dark"] .bg-orange-50\/40,
+html[data-theme="dark"] .bg-orange-50\/50,
+html[data-theme="dark"] .bg-orange-50\/60,
+html[data-theme="dark"] .bg-orange-50\/70,
+html[data-theme="dark"] .bg-orange-50\/80 { background-color: rgba(249, 115, 22, .12); }
+html[data-theme="dark"] .bg-orange-100 { background-color: rgba(249, 115, 22, .18); }
+html[data-theme="dark"] .border-orange-200 { border-color: rgba(249, 115, 22, .28); }
+html[data-theme="dark"] .text-orange-900 { color: #fdba74; }
+html[data-theme="dark"] .text-orange-800 { color: #fdba74; }
+html[data-theme="dark"] .text-orange-700 { color: #fb923c; }
+html[data-theme="dark"] .text-orange-600 { color: #fdba74; }
+html[data-theme="dark"] .border-orange-100 { border-color: rgba(249, 115, 22, .18); }
+html[data-theme="dark"] .bg-gradient-to-r.from-orange-50.to-amber-50 {
+  background: linear-gradient(to right, rgba(249, 115, 22, .12) 0%, rgba(245, 158, 11, .10) 100%) !important;
+}
+/* fuchsia / pink */
+html[data-theme="dark"] .bg-fuchsia-50,
+html[data-theme="dark"] .bg-fuchsia-50\/40,
+html[data-theme="dark"] .bg-fuchsia-50\/50,
+html[data-theme="dark"] .bg-fuchsia-50\/60,
+html[data-theme="dark"] .bg-fuchsia-50\/70,
+html[data-theme="dark"] .bg-fuchsia-50\/80 { background-color: rgba(217, 70, 239, .12); }
+html[data-theme="dark"] .bg-fuchsia-100 { background-color: rgba(217, 70, 239, .18); }
+html[data-theme="dark"] .border-fuchsia-200 { border-color: rgba(217, 70, 239, .28); }
+html[data-theme="dark"] .text-fuchsia-800 { color: #f0abfc; }
+html[data-theme="dark"] .text-fuchsia-700 { color: #e879f9; }
+html[data-theme="dark"] .bg-pink-50,
+html[data-theme="dark"] .bg-pink-50\/40,
+html[data-theme="dark"] .bg-pink-50\/50,
+html[data-theme="dark"] .bg-pink-50\/60,
+html[data-theme="dark"] .bg-pink-50\/70,
+html[data-theme="dark"] .bg-pink-50\/80 { background-color: rgba(236, 72, 153, .12); }
+html[data-theme="dark"] .bg-pink-100 { background-color: rgba(236, 72, 153, .18); }
+html[data-theme="dark"] .border-pink-200 { border-color: rgba(236, 72, 153, .28); }
+html[data-theme="dark"] .text-pink-800 { color: #f9a8d4; }
+html[data-theme="dark"] .text-pink-700 { color: #f472b6; }
+/* cyan */
+html[data-theme="dark"] .bg-cyan-50,
+html[data-theme="dark"] .bg-cyan-50\/40,
+html[data-theme="dark"] .bg-cyan-50\/50,
+html[data-theme="dark"] .bg-cyan-50\/60,
+html[data-theme="dark"] .bg-cyan-50\/70,
+html[data-theme="dark"] .bg-cyan-50\/80 { background-color: rgba(6, 182, 212, .12); }
+html[data-theme="dark"] .bg-cyan-100 { background-color: rgba(6, 182, 212, .18); }
+html[data-theme="dark"] .border-cyan-200 { border-color: rgba(6, 182, 212, .28); }
+html[data-theme="dark"] .text-cyan-800 { color: #67e8f9; }
+html[data-theme="dark"] .text-cyan-700 { color: #22d3ee; }
+html[data-theme="dark"] .text-cyan-600 { color: #67e8f9; }
+/* slate 补充 */
+html[data-theme="dark"] .bg-slate-50\/90 { background-color: #26334b; }
+
+/* —— 卡片 /30 透明度底色：深色下使用更饱和的色调，避免发灰发脏 —— */
+html[data-theme="dark"] .bg-violet-50\/30 {
+  background: linear-gradient(135deg, rgba(139, 92, 246, .14) 0%, rgba(109, 40, 217, .06) 100%);
+}
+html[data-theme="dark"] .bg-emerald-50\/30 {
+  background: linear-gradient(135deg, rgba(16, 185, 129, .14) 0%, rgba(5, 150, 105, .06) 100%);
+}
+html[data-theme="dark"] .bg-teal-50\/30 {
+  background: linear-gradient(135deg, rgba(20, 184, 166, .14) 0%, rgba(13, 148, 136, .06) 100%);
+}
+html[data-theme="dark"] .bg-amber-50\/30 {
+  background: linear-gradient(135deg, rgba(245, 158, 11, .14) 0%, rgba(217, 119, 6, .06) 100%);
+}
+html[data-theme="dark"] .bg-sky-50\/30 {
+  background: linear-gradient(135deg, rgba(14, 165, 233, .14) 0%, rgba(2, 132, 199, .06) 100%);
+}
+html[data-theme="dark"] .bg-indigo-50\/30 {
+  background: linear-gradient(135deg, rgba(99, 102, 241, .14) 0%, rgba(67, 56, 202, .06) 100%);
+}
+html[data-theme="dark"] .bg-rose-50\/30 {
+  background: linear-gradient(135deg, rgba(244, 63, 94, .14) 0%, rgba(225, 29, 72, .06) 100%);
+}
+html[data-theme="dark"] .bg-rose-50\/50 {
+  background: linear-gradient(135deg, rgba(244, 63, 94, .18) 0%, rgba(225, 29, 72, .08) 100%);
+}
+html[data-theme="dark"] .bg-rose-50\/20 {
+  background: linear-gradient(135deg, rgba(244, 63, 94, .10) 0%, rgba(225, 29, 72, .04) 100%);
+}
+html[data-theme="dark"] .bg-emerald-50\/20 {
+  background: linear-gradient(135deg, rgba(16, 185, 129, .10) 0%, rgba(5, 150, 105, .04) 100%);
+}
+
+/* —— 浅色渐变头（to-white / to-transparent）：深色下改为暗色渐变 —— */
+html[data-theme="dark"] .bg-gradient-to-r.from-brand-50.to-white {
+  background: linear-gradient(to right, rgba(99, 102, 241, .12) 0%, rgba(30, 41, 59, 0) 100%) !important;
+}
+html[data-theme="dark"] .bg-gradient-to-r.from-slate-50\/80.to-white {
+  background: linear-gradient(to right, rgba(38, 51, 75, .8) 0%, rgba(26, 34, 54, 0) 100%) !important;
+}
+html[data-theme="dark"] .bg-gradient-to-r.from-slate-50\/50.to-transparent {
+  background: linear-gradient(to right, rgba(38, 51, 75, .5) 0%, transparent 100%) !important;
+}
+
+/* —— 深色下卡片边框加强一点，配合渐变底更有层次 —— */
+html[data-theme="dark"] .border-violet-200 { border-color: rgba(139, 92, 246, .35); }
+html[data-theme="dark"] .border-emerald-200 { border-color: rgba(16, 185, 129, .35); }
+html[data-theme="dark"] .border-teal-200 { border-color: rgba(20, 184, 166, .35); }
+html[data-theme="dark"] .border-amber-200 { border-color: rgba(245, 158, 11, .35); }
+html[data-theme="dark"] .border-sky-200 { border-color: rgba(14, 165, 233, .35); }
+html[data-theme="dark"] .border-indigo-200 { border-color: rgba(99, 102, 241, .35); }
+
+/* —— 虚线占位卡片：深色下降低对比度，不抢眼 —— */
+html[data-theme="dark"] .border-dashed.border-slate-300 {
+  border-color: rgba(100, 116, 139, .35);
+}
+
+/* —— brand 色背景（随主色调自适应）：用 brand-500 低透明度替代浅色 brand-50 —— */
+html[data-theme="dark"] .bg-brand-50,
+html[data-theme="dark"] .bg-brand-50\/60 {
+  background-color: color-mix(in srgb, var(--brand-500) 16%, transparent);
+}
+html[data-theme="dark"] .bg-brand-50\/70 {
+  background-color: color-mix(in srgb, var(--brand-500) 18%, transparent);
+}
+html[data-theme="dark"] .bg-brand-100,
+html[data-theme="dark"] .bg-brand-100\/70 {
+  background-color: color-mix(in srgb, var(--brand-500) 22%, transparent);
+}
+html[data-theme="dark"] .hover\:bg-brand-100\/70:hover {
+  background-color: color-mix(in srgb, var(--brand-500) 26%, transparent);
+}
+html[data-theme="dark"] .hover\:ring-brand-300:hover {
+  --tw-ring-color: color-mix(in srgb, var(--brand-500) 50%, transparent);
+}
+html[data-theme="dark"] .ring-brand-300 {
+  --tw-ring-color: color-mix(in srgb, var(--brand-500) 45%, transparent);
+}
+html[data-theme="dark"] .ring-brand-200 {
+  --tw-ring-color: color-mix(in srgb, var(--brand-500) 35%, transparent);
+}
+html[data-theme="dark"] .text-brand-700 {
+  color: color-mix(in srgb, var(--brand-400) 85%, white);
+}
+
+/* —— 白色边框/分隔线（深色下改为冷灰蓝）—— */
+html[data-theme="dark"] .border-white\/40 { border-color: rgba(148, 163, 184, .18); }
+html[data-theme="dark"] .border-white\/70 { border-color: rgba(148, 163, 184, .22); }
+html[data-theme="dark"] .border-white\/60 { border-color: rgba(148, 163, 184, .20); }
+html[data-theme="dark"] .ring-white\/10 { --tw-ring-color: rgba(148, 163, 184, .12); }
+
+/* —— 白色底 hover 态（深色下）—— */
+html[data-theme="dark"] .hover\:bg-white:hover { background-color: #26334b; }
+html[data-theme="dark"] .hover\:bg-white\/90:hover { background-color: rgba(38, 51, 75, .95); }
+html[data-theme="dark"] .hover\:bg-white\/80:hover { background-color: rgba(38, 51, 75, .85); }
+html[data-theme="dark"] .hover\:bg-white\/70:hover { background-color: rgba(38, 51, 75, .85); }
+html[data-theme="dark"] .hover\:bg-white\/60:hover { background-color: rgba(38, 51, 75, .7); }
+html[data-theme="dark"] .hover\:bg-white\/50:hover { background-color: rgba(38, 51, 75, .6); }
+html[data-theme="dark"] .hover\:bg-white\/30:hover { background-color: rgba(148, 163, 184, .12); }
+html[data-theme="dark"] .hover\:bg-white\/20:hover { background-color: rgba(148, 163, 184, .14); }
+html[data-theme="dark"] .hover\:bg-white\/10:hover { background-color: rgba(148, 163, 184, .10); }
+html[data-theme="dark"] .hover\:text-slate-700:hover { color: #e2e8f0; }
+
+/* —— ring 彩色浅色 → 深色下低透明度 —— */
+html[data-theme="dark"] .ring-emerald-200 { --tw-ring-color: rgba(16, 185, 129, .28); }
+html[data-theme="dark"] .ring-violet-200 { --tw-ring-color: rgba(139, 92, 246, .28); }
+html[data-theme="dark"] .ring-sky-200 { --tw-ring-color: rgba(14, 165, 233, .28); }
+html[data-theme="dark"] .ring-indigo-200 { --tw-ring-color: rgba(99, 102, 241, .28); }
+html[data-theme="dark"] .ring-rose-200 { --tw-ring-color: rgba(244, 63, 94, .28); }
+html[data-theme="dark"] .ring-amber-200 { --tw-ring-color: rgba(245, 158, 11, .28); }
+html[data-theme="dark"] .ring-slate-300 { --tw-ring-color: #3a4a66; }
+html[data-theme="dark"] .ring-slate-100 { --tw-ring-color: #2f3d58; }
+
+/* —— SkillPanel 循环管理弹窗：作用域内深色适配 —— */
+html[data-theme="dark"] .skill-panel-root {
+  background-color: #1a2236;
+  box-shadow: 0 25px 60px -12px rgba(0,0,0,.65), 0 0 0 1px rgba(99,102,241,.15);
+}
+/* 头部渐变 */
+html[data-theme="dark"] .skill-panel-root > div:first-child {
+  background: linear-gradient(135deg, rgba(99,102,241,.12) 0%, rgba(139,92,246,.10) 50%, rgba(217,70,239,.08) 100%) !important;
+  border-bottom-color: rgba(99,102,241,.18) !important;
+}
+html[data-theme="dark"] .skill-panel-root .bg-indigo-200\/40 { background-color: rgba(99,102,241,.12) !important; }
+html[data-theme="dark"] .skill-panel-root .bg-fuchsia-200\/40 { background-color: rgba(217,70,239,.10) !important; }
+/* 头部文字 */
+html[data-theme="dark"] .skill-panel-root .text-slate-900 { color: #e2e8f0; }
+html[data-theme="dark"] .skill-panel-root .text-slate-500 { color: #94a3b8; }
+/* 关闭按钮 */
+html[data-theme="dark"] .skill-panel-root .hover\:bg-white\/60:hover { background-color: rgba(148,163,184,.14); }
+html[data-theme="dark"] .skill-panel-root .hover\:text-slate-700:hover { color: #e2e8f0; }
+/* 搜索框 */
+html[data-theme="dark"] .skill-panel-root input[type="text"] {
+  background-color: rgba(15,22,41,.7) !important;
+  border-color: rgba(99,102,241,.20) !important;
+  color: #e2e8f0 !important;
+  box-shadow: 0 1px 3px rgba(0,0,0,.25) !important;
+}
+html[data-theme="dark"] .skill-panel-root input[type="text"]::placeholder { color: #64748b; }
+html[data-theme="dark"] .skill-panel-root input[type="text"]:focus {
+  background-color: rgba(15,22,41,.9) !important;
+  border-color: rgba(99,102,241,.45) !important;
+  box-shadow: 0 0 0 2px rgba(99,102,241,.20) !important;
+}
+/* 清空搜索按钮 */
+html[data-theme="dark"] .skill-panel-root .hover\:bg-slate-100:hover { background-color: rgba(148,163,184,.14); }
+html[data-theme="dark"] .skill-panel-root .hover\:text-slate-600:hover { color: #e2e8f0; }
+/* 卡片 */
+html[data-theme="dark"] .skill-panel-root .rounded-2xl.border.bg-white {
+  background-color: #1e293b;
+  border-color: rgba(99,102,241,.15);
+  box-shadow: 0 1px 3px rgba(0,0,0,.3);
+}
+html[data-theme="dark"] .skill-panel-root .rounded-2xl.border.bg-white:hover {
+  border-color: rgba(99,102,241,.35);
+  box-shadow: 0 4px 16px rgba(0,0,0,.35);
+}
+/* 卡片描述文字 */
+html[data-theme="dark"] .skill-panel-root .text-slate-400 { color: #64748b; }
+/* emoji 占位渐变 */
+html[data-theme="dark"] .skill-panel-root .bg-gradient-to-br.from-indigo-50 {
+  background: linear-gradient(135deg, rgba(99,102,241,.18), rgba(139,92,246,.14)) !important;
+}
+/* 流程按钮 */
+html[data-theme="dark"] .skill-panel-root .bg-violet-50 {
+  background-color: rgba(139,92,246,.15);
+}
+html[data-theme="dark"] .skill-panel-root .hover\:bg-violet-100:hover {
+  background-color: rgba(139,92,246,.25);
+}
+/* 模式徽章 */
+html[data-theme="dark"] .skill-panel-root .bg-indigo-100 { background-color: rgba(99,102,241,.18); }
+html[data-theme="dark"] .skill-panel-root .text-indigo-700 { color: #a5b4fc; }
+html[data-theme="dark"] .skill-panel-root .bg-sky-100 { background-color: rgba(14,165,233,.18); }
+html[data-theme="dark"] .skill-panel-root .text-sky-700 { color: #7dd3fc; }
+html[data-theme="dark"] .skill-panel-root .bg-violet-100 { background-color: rgba(139,92,246,.18); }
+/* 编辑态输入框 */
+html[data-theme="dark"] .skill-panel-root .border-slate-300 { border-color: rgba(99,102,241,.25); }
+html[data-theme="dark"] .skill-panel-root .border-slate-200 { border-color: rgba(148,163,184,.15); }
+/* emoji 选择器 */
+html[data-theme="dark"] .skill-panel-root .bg-slate-50 { background-color: rgba(148,163,184,.08); }
+html[data-theme="dark"] .skill-panel-root .hover\:bg-slate-100:hover { background-color: rgba(148,163,184,.16); }
+html[data-theme="dark"] .skill-panel-root .bg-indigo-100.ring-2 { background-color: rgba(99,102,241,.22); }
+/* 删除按钮 hover */
+html[data-theme="dark"] .skill-panel-root .hover\:bg-rose-50:hover { background-color: rgba(244,63,94,.12); }
+/* 空状态图标 */
+html[data-theme="dark"] .skill-panel-root .text-slate-200 { color: #334155; }
+/* 编辑态 textarea 文字 */
+html[data-theme="dark"] .skill-panel-root textarea { color: #e2e8f0 !important; }
+/* 编辑态输入框背景覆盖全局深色 input 规则 */
+html[data-theme="dark"] .skill-panel-root input[type="text"]:not(.focus) {
+  background-color: rgba(15,22,41,.7) !important;
+}
+
+/* —— 群组栏（LeftPanel 批量勾选后的操作条）—— */
+html[data-theme="dark"] .group-header-bar {
+  background-color: rgba(99, 102, 241, .16) !important;
+  border-color: rgba(99, 102, 241, .35) !important;
+  box-shadow: 0 1px 4px rgba(0,0,0,.25);
+}
+/* 未展开的「操作面板」按钮：bg-white */
+html[data-theme="dark"] .group-header-bar > button.bg-white {
+  background-color: rgba(15, 22, 41, .85);
+  color: #a5b4fc;
+  --tw-ring-color: rgba(99, 102, 241, .35);
+}
+html[data-theme="dark"] .group-header-bar > button.bg-white:hover {
+  background-color: rgba(99, 102, 241, .22);
+}
+/* 解散群组按钮 hover */
+html[data-theme="dark"] .group-header-bar .hover\:bg-rose-100:hover {
+  background-color: rgba(244, 63, 94, .15);
+}
+/* 浮动下拉面板 */
+html[data-theme="dark"] .group-panel-dropdown {
+  background-color: #1e293b;
+  border-color: rgba(99, 102, 241, .20);
+  box-shadow: 0 8px 24px rgba(0,0,0,.45);
+}
+html[data-theme="dark"] .group-panel-dropdown .hover\:bg-indigo-50:hover {
+  background-color: rgba(99, 102, 241, .16);
+}
+html[data-theme="dark"] .group-panel-dropdown .hover\:text-indigo-700:hover {
+  color: #a5b4fc;
+}
+
+/* —— 日历控件 / 角色标注面板（WidgetExtractPanel）—— */
+/* 日历弹出面板 */
+html[data-theme="dark"] .mock-calendar-widget > .rounded.border.bg-white {
+  background-color: #1e293b;
+  border-color: rgba(99,102,241,.18);
+  box-shadow: 0 4px 16px rgba(0,0,0,.35);
+}
+/* 角色标注渐变面板 */
+html[data-theme="dark"] .mock-calendar-widget .bg-gradient-to-br {
+  background: linear-gradient(135deg, rgba(30,41,59,.9), rgba(99,102,241,.08)) !important;
+  --tw-ring-color: rgba(99,102,241,.20);
+}
+/* 标题 / 文字 */
+html[data-theme="dark"] .mock-calendar-widget .text-slate-700 { color: #e2e8f0; }
+html[data-theme="dark"] .mock-calendar-widget .text-slate-600 { color: #cbd5e1; }
+html[data-theme="dark"] .mock-calendar-widget .text-slate-500 { color: #94a3b8; }
+html[data-theme="dark"] .mock-calendar-widget .text-slate-400 { color: #64748b; }
+/* 绿色（已标注） */
+html[data-theme="dark"] .mock-calendar-widget .text-emerald-700 { color: #6ee7b7; }
+html[data-theme="dark"] .mock-calendar-widget .text-emerald-600 { color: #34d399; }
+html[data-theme="dark"] .mock-calendar-widget .bg-emerald-100 { background-color: rgba(16,185,129,.18); }
+html[data-theme="dark"] .mock-calendar-widget .hover\:bg-emerald-200:hover { background-color: rgba(16,185,129,.30); }
+html[data-theme="dark"] .mock-calendar-widget .bg-emerald-50 { background-color: rgba(16,185,129,.10); }
+html[data-theme="dark"] .mock-calendar-widget .hover\:bg-emerald-100:hover { background-color: rgba(16,185,129,.20); }
+html[data-theme="dark"] .mock-calendar-widget .ring-emerald-200 { --tw-ring-color: rgba(16,185,129,.30); }
+/* 琥珀色（未标注） */
+html[data-theme="dark"] .mock-calendar-widget .text-amber-700 { color: #fcd34d; }
+html[data-theme="dark"] .mock-calendar-widget .text-amber-600 { color: #fbbf24; }
+html[data-theme="dark"] .mock-calendar-widget .bg-amber-100 { background-color: rgba(245,158,11,.18); }
+html[data-theme="dark"] .mock-calendar-widget .hover\:bg-amber-200:hover { background-color: rgba(245,158,11,.30); }
+html[data-theme="dark"] .mock-calendar-widget .bg-amber-50 { background-color: rgba(245,158,11,.10); }
+html[data-theme="dark"] .mock-calendar-widget .hover\:bg-amber-100:hover { background-color: rgba(245,158,11,.20); }
+html[data-theme="dark"] .mock-calendar-widget .ring-amber-200 { --tw-ring-color: rgba(245,158,11,.30); }
+/* 紫色（拾取中 / 模板按钮） */
+html[data-theme="dark"] .mock-calendar-widget .text-violet-700 { color: #c4b5fd; }
+html[data-theme="dark"] .mock-calendar-widget .text-violet-600 { color: #a78bfa; }
+html[data-theme="dark"] .mock-calendar-widget .bg-violet-100 { background-color: rgba(139,92,246,.18); }
+html[data-theme="dark"] .mock-calendar-widget .hover\:bg-violet-200:hover { background-color: rgba(139,92,246,.30); }
+html[data-theme="dark"] .mock-calendar-widget .bg-violet-50 { background-color: rgba(139,92,246,.10); }
+html[data-theme="dark"] .mock-calendar-widget .hover\:bg-violet-50:hover { background-color: rgba(139,92,246,.18); }
+html[data-theme="dark"] .mock-calendar-widget .hover\:text-violet-600:hover { color: #a78bfa; }
+html[data-theme="dark"] .mock-calendar-widget .hover\:ring-violet-200:hover { --tw-ring-color: rgba(139,92,246,.35); }
+/* 重选按钮白底 */
+html[data-theme="dark"] .mock-calendar-widget button.bg-white {
+  background-color: rgba(15,22,41,.70);
+  color: #94a3b8;
+}
+html[data-theme="dark"] .mock-calendar-widget button.bg-white:hover {
+  background-color: rgba(139,92,246,.18);
+  color: #a78bfa;
+}
+/* 灰色格子 */
+html[data-theme="dark"] .mock-calendar-widget .bg-slate-50 { background-color: rgba(148,163,184,.08); }
+html[data-theme="dark"] .mock-calendar-widget .ring-slate-200 { --tw-ring-color: rgba(148,163,184,.20); }
+/* 镜像已激活徽章 */
+html[data-theme="dark"] .mock-calendar-widget .bg-emerald-100.rounded-full {
+  background-color: rgba(16,185,129,.20);
+}
+/* 选中日：bg-violet-500 text-white 本身 OK，不用改 */
+
+/* —— 选项控件（MockOptionWidget / MockTriggerBox）—— */
+html[data-theme="dark"] .mock-option-widget .text-slate-700 { color: #e2e8f0; }
+html[data-theme="dark"] .mock-option-widget .text-slate-600 { color: #cbd5e1; }
+html[data-theme="dark"] .mock-option-widget .text-slate-500 { color: #94a3b8; }
+html[data-theme="dark"] .mock-option-widget .text-slate-400 { color: #64748b; }
+/* 触发框 */
+html[data-theme="dark"] .mock-option-widget .border-slate-300.bg-white,
+html[data-theme="dark"] .mock-calendar-widget .border-slate-300.bg-white {
+  background-color: rgba(15,22,41,.80);
+  border-color: rgba(99,102,241,.25);
+}
+/* 下拉面板 */
+html[data-theme="dark"] .mock-option-widget .rounded.border.border-slate-200.bg-white {
+  background-color: #1e293b;
+  border-color: rgba(99,102,241,.18);
+  box-shadow: 0 4px 16px rgba(0,0,0,.35);
+}
+/* 选项按钮 */
+html[data-theme="dark"] .mock-option-widget button.border-slate-200.bg-white {
+  background-color: rgba(15,22,41,.60);
+  border-color: rgba(148,163,184,.18);
+  color: #cbd5e1;
+}
+html[data-theme="dark"] .mock-option-widget button.border-slate-200.bg-white:hover {
+  background-color: rgba(139,92,246,.12);
+  border-color: rgba(139,92,246,.35);
+}
+/* 选中项 */
+html[data-theme="dark"] .mock-option-widget .bg-violet-100 { background-color: rgba(139,92,246,.20); }
+html[data-theme="dark"] .mock-option-widget .text-violet-700 { color: #c4b5fd; }
+html[data-theme="dark"] .mock-option-widget .border-violet-400 { border-color: rgba(139,92,246,.50); }
+html[data-theme="dark"] .mock-option-widget .hover\:bg-violet-50:hover { background-color: rgba(139,92,246,.12); }
+/* 别名徽章 */
+html[data-theme="dark"] .mock-option-widget .bg-violet-200\/70 { background-color: rgba(139,92,246,.25); }
+html[data-theme="dark"] .mock-option-widget .text-violet-800 { color: #ddd6fe; }
+/* 别名编辑区 bg-slate-50 */
+html[data-theme="dark"] .mock-option-widget .rounded.bg-slate-50 {
+  background-color: rgba(148,163,184,.08);
+}
+/* 拾取按钮 */
+html[data-theme="dark"] .mock-option-widget .hover\:bg-emerald-100:hover { background-color: rgba(16,185,129,.18); }
+html[data-theme="dark"] .mock-option-widget .hover\:bg-amber-100:hover { background-color: rgba(245,158,11,.18); }
+html[data-theme="dark"] .mock-option-widget .hover\:bg-rose-100:hover { background-color: rgba(244,63,94,.15); }
+/* 绿色/琥珀按钮 */
+html[data-theme="dark"] .mock-option-widget .bg-emerald-100 { background-color: rgba(16,185,129,.18); }
+html[data-theme="dark"] .mock-option-widget .text-emerald-700 { color: #6ee7b7; }
+html[data-theme="dark"] .mock-option-widget .hover\:bg-emerald-200:hover { background-color: rgba(16,185,129,.30); }
+html[data-theme="dark"] .mock-option-widget .bg-amber-100 { background-color: rgba(245,158,11,.18); }
+html[data-theme="dark"] .mock-option-widget .text-amber-700 { color: #fcd34d; }
+html[data-theme="dark"] .mock-option-widget .hover\:bg-amber-200:hover { background-color: rgba(245,158,11,.30); }
+/* 添加按钮虚线边框 */
+html[data-theme="dark"] .mock-option-widget .border-dashed.border-violet-300 {
+  border-color: rgba(139,92,246,.35);
+}
+html[data-theme="dark"] .mock-option-widget .text-violet-500 { color: #a78bfa; }
+html[data-theme="dark"] .mock-option-widget .hover\:text-violet-600:hover { color: #c4b5fd; }
+/* 内联输入框 */
+html[data-theme="dark"] .mock-option-widget input.border-violet-300 {
+  background-color: rgba(15,22,41,.80) !important;
+  border-color: rgba(139,92,246,.35) !important;
+  color: #e2e8f0 !important;
+}
+html[data-theme="dark"] .mock-option-widget input.border-slate-200 {
+  background-color: rgba(15,22,41,.60) !important;
+  border-color: rgba(148,163,184,.20) !important;
+  color: #e2e8f0 !important;
+}
+html[data-theme="dark"] .mock-option-widget .ring-violet-100 {
+  --tw-ring-color: rgba(139,92,246,.20);
+}
+
+/* —— WidgetExtractPanel 整体作用域：补全所有浅色硬编码 —— */
+/* 琥珀引导条 */
+html[data-theme="dark"] .widget-extract-panel .bg-amber-50 {
+  background-color: rgba(245,158,11,.10);
+}
+html[data-theme="dark"] .widget-extract-panel .border-amber-300 {
+  border-color: rgba(245,158,11,.35);
+}
+html[data-theme="dark"] .widget-extract-panel .ring-amber-200 {
+  --tw-ring-color: rgba(245,158,11,.25);
+}
+html[data-theme="dark"] .widget-extract-panel .text-amber-800 { color: #fcd34d; }
+html[data-theme="dark"] .widget-extract-panel .text-amber-600\/80 { color: rgba(251,191,36,.75); }
+/* 白色小按钮（重选/绑定等） */
+html[data-theme="dark"] .widget-extract-panel button.bg-white.ring-1,
+html[data-theme="dark"] .widget-extract-panel .rounded.bg-white.ring-1 {
+  background-color: rgba(15,22,41,.70);
+}
+html[data-theme="dark"] .widget-extract-panel .ring-amber-300 {
+  --tw-ring-color: rgba(245,158,11,.35);
+}
+html[data-theme="dark"] .widget-extract-panel .ring-rose-200 {
+  --tw-ring-color: rgba(244,63,94,.30);
+}
+html[data-theme="dark"] .widget-extract-panel .text-rose-600 { color: #fb7185; }
+html[data-theme="dark"] .widget-extract-panel .hover\:bg-rose-50:hover {
+  background-color: rgba(244,63,94,.12);
+}
+html[data-theme="dark"] .widget-extract-panel .hover\:bg-amber-100:hover {
+  background-color: rgba(245,158,11,.20);
+}
+/* 紫色提示条 / 拾取态区域 */
+html[data-theme="dark"] .widget-extract-panel .bg-violet-50 {
+  background-color: rgba(139,92,246,.10);
+}
+html[data-theme="dark"] .widget-extract-panel .bg-violet-50\/60 {
+  background-color: rgba(139,92,246,.14);
+}
+html[data-theme="dark"] .widget-extract-panel .border-violet-300 {
+  border-color: rgba(139,92,246,.35);
+}
+html[data-theme="dark"] .widget-extract-panel .border-violet-200 {
+  border-color: rgba(139,92,246,.25);
+}
+html[data-theme="dark"] .widget-extract-panel .ring-violet-200 {
+  --tw-ring-color: rgba(139,92,246,.28);
+}
+html[data-theme="dark"] .widget-extract-panel .text-violet-600 { color: #a78bfa; }
+/* 灰色按钮/区域 */
+html[data-theme="dark"] .widget-extract-panel .bg-slate-50 {
+  background-color: rgba(148,163,184,.08);
+}
+html[data-theme="dark"] .widget-extract-panel .border-slate-200 {
+  border-color: rgba(148,163,184,.18);
+}
+html[data-theme="dark"] .widget-extract-panel .ring-slate-200 {
+  --tw-ring-color: rgba(148,163,184,.20);
+}
+html[data-theme="dark"] .widget-extract-panel .text-slate-600 { color: #cbd5e1; }
+html[data-theme="dark"] .widget-extract-panel .hover\:bg-slate-50:hover {
+  background-color: rgba(148,163,184,.12);
+}
+html[data-theme="dark"] .widget-extract-panel .hover\:bg-violet-50:hover {
+  background-color: rgba(139,92,246,.14);
+}
+html[data-theme="dark"] .widget-extract-panel .hover\:border-violet-200:hover {
+  border-color: rgba(139,92,246,.35);
+}
+/* OptionChip 别名标签 */
+html[data-theme="dark"] .widget-extract-panel .bg-violet-100 {
+  background-color: rgba(139,92,246,.18);
+}
+html[data-theme="dark"] .widget-extract-panel .text-violet-700 { color: #c4b5fd; }
+html[data-theme="dark"] .widget-extract-panel .bg-violet-200\/70 {
+  background-color: rgba(139,92,246,.25);
+}
+html[data-theme="dark"] .widget-extract-panel .text-violet-800 { color: #ddd6fe; }
+/* 所有内嵌输入框 */
+html[data-theme="dark"] .widget-extract-panel input.bg-white {
+  background-color: rgba(15,22,41,.70) !important;
+  border-color: rgba(148,163,184,.20) !important;
+  color: #e2e8f0 !important;
+}
+html[data-theme="dark"] .widget-extract-panel input.border-violet-400 {
+  border-color: rgba(139,92,246,.45) !important;
+}
+/* 绿色/琥珀小按钮（BindingRow 等） */
+html[data-theme="dark"] .widget-extract-panel .bg-emerald-100 {
+  background-color: rgba(16,185,129,.18);
+}
+html[data-theme="dark"] .widget-extract-panel .text-emerald-700 { color: #6ee7b7; }
+html[data-theme="dark"] .widget-extract-panel .hover\:bg-emerald-200:hover {
+  background-color: rgba(16,185,129,.30);
+}
+html[data-theme="dark"] .widget-extract-panel .bg-amber-100 {
+  background-color: rgba(245,158,11,.18);
+}
+html[data-theme="dark"] .widget-extract-panel .text-amber-700 { color: #fcd34d; }
+html[data-theme="dark"] .widget-extract-panel .hover\:bg-amber-200:hover {
+  background-color: rgba(245,158,11,.30);
+}
+/* 深色下输入框：比卡片稍亮，带边框区分 */
+html[data-theme="dark"] input,
+html[data-theme="dark"] select,
+html[data-theme="dark"] textarea {
+  color-scheme: dark;
+  background-color: #0f1629;
+  border-color: #3a4a66;
+  color: #e2e8f0;
+}
+/* bg-transparent 的输入框（搜索栏、地址栏等）在深色下保持透明，不被上面的全局 input 规则覆盖 */
+html[data-theme="dark"] input.bg-transparent,
+html[data-theme="dark"] textarea.bg-transparent {
+  background-color: transparent;
+  border-color: transparent;
+}
+html[data-theme="dark"] input.bg-transparent:focus,
+html[data-theme="dark"] textarea.bg-transparent:focus {
+  border-color: transparent;
+  box-shadow: none;
+}
+html[data-theme="dark"] input::placeholder { color: #64748b; }
+html[data-theme="dark"] input:focus,
+html[data-theme="dark"] select:focus,
+html[data-theme="dark"] textarea:focus {
+  border-color: var(--brand-500);
+}
+/* 滚动条 */
+html[data-theme="dark"] ::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, .25); background-clip: padding-box; }
+html[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: var(--brand-500); background-clip: padding-box; }
+
+body {
+  /* 渐变背景：跟随主色调（用 --brand-* 变量），给玻璃质感提供底层色彩 */
+  background:
+    radial-gradient(1200px 800px at 10% 10%, var(--brand-100) 0%, transparent 60%),
     radial-gradient(1000px 700px at 90% 20%, #fce7f3 0%, transparent 55%),
-    radial-gradient(900px 600px at 50% 100%, #dbeafe 0%, transparent 60%),
-    linear-gradient(135deg, #f6f7fb 0%, #eef2ff 100%);
+    radial-gradient(900px 600px at 50% 100%, var(--brand-100) 0%, transparent 60%),
+    linear-gradient(135deg, #f6f7fb 0%, var(--brand-50) 100%);
   background-attachment: fixed;
   color: #1f2937;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", Roboto, sans-serif;
@@ -48,6 +887,20 @@ body {
 
 /* tab 切换无蓝色高亮 */
 button { -webkit-tap-highlight-color: transparent; }
+
+/* 滑块拖拽零延迟：禁止 transition，使用 GPU 合成层保证跟手 */
+input[type="range"] {
+  transition: none !important;
+  touch-action: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  transition: none !important;
+  will-change: transform;
+}
+input[type="range"]::-moz-range-thumb {
+  transition: none !important;
+  will-change: transform;
+}
 
 /* ============ 玻璃质感工具类 ============ */
 /* 玻璃面板：半透明 + 背景模糊 + 细边 + 阴影 */
@@ -98,16 +951,45 @@ button { -webkit-tap-highlight-color: transparent; }
 }
 .animate-glow-pulse { animation: glow-pulse 1.6s ease-in-out infinite; }
 
-/* BrowserPane 拾取态呼吸灯：内发光的强度与扩散周期性变化 */
+/* BrowserPane 拾取态呼吸灯：柔和的多层内发光 + 顶部高光线 */
 @keyframes picking-breath {
   0%, 100% {
-    box-shadow: inset 0 0 0 2px rgba(251, 146, 60, 0.55), inset 0 0 16px 4px rgba(251, 146, 60, 0.30);
+    box-shadow:
+      inset 0 0 0 1px rgba(251, 146, 60, 0.35),
+      inset 0 0 18px 2px rgba(251, 146, 60, 0.12),
+      inset 0 1px 0 0 rgba(255, 237, 213, 0.25);
   }
   50% {
-    box-shadow: inset 0 0 0 2px rgba(251, 146, 60, 0.85), inset 0 0 32px 10px rgba(251, 146, 60, 0.55);
+    box-shadow:
+      inset 0 0 0 1.5px rgba(251, 146, 60, 0.65),
+      inset 0 0 28px 6px rgba(251, 146, 60, 0.22),
+      inset 0 1px 0 0 rgba(255, 237, 213, 0.5);
   }
 }
-.picking-breath { animation: picking-breath 2.4s ease-in-out infinite; }
+@keyframes picking-breath-line {
+  0%, 100% { opacity: 0.35; transform: scaleX(0.6); }
+  50% { opacity: 0.9; transform: scaleX(1); }
+}
+.picking-breath {
+  animation: picking-breath 2.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+.picking-breath::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 12%; right: 12%;
+  height: 1.5px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(253, 186, 116, 0.9) 20%,
+    rgba(254, 215, 170, 1) 50%,
+    rgba(253, 186, 116, 0.9) 80%,
+    transparent 100%);
+  border-radius: 0 0 2px 2px;
+  pointer-events: none;
+  z-index: 20;
+  animation: picking-breath-line 2.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  filter: drop-shadow(0 0 4px rgba(251, 146, 60, 0.6));
+}
 
 /* ============ 黄色高光笔划过动画（教学步骤引导） ============ */
 @keyframes highlight-pen {
