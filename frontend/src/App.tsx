@@ -28,6 +28,7 @@ import {
   PanelLeftClose,
   Play,
   Plus,
+  LayoutGrid,
   Repeat2,
   Save,
   Settings2,
@@ -45,6 +46,8 @@ import {
 import { api, subscribeTask } from "./api/client";
 import appIconPng from "./assets/app-icon.png";
 import DocExportDialog from "./components/DocExportDialog";
+import PPTWorkflowPanel from "./components/PPTWorkflowPanel";
+import TaskSelector from "./components/TaskSelector";
 function LogoWordmark({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 520 120" width="100%" height="100%" className={className} aria-label="CINSIDE">
@@ -118,6 +121,7 @@ import ElementSelectBar, { type PickTarget, type CustomTextEntry } from "./compo
 import ResultsPanel from "./components/ResultsPanel";
 import type { ExtractSummaryItem } from "./components/ResultsPanel";
 import SettingsModal from "./components/SettingsModal";
+import OfficecliRequiredModal from "./components/OfficecliRequiredModal";
 import DocFillDialog from "./components/DocFillDialog";
 import SkillPanel from "./components/SkillPanel";
 import LoopEditor from "./components/LoopEditor";
@@ -916,6 +920,35 @@ export default function App() {
   const ctrlPressedRef = useRef(false);
   const [loadingRecords, setLoadingRecords] = useState(false);
   const [backendReady, setBackendReady] = useState(!window.electronAPI);
+  // 任务类型：select=选择页，web=网页任务，ppt=幻灯片任务
+  const [taskType, setTaskType] = useState<"select" | "web" | "ppt">("select");
+  const switchTaskType = useCallback((t: "select" | "web" | "ppt") => {
+    setTaskType(t);
+  }, []);
+  // OfficeCLI 未安装提示弹窗（点击幻灯片任务时触发）
+  const [officecliModalOpen, setOfficecliModalOpen] = useState(false);
+  const [officecliChecking, setOfficecliChecking] = useState(false);
+  const handleTaskSelect = useCallback(async (t: "web" | "ppt") => {
+    if (t === "ppt") {
+      // 进入幻灯片任务前检查 OfficeCLI 是否可用
+      setOfficecliChecking(true);
+      try {
+        const status = await api.pptStatus();
+        if (status.available) {
+          switchTaskType("ppt");
+        } else {
+          setOfficecliModalOpen(true);
+        }
+      } catch {
+        // 检查失败也弹窗，让用户可以尝试安装
+        setOfficecliModalOpen(true);
+      } finally {
+        setOfficecliChecking(false);
+      }
+    } else {
+      switchTaskType("web");
+    }
+  }, [switchTaskType]);
   const [showSettings, setShowSettings] = useState(false);
   const [leftPanelOpen, setLeftPanelOpen] = useState(true);
   const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
@@ -11202,6 +11235,106 @@ type: info.type,
   if (detachMode === "browser-right") return <DetachedBrowserPanel detachSide="browser-right" />;
   if (detachMode === "browser-excel") return <DetachedExcelPanel />;
 
+  // 任务选择页
+  if (taskType === "select") {
+    return (
+      <>
+        <TaskSelector onSelect={handleTaskSelect} checking={officecliChecking} />
+        {officecliModalOpen && (
+          <OfficecliRequiredModal
+            onClose={() => setOfficecliModalOpen(false)}
+            onInstalled={() => {
+              setOfficecliModalOpen(false);
+              switchTaskType("ppt");
+            }}
+          />
+        )}
+      </>
+    );
+  }
+
+  // 设置弹窗（web 与 ppt 两种全屏视图下都可弹出，故在早返回前提取为变量复用）
+  const settingsModal = showSettings ? (
+    <SettingsModal
+      initial={{ ...settings, ui_scale: uiScale }}
+      onClose={() => {
+        // 关闭时取消未执行的 rAF，避免拖拽回调在弹窗关闭后才触发
+        if (brightnessRafRef.current) { cancelAnimationFrame(brightnessRafRef.current); brightnessRafRef.current = 0; }
+        if (scaleRafRef.current) { cancelAnimationFrame(scaleRafRef.current); scaleRafRef.current = 0; }
+        setShowSettings(false);
+      }}
+      onScaleChange={(scale) => {
+        // rAF 节流：拖拽滑块时每帧最多应用一次 zoom，避免高频 setZoomFactor + resize 卡顿
+        pendingScaleRef.current = scale;
+        if (scaleRafRef.current) return;
+        scaleRafRef.current = requestAnimationFrame(() => {
+          scaleRafRef.current = 0;
+          const s = pendingScaleRef.current;
+          setUiScale(s);
+          uiScaleRef.current = s;
+          try { localStorage.setItem("cinside-ui-scale", s.toString()); } catch {}
+          window.dispatchEvent(new Event("resize"));
+        });
+      }}
+      onAppearanceChange={(theme, accent) => {
+        // 即时生效：直接写入 DOM，不等待保存
+        // 临时禁用所有过渡，避免数百个 transition-all 元素同时动画导致卡顿
+        const root = document.documentElement;
+        root.classList.add("no-transitions");
+        root.setAttribute("data-theme", theme === "dark" ? "dark" : "light");
+        root.setAttribute("data-accent", accent || "indigo");
+        // 强制重排后下一帧恢复过渡
+        void root.offsetWidth;
+        requestAnimationFrame(() => root.classList.remove("no-transitions"));
+      }}
+      onBrightnessChange={(val) => {
+        // rAF 节流 + 直接 IPC：拖拽时每帧最多调用一次，不经过 setSettings 避免整个 App 树重渲染
+        pendingBrightnessRef.current = val;
+        if (brightnessRafRef.current) return;
+        brightnessRafRef.current = requestAnimationFrame(() => {
+          brightnessRafRef.current = 0;
+          const v = pendingBrightnessRef.current;
+          window.electronAPI?.viewSetBrightness?.("left", v);
+          window.electronAPI?.viewSetBrightness?.("right", v);
+        });
+      }}
+      onSaved={(s) => {
+        setSettings(s);
+        if (typeof s.ui_scale === "number") {
+          setUiScale(s.ui_scale);
+          uiScaleRef.current = s.ui_scale;
+          try { localStorage.setItem("cinside-ui-scale", s.ui_scale.toString()); } catch {}
+          window.dispatchEvent(new Event("resize"));
+        }
+        setConfig((c) =>
+          c
+            ? {
+                ...c,
+                settings: s,
+                agent_backend: s.agent_backend,
+                vision_configured: Boolean(s.vision_api_key),
+                browser_use_configured: Boolean(s.browser_use_llm_key),
+              }
+            : c
+        );
+        setShowSettings(false);
+      }}
+    />
+  ) : null;
+
+  // 幻灯片任务模式：全屏渲染 PPT 工作流
+  if (taskType === "ppt") {
+    return (
+      <>
+        <PPTWorkflowPanel
+          onBack={() => switchTaskType("select")}
+          onOpenSettings={() => setShowSettings(true)}
+        />
+        {settingsModal}
+      </>
+    );
+  }
+
   // 是否有模态/覆盖面板打开（此时需要隐藏 BrowserView，显示毛玻璃背景）
   const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel || showApplyLoop || executionPanelOpen || !!showCredentialsPanel || !!showBlockPanel;
 
@@ -11228,6 +11361,14 @@ type: info.type,
             className="h-5 w-5"
           />
           <LogoWordmark className="h-5 logo-wordmark" />
+          <div className="w-px h-4 bg-slate-200 mx-1" />
+          <button
+            onClick={() => switchTaskType("select")}
+            className="flex items-center justify-center w-7 h-7 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-md transition-colors"
+            title="切换任务类型"
+          >
+            <LayoutGrid size={18} />
+          </button>
         </div>
         {/* UPDATER */}
         <div className="flex items-center gap-2" style={{WebkitAppRegion:"no-drag"}as React.CSSProperties}>
@@ -12676,74 +12817,8 @@ type: info.type,
         </section>
       </main>
 
-      {/* 设置弹窗 */}
-      {showSettings && (
-        <SettingsModal
-          initial={{ ...settings, ui_scale: uiScale }}
-          onClose={() => {
-            // 关闭时取消未执行的 rAF，避免拖拽回调在弹窗关闭后才触发
-            if (brightnessRafRef.current) { cancelAnimationFrame(brightnessRafRef.current); brightnessRafRef.current = 0; }
-            if (scaleRafRef.current) { cancelAnimationFrame(scaleRafRef.current); scaleRafRef.current = 0; }
-            setShowSettings(false);
-          }}
-          onScaleChange={(scale) => {
-            // rAF 节流：拖拽滑块时每帧最多应用一次 zoom，避免高频 setZoomFactor + resize 卡顿
-            pendingScaleRef.current = scale;
-            if (scaleRafRef.current) return;
-            scaleRafRef.current = requestAnimationFrame(() => {
-              scaleRafRef.current = 0;
-              const s = pendingScaleRef.current;
-              setUiScale(s);
-              uiScaleRef.current = s;
-              try { localStorage.setItem("cinside-ui-scale", s.toString()); } catch {}
-              window.dispatchEvent(new Event("resize"));
-            });
-          }}
-          onAppearanceChange={(theme, accent) => {
-            // 即时生效：直接写入 DOM，不等待保存
-            // 临时禁用所有过渡，避免数百个 transition-all 元素同时动画导致卡顿
-            const root = document.documentElement;
-            root.classList.add("no-transitions");
-            root.setAttribute("data-theme", theme === "dark" ? "dark" : "light");
-            root.setAttribute("data-accent", accent || "indigo");
-            // 强制重排后下一帧恢复过渡
-            void root.offsetWidth;
-            requestAnimationFrame(() => root.classList.remove("no-transitions"));
-          }}
-          onBrightnessChange={(val) => {
-            // rAF 节流 + 直接 IPC：拖拽时每帧最多调用一次，不经过 setSettings 避免整个 App 树重渲染
-            pendingBrightnessRef.current = val;
-            if (brightnessRafRef.current) return;
-            brightnessRafRef.current = requestAnimationFrame(() => {
-              brightnessRafRef.current = 0;
-              const v = pendingBrightnessRef.current;
-              window.electronAPI?.viewSetBrightness?.("left", v);
-              window.electronAPI?.viewSetBrightness?.("right", v);
-            });
-          }}
-          onSaved={(s) => {
-            setSettings(s);
-            if (typeof s.ui_scale === "number") {
-              setUiScale(s.ui_scale);
-              uiScaleRef.current = s.ui_scale;
-              try { localStorage.setItem("cinside-ui-scale", s.ui_scale.toString()); } catch {}
-              window.dispatchEvent(new Event("resize"));
-            }
-            setConfig((c) =>
-              c
-                ? {
-                    ...c,
-                    settings: s,
-                    agent_backend: s.agent_backend,
-                    vision_configured: Boolean(s.vision_api_key),
-                    browser_use_configured: Boolean(s.browser_use_llm_key),
-                  }
-                : c
-            );
-            setShowSettings(false);
-          }}
-        />
-      )}
+      {/* 设置弹窗（与 ppt 视图共用同一 settingsModal 变量） */}
+      {settingsModal}
 
       {/* 功能2：本地文档提取审核弹窗（确认后填入右侧网页输入框） */}
       <input
