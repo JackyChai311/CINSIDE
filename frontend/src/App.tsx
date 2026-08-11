@@ -40,6 +40,7 @@ import {
   Type,
   Upload,
   UserCircle,
+  Users,
   X,
   XCircle,
 } from "lucide-react";
@@ -47,6 +48,7 @@ import { api, subscribeTask } from "./api/client";
 import appIconPng from "./assets/app-icon.png";
 import DocExportDialog from "./components/DocExportDialog";
 import PPTWorkflowPanel from "./components/PPTWorkflowPanel";
+import CoworkStudio from "./components/CoworkStudio";
 import TaskSelector from "./components/TaskSelector";
 function LogoWordmark({ className }: { className?: string }) {
   return (
@@ -920,15 +922,15 @@ export default function App() {
   const ctrlPressedRef = useRef(false);
   const [loadingRecords, setLoadingRecords] = useState(false);
   const [backendReady, setBackendReady] = useState(!window.electronAPI);
-  // 任务类型：select=选择页，web=网页任务，ppt=幻灯片任务
-  const [taskType, setTaskType] = useState<"select" | "web" | "ppt">("select");
-  const switchTaskType = useCallback((t: "select" | "web" | "ppt") => {
+  // 任务类型：select=选择页，web=网页任务，ppt=幻灯片任务，cowork=协作任务
+  const [taskType, setTaskType] = useState<"select" | "web" | "ppt" | "cowork">("select");
+  const switchTaskType = useCallback((t: "select" | "web" | "ppt" | "cowork") => {
     setTaskType(t);
   }, []);
   // OfficeCLI 未安装提示弹窗（点击幻灯片任务时触发）
   const [officecliModalOpen, setOfficecliModalOpen] = useState(false);
   const [officecliChecking, setOfficecliChecking] = useState(false);
-  const handleTaskSelect = useCallback(async (t: "web" | "ppt") => {
+  const handleTaskSelect = useCallback(async (t: "web" | "ppt" | "cowork") => {
     if (t === "ppt") {
       // 进入幻灯片任务前检查 OfficeCLI 是否可用
       setOfficecliChecking(true);
@@ -945,6 +947,8 @@ export default function App() {
       } finally {
         setOfficecliChecking(false);
       }
+    } else if (t === "cowork") {
+      switchTaskType("cowork");
     } else {
       switchTaskType("web");
     }
@@ -11330,6 +11334,16 @@ type: info.type,
           onBack={() => switchTaskType("select")}
           onOpenSettings={() => setShowSettings(true)}
         />
+        {settingsModal}
+      </>
+    );
+  }
+
+  // 协作任务模式：Cowork Studio（人工协作 / AI 协作）
+  if (taskType === "cowork") {
+    return (
+      <>
+        <CoworkStudio onBack={() => switchTaskType("select")} />
         {settingsModal}
       </>
     );

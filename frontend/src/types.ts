@@ -122,6 +122,9 @@ export interface AppSettings {
   browser_use_llm_key: string;
   browser_use_llm_model: string;
 
+  // SenseNova U1 Fast 生图（PPT 配图）
+  sensenova_api_key?: string;
+
   // 文档/护照 OCR 引擎：vision=识图AI（Vision LLM），umi=本地 UMI-OCR
   ocr_engine?: string;
   umi_ocr_host?: string;
@@ -781,6 +784,71 @@ export interface PPTSlideNode {
   texts: PPTTextNode[];
 }
 
+// ========== Cowork Studio（中央 AI 协作） ==========
+
+export interface CoworkSkill {
+  id: string;
+  name: string;
+  description: string;
+  content: string;
+  category: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface CoworkClient {
+  id: string;
+  name: string;
+  available: boolean;
+  path: string;
+  version: string;
+  hint: string;
+}
+
+export type CoworkDispatchEvent =
+  | { type: "status"; stage: string; message: string; round: number }
+  | { type: "client_start"; client_id: string; client_name: string }
+  | {
+      type: "client_done";
+      client_id: string;
+      status: "done" | "failed";
+      elapsed: number;
+      result_preview?: string;
+      error?: string;
+    }
+  | { type: "qc"; review: string; passed: boolean; feedback: string; round: number }
+  | { type: "done"; task: CoworkTask }
+  | { type: "error"; message: string };
+
+export interface CoworkAssignment {
+  client_id: string;
+  client_name: string;
+  prompt_file: string;
+  result_file: string;
+  status: "pending" | "running" | "done" | "failed" | "timeout";
+  result: string;
+  error: string;
+  started_at: number;
+  finished_at: number;
+  elapsed: number;
+}
+
+export interface CoworkTask {
+  id: string;
+  instruction: string;
+  skill_ids: string[];
+  client_ids: string[];
+  max_rounds: number;
+  status: string;
+  assignments: CoworkAssignment[];
+  qc_review: string;
+  qc_passed: boolean;
+  qc_feedback: string;
+  round: number;
+  final_result: string;
+  created_at: number;
+}
+
 export interface PPTFileSlides {
   file_id: string;
   file_name: string;
@@ -822,3 +890,54 @@ export interface PPTProgressEvent {
   chars?: number;
   message?: string;
 }
+
+// PPT 视觉风格（与后端 StyleProfile 对应）
+export interface PPTStyleProfile {
+  name: string;
+  display_name: string;
+  palette: [string, string][];           // [(accent, tint), ...]
+  title_size: number;
+  body_size: number;
+  title_color: string;
+  body_color: string;
+  cover_layout: "center" | "split";
+  content_layout: "card" | "minimal" | "sidebar";
+  decor: string[];
+  style_notes: string;
+}
+
+// 单页可编辑元素（slide-elements 端点返回）
+export interface PPTSlideElement {
+  path: string;
+  type: string;                          // shape / picture / table ...
+  x?: string; y?: string;                // 英寸字符串，如 "1.2in"
+  width?: string; height?: string;
+  text?: string;
+  size?: string;
+  color?: string;
+  fill?: string;
+  bold?: string;
+  align?: string;
+  valign?: string;
+  geometry?: string;
+  name?: string;
+}
+
+// 流式按文字新建 PPT 的推送事件（AI 逐步放置文字/装饰/图片元素）
+/** AI 生成的 PPT 大纲单页（含章节、摘要、要点） */
+export interface PPTOutlineSlide {
+  section: string;
+  title: string;
+  summary: string;
+  bullets: string[];
+  image_prompt?: string;
+}
+
+export type PPTStreamEvent =
+  | { type: "outline"; slides: PPTOutlineSlide[]; style?: { name: string; display_name: string } }
+  | { type: "add_text"; slide: number; element: "title" | "bullet"; text: string }
+  | { type: "add_decor"; slide: number; element: string }
+  | { type: "add_image"; slide: number; status: "generating" | "placed" | "failed" }
+  | { type: "screenshot"; slide: number; image_data: string }
+  | { type: "done"; result: { file_path: string; file_name: string; total_slides: number } }
+  | { type: "error"; message?: string };

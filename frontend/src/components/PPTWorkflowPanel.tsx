@@ -13,7 +13,6 @@ import {
   Presentation,
   SendHorizontal,
   Paperclip,
-  Bot,
   ChevronRight,
   ChevronDown,
   Type,
@@ -21,6 +20,7 @@ import {
   CheckCheck,
   CircleDot,
   LayoutGrid,
+  Columns,
   Minus,
   Square,
   Clapperboard,
@@ -28,22 +28,36 @@ import {
   FolderOpen,
   FolderPlus,
   Bookmark,
+  Plus,
+  Lock,
 } from "lucide-react";
 import { api } from "../api/client";
 import appIconPng from "../assets/app-icon.png";
 import type {
   PPTFileSlides,
+  PPTOutlineSlide,
   PPTProgressEvent,
   PPTSection,
+  PPTStyleProfile,
   PPTTextPatch,
 } from "../types";
 import {
-  ReferenceRail,
   ReferenceLabelModal,
   ReferenceDropOverlay,
+  ReferenceLibraryModal,
   buildReferenceContext,
+  TAG_META,
+  fileIcon,
+  fileTypeMeta,
+  detectFileType,
 } from "./ReferenceBookmarks";
+import { OutlineBoard } from "./OutlineBoard";
 import type { ReferenceBookmark, PendingReferenceFile } from "./ReferenceBookmarks";
+import SlidePreviewTray from "./SlidePreviewTray";
+import CreateStreamBoard, {
+  type StreamSlide,
+  type StreamActive,
+} from "./CreateStreamBoard";
 
 interface SelectedFile {
   file_path: string;
@@ -68,6 +82,28 @@ const PHASES: PhaseDef[] = [
   { id: "apply", label: "回填原 PPT", shortLabel: "回填", icon: CheckCheck },
 ];
 
+// 解析输入中的 @引用：提取被提及的参考文件，并生成仅针对它们的参考上下文；
+// 若没有 @引用，则沿用原有行为（附加全部参考文件）。
+// mentioned 为显式 @ 提及的文件列表（即使为空也不回退），用于触发懒解析等。
+function resolveMentions(
+  text: string,
+  bookmarks: ReferenceBookmark[]
+): { cleanText: string; refCtx: string; mentioned: ReferenceBookmark[] } {
+  const mentioned: ReferenceBookmark[] = [];
+  let clean = text;
+  for (const b of bookmarks) {
+    const token = `@${b.file_name}`;
+    if (clean.includes(token)) {
+      mentioned.push(b);
+      clean = clean.split(token).join("");
+    }
+  }
+  clean = clean.replace(/@\S+/g, "").trim();
+  const refs = mentioned.length ? mentioned : bookmarks;
+  const refCtx = buildReferenceContext(refs).trim();
+  return { cleanText: clean, refCtx, mentioned };
+}
+
 export default function PPTWorkflowPanel({
   onBack,
   onOpenSettings,
@@ -85,9 +121,17 @@ export default function PPTWorkflowPanel({
   const [progressMap, setProgressMap] = useState<Record<string, PPTProgressEvent>>({});
   const [analyzing, setAnalyzing] = useState(false);
   const [aiInfo, setAiInfo] = useState<{ model: string; configured: boolean } | null>(null);
+  // 批量编辑：文件勾选确认后才解封输入框
+  const [batchConfirmed, setBatchConfirmed] = useState(false);
 
   // 模式：create=PPT制作（文字新建），batch=批量编辑PPT，video=PPT转视频（暂未实现）
   const [activeMode, setActiveMode] = useState<"create" | "batch" | "video">("create");
+  // 幻灯片预览窗口数量（1/2/3）
+  const [previewSlots, setPreviewSlots] = useState(1);
+  // 各预览槽位当前显示的文件 id（由 SlidePreviewTray 上报，用于参考预览时保持原槽位）
+  const slotFileIdsRef = useRef<(string | null)[]>([]);
+  // 打开参考预览时指定各槽位初始显示的文件 id
+  const [previewInitialFileIds, setPreviewInitialFileIds] = useState<(string | null)[]>([]);
   // 按文字新建 PPT
   const [creating, setCreating] = useState(false);
   const [createdResult, setCreatedResult] = useState<{
@@ -96,6 +140,18 @@ export default function PPTWorkflowPanel({
     total_slides: number;
   } | null>(null);
   const [createText, setCreateText] = useState("");
+  // 流式生成看板：AI 逐步放置文字元素
+  const [streamSlides, setStreamSlides] = useState<StreamSlide[]>([]);
+  const [streamActive, setStreamActive] = useState<StreamActive | null>(null);
+  const [streamDone, setStreamDone] = useState(false);
+  // 风格选择："auto"=AI 自动选 / 预设风格 name
+  // 参考 PPT 的风格不再在上传时即时拆解，而是在用户 @ 引用该 PPT 时懒解析，结果缓存于此
+  const [stylePresets, setStylePresets] = useState<PPTStyleProfile[]>([]);
+  const [styleChoice, setStyleChoice] = useState<string>("auto");
+  const [styleCache, setStyleCache] = useState<Record<string, PPTStyleProfile>>({});
+  const [parsingStyleFor, setParsingStyleFor] = useState<string | null>(null);
+  // AI 实际采用的风格名（大纲事件回传，用于展示）
+  const [appliedStyleName, setAppliedStyleName] = useState("");
 
   // 解析结果
   const [fileSlides, setFileSlides] = useState<PPTFileSlides[]>([]);
@@ -168,6 +224,9 @@ export default function PPTWorkflowPanel({
   });
   const [pendingRefFiles, setPendingRefFiles] = useState<PendingReferenceFile[]>([]);
   const [dragOver, setDragOver] = useState(false);
+  const [showRefLibrary, setShowRefLibrary] = useState(false);
+  const [outlineDraft, setOutlineDraft] = useState<{ text: string; style: PPTStyleProfile | null } | null>(null);
+  const [outlineKey, setOutlineKey] = useState(0);
   const dragCounter = useRef(0);
 
   // 持久化到 localStorage
@@ -201,17 +260,86 @@ export default function PPTWorkflowPanel({
     setReferenceBookmarks((prev) => prev.filter((b) => b.id !== id));
   }, []);
 
+  // 从参考资料库弹窗点击「引用」：把 @文件名 插入输入框光标位置
+  const handleInsertMention = useCallback((b: ReferenceBookmark) => {
+    const token = `@${b.file_name} `;
+    const ta = textareaRef.current;
+    if (ta) {
+      const start = ta.selectionStart ?? chatInput.length;
+      const end = ta.selectionEnd ?? chatInput.length;
+      const next = chatInput.slice(0, start) + token + chatInput.slice(end);
+      setChatInput(next);
+      requestAnimationFrame(() => {
+        ta.focus();
+        const pos = start + token.length;
+        ta.setSelectionRange(pos, pos);
+      });
+    } else {
+      setChatInput((prev) => (prev ? `${prev} ${token}` : token));
+    }
+    setShowRefLibrary(false);
+  }, [chatInput]);
+
+  // 从左侧参考栏打开某个参考文件的预览：加到预览文件列表，并自动把窗口数调到 2，
+  // 且新窗口指向该参考文件、原窗口保持当前预览的文件。
+  const handlePreviewRef = useCallback(async (bookmark: ReferenceBookmark) => {
+    setError(null);
+    try {
+      const refId = `ref_${bookmark.id}`;
+      // 获取参考文件页数（PPT / PDF）
+      const { page_count } = await api.pptPageCount(bookmark.file_path);
+      // 将参考文件加入 fileSlides（含正确页数）
+      setFileSlides((prev) => {
+        if (prev.some((f) => f.file_id === refId)) {
+          // 已存在则仅校正页数
+          return prev.map((f) =>
+            f.file_id === refId
+              ? {
+                  ...f,
+                  slides: Array.from({ length: page_count }, (_, i) => ({
+                    index: i + 1,
+                    path: "",
+                    title: `第 ${i + 1} 页`,
+                    texts: [],
+                  })),
+                }
+              : f
+          );
+        }
+        return [
+          ...prev,
+          {
+            file_id: refId,
+            file_name: bookmark.file_name,
+            file_path: bookmark.file_path,
+            slides: Array.from({ length: page_count }, (_, i) => ({
+              index: i + 1,
+              path: "",
+              title: `第 ${i + 1} 页`,
+              texts: [],
+            })),
+          },
+        ];
+      });
+      // 左侧预览窗聚焦该参考文件（单窗口 = 左侧参考预览，右侧继续制作 PPT）
+      setPreviewInitialFileIds([refId]);
+      setPreviewSlots(1);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "无法预览参考文件");
+    }
+  }, []);
+
   // 通过文件选择器添加参考文件（左侧栏 + 号）
   const handlePickReferenceFiles = useCallback(async () => {
     try {
       const result = await window.electronAPI?.pickReferenceFiles?.();
       if (result?.canceled || !result?.files?.length) return;
       const pending: PendingReferenceFile[] = result.files
-        .filter((f) => /\.(ppt|pptx|pdf)$/i.test(f.file_name))
+        .filter((f) => /\.(ppt|pptx|pdf|png|jpe?g|gif|webp|bmp|svg)$/i.test(f.file_name))
         .map((f) => ({
           file_name: f.file_name,
           file_path: f.file_path,
-          file_type: /\.pdf$/i.test(f.file_name) ? "pdf" : "ppt",
+          file_type: detectFileType(f.file_name),
           size: f.size,
         }));
       openReferenceLabelModal(pending);
@@ -228,14 +356,14 @@ export default function PPTWorkflowPanel({
     for (let i = 0; i < items.length; i++) {
       const file = items[i];
       const name = file.name || "";
-      if (!/\.(ppt|pptx|pdf)$/i.test(name)) continue;
+      if (!/\.(ppt|pptx|pdf|png|jpe?g|gif|webp|bmp|svg)$/i.test(name)) continue;
       // Electron：通过 preload 获取真实磁盘路径
       const filePath = window.electronAPI?.getPathForFile?.(file) || (file as unknown as { path?: string }).path || "";
       if (!filePath) continue;
       pending.push({
         file_name: name,
         file_path: filePath,
-        file_type: /\.pdf$/i.test(name) ? "pdf" : "ppt",
+        file_type: detectFileType(name),
         size: file.size,
       });
     }
@@ -279,7 +407,7 @@ export default function PPTWorkflowPanel({
   }, [extractDroppedFiles, openReferenceLabelModal]);
 
   // ---- 文件选择 ----
-  const handlePickFiles = useCallback(async () => {
+  const handlePickFiles = useCallback(async (autoAnalyze = false) => {
     setError(null);
     try {
       const result = await window.electronAPI?.pickPptFiles?.();
@@ -287,12 +415,35 @@ export default function PPTWorkflowPanel({
       const newFiles = result.files.filter(
         (f) => !selectedFiles.some((s) => s.file_path === f.file_path)
       );
+      if (newFiles.length === 0) return;
       setSelectedFiles((prev) => [...prev, ...newFiles]);
       setEnabledPaths((prev) => {
         const next = new Set(prev);
         newFiles.forEach((f) => next.add(f.file_path));
         return next;
       });
+      // PPT 制作模式：选完文件后自动解析以显示三槽预览
+      if (autoAnalyze && newFiles.length > 0) {
+        const paths = newFiles.map((f) => f.file_path);
+        setAnalyzing(true);
+        setLoading(true);
+        setProgressMap({});
+        try {
+          const files = await api.pptAnalyzeStream(paths, (ev) => {
+            setProgressMap((prev) => ({ ...prev, [ev.file]: ev }));
+          });
+          setFileSlides((prev) => {
+            const existing = new Set(prev.map((f) => f.file_path));
+            const fresh = files.filter((f) => !existing.has(f.file_path));
+            return [...prev, ...fresh];
+          });
+        } catch (e: unknown) {
+          setError(e instanceof Error ? e.message : "解析失败");
+        } finally {
+          setAnalyzing(false);
+          setLoading(false);
+        }
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "选择文件失败");
     }
@@ -346,7 +497,14 @@ export default function PPTWorkflowPanel({
 
   useEffect(() => {
     api.pptAiInfo().then(setAiInfo).catch(() => {});
+    api.pptStylePresets().then((r) => setStylePresets(r.presets)).catch(() => {});
   }, []);
+
+  // 当前显式选择的风格（null = AI 自动；@ 提及的参考 PPT 风格在发送时懒解析后叠加）
+  const activeStyle: PPTStyleProfile | null =
+    styleChoice === "auto"
+      ? null
+      : stylePresets.find((p) => p.name === styleChoice) ?? null;
 
   // ---- 解析文件 ----
   const handleAnalyze = useCallback(async () => {
@@ -382,7 +540,9 @@ export default function PPTWorkflowPanel({
     setError(null);
     setDetectInstruction(instructionText);
     try {
-      const res = await api.pptDetectSections(fileSlides, instructionText);
+      const { cleanText, refCtx } = resolveMentions(instructionText, referenceBookmarks);
+      const promptText = refCtx ? `${refCtx}\n\n---\n\n用户指令：${cleanText}` : cleanText;
+      const res = await api.pptDetectSections(fileSlides, promptText);
       setSections(res.sections);
       setReadingScript(res.readingScript);
     } catch (e: unknown) {
@@ -391,7 +551,7 @@ export default function PPTWorkflowPanel({
       setDetecting(false);
       setLoading(false);
     }
-  }, [fileSlides]);
+  }, [fileSlides, referenceBookmarks]);
 
   const handleSectionNameChange = useCallback((idx: number, name: string) => {
     setSections((prev) => {
@@ -426,7 +586,9 @@ export default function PPTWorkflowPanel({
     setInstruction(instructionText);
     setPatches([]);
     try {
-      const res = await api.pptModify(sections, instructionText);
+      const { cleanText, refCtx } = resolveMentions(instructionText, referenceBookmarks);
+      const promptText = refCtx ? `${refCtx}\n\n---\n\n用户指令：${cleanText}` : cleanText;
+      const res = await api.pptModify(sections, promptText);
       setPatches(res.patches);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "AI 修改失败");
@@ -434,7 +596,7 @@ export default function PPTWorkflowPanel({
       setModifying(false);
       setLoading(false);
     }
-  }, [sections]);
+  }, [sections, referenceBookmarks]);
 
   // ---- 回填 ----
   const handleApply = useCallback(async () => {
@@ -471,22 +633,120 @@ export default function PPTWorkflowPanel({
     setCreatedResult(null);
     setCreating(false);
     setCreateText("");
+    setOutlineDraft(null);
+    setStreamSlides([]);
+    setStreamActive(null);
+    setStreamDone(false);
+    setAppliedStyleName("");
     setError(null);
     setChatInput("");
+    setBatchConfirmed(false);
   }, []);
 
-  // ---- 按文字新建 PPT ----
-  const handleCreateFromText = useCallback(async (text: string) => {
+  // 下载生成的 PPT 文件
+  const handleDownload = useCallback(() => {
+    if (!createdResult?.file_path) return;
+    // 使用 Electron 的 shell.openPath 打开文件所在目录
+    window.electronAPI?.showItemInFolder?.(createdResult.file_path);
+  }, [createdResult]);
+
+  // 切换模式时重置批量确认状态
+  const handleModeSwitch = useCallback((mode: "create" | "batch" | "video") => {
+    setActiveMode(mode);
+    if (mode === "batch") setBatchConfirmed(false);
+  }, []);
+
+  // ---- 批量编辑：确认勾选的文件并开始解析 ----
+  const handleBatchConfirm = useCallback(async () => {
+    const paths = selectedFiles
+      .filter((f) => enabledPaths.has(f.file_path))
+      .map((f) => f.file_path);
+    if (!paths.length) {
+      setError("请至少勾选一个 PPT 文件");
+      return;
+    }
+    setBatchConfirmed(true);
+    setAnalyzing(true);
+    setLoading(true);
+    setError(null);
+    setProgressMap({});
+    try {
+      const files = await api.pptAnalyzeStream(paths, (ev) => {
+        setProgressMap((prev) => ({ ...prev, [ev.file]: ev }));
+      });
+      setFileSlides((prev) => {
+        const existing = new Set(prev.map((f) => f.file_path));
+        const fresh = files.filter((f) => !existing.has(f.file_path));
+        return [...prev, ...fresh];
+      });
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "解析失败");
+      setBatchConfirmed(false);
+    } finally {
+      setAnalyzing(false);
+      setLoading(false);
+    }
+  }, [selectedFiles, enabledPaths]);
+
+  // ---- 按文字新建 PPT（流式：实时显示 AI 一步步放置文字元素） ----
+  const handleCreateFromText = useCallback(async (
+    text: string,
+    styleToUse: PPTStyleProfile | null,
+    confirmedSlides?: PPTOutlineSlide[],
+    addBackground?: boolean
+  ) => {
     setCreating(true);
     setLoading(true);
     setError(null);
     setCreatedResult(null);
+    setStreamSlides([]);
+    setStreamActive(null);
+    setStreamDone(false);
     setCreateText(text);
     try {
-      // 把左侧参考栏中的文件标注与说明注入到 AI 上下文
-      const refCtx = buildReferenceContext(referenceBookmarks);
-      const prompt = refCtx ? `${refCtx}\n\n---\n\n用户需求：${text}` : text;
-      const res = await api.pptCreateFromText(prompt);
+      const res = await api.pptCreateFromTextStream(
+        text,
+        (ev) => {
+          if (ev.type === "outline") {
+            if (ev.style?.display_name) setAppliedStyleName(ev.style.display_name);
+            setStreamSlides(
+              ev.slides.map((s, i) => ({
+                slide: i + 1,
+                title: "",
+                bullets: [],
+                image: (s.image_prompt ? "generating" : "none") as StreamSlide["image"],
+              }))
+            );
+          } else if (ev.type === "add_text") {
+            setStreamActive({ slide: ev.slide, element: ev.element });
+            setStreamSlides((prev) =>
+              prev.map((s) => {
+                if (s.slide !== ev.slide) return s;
+                if (ev.element === "title") return { ...s, title: ev.text };
+                return { ...s, bullets: [...s.bullets, ev.text] };
+              })
+            );
+          } else if (ev.type === "add_decor") {
+            setStreamSlides((prev) =>
+              prev.map((s) => (s.slide === ev.slide ? { ...s, decor: ev.element } : s))
+            );
+          } else if (ev.type === "add_image") {
+            setStreamSlides((prev) =>
+              prev.map((s) => (s.slide === ev.slide ? { ...s, image: ev.status } : s))
+            );
+          } else if (ev.type === "screenshot") {
+            setStreamSlides((prev) =>
+              prev.map((s) => (s.slide === ev.slide ? { ...s, frame: ev.image_data } : s))
+            );
+          }
+        },
+        styleToUse,
+        confirmedSlides ?? null,
+        addBackground ?? false
+      );
+
+      if (!res) throw new Error("生成结果为空");
+      setStreamDone(true);
       setCreatedResult(res);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "生成 PPT 失败");
@@ -494,7 +754,43 @@ export default function PPTWorkflowPanel({
       setCreating(false);
       setLoading(false);
     }
-  }, [referenceBookmarks]);
+  }, []);
+
+  // ---- 发送前准备：解析 @ 引用 + 懒解析参考 PPT 风格，然后弹出大纲确认 ----
+  const prepareAndDraftOutline = useCallback(async (rawText: string) => {
+    setError(null);
+    setCreateText(rawText);
+
+    const { cleanText, refCtx, mentioned } = resolveMentions(rawText, referenceBookmarks);
+    const prompt = refCtx ? `${refCtx}\n\n---\n\n用户需求：${cleanText}` : cleanText;
+
+    let styleToUse = activeStyle;
+    const mentionedPpts = mentioned.filter((b) => b.file_type === "ppt");
+    if (mentionedPpts.length > 0) {
+      const justParsed: Record<string, PPTStyleProfile> = {};
+      for (const b of mentionedPpts) {
+        const cached = styleCache[b.file_path] || justParsed[b.file_path];
+        if (cached) {
+          if (!styleToUse) styleToUse = cached;
+          continue;
+        }
+        setParsingStyleFor(b.file_path);
+        try {
+          const res = await api.pptAnalyzeStyle(b.file_path);
+          justParsed[b.file_path] = res.style;
+          setStyleCache((prev) => ({ ...prev, [b.file_path]: res.style }));
+          if (!styleToUse) styleToUse = res.style;
+        } catch (e) {
+          setError(e instanceof Error ? `参考风格拆解失败：${e.message}` : "参考风格拆解失败");
+        } finally {
+          setParsingStyleFor(null);
+        }
+      }
+    }
+
+    setOutlineDraft({ text: prompt, style: styleToUse });
+    setOutlineKey((k) => k + 1);
+  }, [referenceBookmarks, activeStyle, styleCache]);
 
   // ---- 发送聊天消息 ----
   const handleSend = useCallback(() => {
@@ -510,8 +806,8 @@ export default function PPTWorkflowPanel({
     setChatInput("");
 
     if (activeMode === "create") {
-      // PPT 制作：直接按文字新建 PPT
-      handleCreateFromText(text);
+      // PPT 制作：先出大纲供用户编辑确认，再生成
+      prepareAndDraftOutline(text);
       return;
     }
 
@@ -531,7 +827,121 @@ export default function PPTWorkflowPanel({
       // 已合并 → AI 修改
       runModify(text);
     }
-  }, [chatInput, activeMode, fileSlides.length, sections.length, mergedResult, runDetect, runModify, handleCreateFromText]);
+  }, [chatInput, activeMode, fileSlides.length, sections.length, mergedResult, runDetect, runModify, prepareAndDraftOutline]);
+
+  // ---- 输入框 @ 引用参考文件 ----
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState("");
+  const [mentionStart, setMentionStart] = useState(0); // 当前 @ 在输入文本中的起始索引
+  const [mentionActive, setMentionActive] = useState(0); // 下拉列表中高亮项
+  const mentionRef = useRef<HTMLDivElement>(null);
+
+  // 过滤后的可引用文件列表
+  const mentionFiltered = useMemo(() => {
+    if (referenceBookmarks.length === 0) return [];
+    const q = mentionQuery.trim().toLowerCase();
+    if (!q) return referenceBookmarks;
+    return referenceBookmarks.filter((b) => b.file_name.toLowerCase().includes(q));
+  }, [referenceBookmarks, mentionQuery]);
+
+  const closeMention = useCallback(() => {
+    setMentionOpen(false);
+    setMentionQuery("");
+  }, []);
+
+  // 在输入框内容变化时检测末尾的 @ 并打开下拉
+  const handleChatChange = useCallback(
+    (value: string) => {
+      setChatInput(value);
+      const caret = textareaRef.current?.selectionStart ?? value.length;
+      // 从光标往前找最近的 @，要求 @ 与该位置之间没有空格/换行
+      let start = -1;
+      for (let i = caret - 1; i >= 0; i--) {
+        const ch = value[i];
+        if (ch === "@") {
+          start = i;
+          break;
+        }
+        if (ch === " " || ch === "\n") break;
+      }
+      if (start >= 0) {
+        const query = value.slice(start + 1, caret);
+        setMentionStart(start);
+        setMentionQuery(query);
+        setMentionActive(0);
+        setMentionOpen(true);
+      } else {
+        closeMention();
+      }
+    },
+    [closeMention]
+  );
+
+  // 选中某个参考文件，写入 @文件名
+  const applyMention = useCallback(
+    (b: ReferenceBookmark) => {
+      const before = chatInput.slice(0, mentionStart);
+      const after = chatInput.slice(textareaRef.current?.selectionStart ?? chatInput.length);
+      const next = `${before}@${b.file_name} ${after}`;
+      setChatInput(next);
+      closeMention();
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current;
+        if (ta) {
+          const pos = before.length + b.file_name.length + 2;
+          ta.focus();
+          ta.setSelectionRange(pos, pos);
+        }
+      });
+    },
+    [chatInput, mentionStart, closeMention]
+  );
+
+  // 下拉的键盘导航与 @ 选择
+  const handleChatKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      const isMentionActive = mentionOpen && mentionFiltered.length > 0;
+      if (isMentionActive) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setMentionActive((i) => (i + 1) % mentionFiltered.length);
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setMentionActive((i) => (i - 1 + mentionFiltered.length) % mentionFiltered.length);
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          applyMention(mentionFiltered[mentionActive]);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          closeMention();
+          return;
+        }
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        handleSend();
+      }
+    },
+    [mentionOpen, mentionFiltered, mentionActive, applyMention, closeMention, handleSend]
+  );
+
+  // 点击下拉外部时关闭
+  useEffect(() => {
+    if (!mentionOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (mentionRef.current && !mentionRef.current.contains(e.target as Node)) {
+        closeMention();
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [mentionOpen, closeMention]);
 
   // 自动滚到底部
   useEffect(() => {
@@ -568,14 +978,17 @@ export default function PPTWorkflowPanel({
   const inputPlaceholder = useMemo(() => {
     if (activeMode === "video") return "向 AI 描述要生成的视频内容（即将上线）…";
     if (activeMode === "create") return "输入主题或大纲，AI 帮你生成一份新 PPT…";
+    if (activeMode === "batch" && !batchConfirmed) return "请先在上方勾选文件并确认，再开始对话…";
     if (fileSlides.length === 0) return "请先选择 PPT 文件，再告诉 AI 怎么批量编辑…";
     if (sections.length === 0) return "告诉 AI 怎么拆分章节，例如：帮我把读课文部分拆出来";
     if (!mergedResult) return "输入新的拆分要求重新识别，或点击下方按钮生成合并总览…";
     if (patches.length === 0) return "告诉 AI 需要修改什么，例如：统一术语、修正错别字…";
     return "输入新的修改要求，或点击回填按钮写回原 PPT…";
-  }, [activeMode, fileSlides.length, sections.length, mergedResult, patches.length]);
+  }, [activeMode, batchConfirmed, fileSlides.length, sections.length, mergedResult, patches.length]);
 
-  const canSend = chatInput.trim().length > 0 && !loading;
+  // 批量编辑模式：未确认文件前输入框锁定
+  const inputLocked = activeMode === "batch" && !batchConfirmed;
+  const canSend = chatInput.trim().length > 0 && !loading && !inputLocked;
 
   return (
     <div
@@ -596,13 +1009,6 @@ export default function PPTWorkflowPanel({
 
       {/* 拖拽放入参考文件的遮罩 */}
       <ReferenceDropOverlay visible={dragOver} />
-
-      {/* 左侧参考资料书签栏 */}
-      <ReferenceRail
-        bookmarks={referenceBookmarks}
-        onRemove={handleRemoveRef}
-        onPickFiles={handlePickReferenceFiles}
-      />
 
       {/* ============ 自定义标题栏（与网页任务一致：可拖动 + 窗口控件） ============ */}
       <div
@@ -673,7 +1079,7 @@ export default function PPTWorkflowPanel({
         <div className="flex-1 flex justify-center">
           <div className="ppt-mode-segment flex items-center gap-0.5 p-0.5 rounded-lg bg-slate-100/70 ring-1 ring-slate-200/60">
             <button
-              onClick={() => setActiveMode("create")}
+              onClick={() => handleModeSwitch("create")}
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
                 activeMode === "create"
                   ? "bg-white text-slate-800 shadow-sm"
@@ -684,7 +1090,7 @@ export default function PPTWorkflowPanel({
               PPT 制作
             </button>
             <button
-              onClick={() => setActiveMode("batch")}
+              onClick={() => handleModeSwitch("batch")}
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
                 activeMode === "batch"
                   ? "bg-white text-slate-800 shadow-sm"
@@ -695,7 +1101,7 @@ export default function PPTWorkflowPanel({
               批量编辑 PPT
             </button>
             <button
-              onClick={() => setActiveMode("video")}
+              onClick={() => handleModeSwitch("video")}
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
                 activeMode === "video"
                   ? "bg-white text-slate-800 shadow-sm"
@@ -708,6 +1114,27 @@ export default function PPTWorkflowPanel({
           </div>
         </div>
         <div className="flex items-center gap-1">
+          {/* 预览窗口数量三态按钮 */}
+          <div className="flex items-center gap-0.5 p-0.5 rounded-md bg-white/70 ring-1 ring-slate-200/60" title="幻灯片预览窗口数量：1个/2个/3个">
+            {[
+              { n: 1, Icon: Square },
+              { n: 2, Icon: Columns },
+              { n: 3, Icon: LayoutGrid },
+            ].map(({ n, Icon }) => (
+              <button
+                key={n}
+                onClick={() => setPreviewSlots(n)}
+                className={`flex h-5 w-5 items-center justify-center rounded transition-all ${
+                  previewSlots === n
+                    ? "bg-brand-500 text-white shadow-sm"
+                    : "text-slate-500 hover:bg-white hover:text-slate-800"
+                }`}
+              >
+                <Icon className="h-3 w-3" />
+              </button>
+            ))}
+          </div>
+
           {/* 工作文件选择 */}
           <div ref={fileMenuRef} className="relative">
             <button
@@ -733,7 +1160,8 @@ export default function PPTWorkflowPanel({
                 <button
                   onClick={() => {
                     setShowFileMenu(false);
-                    setActiveMode("batch");
+                    handleModeSwitch("batch");
+                    setBatchConfirmed(false);
                     void handlePickFiles();
                   }}
                   className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
@@ -744,7 +1172,8 @@ export default function PPTWorkflowPanel({
                 <button
                   onClick={() => {
                     setShowFileMenu(false);
-                    setActiveMode("batch");
+                    handleModeSwitch("batch");
+                    setBatchConfirmed(false);
                     void handlePickDirectory();
                   }}
                   className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
@@ -825,83 +1254,183 @@ export default function PPTWorkflowPanel({
         </div>
       )}
 
-      {/* 聊天区域 */}
-      <main ref={scrollRef} className="flex-1 overflow-auto relative z-10">
+      {/* ===== 主体：左侧预览窗 + 右侧制作区（单窗口时仅右侧，有预览文件时自动切双窗口） ===== */}
+      <div className="ppt-body flex flex-1 overflow-hidden relative z-10">
+        {/* 左侧预览窗：参考预览 / 生成的 PPT */}
+        {fileSlides.length > 0 && (
+          <div className="ppt-preview-dock shrink-0">
+            <SlidePreviewTray
+              files={fileSlides}
+              slotCount={previewSlots}
+              initialFileIds={previewInitialFileIds}
+              onSlotsChange={(ids) => { slotFileIdsRef.current = ids; }}
+            />
+          </div>
+        )}
+
+        {/* 右侧制作区（聊天 + 生成看板） */}
+        <main ref={scrollRef} className="flex-1 overflow-auto">
         <div className="max-w-3xl mx-auto px-5 py-6 space-y-5">
+
           {/* 用户新建 PPT 的文字输入 */}
-          {createText && (creating || createdResult) && (
+          {createText && (creating || createdResult || outlineDraft) && (
             <UserMessage text={createText} />
           )}
 
-          {/* 新建 PPT 生成中 */}
-          {creating && (
+          {/* 内联大纲面板：流式展示 AI 写大纲过程，完成后可编辑确认 */}
+          {outlineDraft && !creating && (
             <AIMessage>
-              <SkeletonLoader text="正在生成 PPT…" />
+              <OutlineBoard
+                key={outlineKey}
+                text={outlineDraft.text}
+                onConfirm={(slides, addBackground) => {
+                  const { text, style } = outlineDraft;
+                  setOutlineDraft(null);
+                  handleCreateFromText(text, style, slides, addBackground);
+                }}
+                onRegenerate={() => setOutlineKey((k) => k + 1)}
+                onCancel={() => {
+                  setOutlineDraft(null);
+                  setCreateText("");
+                }}
+              />
             </AIMessage>
           )}
 
-          {/* 新建 PPT 完成 */}
-          {createdResult && !creating && (
-            <AIMessage>
-              <div className="ppt-success-banner flex items-center gap-3 p-3.5 bg-violet-50/60 border border-violet-200/60 rounded-xl">
-                <div className="w-9 h-9 rounded-lg bg-violet-100 flex items-center justify-center shrink-0">
-                  <CheckCircle2 size={18} className="text-violet-600" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-semibold text-violet-800">PPT 已生成</div>
-                  <div className="text-xs text-violet-600 truncate">
-                    {createdResult.file_name} · {createdResult.total_slides} 页
+          {/* 新建 PPT：生成中实时展示放置过程；完成后看板合并为居中查看器（不再消失/跳侧栏）
+              外层突破 max-w-3xl 窄容器，让幻灯片画面充分利用两侧宽度 */}
+          {(creating || (createdResult && streamSlides.length > 0)) && (
+            <div className="relative left-1/2 -translate-x-1/2 w-[min(1180px,calc(100vw-3rem))]">
+              <AIMessage>
+                <CreateStreamBoard
+                  slides={streamSlides}
+                  active={streamActive}
+                  done={streamDone}
+                  fileName={createdResult?.file_name}
+                  filePath={createdResult?.file_path}
+                  onFrameUpdate={(slide, img) =>
+                    setStreamSlides((prev) =>
+                      prev.map((s) => (s.slide === slide ? { ...s, frame: img } : s))
+                    )
+                  }
+                  onReset={streamDone ? handleReset : undefined}
+                  onDownload={streamDone ? handleDownload : undefined}
+                />
+              </AIMessage>
+            </div>
+          )}
+
+          {/* ==== 批量编辑：文件选择面板 ==== */}
+          {activeMode === "batch" && !batchConfirmed && !analyzing && (
+            <div className="batch-file-panel">
+              {selectedFiles.length === 0 ? (
+                /* 空状态：添加文件 */
+                <button
+                  onClick={() => handlePickFiles()}
+                  className="batch-empty-zone w-full flex flex-col items-center justify-center gap-3 py-16 px-6 rounded-2xl border-2 border-dashed border-slate-200 hover:border-violet-300 hover:bg-violet-50/30 transition-all group cursor-pointer"
+                >
+                  <div className="w-14 h-14 rounded-2xl bg-slate-50 group-hover:bg-violet-100 flex items-center justify-center transition-all">
+                    <Plus size={26} className="text-slate-400 group-hover:text-violet-500" />
+                  </div>
+                  <div className="text-center">
+                    <div className="text-sm font-semibold text-slate-700 group-hover:text-violet-700">
+                      添加 PPT 文件
+                    </div>
+                    <div className="text-xs text-slate-400 mt-1">
+                      点击选择，或从工作文件中添加
+                    </div>
+                  </div>
+                </button>
+              ) : (
+                /* 文件列表：勾选确认 */
+                <div className="batch-file-list-panel rounded-2xl border border-slate-200/80 bg-white/70 backdrop-blur-sm overflow-hidden">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+                    <div className="flex items-center gap-2">
+                      <Presentation size={15} className="text-violet-500" />
+                      <span className="text-sm font-semibold text-slate-700">工作区文件</span>
+                      <span className="text-xs text-slate-400">
+                        已勾选 {enabledPaths.size}/{selectedFiles.length}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => handlePickFiles()}
+                      className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-500 hover:text-violet-600 hover:bg-violet-50 rounded-lg transition-all"
+                    >
+                      <Plus size={13} />
+                      添加
+                    </button>
+                  </div>
+                  <div className="max-h-[340px] overflow-auto p-2 space-y-1">
+                    {selectedFiles.map((f) => {
+                      const enabled = enabledPaths.has(f.file_path);
+                      return (
+                        <label
+                          key={f.file_path}
+                          className={`batch-file-row flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-all ${
+                            enabled
+                              ? "bg-violet-50/70 ring-1 ring-violet-200/60"
+                              : "hover:bg-slate-50"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={enabled}
+                            onChange={() => toggleFileEnabled(f.file_path)}
+                            className="w-4 h-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500 cursor-pointer"
+                          />
+                          <div className="w-8 h-8 rounded-lg bg-violet-100/70 flex items-center justify-center shrink-0">
+                            <FileText size={15} className="text-violet-500" />
+                          </div>
+                          <span className="flex-1 truncate text-sm text-slate-700">
+                            {f.file_name}
+                          </span>
+                          <button
+                            onClick={(e) => {
+                              e.preventDefault();
+                              handleRemoveFile(f.file_path);
+                            }}
+                            className="p-1 rounded-lg text-slate-300 hover:text-red-500 hover:bg-red-50 transition-all"
+                          >
+                            <X size={14} />
+                          </button>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 bg-slate-50/50">
+                    <button
+                      onClick={() => {
+                        const allEnabled = selectedFiles.every((f) =>
+                          enabledPaths.has(f.file_path)
+                        );
+                        setEnabledPaths((prev) => {
+                          const next = new Set(prev);
+                          if (allEnabled) {
+                            selectedFiles.forEach((f) => next.delete(f.file_path));
+                          } else {
+                            selectedFiles.forEach((f) => next.add(f.file_path));
+                          }
+                          return next;
+                        });
+                      }}
+                      className="text-xs text-slate-500 hover:text-violet-600 transition-colors"
+                    >
+                      {selectedFiles.every((f) => enabledPaths.has(f.file_path))
+                        ? "取消全选"
+                        : "全选"}
+                    </button>
+                    <button
+                      onClick={handleBatchConfirm}
+                      disabled={!enabledPaths.size}
+                      className="flex items-center gap-1.5 px-5 py-2 bg-violet-600 text-white text-sm font-semibold rounded-xl hover:bg-violet-700 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100"
+                    >
+                      确认并解析
+                      <ChevronRight size={15} />
+                    </button>
                   </div>
                 </div>
-                <button
-                  onClick={handleReset}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-violet-700 bg-white border border-violet-200 rounded-lg hover:bg-violet-50 transition-all shrink-0"
-                >
-                  <RefreshCw size={12} />
-                  新建一份
-                </button>
-              </div>
-            </AIMessage>
-          )}
-
-          {/* 用户选择的文件 */}
-          {activeMode === "batch" && selectedFiles.length > 0 && fileSlides.length === 0 && !analyzing && (
-            <UserMessage>
-              <div className="space-y-1.5 min-w-[280px]">
-                <div className="text-[10px] uppercase tracking-[0.18em] text-white/60 font-medium mb-1.5">
-                  已选文件 · {enabledPaths.size}/{selectedFiles.length}
-                </div>
-                {selectedFiles.map((f) => {
-                  const enabled = enabledPaths.has(f.file_path);
-                  return (
-                    <div
-                      key={f.file_path}
-                      onClick={() => toggleFileEnabled(f.file_path)}
-                      className={`group flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer transition-all text-sm ${
-                        enabled ? "bg-white/20" : "bg-white/10 opacity-50"
-                      }`}
-                    >
-                      <FileText size={14} className="shrink-0" />
-                      <span className="flex-1 truncate">{f.file_name}</span>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleRemoveFile(f.file_path); }}
-                        className="p-0.5 rounded hover:bg-white/20 opacity-0 group-hover:opacity-100 transition-all"
-                      >
-                        <X size={12} />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-              <button
-                onClick={handleAnalyze}
-                disabled={!enabledPaths.size}
-                className="mt-3 inline-flex items-center gap-1.5 px-4 py-1.5 bg-white text-violet-700 text-xs font-semibold rounded-lg hover:bg-violet-50 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                解析 {enabledPaths.size} 个 PPT
-                <ChevronRight size={13} />
-              </button>
-            </UserMessage>
+              )}
+            </div>
           )}
 
           {/* 解析进度 */}
@@ -1139,7 +1668,8 @@ export default function PPTWorkflowPanel({
             </AIMessage>
           )}
         </div>
-      </main>
+        </main>
+      </div>
 
       {/* 底部输入栏 */}
       <footer
@@ -1148,12 +1678,51 @@ export default function PPTWorkflowPanel({
         }`}
       >
         <div className="max-w-3xl mx-auto">
-          <div className="ppt-input-shell flex items-end gap-2 p-2 rounded-2xl transition-all">
-            {activeMode === "batch" && (
+          {/* 风格选择行：AI 自动 / 预制教育风格 / 上传参考 PPT 拆解 */}
+          {activeMode === "create" && (
+            <div className="ppt-style-row">
+              <span className="ppt-style-label">风格</span>
               <button
-                onClick={handlePickFiles}
+                className={`ppt-style-chip ${styleChoice === "auto" ? "ppt-style-chip-on" : ""}`}
+                onClick={() => setStyleChoice("auto")}
+                title="AI 根据主题自动挑选最合适的教育风格"
+              >
+                <Sparkles size={10} />
+                AI 自动
+              </button>
+              {stylePresets.map((p) => (
+                <button
+                  key={p.name}
+                  className={`ppt-style-chip ${styleChoice === p.name ? "ppt-style-chip-on" : ""}`}
+                  onClick={() => setStyleChoice(p.name)}
+                  title={p.style_notes}
+                >
+                  <span className="ppt-style-dots">
+                    {p.palette.slice(0, 3).map(([accent]) => (
+                      <i key={accent} style={{ background: accent }} />
+                    ))}
+                  </span>
+                  {p.display_name}
+                </button>
+              ))}
+              {appliedStyleName && (creating || streamDone) && (
+                <span className="ppt-style-applied">已采用「{appliedStyleName}」</span>
+              )}
+            </div>
+          )}
+          <div className="ppt-input-shell relative flex items-end gap-2 p-2 rounded-2xl transition-all">
+            {(activeMode === "batch" || activeMode === "create" || activeMode === "video") && (
+              <button
+                onClick={() => {
+                  if (activeMode === "create") {
+                    // PPT 制作模式：回形针与拖拽效果一致——添加为参考文件（走打标签流程）
+                    handlePickReferenceFiles();
+                  } else {
+                    handlePickFiles(activeMode !== "batch");
+                  }
+                }}
                 className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition-all shrink-0"
-                title="添加 PPT 文件"
+                title={activeMode === "create" ? "添加 PPT/PDF 作为参考" : "添加 PPT 文件进行预览"}
               >
                 <Paperclip size={18} />
               </button>
@@ -1161,19 +1730,53 @@ export default function PPTWorkflowPanel({
             <textarea
               ref={textareaRef}
               value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
+              onChange={(e) => handleChatChange(e.target.value)}
               onFocus={() => setInputFocused(true)}
               onBlur={() => setInputFocused(false)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSend();
-                }
-              }}
+              onKeyDown={handleChatKeyDown}
               placeholder={inputPlaceholder}
               rows={1}
-              className="flex-1 bg-transparent border-none outline-none resize-none text-sm text-slate-800 placeholder:text-slate-400 py-2 leading-relaxed"
+              disabled={inputLocked}
+              className={`flex-1 bg-transparent border-none outline-none resize-none text-sm text-slate-800 placeholder:text-slate-400 py-2 leading-relaxed ${
+                inputLocked ? "opacity-50 cursor-not-allowed" : ""
+              }`}
             />
+            {/* @ 引用参考文件下拉 */}
+            {mentionOpen && mentionFiltered.length > 0 && (
+              <div
+                ref={mentionRef}
+                className="absolute bottom-full left-0 mb-2 w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-slate-200 bg-white/95 shadow-xl backdrop-blur-md z-40"
+                style={{ animation: "ppt-mention-in .15s ease-out" }}
+              >
+                <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-100">
+                  <span className="text-[10px] font-medium text-slate-400">引用参考文件</span>
+                  <span className="text-[10px] text-slate-300">↑↓选择 · Enter确认 · Esc关闭</span>
+                </div>
+                <div className="max-h-52 overflow-y-auto py-1">
+                  {mentionFiltered.map((b, i) => {
+                    const Icon = fileIcon(b.file_type);
+                    return (
+                      <button
+                        key={b.id}
+                        type="button"
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          applyMention(b);
+                        }}
+                        onMouseEnter={() => setMentionActive(i)}
+                        className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+                          i === mentionActive ? "bg-brand-50 text-brand-700" : "text-slate-600"
+                        }`}
+                      >
+                        <Icon className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                        <span className="truncate font-medium">{b.file_name}</span>
+                        <span className="ml-auto shrink-0 text-[10px] text-slate-400">{TAG_META[b.tag].label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <button
               onClick={handleSend}
               disabled={!canSend}
@@ -1183,35 +1786,77 @@ export default function PPTWorkflowPanel({
             </button>
           </div>
           <div className="flex items-center justify-between mt-1.5 px-1 gap-2">
-            <div className="flex items-center gap-2 min-w-0">
-              {referenceBookmarks.length > 0 && (
-                <span
-                  className="inline-flex shrink-0 items-center gap-1 rounded-full bg-brand-50 px-2 py-0.5 text-[10px] font-medium text-brand-700 ring-1 ring-brand-200/60"
-                  title="参考文件已附加，AI 生成时会参考其中的要求"
+            <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+              {activeMode === "create" && referenceBookmarks.length > 0 ? (
+                <>
+                  {referenceBookmarks.map((b) => {
+                    const Icon = fileIcon(b.file_type);
+                    const tm = fileTypeMeta(b.file_type);
+                    return (
+                      <button
+                        key={b.id}
+                        type="button"
+                        onClick={() => setShowRefLibrary(true)}
+                        className={`group inline-flex shrink-0 items-center gap-1 rounded-full pl-1 pr-2 py-0.5 text-[10px] font-medium ring-1 transition-all ${tm.bg} ${tm.fg} ring-current/10 hover:ring-current/30`}
+                        title={`${TAG_META[b.tag].label} · ${b.file_name}\n${b.description}`}
+                      >
+                        <span className={`flex h-4 w-4 items-center justify-center rounded-full bg-white/70 ${tm.fg}`}>
+                          <Icon className="h-2.5 w-2.5" />
+                        </span>
+                        <span className="max-w-[100px] truncate">{b.file_name}</span>
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleRemoveRef(b.id);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.stopPropagation();
+                              handleRemoveRef(b.id);
+                            }
+                          }}
+                          className="ml-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full opacity-0 group-hover:opacity-100 hover:bg-black/10 transition-opacity"
+                        >
+                          <X className="h-2.5 w-2.5" />
+                        </span>
+                      </button>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    onClick={() => setShowRefLibrary(true)}
+                    className="inline-flex shrink-0 items-center justify-center h-5 w-5 rounded-full bg-slate-50 text-slate-400 ring-1 ring-slate-200/60 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+                    title="参考资料库"
+                  >
+                    <Plus className="h-3 w-3" />
+                  </button>
+                </>
+              ) : activeMode === "create" ? (
+                <button
+                  type="button"
+                  onClick={() => setShowRefLibrary(true)}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-slate-50 text-slate-500 ring-1 ring-slate-200/60 hover:bg-slate-100 transition-colors"
+                  title="查看已保存的参考资料与 PPT 模板"
                 >
                   <Bookmark className="h-2.5 w-2.5" />
-                  {referenceBookmarks.length} 份参考
-                </span>
-              )}
-              <span className="text-[10px] text-slate-400 truncate">
+                  参考资料库
+                </button>
+              ) : null}
+              <span className="text-[10px] text-slate-400 truncate flex items-center gap-1">
+                {inputLocked && <Lock size={10} className="shrink-0" />}
                 {activeMode === "video"
-                  ? "输入内容生成演示视频（即将上线）"
+                  ? "可添加 PPT 预览幻灯片，或输入内容描述视频（即将上线）"
                   : activeMode === "create"
-                  ? "直接输入主题或大纲，AI 生成新 PPT（可拖入 PPT/PDF 作为参考）"
+                  ? "直接输入主题或大纲，AI 生成新 PPT（可拖入 PPT/PDF/图片 作为参考）"
+                  : inputLocked
+                  ? "请先在上方勾选文件并点击「确认并解析」"
                   : fileSlides.length === 0
                   ? "请先选择文件进行批量编辑，或切换到「PPT 制作」直接新建"
                   : "按 Enter 发送 · Shift+Enter 换行"}
               </span>
             </div>
-            {activeMode === "batch" && selectedFiles.length > 0 && fileSlides.length === 0 && (
-              <button
-                onClick={handleAnalyze}
-                disabled={!enabledPaths.size}
-                className="text-[11px] text-slate-600 hover:text-slate-800 font-medium disabled:opacity-40"
-              >
-                或点击此处开始解析 {enabledPaths.size} 个文件 →
-              </button>
-            )}
           </div>
         </div>
       </footer>
@@ -1225,7 +1870,105 @@ export default function PPTWorkflowPanel({
         />
       )}
 
+      {/* 参考资料库弹窗：已保存参考资料 + PPT 模板 */}
+      {showRefLibrary && (
+        <ReferenceLibraryModal
+          bookmarks={referenceBookmarks}
+          templates={stylePresets}
+          activeTemplateName={styleChoice}
+          onSelectTemplate={(name) => {
+            setStyleChoice(name);
+            setShowRefLibrary(false);
+          }}
+          onRemove={handleRemoveRef}
+          onPreview={handlePreviewRef}
+          onInsertMention={handleInsertMention}
+          onPickFiles={handlePickReferenceFiles}
+          onClose={() => setShowRefLibrary(false)}
+        />
+      )}
+
       <style>{`
+        /* ===== 风格选择行 ===== */
+        .ppt-style-row {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          flex-wrap: wrap;
+          padding: 0 4px 8px;
+        }
+        .ppt-style-label {
+          font-size: 10px;
+          font-weight: 600;
+          color: #94a3b8;
+          margin-right: 2px;
+        }
+        .ppt-style-chip {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          font-size: 11px;
+          font-weight: 500;
+          color: #475569;
+          background: rgba(255, 255, 255, 0.7);
+          border: 1px solid #e2e8f0;
+          padding: 3px 10px;
+          border-radius: 999px;
+          cursor: pointer;
+          transition: all 0.18s;
+        }
+        .ppt-style-chip:hover:not(:disabled) {
+          border-color: #c4b5fd;
+          color: #6d28d9;
+          background: #faf5ff;
+        }
+        .ppt-style-chip:disabled { opacity: 0.6; cursor: default; }
+        .ppt-style-chip-on {
+          color: #6d28d9;
+          background: #f5f3ff;
+          border-color: #a78bfa;
+          box-shadow: 0 1px 4px rgba(124, 58, 237, 0.15);
+        }
+        .ppt-style-dots { display: inline-flex; gap: 2px; }
+        .ppt-style-dots i {
+          width: 7px;
+          height: 7px;
+          border-radius: 50%;
+          display: block;
+        }
+        .ppt-style-applied {
+          font-size: 10px;
+          color: #059669;
+          background: #ecfdf5;
+          border: 1px solid #a7f3d0;
+          padding: 2px 8px;
+          border-radius: 999px;
+        }
+        /* ===== 主体：左侧预览窗 + 右侧制作区 ===== */
+        .ppt-body { min-width: 0; }
+        .ppt-preview-dock {
+          width: clamp(320px, 32vw, 480px);
+          border-right: 1px solid #e2e8f0;
+          background: rgba(248, 250, 252, 0.6);
+          backdrop-filter: blur(6px);
+          -webkit-backdrop-filter: blur(6px);
+          overflow-y: auto;
+          padding: 14px;
+          animation: ppt-dock-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+        }
+        .ppt-preview-dock .spt-root {
+          width: 100%;
+          left: 0;
+          transform: none;
+        }
+        @keyframes ppt-dock-in {
+          from { opacity: 0; transform: translateX(-16px); }
+          to { opacity: 1; transform: translateX(0); }
+        }
+        /* 参考预览在窄窗内：不让文件选择器溢出 */
+        .ppt-preview-dock .spt-slot-topbar,
+        .ppt-preview-dock .spt-navbar { padding-left: 8px; padding-right: 8px; }
+
         /* ===== 大气背景：渐变光斑 ===== */
         .ppt-workspace { isolation: isolate; }
         .ppt-atmosphere {
@@ -1282,7 +2025,7 @@ export default function PPTWorkflowPanel({
         /* ===== 阶段进度条 ===== */
         .ppt-phase-tracker { font-feature-settings: "tnum"; }
         .ppt-phase-item { position: relative; }
-        .ppt-phase-current { background: rgba(139, 92, 246, .08); }
+        .ppt-phase-current { background: transparent; }
         .ppt-phase-pulse {
           background: rgba(139, 92, 246, .25);
           animation: ppt-phase-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
@@ -1633,6 +2376,10 @@ export default function PPTWorkflowPanel({
         .chat-msg-enter {
           animation: ppt-fade-in-up 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
         }
+        @keyframes ppt-mention-in {
+          from { opacity: 0; transform: translateY(6px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
         @keyframes ppt-progress-shimmer {
           0% { transform: translateX(-100%); }
           100% { transform: translateX(100%); }
@@ -1731,7 +2478,7 @@ export default function PPTWorkflowPanel({
           color: #6ee7b7;
         }
         html[data-theme="dark"] .ppt-patch-arrow { color: #64748b; }
-        html[data-theme="dark"] .ppt-phase-current { background: rgba(139, 92, 246, .14); }
+        html[data-theme="dark"] .ppt-phase-current { background: transparent; }
         html[data-theme="dark"] .ppt-feature-card {
           background: rgba(30, 41, 59, .5);
           border-color: rgba(148, 163, 184, .12);
@@ -1794,17 +2541,6 @@ export default function PPTWorkflowPanel({
           .ppt-phase-item span { display: none; }
           .ppt-phase-current span { display: inline; }
         }
-
-        /* ===== 参考资料书签栏 ===== */
-        .ref-rail-scroll { scrollbar-width: none; }
-        .ref-rail-scroll::-webkit-scrollbar { width: 0; display: none; }
-        @keyframes ref-card-in {
-          from { opacity: 0; transform: translateX(-6px) scale(.98); }
-          to { opacity: 1; transform: translateX(0) scale(1); }
-        }
-        .animate-ref-card-in {
-          animation: ref-card-in .18s cubic-bezier(.22,1,.36,1) both;
-        }
       `}</style>
     </div>
   );
@@ -1829,26 +2565,13 @@ function LogoWordmark({ className }: { className?: string }) {
   );
 }
 
-// ---- AI 消息气泡 ----
+// ---- AI 消息气泡（无头像，内容直接铺开） ----
 function AIMessage({ children }: { children: React.ReactNode }) {
   return (
-    <div className="chat-msg-enter flex gap-3">
-      <div className="ppt-ai-avatar w-8 h-8 rounded-xl bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center shrink-0 shadow-md shadow-violet-500/20">
-        <Bot size={16} className="text-white" />
-      </div>
-      <div className="flex-1 min-w-0 pt-0.5">
+    <div className="chat-msg-enter">
+      <div className="min-w-0">
         {children}
       </div>
-      <style>{`
-        .ppt-ai-avatar { position: relative; overflow: hidden; }
-        .ppt-ai-avatar::after {
-          content: "";
-          position: absolute;
-          inset: 0;
-          background: linear-gradient(135deg, rgba(255,255,255,.25) 0%, transparent 50%);
-          pointer-events: none;
-        }
-      `}</style>
     </div>
   );
 }

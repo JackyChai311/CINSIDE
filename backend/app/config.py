@@ -18,12 +18,23 @@ def _get_base_dir() -> Path:
 def _get_user_data_dir() -> Path:
     """获取用户数据目录（用于上传文件、配置等可写内容）。"""
     if getattr(sys, "frozen", False):
-        # 打包后使用 %APPDATA%/CINSIDE 或 exe 同级目录
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            user_dir = Path(appdata) / "CINSIDE"
+        if sys.platform == "darwin":
+            # macOS: ~/Library/Application Support/CINSIDE
+            user_dir = Path.home() / "Library" / "Application Support" / "CINSIDE"
+        elif sys.platform == "win32":
+            # Windows: %APPDATA%/CINSIDE
+            appdata = os.environ.get("APPDATA")
+            if appdata:
+                user_dir = Path(appdata) / "CINSIDE"
+            else:
+                user_dir = Path(sys.executable).resolve().parent / "userdata"
         else:
-            user_dir = Path(sys.executable).resolve().parent / "userdata"
+            # Linux: ~/.config/CINSIDE 或 ~/.local/share/CINSIDE
+            xdg_config = os.environ.get("XDG_CONFIG_HOME")
+            if xdg_config:
+                user_dir = Path(xdg_config) / "CINSIDE"
+            else:
+                user_dir = Path.home() / ".config" / "CINSIDE"
         user_dir.mkdir(parents=True, exist_ok=True)
         return user_dir
     return _get_base_dir()
@@ -76,6 +87,7 @@ SETTING_KEYS = {
     "browser_use_llm_base": "BROWSER_USE_LLM_BASE",
     "browser_use_llm_key": "BROWSER_USE_LLM_KEY",
     "browser_use_llm_model": "BROWSER_USE_LLM_MODEL",
+    "sensenova_api_key": "SENSENOVA_API_KEY",
     "ocr_engine": "OCR_ENGINE",
     "umi_ocr_host": "UMI_OCR_HOST",
     "umi_ocr_port": "UMI_OCR_PORT",
@@ -119,6 +131,9 @@ class Settings:
     browser_use_llm_base: str = field(default_factory=lambda: _env("BROWSER_USE_LLM_BASE", "https://open.bigmodel.cn/api/paas/v4"))
     browser_use_llm_key: str = field(default_factory=lambda: _env("BROWSER_USE_LLM_KEY", ""))
     browser_use_llm_model: str = field(default_factory=lambda: _env("BROWSER_USE_LLM_MODEL", "glm-4-plus"))
+
+    # === SenseNova U1 Fast 生图（PPT 配图） ===
+    sensenova_api_key: str = field(default_factory=lambda: _env("SENSENOVA_API_KEY", ""))
 
     # === 文档/护照 OCR 引擎 ===
     # vision: 识图AI（Vision LLM，需配置 vision_api_key）
@@ -181,6 +196,7 @@ class Settings:
             "browser_use_llm_base": self.browser_use_llm_base,
             "browser_use_llm_key": self.browser_use_llm_key,
             "browser_use_llm_model": self.browser_use_llm_model,
+            "sensenova_api_key": self.sensenova_api_key,
             "ocr_engine": self.ocr_engine,
             "umi_ocr_host": self.umi_ocr_host,
             "umi_ocr_port": self.umi_ocr_port,

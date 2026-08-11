@@ -135,6 +135,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
     } catch (_) {}
     return file && file.path ? file.path : "";
   },
+  // 在文件管理器中显示文件（打开所在目录并选中）
+  showItemInFolder: (filePath) => {
+    try {
+      const { shell } = require("electron");
+      shell.showItemInFolder(filePath);
+    } catch (_) {}
+  },
   onDownloadCaptured: (callback) => {
     const handler = (_e, data) => callback(data);
     ipcRenderer.on("download-captured", handler);

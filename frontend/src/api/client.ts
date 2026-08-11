@@ -2,13 +2,20 @@ import type {
   AppConfig,
   AppSettings,
   ApplicantRecord,
+  CoworkClient,
+  CoworkDispatchEvent,
+  CoworkSkill,
   DepsStatus,
   DocumentConvertResult,
   DocumentExtractResult,
   DocumentPreviewResult,
   PPTFileSlides,
+  PPTOutlineSlide,
   PPTProgressEvent,
+  PPTSlideElement,
+  PPTStreamEvent,
   PPTSection,
+  PPTStyleProfile,
   PPTTextPatch,
   PluginRecord,
   PluginStatus,
@@ -341,6 +348,99 @@ export const api = {
       }
     ),
 
+  /** AI 仅生成 PPT 大纲（含 section/summary/bullets），不创建文件 */
+  pptDraftOutline: (text: string) =>
+    jsonFetch<{ style: string; slides: PPTOutlineSlide[] }>(`${BASE}/ppt/draft-outline`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    }),
+
+  /** SSE 流式生成大纲：逐 token 推送，完成后给出结构化 slides */
+  pptDraftOutlineStream: async (
+    text: string,
+    onEvent: (ev:
+      | { type: "token"; text: string }
+      | { type: "done"; style: string; slides: PPTOutlineSlide[] }
+      | { type: "error"; message: string }
+    ) => void
+  ): Promise<void> => {
+    const resp = await fetch(`${BASE}/ppt/draft-outline-stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!resp.ok || !resp.body) {
+      throw new Error(`大纲生成失败: HTTP ${resp.status}`);
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() || "";
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith("data:")) continue;
+        try {
+          const ev = JSON.parse(line.slice(5).trim());
+          if (ev.type === "done") {
+            onEvent({ type: "done", style: ev.style, slides: ev.slides });
+            return;
+          }
+          if (ev.type === "error") throw new Error(ev.message || "大纲生成失败");
+          if (ev.type === "token") onEvent({ type: "token", text: ev.text });
+        } catch (e) {
+          if (e instanceof Error && e.message !== "Unexpected end of JSON input") throw e;
+        }
+      }
+    }
+  },
+
+  /** SSE 流式按文字新建 PPT，逐条推送 AI 放置文字的过程；style 为参考风格（可选），slides 为用户确认的大纲（可选） */
+  pptCreateFromTextStream: async (
+    text: string,
+    onEvent: (ev: PPTStreamEvent) => void,
+    style?: PPTStyleProfile | null,
+    slides?: PPTOutlineSlide[] | null,
+    addBackground?: boolean
+  ): Promise<{ file_path: string; file_name: string; total_slides: number } | void> => {
+    const resp = await fetch(`${BASE}/ppt/create-from-text-stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, style: style ?? null, slides: slides ?? null, add_background: addBackground ?? false }),
+    });
+    if (!resp.ok || !resp.body) {
+      throw new Error(`生成 PPT 失败: HTTP ${resp.status}`);
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() || "";
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith("data:")) continue;
+        try {
+          const ev = JSON.parse(line.slice(5).trim());
+          if (ev.type === "done") return ev.result as { file_path: string; file_name: string; total_slides: number };
+          if (ev.type === "error") throw new Error(ev.message || "生成失败");
+          onEvent(ev as PPTStreamEvent);
+        } catch (e) {
+          if (e instanceof Error && e.message !== "Unexpected end of JSON input") throw e;
+        }
+      }
+    }
+    throw new Error("生成流意外结束");
+  },
+
   /** SSE 流式解析 PPT，实时进度回调 */
   pptAnalyzeStream: async (
     filePaths: string[],
@@ -383,6 +483,161 @@ export const api = {
   pptAiInfo: () =>
     jsonFetch<{ shared: boolean; provider: string; model: string; configured: boolean }>(
       `${BASE}/ppt/ai-info`
+    ),
+
+  /** 为 PPT 指定页生成截图，返回 base64 data URL */
+  pptScreenshot: (filePath: string, page: number) =>
+    jsonFetch<{ image_data: string; image_path: string }>(`${BASE}/ppt/screenshot`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_path: filePath, page }),
+    }),
+
+  /** 获取参考文件页数（PPT / PDF） */
+  pptPageCount: (filePath: string) =>
+    jsonFetch<{ page_count: number }>(`${BASE}/ppt/page-count`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_path: filePath }),
+    }),
+
+  /** 列出全部预制教育风格 */
+  pptStylePresets: () =>
+    jsonFetch<{ presets: PPTStyleProfile[] }>(`${BASE}/ppt/style-presets`),
+
+  /** 拆解参考 PPT 的视觉风格（截图 → 识图 AI → StyleProfile） */
+  pptAnalyzeStyle: (filePath: string) =>
+    jsonFetch<{ style: PPTStyleProfile }>(`${BASE}/ppt/analyze-style`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_path: filePath }),
+    }),
+
+  /** 获取某页全部元素（供拖拽编辑） */
+  pptSlideElements: (filePath: string, slide: number) =>
+    jsonFetch<{ slide: number; elements: PPTSlideElement[] }>(
+      `${BASE}/ppt/slide-elements`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_path: filePath, slide }),
+      }
+    ),
+
+  /** 批量更新某页元素属性（拖拽位置 / 改文字），返回最新截图 */
+  pptUpdateElements: (
+    filePath: string,
+    slide: number,
+    updates: { path: string; props: Record<string, string> }[]
+  ) =>
+    jsonFetch<{ applied: number; errors: string[]; image_data?: string }>(
+      `${BASE}/ppt/update-elements`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_path: filePath, slide, updates }),
+      }
+    ),
+
+  /** AI 指令只改某一页，返回最新截图 */
+  pptRefineSlide: (filePath: string, slide: number, instruction: string) =>
+    jsonFetch<{ applied: number; image_data: string }>(`${BASE}/ppt/refine-slide`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_path: filePath, slide, instruction }),
+    }),
+
+  // ============ Cowork Studio ============
+
+  /** 列出技能库 */
+  coworkListSkills: () =>
+    jsonFetch<{ skills: CoworkSkill[] }>(`${BASE}/cowork/skills`),
+
+  /** 保存（新增/更新）技能 */
+  coworkSaveSkill: (skill: Partial<CoworkSkill>) =>
+    jsonFetch<{ skill: CoworkSkill }>(`${BASE}/cowork/skills`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(skill),
+    }),
+
+  /** 删除技能 */
+  coworkDeleteSkill: (id: string) =>
+    jsonFetch<{ ok: boolean }>(`${BASE}/cowork/skills/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }),
+
+  /** 检测本机编码客户端 */
+  coworkDetectClients: () =>
+    jsonFetch<{ clients: CoworkClient[] }>(`${BASE}/cowork/clients`),
+
+  /** 读取用户风格画像 */
+  coworkGetProfile: () =>
+    jsonFetch<{ profile: string }>(`${BASE}/cowork/profile`),
+
+  /** 更新用户风格画像（append 非空则追加，否则整体覆盖） */
+  coworkUpdateProfile: (text: string, append = false) =>
+    jsonFetch<{ profile: string }>(`${BASE}/cowork/profile`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(append ? { append: text } : { text }),
+    }),
+
+  /** SSE 派发任务，逐条推送品控进度 */
+  coworkDispatch: async (
+    params: {
+      instruction: string;
+      skill_ids: string[];
+      client_ids: string[];
+      max_rounds?: number;
+      timeout?: number;
+    },
+    onEvent: (ev: CoworkDispatchEvent) => void
+  ): Promise<void> => {
+    const resp = await fetch(`${BASE}/cowork/dispatch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    if (!resp.ok || !resp.body) {
+      throw new Error(`派发失败: HTTP ${resp.status}`);
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() || "";
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith("data:")) continue;
+        try {
+          const ev = JSON.parse(line.slice(5).trim());
+          if (ev.type === "error") throw new Error(ev.message || "任务失败");
+          if (ev.type === "done") return;
+          onEvent(ev as CoworkDispatchEvent);
+        } catch (e) {
+          if (e instanceof Error && e.message !== "Unexpected end of JSON input") throw e;
+        }
+      }
+    }
+  },
+
+  /** 历史任务列表 */
+  coworkListTasks: (limit = 20) =>
+    jsonFetch<{ tasks: { id: string; mtime: number; has_final: boolean; final_preview: string }[] }>(
+      `${BASE}/cowork/tasks?limit=${limit}`
+    ),
+
+  /** 任务详情 */
+  coworkGetTask: (taskId: string) =>
+    jsonFetch<{ id: string; dir: string; files: string[]; final: string }>(
+      `${BASE}/cowork/tasks/${taskId}`
     ),
 };
 

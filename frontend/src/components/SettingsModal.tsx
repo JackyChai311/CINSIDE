@@ -442,6 +442,27 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
             </div>
           </div>
 
+          {/* PPT 配图：SenseNova U1 Fast 生图 */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-700">
+              <Palette className="h-3.5 w-3.5 text-violet-600" />
+              PPT 配图（商汤日日新 U1 Fast 生图）
+            </div>
+            <div>
+              <label className="mb-1 block text-[10px] font-medium text-slate-500">SenseNova API Key</label>
+              <input
+                type={showKey ? "text" : "password"}
+                value={settings.sensenova_api_key || ""}
+                onChange={(e) => update({ sensenova_api_key: e.target.value })}
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-brand-400"
+                placeholder="sk-..."
+              />
+              <p className="mt-1 text-[10px] text-slate-400">
+                留空则生成纯文字 PPT；填入后制作 PPT 时会自动为每页生成信息图配图。
+              </p>
+            </div>
+          </div>
+
           {/* 防误关：挂后台到系统托盘 */}
           <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
             <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-700">

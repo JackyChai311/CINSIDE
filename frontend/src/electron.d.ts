@@ -156,6 +156,8 @@ export interface ElectronAPI {
   pickReferenceFiles: () => Promise<{ canceled: boolean; files: Array<{ file_path: string; file_name: string; size: number; ext: string }> }>;
   /** 获取拖拽放入的 File 对象对应的真实磁盘路径 */
   getPathForFile: (file: File) => string;
+  /** 在文件管理器中显示文件（打开所在目录并选中） */
+  showItemInFolder: (filePath: string) => void;
 
   // 接收 BrowserView 内部消息
   onViewMessage: (callback: (msg: ViewMessage) => void) => () => void;

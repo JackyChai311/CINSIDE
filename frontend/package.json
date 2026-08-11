@@ -1,7 +1,7 @@
 {
   "name": "cinside-frontend",
   "private": true,
-  "version": "0.5.6",
+  "version": "0.5.7",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
@@ -9,8 +9,10 @@
     "preview": "vite preview",
     "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
     "build:backend": "cd /d ..\\backend && .venv\\Scripts\\pyinstaller.exe cinside-backend.spec --clean --noconfirm",
+    "build:backend:mac": "cd ../backend && .venv/bin/pyinstaller cinside-backend.spec --clean --noconfirm",
     "electron:build": "npm run build && npm run build:backend && electron-builder",
-    "electron:build:portable": "npm run build && npm run build:backend && electron-builder --win portable"
+    "electron:build:portable": "npm run build && npm run build:backend && electron-builder --win portable",
+    "electron:build:mac": "npm run build && npm run build:backend:mac && electron-builder --mac"
   },
   "dependencies": {
     "@officecli/officecli": "^1.0.143",
@@ -98,6 +100,40 @@
           "arch": [
             "x64"
           ]
+        }
+      ]
+    },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "../assets/app-icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64", "x64"]
+        },
+        {
+          "target": "zip",
+          "arch": ["arm64", "x64"]
+        }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "../assets/entitlements.mac.plist",
+      "entitlementsInherit": "../assets/entitlements.mac.plist"
+    },
+    "dmg": {
+      "sign": false,
+      "contents": [
+        {
+          "x": 130,
+          "y": 220,
+          "type": "file"
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
         }
       ]
     },

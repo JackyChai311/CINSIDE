@@ -2765,12 +2765,13 @@ app.whenReady().then(() => {
   ipcMain.handle("pick-reference-files", async () => {
     const { dialog } = require("electron");
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: "选择参考文件（PPT / PDF）",
+      title: "选择参考文件（PPT / PDF / 图片）",
       properties: ["openFile", "multiSelections"],
       filters: [
-        { name: "演示与文档", extensions: ["ppt", "pptx", "pdf"] },
+        { name: "所有支持的文件", extensions: ["ppt", "pptx", "pdf", "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"] },
         { name: "PowerPoint", extensions: ["ppt", "pptx"] },
         { name: "PDF", extensions: ["pdf"] },
+        { name: "图片", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"] },
       ],
     });
     if (result.canceled || result.filePaths.length === 0) {
@@ -3067,6 +3068,11 @@ ipcMain.handle("backend-status", () => backendReady);
 // 打开外部链接
 ipcMain.on("open-external", (_event, url) => {
   shell.openExternal(url);
+});
+
+// 在文件管理器中显示文件
+ipcMain.on("show-item-in-folder", (_event, filePath) => {
+  shell.showItemInFolder(filePath);
 });
 
 // === 无边框窗口控制 ===

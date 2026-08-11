@@ -46,8 +46,13 @@ def _find_officecli_bin() -> str | None:
     if _BIN_CACHE:
         return _BIN_CACHE
 
-    # Windows 上是 .exe，其他平台无后缀
-    exe_name = "officecli.exe" if sys.platform == "win32" else "officecli"
+    # Windows 上是 .exe，macOS/Linux 无后缀
+    if sys.platform == "win32":
+        exe_name = "officecli.exe"
+    elif sys.platform == "darwin":
+        exe_name = "officecli"  # macOS 二进制无后缀
+    else:
+        exe_name = "officecli"
 
     candidates: list[Path] = [
         # 开发环境：frontend/node_modules
@@ -59,6 +64,14 @@ def _find_officecli_bin() -> str | None:
         # PyInstaller 临时目录
         Path(getattr(sys, "_MEIPASS", "")) / "officecli" / exe_name,
     ]
+
+    # macOS 额外路径：Homebrew / npm global
+    if sys.platform == "darwin":
+        candidates.extend([
+            Path("/usr/local/bin/officecli"),
+            Path("/opt/homebrew/bin/officecli"),
+            Path.home() / ".npm-global" / "bin" / "officecli",
+        ])
 
     for c in candidates:
         if c.exists():
@@ -111,21 +124,43 @@ def _run(
         raise RuntimeError("OfficeCLI 不可用，请先安装 @officecli/officecli")
 
     cmd = [bin_path] + args
-    # Windows 上隐藏控制台窗口
+    # Windows 上隐藏控制台窗口，并创建新进程组以便超时能杀掉整个进程树
     creationflags = 0
     if sys.platform == "win32":
-        creationflags = subprocess.CREATE_NO_WINDOW
+        creationflags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
 
-    return subprocess.run(
+    proc = subprocess.Popen(
         cmd,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=timeout,
         cwd=cwd,
         creationflags=creationflags,
+        # Unix 系统（macOS/Linux）创建新进程组，便于超时后 killpg
+        start_new_session=(sys.platform != "win32"),
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # 杀掉整个进程树（officecli 可能启动 LibreOffice 等子进程）
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        else:
+            import signal
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # 进程可能已经退出
+        stdout, stderr = proc.communicate()
+        raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr)
+
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 def _run_json(args: list[str], *, timeout: int = 60) -> dict[str, Any]:
@@ -188,8 +223,8 @@ def view_screenshot(
     output_path: str,
     *,
     page: int | None = None,
-    width: int = 1600,
-    height: int = 1200,
+    width: int = 1280,
+    height: int = 720,
 ) -> str:
     """渲染文档截图为 PNG。"""
     args = [
@@ -200,7 +235,7 @@ def view_screenshot(
     ]
     if page is not None:
         args.extend(["--page", str(page)])
-    result = _run(args, timeout=120)
+    result = _run(args, timeout=60)
     if result.returncode != 0:
         raise RuntimeError(f"截图失败: {(result.stderr or '').strip()[:300]}")
     return output_path
@@ -223,7 +258,7 @@ def add_element(
     if props:
         for k, v in props.items():
             args.extend(["--prop", f"{k}={v}"])
-    result = _run(args, timeout=15)
+    result = _run(args, timeout=45)
     return result.returncode == 0
 
 
@@ -236,7 +271,7 @@ def set_element(
     args = ["set", file_path, path]
     for k, v in props.items():
         args.extend(["--prop", f"{k}={v}"])
-    result = _run(args, timeout=15)
+    result = _run(args, timeout=45)
     if result.returncode != 0:
         err = (result.stderr or "").strip()
         raise RuntimeError(f"set_element 失败 {path}: {err[:300]}")
