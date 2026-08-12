@@ -3254,6 +3254,16 @@ ipcMain.handle("view-go-back", (_event, side) => {
   return { ok: false, reason: "cannot-go-back" };
 });
 
+ipcMain.handle("view-go-forward", (_event, side) => {
+  debugLog(`[main] view-go-forward side=${side}`);
+  const view = side === "left" ? leftBrowserView : rightBrowserView;
+  if (view && view.webContents.canGoForward()) {
+    view.webContents.goForward();
+    return { ok: true };
+  }
+  return { ok: false, reason: "cannot-go-forward" };
+});
+
 // 设置元素屏蔽规则（side, rules[{selector, mode}]）—— 立即注入 CSS/JS，导航后自动重注入
 ipcMain.handle("view-set-block-rules", (_event, side, rules) => {
   blockRulesBySide[side] = Array.isArray(rules) ? rules : [];

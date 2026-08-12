@@ -105,6 +105,10 @@ html[data-theme="dark"] .text-slate-300 { color: #cbd5e1; }
 html[data-theme="dark"] .border-slate-200 { border-color: #3a4a66; }
 html[data-theme="dark"] .border-slate-100 { border-color: #2f3d58; }
 html[data-theme="dark"] .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-color: #3a4a66; }
+
+/* 三面板交界分隔线：板岩灰 slate-300，与全站灰色谱系协调（略深于边框线，承担无框面板的分割）；暗主题同族灰 */
+.panel-divider { background-color: #cbd5e1; }
+html[data-theme="dark"] .panel-divider { background-color: #4a5d7d; }
 html[data-theme="dark"] .ring-slate-200 { --tw-ring-color: #3a4a66; }
 /* 深色下带透明度的浅色背景类（面板 header/容器/表头）——这些是独立类，上面的 .bg-white 覆盖命中不到 */
 html[data-theme="dark"] .bg-white\/95,

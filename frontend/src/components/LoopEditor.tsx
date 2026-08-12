@@ -77,9 +77,9 @@ function anchorEquals(a: InsertAnchor, b: InsertAnchor): boolean {
   return false;
 }
 
-/** 节点所在的泳道：step 按 markSide 分左右，其余节点跨泳道居中 */
+/** 节点所在的泳道：step 按 markSide 分左右，wide 步骤与其余节点跨泳道居中 */
 function nodeLane(n: FlowNode): "left" | "right" | "center" {
-  if (n.kind === "step") return n.markSide === "right" ? "right" : "left";
+  if (n.kind === "step" && !n.wide) return n.markSide === "right" ? "right" : "left";
   return "center";
 }
 
@@ -88,7 +88,7 @@ function laneCx(lane: "left" | "right" | "center"): number {
 }
 
 function nodeWidth(n: FlowNode): number {
-  if (n.kind === "step") return LANE_W;
+  if (n.kind === "step" && !n.wide) return LANE_W;
   return WIDE_W;
 }
 
@@ -184,7 +184,7 @@ function shiftLaidNodeX(ln: LaidNode, dx: number) {
   }
 }
 
-function nodeStyle(kind: FlowNode["kind"], selected: boolean, side?: "left" | "right") {
+function nodeStyle(kind: FlowNode["kind"], selected: boolean, side?: "left" | "right", wide?: boolean) {
   const base: Record<string, { fill: string; stroke: string; text: string }> = {
     step:     { fill: "#ffffff", stroke: "#cbd5e1", text: "text-slate-800" },
     subloop:  { fill: "#faf5ff", stroke: "#a78bfa", text: "text-violet-900" },
@@ -194,10 +194,11 @@ function nodeStyle(kind: FlowNode["kind"], selected: boolean, side?: "left" | "r
     loopback: { fill: "#ecfdf5", stroke: "#34d399", text: "text-emerald-800" },
   };
   const s = { ...(base[kind] || base.step) };
-  // 左右泳道的步骤卡片用不同描边颜色轻微区分：左蓝右紫
+  // 左右泳道的步骤卡片用不同描边颜色轻微区分：左蓝右紫；跨泳道文件处理步骤用青色区分
   if (kind === "step") {
-    if (side === "left")  { s.stroke = selected ? "#6366f1" : "#93c5fd"; s.fill = selected ? "#eff6ff" : "#ffffff"; }
-    if (side === "right") { s.stroke = selected ? "#6366f1" : "#c4b5fd"; s.fill = selected ? "#f5f3ff" : "#ffffff"; }
+    if (wide) { s.stroke = selected ? "#6366f1" : "#2dd4bf"; s.fill = selected ? "#f0fdfa" : "#f8fafc"; }
+    else if (side === "left")  { s.stroke = selected ? "#6366f1" : "#93c5fd"; s.fill = selected ? "#eff6ff" : "#ffffff"; }
+    else if (side === "right") { s.stroke = selected ? "#6366f1" : "#c4b5fd"; s.fill = selected ? "#f5f3ff" : "#ffffff"; }
   }
   return { ...s, strokeWidth: 2 };
 }
@@ -1126,10 +1127,10 @@ function LaidNodeView(props: {
   const selected = selectedId === node.id;
   const inRange = rangeStart && selectedId && rangeStart !== selectedId && (rangeStart === node.id || selectedId === node.id);
   const side = node.kind === "step" ? (node.markSide || "left") : undefined;
-  const sty = nodeStyle(node.kind, selected, side);
+  const sty = nodeStyle(node.kind, selected, side, node.wide);
   const isEditing = editingLabel === node.id;
   const isBranch = node.kind === "ifelse" || node.kind === "case";
-  const isWide = node.kind !== "step";
+  const isWide = node.kind !== "step" || !!node.wide;
 
   const strokeDash = node.kind === "comment" || node.kind === "loopback" ? "6 3" : undefined;
   let shape: JSX.Element;

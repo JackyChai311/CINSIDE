@@ -1,27 +1,25 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import {
+  Activity,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Database,
   ExternalLink,
   FileSpreadsheet,
-  FileText,
   GripVertical,
-  Image as ImageIcon,
   ListChecks,
   Loader2,
   Play,
   RefreshCw,
   Sparkles,
   Trash2,
-  Upload,
   X,
 } from "lucide-react";
-import { api } from "../api/client";
-import type { ApplicantRecord, BatchResult, BatchStatus, Overall } from "../types";
+import type { ApplicantRecord, BatchResult, BatchStatus, Overall, VerificationStep } from "../types";
 import { OVERALL_LABELS } from "../types";
+import AISphere, { type AISphereState } from "./AISphere";
+import ExecutionBubbles from "./ExecutionBubbles";
 
 const SKILL_DRAG_MIME = "application/x-cinside-skill-id";
 
@@ -39,8 +37,8 @@ interface Props {
   onRefresh: () => Promise<void>;
   onClear: () => Promise<void>;
   onDetach?: () => void;
-  /** Excel上传成功回调，传回后端自动识别的列映射 */
-  onExcelUploaded?: (detectedColumnMap: Record<string, string>) => void;
+  /** AI 球体状态（待命/处理中/发现问题/讲解中） */
+  aiSphereState?: AISphereState;
   /** 后端自动识别的列映射（用于过滤列选择浮层中的别名列） */
   detectedColumnMap?: Record<string, string>;
   /** 每条记录的核验结论：record_id -> overall */
@@ -53,10 +51,6 @@ interface Props {
   runDisabled?: boolean;
   /** 正在单卡运行的记录 ID */
   runningRecordId?: string | null;
-  /** 功能2：从本地文件库选择文档（图片/PDF）提取并填入右侧网页 */
-  onPickDocument?: (file: File) => void;
-  /** 文档提取进行中 */
-  docExtracting?: boolean;
   /** 记录为空时的自定义提示（如：等待框选 LOOP 行范围生成卡片） */
   emptyHint?: string;
   /** SKILL 拖放到卡片：(skillId, recordId) => void */
@@ -93,9 +87,19 @@ interface Props {
   onSetCardImage?: (recordId: string, dataUrl: string) => void;
   /** 清除某张卡片的图片：(recordId) => void */
   onClearCardImage?: (recordId: string) => void;
+  /** LOOP 执行步骤流（驱动球体下方的进度气泡） */
+  execSteps?: VerificationStep[];
+  /** 是否正在执行 LOOP */
+  execRunning?: boolean;
+  /** 执行进度面板是否已打开（打开时隐藏气泡） */
+  execPanelOpen?: boolean;
+  /** 是否显示「执行进度」药丸按钮（气泡消散后、面板未开时） */
+  execChipVisible?: boolean;
+  /** 点击「执行进度」药丸按钮 */
+  onOpenExecPanel?: () => void;
+  /** 气泡全部消散回调（用于触发药丸按钮显现） */
+  onExecBubblesGone?: () => void;
 }
-
-type UploadKind = "excel" | "passport" | "document" | null;
 
 export default function LeftPanel({
   records,
@@ -104,15 +108,13 @@ export default function LeftPanel({
   onRefresh,
   onClear,
   onDetach,
-  onExcelUploaded,
+  aiSphereState = "idle",
   detectedColumnMap = {},
   recordResults,
   batchResults,
   onRunRecord,
   runDisabled = true,
   runningRecordId = null,
-  onPickDocument,
-  docExtracting = false,
   emptyHint,
   onDropSkill,
   checkedIds,
@@ -131,15 +133,13 @@ export default function LeftPanel({
   cardImages = {},
   onSetCardImage,
   onClearCardImage,
+  execSteps = [],
+  execRunning = false,
+  execPanelOpen = false,
+  execChipVisible = false,
+  onOpenExecPanel,
+  onExecBubblesGone,
 }: Props) {
-  const [uploading, setUploading] = useState<UploadKind>(null);
-  const [excelDrag, setExcelDrag] = useState(false);
-  const [passportDrag, setPassportDrag] = useState(false);
-  const [docDrag, setDocDrag] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
-  const fileInputExcel = useRef<HTMLInputElement>(null);
-  const fileInputPassport = useRef<HTMLInputElement>(null);
-  const fileInputDoc = useRef<HTMLInputElement>(null);
   /** 范围勾选：上次点击的记录索引（群组起点） */
   const lastCheckIdxRef = useRef<number>(-1);
   /** 群组操作面板是否展开 */
@@ -265,160 +265,34 @@ export default function LeftPanel({
     setShowGroupPanel(false);
   }, [checkedIds, onCheckChange, records, cardLoopMap]);
 
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 2800);
-    return () => clearTimeout(t);
-  }, [toast]);
-
-  const handleExcel = useCallback(
-    async (file: File) => {
-      setUploading("excel");
-      try {
-        const r = await api.uploadExcel(file);
-        setToast(`已导入 ${r.count} 条记录`);
-        // 通知父组件后端自动识别的列映射
-        if (onExcelUploaded) onExcelUploaded(r.detected_column_map || {});
-        await onRefresh();
-      } catch (e: any) {
-        setToast(`导入失败: ${e.message}`);
-      } finally {
-        setUploading(null);
-      }
-    },
-    [onRefresh, onExcelUploaded]
-  );
-
-  const handlePassport = useCallback(
-    async (file: File) => {
-      if (!selectedId) {
-        setToast("请先在下方选择一条记录");
-        return;
-      }
-      setUploading("passport");
-      try {
-        const r = await api.uploadPassport(selectedId, file);
-        setToast(
-          Object.keys(r.fields || {}).length > 0
-            ? `护照识别成功：${Object.keys(r.fields).length} 个字段`
-            : "护照识别未返回字段（可能未配置 Vision API）"
-        );
-        await onRefresh();
-      } catch (e: any) {
-        setToast(`护照上传失败: ${e.message}`);
-      } finally {
-        setUploading(null);
-      }
-    },
-    [selectedId, onRefresh]
-  );
-
   return (
     <div className="panel-solid flex h-full flex-col gap-3 p-3">
-      {/* 数据源 */}
-      <div className="grid grid-cols-1 gap-2">
-        <SourceCard
-          title="Excel / CSV"
-          icon={<FileSpreadsheet className="h-4 w-4" />}
-          desc="上传申请人结构化数据"
-          dragging={excelDrag}
-          uploading={uploading === "excel"}
-          onPick={() => fileInputExcel.current?.click()}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setExcelDrag(true);
-          }}
-          onDragLeave={() => setExcelDrag(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setExcelDrag(false);
-            const f = e.dataTransfer.files?.[0];
-            if (f) handleExcel(f);
-          }}
-        />
-        <SourceCard
-          title="护照图片"
-          icon={<ImageIcon className="h-4 w-4" />}
-          desc={selectedId ? `为当前记录上传` : "先选择一条记录"}
-          dragging={passportDrag}
-          uploading={uploading === "passport"}
-          disabled={!selectedId}
-          onPick={() => fileInputPassport.current?.click()}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setPassportDrag(true);
-          }}
-          onDragLeave={() => setPassportDrag(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setPassportDrag(false);
-            const f = e.dataTransfer.files?.[0];
-            if (f) handlePassport(f);
-          }}
-        />
-        {onPickDocument && (
-          <SourceCard
-            title="文档提取"
-            icon={<FileText className="h-4 w-4" />}
-            desc="图片/PDF → OCR → 审核后填入右侧网页"
-            dragging={docDrag}
-            uploading={docExtracting}
-            onPick={() => fileInputDoc.current?.click()}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDocDrag(true);
-            }}
-            onDragLeave={() => setDocDrag(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setDocDrag(false);
-              const f = e.dataTransfer.files?.[0];
-              if (f) onPickDocument(f);
-            }}
+      {/* AI 助手：黑白方格粒子球（无边框无文字，LOOP 运行/告警/讲解时形态变化）
+          执行气泡融入球体：运行时步骤从球体下方吐出，消散后原地显现「执行进度」药丸 */}
+      <div className="relative flex shrink-0 items-center justify-center py-1">
+        <AISphere state={aiSphereState} size={132} />
+        {!execPanelOpen && (
+          <ExecutionBubbles
+            variant="sphere"
+            steps={execSteps}
+            running={execRunning}
+            onAllGone={onExecBubblesGone}
           />
         )}
-        <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50/60 px-2.5 py-1.5 text-[10px] text-slate-500">
-          <Database className="h-3 w-3 shrink-0 text-slate-400" />
-          <span>数据库网页请在左侧浏览器输入 URL</span>
-        </div>
+        {execChipVisible && !execPanelOpen && (
+          <button
+            onClick={onOpenExecPanel}
+            className="absolute -bottom-1 left-1/2 z-30 flex -translate-x-1/2 items-center gap-1 rounded-full border border-slate-200 bg-white/90 px-2.5 py-1 text-[10px] font-medium text-slate-600 shadow-sm backdrop-blur-sm transition-all duration-300 animate-fade-in hover:bg-white hover:text-slate-800 hover:shadow"
+            title="查看执行进度"
+          >
+            <Activity className="h-3 w-3 text-brand-600" />
+            执行进度
+          </button>
+        )}
       </div>
 
-      <input
-        ref={fileInputExcel}
-        type="file"
-        accept=".xlsx,.xls,.csv"
-        className="hidden"
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) handleExcel(f);
-          e.target.value = "";
-        }}
-      />
-      <input
-        ref={fileInputPassport}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) handlePassport(f);
-          e.target.value = "";
-        }}
-      />
-      <input
-        ref={fileInputDoc}
-        type="file"
-        accept="image/*,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx"
-        className="hidden"
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f && onPickDocument) onPickDocument(f);
-          e.target.value = "";
-        }}
-      />
-
-      {/* 记录列表 */}
-      <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-slate-200 bg-white">
+      {/* 记录列表（无外框，直接融入面板） */}
+      <div className="flex min-h-0 flex-1 flex-col">
         <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2">
           <div className="flex items-center gap-1.5">
             <span className="text-xs font-semibold text-slate-700">申请人记录</span>
@@ -787,59 +661,7 @@ export default function LeftPanel({
           )}
         </div>
       </div>
-
-      {/* toast */}
-      {toast && (
-        <div className="animate-fade-in pointer-events-none absolute bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-full bg-slate-900/90 px-3 py-1.5 text-[11px] text-white shadow-lg">
-          {toast}
-        </div>
-      )}
     </div>
-  );
-}
-
-function SourceCard(props: {
-  title: string;
-  icon: React.ReactNode;
-  desc: string;
-  dragging: boolean;
-  uploading: boolean;
-  disabled?: boolean;
-  onPick: () => void;
-  onDragOver: (e: DragEvent) => void;
-  onDragLeave: () => void;
-  onDrop: (e: DragEvent) => void;
-}) {
-  return (
-    <button
-      onClick={props.onPick}
-      disabled={props.disabled || props.uploading}
-      onDragOver={props.onDragOver}
-      onDragLeave={props.onDragLeave}
-      onDrop={props.onDrop}
-      className={[
-        "group flex items-center gap-2.5 rounded-lg border-2 border-dashed p-2 text-left transition-all",
-        props.disabled
-          ? "cursor-not-allowed border-slate-100 bg-slate-50/50 opacity-60"
-          : "cursor-pointer hover:border-brand-400 hover:bg-brand-50/40",
-        props.dragging ? "border-brand-500 bg-brand-50" : "border-slate-200 bg-white",
-      ].join(" ")}
-    >
-      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-brand-50 text-brand-600">
-        {props.uploading ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          props.icon
-        )}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="text-xs font-medium text-slate-800">{props.title}</div>
-        <div className="truncate text-[10px] text-slate-500">{props.desc}</div>
-      </div>
-      {!props.disabled && !props.uploading && (
-        <Upload className="h-3.5 w-3.5 text-slate-400 transition-colors group-hover:text-brand-500" />
-      )}
-    </button>
   );
 }
 

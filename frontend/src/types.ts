@@ -297,8 +297,35 @@ export interface FieldMapping {
   left_record_key?: string | null;
   verify_method?: VerifyMethod;
   note?: string | null;
+  /** 网页侧来源：目标元素所在的浏览器面板侧（默认 right，兼容旧数据）；
+   *  右侧放 Excel 作数据源时，学校系统网页在左侧，此值为 "left" */
+  web_side?: "left" | "right";
   /** 点击展开型控件（存在时，录入/审查走控件脚本而非普通填值/读值） */
   widget?: WidgetDef | null;
+}
+
+/** 提取元素面板条目：自定义文本 / 文件提取送来的字段，可关联网页元素用于审查/录入 */
+export interface CustomTextEntry {
+  id: string;
+  /** 框框名字（仅显示，方便理解功能，不参与数据对比/录入） */
+  name: string;
+  /** 实际内容值（参与审查对比/录入填入） */
+  text: string;
+  selector?: string;
+  label?: string;
+  side?: "left" | "right";
+  tag?: string;
+  type?: string;
+  /** 是否已保存为映射步骤 */
+  saved?: boolean;
+  /** 来源：doc=文件提取送来的字段，manual=手动添加（旧数据无此字段按 manual 处理） */
+  source?: "doc" | "manual";
+  /** 创建时间戳：提取元素面板内按设置先后排序编号（FIFO） */
+  createdAt?: number;
+  /** 本条目的工作流：review=审查对比，entry=录入填入；未设置时跟随全局 currentLoopStepType */
+  workflow?: "review" | "entry";
+  /** 绑定的 Excel 列名：设置后保存步骤时转为 variableField，LOOP 运行时按当前卡片行的该列取值 */
+  excelField?: string;
 }
 
 /** 已拾取的元素标记（用于在 UI 上显示顺序编号 1, 2, 3...） */
@@ -362,6 +389,8 @@ export interface PickedMark {
   docExtractClickPhase?: "pre" | "mid" | "post";
   /** 面板动作标记：点击的是前端面板按钮（非网页元素），执行时直接调用对应前端逻辑而非网页点击 */
   panelAction?: "doc-web-extract";
+  /** 文件处理按钮操作记录：extract=送字段到提取元素面板，export=导出文件，upload=绑定上传；仅作步骤记录/流程图展示，执行时 no-op */
+  fileOp?: "extract" | "export" | "upload";
   /** 文件上传步骤标记：把文件槽位中的文件填入网页 file input（DataTransfer 方案） */
   docUpload?: boolean;
   /** 上传来源：绑定的文件提取步骤 mark id（执行时从该槽位取文件）；空=取最近一次提取的文件 */
@@ -430,6 +459,8 @@ export interface FlowNode {
   collapsed?: boolean;
   /** 断点类型：always=强制断点，on-error=条件断点（AI出错时暂停） */
   breakpoint?: "always" | "on-error";
+  /** 跨泳道宽卡片：文件处理类步骤（文件提取/上传/面板操作）在流程图中居中横跨左右泳道 */
+  wide?: boolean;
 
   // --- step 类型专用：引用原模板中的 PickedMark ---
   /** 引用阶段: data=数据源, review=审查, entry=录入 */
@@ -501,6 +532,8 @@ export interface WorkflowTemplate {
   entryMarks: PickedMark[];
   /** 字段映射（审查字段/控件/固定值等）：随模板保存，复用模板时比对不丢失 */
   mappings?: FieldMapping[];
+  /** 提取元素面板条目（自定义文本 + 文件提取字段，含 Excel 列绑定）：随模板保存，分享/应用模板时完整恢复 */
+  customTextEntries?: CustomTextEntry[];
   /** 流程图（可选）：如果存在，执行器可按流程图中的嵌套/分支逻辑运行；不存在则按 marks 线性执行 */
   flowGraph?: FlowGraph;
   /** 是否包含搜索步骤（自动检测，审查流用） */

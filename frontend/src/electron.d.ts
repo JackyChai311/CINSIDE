@@ -93,6 +93,8 @@ export interface ElectronAPI {
   viewStopPicking: (side: ViewSide) => Promise<unknown>;
   // 浏览器回退（网页提取时点错撤销）
   viewGoBack: (side: ViewSide) => Promise<{ ok: boolean; reason?: string }>;
+  // 浏览器前进（保底机制过度回退后恢复页面）
+  viewGoForward: (side: ViewSide) => Promise<{ ok: boolean; reason?: string }>;
 
   // 一键直传：把文件直接填入网页 file input
   viewQuickUpload: (

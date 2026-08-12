@@ -21,32 +21,12 @@ import {
   Users,
   X,
 } from "lucide-react";
-import type { AppMode, FieldMapping, LeftSource, TeachingPhase, VerifyMethod } from "../types";
+import type { AppMode, FieldMapping, LeftSource, TeachingPhase, VerifyMethod, CustomTextEntry } from "../types";
 import type { PickedElementInfo } from "./BrowserPane";
 
-export type PickTarget = "right" | "left" | null;
+export type { CustomTextEntry };
 
-/** 自定义文本条目：用户手动输入的临时内容，可关联网页元素用于审查/录入 */
-export interface CustomTextEntry {
-  id: string;
-  /** 框框名字（仅显示，方便理解功能，不参与数据对比/录入） */
-  name: string;
-  /** 实际内容值（参与审查对比/录入填入） */
-  text: string;
-  selector?: string;
-  label?: string;
-  side?: "left" | "right";
-  tag?: string;
-  type?: string;
-  /** 是否已保存为映射步骤 */
-  saved?: boolean;
-  /** 来源：doc=文件提取送来的字段，manual=手动添加（旧数据无此字段按 manual 处理） */
-  source?: "doc" | "manual";
-  /** 创建时间戳：提取元素面板内按设置先后排序编号（FIFO） */
-  createdAt?: number;
-  /** 本条目的工作流：review=审查对比，entry=录入填入；未设置时跟随全局 currentLoopStepType */
-  workflow?: "review" | "entry";
-}
+export type PickTarget = "right" | "left" | null;
 
 interface Props {
   /** 当前是否处于选择模式 */

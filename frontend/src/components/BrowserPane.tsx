@@ -859,7 +859,7 @@ export default function BrowserPane({
                   className={[
                     "flex shrink-0 items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10px] font-medium transition-all",
                     isWebMode
-                      ? "bg-brand-600 text-white shadow-sm"
+                      ? "bg-slate-900 text-white shadow-sm"
                       : "bg-white/30 text-slate-500 hover:bg-white/50 hover:text-slate-600",
                   ].join(" ")}
                   title="网页视图"
@@ -872,7 +872,7 @@ export default function BrowserPane({
                   className={[
                     "flex shrink-0 items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10px] font-medium transition-all",
                     !isWebMode
-                      ? "bg-emerald-600 text-white shadow-sm"
+                      ? "bg-slate-900 text-white shadow-sm"
                       : "bg-white/30 text-slate-500 hover:bg-white/50 hover:text-slate-600",
                   ].join(" ")}
                   title="Excel 视图"
@@ -896,7 +896,7 @@ export default function BrowserPane({
                       return (
                         <div key={tab.id} className="flex shrink-0 items-center">
                           {editingTabId === tab.id ? (
-                            <div className="flex items-center gap-0.5 rounded-md border border-brand-300 bg-white px-1.5 py-0.5 shadow-sm ring-1 ring-brand-200">
+                            <div className="flex items-center gap-0.5 rounded-md border border-slate-300 bg-white px-1.5 py-0.5 shadow-sm ring-1 ring-slate-200">
                               <input
                                 autoFocus
                                 value={inputUrl}
@@ -913,7 +913,7 @@ export default function BrowserPane({
                                   else cancelTabInput();
                                 }}
                               />
-                              {loading && <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin text-brand-500" />}
+                              {loading && <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin text-slate-400" />}
                             </div>
                           ) : (
                             <button
@@ -936,9 +936,9 @@ export default function BrowserPane({
                               title={isEmpty ? (newTabTitle || "新标签页") : tab.url}
                             >
                               {isEmpty ? (
-                                <Search className={`h-2.5 w-2.5 shrink-0 ${isActive ? "text-brand-500" : "text-slate-400"}`} />
+                                <Search className={`h-2.5 w-2.5 shrink-0 ${isActive ? "text-slate-600" : "text-slate-400"}`} />
                               ) : (
-                                <Globe className={`h-2.5 w-2.5 shrink-0 ${isActive ? "text-brand-500" : "text-slate-400"}`} />
+                                <Globe className={`h-2.5 w-2.5 shrink-0 ${isActive ? "text-slate-600" : "text-slate-400"}`} />
                               )}
                               <span className="truncate">{getTabTitle(tab.url)}</span>
                               {!isEmpty && (
@@ -1116,8 +1116,8 @@ export default function BrowserPane({
               disabled={disabled || blockPicking}
               className={`rounded p-0.5 transition-colors disabled:opacity-40 ${
                 sidebarCollapsed
-                  ? "bg-indigo-100 text-indigo-600"
-                  : "text-slate-400 hover:bg-white/60 hover:text-indigo-500"
+                  ? "bg-slate-200 text-slate-700"
+                  : "text-slate-400 hover:bg-white/60 hover:text-slate-600"
               }`}
               title={sidebarCollapsed ? "已开启自动折叠侧边栏（点击关闭）" : "自动折叠该网页侧边栏（长久生效）"}
             >

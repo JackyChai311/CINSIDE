@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
-  Activity,
   ArrowLeft,
   ArrowLeftRight,
   Bot,
@@ -116,6 +115,7 @@ import {
   type WidgetSnapshotResult,
 } from "./lib/widgetScripts";
 import LeftPanel from "./components/LeftPanel";
+import type { AISphereState } from "./components/AISphere";
 import BrowserPane, { type PickedElementInfo } from "./components/BrowserPane";
 import ExcelView, { type ExcelPickedField } from "./components/ExcelView";
 import BlankExcel from "./components/BlankExcel";
@@ -131,7 +131,6 @@ import BreakpointDialog from "./components/BreakpointDialog";
 import SaveSkillDialog from "./components/SaveSkillDialog";
 import CredentialsPanel from "./components/CredentialsPanel";
 import DocLocalExtractConfig from "./components/DocLocalExtractConfig";
-import ExecutionBubbles from "./components/ExecutionBubbles";
 import ExecutionPanel from "./components/ExecutionPanel";
 import { saveSkill, getSkillById, loadSkills } from "./lib/skills";
 import { getBlockRules, addBlockRule, removeBlockRule, getHost, type BlockRule, SIDEBAR_AUTO_SELECTORS, getSidebarAutoCollapse, setSidebarAutoCollapse } from "./lib/blockRules";
@@ -147,8 +146,46 @@ const rlog = (...args: unknown[]) => {
 
 // 清洗选择器：剔除拾取/高亮模式注入的 cinside-* 临时类
 // 这些类只在拾取时存在于 DOM 上，执行时已被移除，含它们的选择器会匹配失败
+// 同时剔除动画瞬态类：如 lightgallery 的 lg-start-zoom/lg-start-show 只在打开动画期间存在，
+// 教学拾取时恰好录下它们，执行时类已被移除，选择器永远匹配不到
 const sanitizeSelector = (sel: string): string =>
-  (sel || "").replace(/\.cinside-[a-z0-9_-]+/gi, "");
+  (sel || "")
+    .replace(/\.cinside-[a-z0-9_-]+/gi, "")
+    .replace(/\.lg-start-(?:zoom|show)\b/gi, "");
+
+/** 兜底：模板未保存 mappings 时，从审查类 marks 反推字段映射（老模板/未同步映射的提取元素条目），
+ *  保证 LOOP 运行时「字段对比」区域和逐字段比对有数据 */
+const deriveMappingsFromMarks = (marks: PickedMark[]): FieldMapping[] => {
+  const out: FieldMapping[] = [];
+  for (const m of marks) {
+    if (m.clickPhase || m.docExtract || m.docExtractClick || m.fileOp || m.panelAction) continue;
+    if (m.action !== "pick" && m.action !== "input") continue;
+    if (!m.selector || m.selector.includes("://")) continue;
+    if (out.some((x) => x.right_selector === m.selector)) continue;
+    const isPass = m.source === "passport";
+    const leftSource: FieldMapping["left_source"] = m.excelField ? "excel" : isPass ? "passport" : m.value ? "manual" : "excel";
+    const leftField = m.excelField || (isPass ? (m.variableField || "") : (m.value || m.variableField || ""));
+    if (!leftField) continue;
+    const cleanLabel = (m.label || "").replace(/^(审查|录入)\s*·\s*/, "").split(" ← ")[0].trim();
+    out.push({
+      right_selector: m.selector,
+      right_label: cleanLabel || m.selector,
+      right_input_type: m.type || null,
+      left_source: leftSource,
+      left_field: leftField,
+      verify_method: "smart",
+      web_side: m.side === "left" ? "left" : "right",
+      widget: m.widget || undefined,
+    });
+  }
+  return out;
+};
+
+/** 取模板有效映射：优先模板自带 mappings，缺失时从 marks 反推 */
+const getTemplateMappings = (tpl: WorkflowTemplate): FieldMapping[] =>
+  tpl.mappings && tpl.mappings.length > 0
+    ? tpl.mappings
+    : deriveMappingsFromMarks([...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks]);
 
 /** 将 data URL 转换为 File 对象（用于下载文件 OCR 提取） */
 function dataUrlToFile(dataUrl: string, filename: string): File {
@@ -979,6 +1016,13 @@ export default function App() {
   const [rightRecords, setRightRecords] = useState<ApplicantRecord[]>([]);
   const [rightExcelUploading, setRightExcelUploading] = useState(false);
   const rightExcelInputRef = useRef<HTMLInputElement>(null);
+  // 右侧 Excel 作为 LOOP 数据源：行范围框选 / 卡片已生成 / 选中列（LOOP 列拖拽框选用）
+  const [rightRowRange, setRightRowRange] = useState<{ start: number; end: number } | null>(null);
+  const [rightCardsGenerated, setRightCardsGenerated] = useState(false);
+  const [rightSelectedColumn, setRightSelectedColumn] = useState<string | null>(null);
+  // ref 持有最新 rightSelectedColumn：右侧 Excel 作为数据源时，绑定输入框填值用它做 LOOP 列兜底
+  const rightSelectedColumnRef = useRef<string | null>(null);
+  rightSelectedColumnRef.current = rightSelectedColumn;
   // 常用网页收藏（左右侧分开存储，各自持久化到 localStorage）
   // 左侧通常为数据源/Excel 系统，右侧通常为审查目标网页，收藏内容不同
   const [leftFavoriteSites, setLeftFavoriteSites] = useState<{ name: string; url: string }[]>(() => {
@@ -1069,11 +1113,25 @@ const sourceFieldLabelRef = useRef<string>("");
 
   // 元素选择模式
   const [selectMode, setSelectMode] = useState(false);
+  const selectModeRef = useRef(selectMode);
+  selectModeRef.current = selectMode;
   const [pickTarget, setPickTarget] = useState<PickTarget>("right");
   const [rightPicked, setRightPicked] = useState<PickedElementInfo | null>(null);
   const [leftPicked, setLeftPicked] = useState<PickedElementInfo | null>(null);
   const rightPickedRef = useRef<PickedElementInfo | null>(null);
   rightPickedRef.current = rightPicked;
+  // 右侧 Excel 数据源模式：右面板显示 Excel、左面板显示学校系统网页。
+  // 此模式下「比对目标」元素在左网页，映射保存时 web_side="left"。
+  const rightExcelMode = rightRecords.length > 0 && rightViewMode === "excel" && !rightBlankExcel && leftViewMode === "web";
+  const rightExcelModeRef = useRef(false);
+  rightExcelModeRef.current = rightExcelMode;
+  // rightPicked 槽位中网页元素的实际所在侧（默认 right；右侧Excel模式下左网页元素占此槽位）
+  const rightPickedSideRef = useRef<"left" | "right">("right");
+  // 视图模式 ref（供 useCallback 内读取最新值）
+  const leftViewModeRef = useRef(leftViewMode);
+  leftViewModeRef.current = leftViewMode;
+  const rightViewModeRef = useRef(rightViewMode);
+  rightViewModeRef.current = rightViewMode;
   const [mappings, setMappings] = useState<FieldMapping[]>([]);
   const mappingsRef = useRef<FieldMapping[]>([]);
   mappingsRef.current = mappings;
@@ -1224,6 +1282,10 @@ customTextEntriesRef.current = customTextEntries;
 const [customTextPickingId, setCustomTextPickingId] = useState<string | null>(null);
 const customTextPickingIdRef = useRef<string | null>(null);
 customTextPickingIdRef.current = customTextPickingId;
+// 提取元素条目绑定 Excel 列：armed 状态下点击右侧 Excel 单元格即绑定该列（LOOP 逐行取值）
+const [excelBindEntryId, setExcelBindEntryId] = useState<string | null>(null);
+const excelBindEntryIdRef = useRef<string | null>(null);
+excelBindEntryIdRef.current = excelBindEntryId;
 // 提取元素面板 TAB 切换请求：配置哪个功能就自动切到对应 TAB（支持 widgetTabId 滚动到具体控件）
 const [extractTabRequest, setExtractTabRequest] = useState<{ tab: "doc" | "custom" | "widget"; widgetTabId?: string; ts: number } | null>(null);
 // 提取元素面板 TAB 顺序：谁先设置谁排前（FIFO），保存 LOOP 后顺序随步骤保留
@@ -1419,6 +1481,25 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     []
   );
   const clearPickedMarks = useCallback(() => setPickedMarks([]), []);
+  /** 文件处理按钮点击记录：作为外围步骤显示在字段对比 STEPS 与流程图中（执行时 no-op，仅步骤设置态记录） */
+  const recordFileOp = useCallback(
+    (op: "extract" | "export", detail: string) => {
+      if (!selectModeRef.current) return;
+      addPickedMark({
+        side: "right",
+        source: "web",
+        selector: `fileop://${op}`,
+        label: `文件处理 · ${detail}`,
+        workflow: "data-source",
+        action: "click",
+        recordId: selectedId || undefined,
+        fileOp: op,
+        tag: "",
+        type: "",
+      });
+    },
+    [addPickedMark, selectedId]
+  );
   const removePickedMark = useCallback((id: string) => {
     setPickedMarks((prev) => {
       const filtered = prev.filter((m) => m.id !== id);
@@ -1597,7 +1678,6 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     fields: Record<string, string>;
     fallback?: { from: string; to: string; reason: string } | null;
   } | null>(null);
-  const [docFileExtracting, setDocFileExtracting] = useState(false);
   const [docFilling, setDocFilling] = useState(false);
 
   // ============ 功能3：单卡 LOOP 执行（点击人物卡片 → 自动导航到该人页面） ============
@@ -2041,8 +2121,19 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
   // 运行开始时隐藏侧边按钮，气泡全部消失后再显示
   const isAnyRunning = running || singleRunning || batchRunning || queueRunning;
+  // 供异步回调（OCR完成等）同步判断当前是否在执行期，避免闭包拿到旧值
+  const isAnyRunningRef = useRef(isAnyRunning);
+  isAnyRunningRef.current = isAnyRunning;
   useEffect(() => {
     if (isAnyRunning) setEdgeButtonVisible(false);
+  }, [isAnyRunning]);
+
+  // LOOP/批量执行期间关闭文件提取审查浮层：提取结果已存入 docExtractsByRecord
+  // （文件处理面板可见），浮层弹出会遮挡右侧 BrowserPane 并阻断网页点击
+  useEffect(() => {
+    if (!isAnyRunning) return;
+    setDocExtractPanel(null);
+    setSameNameImages(null);
   }, [isAnyRunning]);
 
   const [steps, setSteps] = useState<VerificationStep[]>([]);
@@ -2083,6 +2174,17 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const [verifyStatus, setVerifyStatus] = useState<VerifyStatus>("idle");
   // 每条记录的核验结论：record_id -> overall（pass/fail/review）
   const [recordResults, setRecordResults] = useState<Record<string, Overall>>({});
+  // ---- AI 球体（左侧面板 AI 角色）：手动讲解态（点击卡片触发）优先于自动状态 ----
+  const [aiManual, setAiManual] = useState<AISphereState | null>(null);
+  const aiManualTimerRef = useRef<number | null>(null);
+  // 自动状态：LOOP 运行中 > 有问题告警 > 待命
+  const aiAuto = useMemo<AISphereState>(() => {
+    if (batchRunning || singleRunning || queueRunning) return "processing";
+    const failedCount = Object.values(batchResults).filter((r) => r.status === "failed").length;
+    const reviewCount = Object.values(recordResults).filter((o) => o === "fail" || o === "review").length;
+    return failedCount > 0 || reviewCount > 0 ? "alert" : "idle";
+  }, [batchRunning, singleRunning, queueRunning, batchResults, recordResults]);
+  const aiSphereState: AISphereState = aiManual ?? aiAuto;
   const taskIdRef = useRef("");
   const wsRef = useRef<WebSocket | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -2263,9 +2365,22 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   };
 
   const clearRecords = async () => {
-    // 只清空验证/任务状态，保留 Excel 数据（records）和卡片池
+    // 清空人物卡片及卡片绑定状态（保留 Excel 原始数据，可重新框选生成卡片）
+    rlog("[clearRecords] 清空人物卡片");
     setSelectedId(null);
     setRowRange(null);
+    setCardPool([]);
+    setCardLoopMap({});
+    setCheckedIds(new Set());
+    setRunCursor(null);
+    setCardsGenerated(false);
+    // 卡片自定义图片持久化在 localStorage，一并清理
+    setCardImages({});
+    try { localStorage.removeItem("cinside-card-images"); } catch {}
+    // 与卡片绑定的文件提取结果随卡片删除一并清理
+    setDocExtractsByRecord({});
+    setDocExtractPanel(null);
+    setSameNameImages(null);
   };
 
   // 左侧人物卡片池：支持从不同 Excel / 不同段持续追加，卡片数量越来越多
@@ -2293,6 +2408,19 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   }, []);
   /** 后端自动识别的列映射（原始列名 -> 标准字段名），用于过滤Excel表头中的别名列和自动初始化fieldColumnMap */
   const [detectedColumnMap, setDetectedColumnMap] = useState<Record<string, string>>({});
+
+  // 已绑定到提取元素条目/输入步骤的 Excel 列集合（用于 Excel 视图表头高亮，明确绑定状态）
+  const boundExcelFields = useMemo(() => {
+    const s = new Set<string>();
+    for (const e of customTextEntries) {
+      if (e.excelField) s.add(e.excelField);
+    }
+    for (const m of pickedMarks) {
+      const f = m.excelField || m.variableField;
+      if (f) s.add(f);
+    }
+    return s;
+  }, [customTextEntries, pickedMarks]);
 
   // cardRecords：已保存批次放顶部（按保存时间setAt升序，第一批最上，第二批紧随其后），未保存卡片放底部
   const cardRecords = useMemo(() => {
@@ -2361,6 +2489,34 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setCardLoopMap({});
     setRunCursor(null);
     // 清理已删除卡片绑定的文件提取结果，避免内存泄漏
+    setDocExtractsByRecord({});
+    setDocExtractPanel(null);
+    setSameNameImages(null);
+  }, []);
+
+  // 右侧 Excel：按框选行范围生成人物卡片（与左侧共用卡片池）
+  const generateRightCards = useCallback(() => {
+    if (!rightRowRange || rightRecords.length === 0) return;
+    const slice = rightRecords.slice(rightRowRange.start, rightRowRange.end + 1);
+    const newCards: ApplicantRecord[] = slice.map((r) => ({
+      ...r,
+      fields: { ...r.fields },
+      passport_fields: r.passport_fields ? { ...r.passport_fields } : undefined,
+      record_id: `${r.record_id}__${Math.random().toString(36).slice(2, 8)}`,
+    }));
+    setCardPool((prev) => [...prev, ...newCards]);
+    setRightCardsGenerated(true);
+    setSelectedId(newCards[0].record_id);
+    setSuccessToast(`已追加 ${newCards.length} 张人物卡片（共 ${cardPool.length + newCards.length} 张）`);
+  }, [rightRowRange, rightRecords, cardPool.length, setSuccessToast]);
+
+  // 右侧 Excel：清空卡片，重新框选
+  const resetRightCards = useCallback(() => {
+    setRightCardsGenerated(false);
+    setRightRowRange(null);
+    setCardPool([]);
+    setCardLoopMap({});
+    setRunCursor(null);
     setDocExtractsByRecord({});
     setDocExtractPanel(null);
     setSameNameImages(null);
@@ -2922,25 +3078,79 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           verify_method: "smart" as const,
         }));
 
-      // 2) 普通元素选择模式：右 pick + 左 pick 成对提取为映射
+      // 2) 普通元素选择模式：网页 pick + 数据源 pick 成对提取为映射
+      // 支持两种布局：标准（右网页目标+左侧来源）、右侧Excel模式（左网页目标+右Excel来源）
       const fromPicks: FieldMapping[] = [];
-      let pendingRight: PickedMark | null = null;
+      let pendingWebTarget: PickedMark | null = null;  // 网页目标元素（所在侧=web_side）
+      let pendingExcelSrc: PickedMark | null = null;   // Excel 数据源单元格（左/右 Excel）
       for (const m of pickedMarks) {
-        if (m.action === "pick" && m.side === "right") {
-          pendingRight = m;
-        } else if (m.action === "pick" && m.side === "left" && pendingRight) {
-          const isExcel = m.source === "excel" || m.tag === "excel-cell";
-          fromPicks.push({
-            right_selector: pendingRight.selector,
-            right_label: pendingRight.label || pendingRight.selector,
-            left_source: isExcel ? "excel" : "database",
-            left_field: isExcel ? (m.excelField || m.selector) : m.selector,
-            verify_method: "smart" as const,
-          });
-          pendingRight = null;
-        } else if (m.action === "input" || m.action === "click") {
-          // 遇到其他动作，清空未配对的右侧 pick
-          pendingRight = null;
+        if (m.action === "input" || m.action === "click") {
+          // 遇到其他动作，清空未配对的暂存
+          pendingWebTarget = null;
+          pendingExcelSrc = null;
+          continue;
+        }
+        if (m.action !== "pick") continue;
+        const isExcel = m.source === "excel" || m.tag === "excel-cell";
+        if (isExcel) {
+          if (pendingWebTarget) {
+            // 网页目标已定 → 配对（web_side=目标元素所在侧）
+            fromPicks.push({
+              right_selector: pendingWebTarget.selector,
+              right_label: pendingWebTarget.label || pendingWebTarget.selector,
+              left_source: "excel",
+              left_field: m.excelField || m.selector,
+              verify_method: "smart" as const,
+              web_side: pendingWebTarget.side,
+            });
+            pendingWebTarget = null;
+          } else {
+            pendingExcelSrc = m;
+          }
+          continue;
+        }
+        if (m.side === "right") {
+          // 右网页元素 = 比对目标
+          if (pendingExcelSrc) {
+            fromPicks.push({
+              right_selector: m.selector,
+              right_label: m.label || m.selector,
+              left_source: "excel",
+              left_field: pendingExcelSrc.excelField || pendingExcelSrc.selector,
+              verify_method: "smart" as const,
+              web_side: "right",
+            });
+            pendingExcelSrc = null;
+          } else {
+            pendingWebTarget = m;
+          }
+        } else {
+          // 左网页元素：右侧Excel源在等待 → 左网页是比对目标（web_side=left）
+          if (pendingExcelSrc && pendingExcelSrc.side === "right") {
+            fromPicks.push({
+              right_selector: m.selector,
+              right_label: m.label || m.selector,
+              left_source: "excel",
+              left_field: pendingExcelSrc.excelField || pendingExcelSrc.selector,
+              verify_method: "smart" as const,
+              web_side: "left",
+            });
+            pendingExcelSrc = null;
+          } else if (pendingWebTarget && pendingWebTarget.side === "right") {
+            // 原有语义：右网页目标 + 左网页源（database）
+            fromPicks.push({
+              right_selector: pendingWebTarget.selector,
+              right_label: pendingWebTarget.label || pendingWebTarget.selector,
+              left_source: "database",
+              left_field: m.selector,
+              verify_method: "smart" as const,
+              web_side: "right",
+            });
+            pendingWebTarget = null;
+          } else if (!pendingWebTarget) {
+            // 左网页先选：暂存为目标候选（等待右Excel源）
+            pendingWebTarget = m;
+          }
         }
       }
 
@@ -3154,14 +3364,21 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setPendingAction("none");
     setInputTarget(null);
     setNextClickLabel(null);
-    setPickTarget("right");
+    // 右侧Excel模式：比对目标在左网页，从左侧开始拾取
+    const targetSide = rightExcelModeRef.current ? "left" : "right";
+    setPickTarget(targetSide);
     setRightPicked(null);
     setLeftPicked(null);
     setError(null);
     if (!selectMode) setSelectMode(true);
     setTimeout(() => {
       window.electronAPI?.viewStopPicking("left").catch(() => {});
-      window.electronAPI?.viewStartPicking("right");
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+      if (targetSide === "left" && leftViewModeRef.current === "web") {
+        window.electronAPI?.viewStartPicking("left");
+      } else if (targetSide === "right" && rightViewModeRef.current === "web") {
+        window.electronAPI?.viewStartPicking("right");
+      }
     }, 300);
   }, [setError, selectMode, exitAllSetupModes]);
 
@@ -3184,14 +3401,19 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setPendingAction("none");
     setInputTarget(null);
     setNextClickLabel(null);
-    setPickTarget("left");
+    // 右侧Excel模式：来源在右侧 Excel（单元格点击拾取），目标输入框在左网页
+    const fromRightExcel = rightExcelModeRef.current;
+    setPickTarget(fromRightExcel ? "right" : "left");
     setRightPicked(null);
     setLeftPicked(null);
     setError(null);
     if (!selectMode) setSelectMode(true);
     setTimeout(() => {
       window.electronAPI?.viewStopPicking("right").catch(() => {});
-      window.electronAPI?.viewStartPicking("left");
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      if (!fromRightExcel && leftViewModeRef.current === "web") {
+        window.electronAPI?.viewStartPicking("left");
+      }
     }, 300);
   }, [setError, selectMode, exitAllSetupModes]);
 
@@ -3276,7 +3498,16 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setDocExtractPanel(null);
     setDocSourcePreview(null);
     setDocSignal((s) => s + 1);
-  }, [exitAddingStepMode]);
+
+    // AI 球体：点击已跑过 LOOP 的卡片 → 触发讲解动画（粒子向外涌动数秒）
+    const rep = [...loopReports].reverse().find((r) => r.record_id === id);
+    const batch = batchResults[id];
+    if (rep || batch) {
+      if (aiManualTimerRef.current) window.clearTimeout(aiManualTimerRef.current);
+      setAiManual("speaking");
+      aiManualTimerRef.current = window.setTimeout(() => setAiManual(null), 5000);
+    }
+  }, [exitAddingStepMode, loopReports, batchResults]);
 
   // === 自定义文本模式 ===
   const toggleCustomText = useCallback(() => {
@@ -3318,6 +3549,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     if (entries.length === 0) return;
     setCustomTextEntries((prev) => [...prev, ...entries]);
     setCustomTextMode(true);
+    // 文件处理按钮点击记录到字段对比 STEPS（外围步骤，执行时 no-op）
+    recordFileOp("extract", `提取元素（送 ${entries.length} 个字段到「提取元素」面板）`);
     // 提取元素面板自动切到「文件提取」TAB
     requestExtractTab("doc");
     setDocExtractPanel(null);
@@ -3329,7 +3562,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setDocExtractSplitView(true);
     setBottomPanelOpen(true);
     setSuccessToast(`已送 ${entries.length} 个字段到「提取元素」面板，请逐个拾取关联网页元素后保存为步骤`);
-  }, [setSuccessToast]);
+  }, [setSuccessToast, recordFileOp]);
 
   /** 网页模式：预览就绪后用户点击「录入提取」触发 OCR 识别（若后台已预提取则直接复用）
    *  overrideRecordId：批量执行时显式传入当前记录 id（避免闭包中 selected 过期导致字段提交到错误记录） */
@@ -3369,20 +3602,23 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         return { ...prev, [rid]: [...filtered, newExtract] };
       });
       setActiveDocIndex(999);
-      setDocExtractPanel({
-        imageUrl: toPreviewImageUrl(pending.dataUrl, result.processed_image),
-        filename: result.filename,
-        method: result.method,
-        text: result.text,
-        fields: result.fields,
-        side: pending.side,
-        workflow: pending.side === "left" ? "entry" : "review",
-        fallback: result.fallback,
-        sourceDataUrl: pending.dataUrl,
-        targetFields,
-        altResult: null,
-      });
-      setDocExtractActiveTab("primary");
+      // 执行期不弹浮动审查面板（结果已入 docExtractsByRecord），否则点击停止后浮层会冒出来
+      if (!isAnyRunningRef.current) {
+        setDocExtractPanel({
+          imageUrl: toPreviewImageUrl(pending.dataUrl, result.processed_image),
+          filename: result.filename,
+          method: result.method,
+          text: result.text,
+          fields: result.fields,
+          side: pending.side,
+          workflow: pending.side === "left" ? "entry" : "review",
+          fallback: result.fallback,
+          sourceDataUrl: pending.dataUrl,
+          targetFields,
+          altResult: null,
+        });
+        setDocExtractActiveTab("primary");
+      }
       setDocWebStatus({ phase: "success", filename: result.filename, size: pending.size });
       setSuccessToast(`文件提取完成：${result.filename}`);
       pendingWebFileRef.current = null;
@@ -3412,20 +3648,23 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           return { ...prev, [rid]: [...filtered, newExtract] };
         });
         setActiveDocIndex(999);
-        setDocExtractPanel({
-          imageUrl: toPreviewImageUrl(pending.dataUrl, result.processed_image),
-          filename: result.filename,
-          method: result.method,
-          text: result.text,
-          fields: result.fields,
-          side: pending.side,
-          workflow: pending.side === "left" ? "entry" : "review",
-          fallback: result.fallback,
-          sourceDataUrl: pending.dataUrl,
-          targetFields,
-          altResult: null,
-        });
-        setDocExtractActiveTab("primary");
+        // 执行期不弹浮动审查面板（结果已入 docExtractsByRecord），否则点击停止后浮层会冒出来
+        if (!isAnyRunningRef.current) {
+          setDocExtractPanel({
+            imageUrl: toPreviewImageUrl(pending.dataUrl, result.processed_image),
+            filename: result.filename,
+            method: result.method,
+            text: result.text,
+            fields: result.fields,
+            side: pending.side,
+            workflow: pending.side === "left" ? "entry" : "review",
+            fallback: result.fallback,
+            sourceDataUrl: pending.dataUrl,
+            targetFields,
+            altResult: null,
+          });
+          setDocExtractActiveTab("primary");
+        }
         setDocWebStatus({ phase: "success", filename: result.filename, size: pending.size });
         setSuccessToast(`文件提取完成：${result.filename}`);
         // 清空暂存
@@ -3560,6 +3799,21 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setCustomTextEntries((prev) => prev.map((e) => (e.id === id ? { ...e, workflow } : e)));
   }, []);
 
+  /** 进入/取消条目的 Excel 列绑定态：armed 后点击右侧 Excel 单元格即绑定该列 */
+  const bindExcelForEntry = useCallback((id: string) => {
+    setExcelBindEntryId((prev) => {
+      const next = prev === id ? null : id;
+      excelBindEntryIdRef.current = next;
+      return next;
+    });
+  }, []);
+
+  /** 解除条目的 Excel 列绑定（恢复为固定值） */
+  const clearEntryExcelField = useCallback((id: string) => {
+    setCustomTextEntries((prev) => prev.map((e) => (e.id === id ? { ...e, excelField: undefined } : e)));
+    setExcelBindEntryId((prev) => (prev === id ? null : prev));
+  }, []);
+
   const pickForCustomText = useCallback((id: string) => {
     customTextModeRef.current = true;
     customTextPickingIdRef.current = id;
@@ -3583,13 +3837,15 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       const entryWorkflow = entry.workflow || savedStepType;
       currentLoopStepTypeRef.current = entryWorkflow;
       // right_label 只用拾取到的元素标签；框框名字（entry.name）不参与保存，仅在 UI 显示
+      // 绑定了 Excel 列时：来源改为 excel 列（LOOP 逐行取值，saveMapping 会自动转为 variableField）
       saveMapping({
         right_selector: entry.selector,
         right_label: entry.label || entry.selector,
         right_input_type: entry.type || null,
-        left_source: "manual",
-        left_field: entry.text,
+        left_source: entry.excelField ? "excel" : "manual",
+        left_field: entry.excelField || entry.text,
         verify_method: "smart",
+        web_side: entry.side || "right",
       });
       newlySavedIds.push(entry.id);
       saved++;
@@ -3784,6 +4040,20 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 {entry.side === "left" ? "左" : "右"}侧元素：{entry.label || entry.selector}
               </span>
             ) : null}
+            {/* 已绑定 Excel 列提示（LOOP 逐行取值） */}
+            {entry.excelField && (
+              <span className="mt-0.5 inline-flex items-center gap-1 text-[9px] font-medium text-emerald-600">
+                <FileSpreadsheet className="h-2.5 w-2.5" />
+                Excel列「{entry.excelField}」· 逐行取值
+                <button
+                  onClick={(e) => { e.stopPropagation(); clearEntryExcelField(entry.id); }}
+                  className="rounded px-0.5 text-slate-400 hover:bg-rose-100 hover:text-rose-600"
+                  title="解除 Excel 列绑定（恢复为固定值）"
+                >
+                  ✕
+                </button>
+              </span>
+            )}
           </div>
           {/* 底部操作按钮（控件拾取模式下隐藏，避免误操作） */}
           {!opts.widgetPickActive && (
@@ -3830,6 +4100,29 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               <MousePointerClick className="h-2.5 w-2.5" />
               {entry.selector ? "重选" : "拾取"}
             </button>
+            {/* 绑定 Excel 列：armed 后点击 Excel 单元格完成绑定；已绑定后按钮变为「取消绑定」 */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (entry.excelField && excelBindEntryId !== entry.id) {
+                  clearEntryExcelField(entry.id);
+                } else {
+                  bindExcelForEntry(entry.id);
+                }
+              }}
+              disabled={!!customTextPickingId && customTextPickingId !== entry.id}
+              className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors ${
+                excelBindEntryId === entry.id
+                  ? "bg-emerald-500 text-white animate-pulse"
+                  : entry.excelField
+                  ? "bg-emerald-500 text-white hover:bg-rose-500"
+                  : "bg-slate-200 text-slate-600 hover:bg-slate-300"
+              } disabled:opacity-40`}
+              title={excelBindEntryId === entry.id ? "请点击 Excel 中的一列完成绑定（再点一次取消）" : entry.excelField ? `已成功绑定 Excel 列「${entry.excelField}」（LOOP 时逐行取该列值）· 点击取消绑定` : "绑定 Excel 列：LOOP 时按每张卡片该行该列的值审查/录入"}
+            >
+              <FileSpreadsheet className="h-2.5 w-2.5" />
+              {excelBindEntryId === entry.id ? "点Excel列…" : entry.excelField ? `已绑「${entry.excelField}」· 取消绑定` : "绑Excel"}
+            </button>
             <button
               onClick={(e) => { e.stopPropagation(); removeCustomTextEntry(entry.id); }}
               className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium text-slate-400 transition-colors hover:bg-rose-100 hover:text-rose-600"
@@ -3871,7 +4164,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       </div>
     </div>
     );
-  }, [customTextPickingId, addingStepMode, renameCustomTextEntry, updateCustomTextEntry, pickForCustomText, removeCustomTextEntry, addCustomTextEntry, saveCustomTextSteps, setCustomTextWorkflow, currentLoopStepType]);
+  }, [customTextPickingId, addingStepMode, renameCustomTextEntry, updateCustomTextEntry, pickForCustomText, removeCustomTextEntry, addCustomTextEntry, saveCustomTextSteps, setCustomTextWorkflow, currentLoopStepType, excelBindEntryId, bindExcelForEntry, clearEntryExcelField]);
 
   // 控件拾取左侧面板条目：通过 ref 间接调用，解决函数定义顺序问题（真正实现在 testWidget/updateSavedWidgetBinding 之后）
   const onWidgetPickExtractEntryRef = useRef<((entry: CustomTextEntry) => void) | null>(null);
@@ -3926,6 +4219,20 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // 提取元素汇总（字段对比设置态「提取元素」小卡片）：文件提取步骤 + 面板条目 + 控件，按设置时间 FIFO
   const extractStepSummary = useMemo<ExtractSummaryItem[]>(() => {
     const items: ExtractSummaryItem[] = [];
+    // 0. 文件处理按钮操作记录（送字段到提取元素面板 / 导出文件，执行时 no-op）
+    for (const m of pickedMarks) {
+      if (!m.fileOp) continue;
+      const opLabel = m.fileOp === "extract" ? "送字段到提取元素" : m.fileOp === "export" ? "导出文件" : "绑定上传";
+      items.push({
+        id: m.id || `fileop-${m.order}`,
+        kind: "doc",
+        name: "文件处理",
+        detail: m.label || opLabel,
+        saved: true,
+        ts: m.createdAt ?? Number.MAX_SAFE_INTEGER,
+        side: m.side,
+      });
+    }
     // 1. 文件提取步骤（pickedMarks 中带 docExtract 标记：网页提取/网页下载/本地文件）
     for (const m of pickedMarks) {
       if (!m.docExtract) continue;
@@ -3988,19 +4295,23 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
   // 重置当前映射选择轮次：根据当前步骤模式回到初始拾取侧
   // 审查模式（先右后左）：回到 right；录入模式（先左后右）：回到 left
+  // 右侧Excel模式：审查回到左网页 / 录入回到右侧 Excel
   const resetMappingRound = useCallback(() => {
     setRightPicked(null);
     setLeftPicked(null);
+    rightPickedSideRef.current = "right";
     const isEntry = currentLoopStepTypeRef.current === "entry";
-    const target = isEntry ? "left" : "right";
-    setPickTarget(target as PickTarget);
+    const target: PickTarget = rightExcelModeRef.current
+      ? (isEntry ? "right" : "left")
+      : (isEntry ? "left" : "right");
+    setPickTarget(target);
     setTimeout(() => {
-      if (isEntry) {
+      if (target === "left") {
         window.electronAPI?.viewStopPicking("right").catch(() => {});
-        window.electronAPI?.viewStartPicking("left");
+        if (leftViewModeRef.current === "web") window.electronAPI?.viewStartPicking("left");
       } else {
         window.electronAPI?.viewStopPicking("left").catch(() => {});
-        window.electronAPI?.viewStartPicking("right");
+        if (rightViewModeRef.current === "web") window.electronAPI?.viewStartPicking("right");
       }
     }, 200);
   }, []);
@@ -4982,9 +5293,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       order: baseOrder + i + 1,
       createdAt: nowTs,
       side: "right" as const,
-      source: "web" as const,
+      source: entry.excelField ? ("excel" as const) : ("web" as const),
       selector: entry.selector!,
-      label: `${isEntryStep ? "录入" : "审查"} · ${entry.label || entry.selector} ← 固定值「${entry.text}」`,
+      label: entry.excelField
+        ? `${isEntryStep ? "录入" : "审查"} · ${entry.label || entry.selector} ← Excel「${entry.excelField}」`
+        : `${isEntryStep ? "录入" : "审查"} · ${entry.label || entry.selector} ← 固定值「${entry.text}」`,
       value: entry.text,
       workflow: stepType,
       action: (isEntryStep ? "input" : "pick") as "input" | "pick",
@@ -4993,6 +5306,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       type: "",
       inputTarget: isEntryStep ? entry.selector : undefined,
       inputTargetLabel: isEntryStep ? (entry.label || entry.selector) : undefined,
+      // 绑定 Excel 列：LOOP 运行时按当前卡片行的该列取值（executeMark 变量替换）
+      variableField: isEntryStep && entry.excelField ? entry.excelField : undefined,
+      excelField: entry.excelField || undefined,
     }));
     // 收尾点击重新编号到新步骤之后（保持彼此相对顺序）
     const renumberedPosts = postMarks.map((m, j) => ({ ...m, order: baseOrder + extraMarks.length + j + 1 }));
@@ -5001,9 +5317,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       right_selector: entry.selector!,
       right_label: entry.label || entry.selector!,
       right_input_type: entry.type || null,
-      left_source: "manual",
-      left_field: entry.text,
+      left_source: entry.excelField ? "excel" : "manual",
+      left_field: entry.excelField || entry.text,
       verify_method: "smart",
+      web_side: entry.side || "right",
     }));
     return { extraMarks, pendingEntries, marksWithExtras, pendingMappings };
   }, [customTextEntries, pickedMarks, selected]);
@@ -5136,10 +5453,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       reviewMarks,
       entryMarks,
       mappings: tplMappings.length > 0 ? tplMappings : undefined,
+      // 提取元素面板条目随模板保存：分享密钥/应用模板后完整复现（含 Excel 列绑定）
+      customTextEntries: customTextEntries.length > 0 ? customTextEntries : undefined,
       hasSearchSteps,
       hasSubmitStep,
     };
-  }, [pickedMarks, selected, appMode, mappings]);
+  }, [pickedMarks, selected, appMode, mappings, customTextEntries]);
 
   const handleSaveSkill = useCallback((name: string, icon: string, runAfter?: boolean) => {
     // 自动收纳「提取元素」面板中已配置但未保存的条目（FIFO，插在收尾点击之前），确保保存的 LOOP 模板包含全部步骤
@@ -5238,6 +5557,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 恢复字段映射
     if (tpl.mappings && tpl.mappings.length > 0) {
       setMappings(tpl.mappings);
+    }
+    // 恢复提取元素面板条目（自定义文本 + 文件提取字段，含 Excel 列绑定）
+    if (tpl.customTextEntries && tpl.customTextEntries.length > 0) {
+      setCustomTextEntries(tpl.customTextEntries);
     }
     // 同步当前工作模板引用（便于后续保存/运行）
     setWorkflowTemplate(tpl);
@@ -5670,18 +5993,55 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 步骤1：更新UI状态为扫描中
     setDocWebStatus({ phase: "fallback-scanning", message: "保底机制：回退页面并扫描可下载文件..." });
 
+    // 读取当前页面URL（用于空白页检测）
+    const readCurrentUrl = async (): Promise<string> => {
+      try {
+        const res = await window.electronAPI?.viewExecuteJS(side, "location.href");
+        return typeof res === "string" ? res : "";
+      } catch { return ""; }
+    };
+    let backedCount = 0; // 成功回退次数（失败时按此前进恢复，防止网页停在白屏）
+    // 前进一步（viewGoForward 可能不存在于旧版本，做了防御）
+    const goForwardOnce = async (): Promise<boolean> => {
+      try {
+        const res = await window.electronAPI?.viewGoForward?.(side);
+        return !!res?.ok;
+      } catch { return false; }
+    };
+    // 回退一步；若退成空白页（about:blank/chrome-error）则立即前进一步恢复并停止回退
+    const goBackGuarded = async (settleMs: number): Promise<boolean> => {
+      try {
+        const res = await window.electronAPI?.viewGoBack(side);
+        if (!res?.ok) return false;
+        backedCount++;
+        await new Promise(r => setTimeout(r, settleMs));
+        const url = await readCurrentUrl();
+        if (!url || url === "about:blank" || url.startsWith("chrome-error")) {
+          rlog(`[fallback] 回退到空白页(${url || "empty"})，前进一步恢复并停止回退`);
+          await goForwardOnce();
+          backedCount = Math.max(0, backedCount - 1);
+          await new Promise(r => setTimeout(r, 600));
+          return false;
+        }
+        return true;
+      } catch { return false; }
+    };
+    // 保底失败时：按回退步数前进恢复页面，避免网页停留在白屏导致后续步骤全挂
+    const restorePage = async () => {
+      rlog(`[fallback] 保底失败，前进恢复页面（回退了 ${backedCount} 步）`);
+      for (let i = 0; i < backedCount; i++) {
+        if (!(await goForwardOnce())) break;
+        await new Promise(r => setTimeout(r, 400));
+      }
+      backedCount = 0;
+    };
+
     // 步骤2：回退页面（回到开头点击之前的页面）
     // 注意：不是所有click都会导致页面跳转，所以回退步数是近似值
     // 采用策略：先回退preClickCount步，然后逐步额外回退直到找到下载链接或到上限
     let goBackSteps = Math.min(Math.max(preClickCount, 1), 8);
     for (let i = 0; i < goBackSteps; i++) {
-      try {
-        const res = await window.electronAPI?.viewGoBack(side);
-        if (!res?.ok) break;
-        await new Promise(r => setTimeout(r, 500));
-      } catch (e) {
-        break;
-      }
+      if (!(await goBackGuarded(500))) break;
     }
     // 等待页面稳定
     await new Promise(r => setTimeout(r, 1500));
@@ -5697,9 +6057,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       // 如果链接太少，继续往前回退扫描（最多额外回退4页）
       let extraBack = 0;
       while (allLinks.length < 2 && extraBack < 4) {
-        const backRes = await window.electronAPI?.viewGoBack(side);
-        if (!backRes?.ok) break;
-        await new Promise(r => setTimeout(r, 800));
+        if (!(await goBackGuarded(800))) break;
         linksResult = await window.electronAPI?.viewGetDownloadableLinks(side);
         if (linksResult?.ok && linksResult.links) {
           allLinks = allLinks.concat(linksResult.links);
@@ -5723,6 +6081,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
     if (uniqueLinks.length === 0) {
       setDocWebStatus({ phase: "error", message: "保底机制：未找到任何可下载文件" });
+      await restorePage();
       throw new Error("保底机制失败：未找到任何可下载文件");
     }
 
@@ -5733,6 +6092,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     
     if (!downloadResult?.ok || !downloadResult.files || downloadResult.files.length === 0) {
       setDocWebStatus({ phase: "error", message: "保底机制：所有文件下载失败" });
+      await restorePage();
       throw new Error("保底机制失败：所有文件下载失败");
     }
 
@@ -5756,6 +6116,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     if (filenameMatches.length === 1) {
       // 精确匹配到一个文件，直接使用（不设置success状态，由后续OCR流程设置）
       rlog(`[fallback] 文件名精确匹配: ${filenameMatches[0].filename}`);
+      // 关键：保底成功也要把页面前进恢复回原页面，否则 LOOP 停留在回退后的页面（白屏/列表页），后续收尾点击全部找不到元素
+      await restorePage();
+      await new Promise(r => setTimeout(r, 800));
       return filenameMatches[0];
     } else if (filenameMatches.length > 1) {
       // 多个文件名匹配，无法确定哪个是正确的，进入人工审查
@@ -5773,12 +6136,18 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       if (isMatch) {
         rlog(`[fallback] OCR内容匹配: ${f.filename}`);
         filesWithMatch.find(fwm => fwm.filename === f.filename)!.matched = true;
+        // 同样：成功匹配后先前进恢复页面再返回
+        await restorePage();
+        await new Promise(r => setTimeout(r, 800));
         return f;
       }
     }
 
     // 步骤6：所有自动匹配都失败，进入人工审查模式
     rlog(`[fallback] 自动匹配失败，进入人工审查模式，共 ${files.length} 个文件`);
+    // 人工审查前也先把页面前进恢复原页面（审查 UI 是 HTML 浮层，不依赖被回退的页面）
+    await restorePage();
+    await new Promise(r => setTimeout(r, 800));
     const reviewFiles = filesWithMatch.map((f, idx) => ({ ...f, selected: idx === 0 }));
     setDocWebStatus({
       phase: "fallback-review",
@@ -5833,6 +6202,77 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     return fileData;
   }, []);
 
+  // ============ LOOP 执行期 OCR：UMI-OCR 提取不到保存步骤所需字段时，自动转 AI Vision 重试 ============
+  // 仍以 UMI 结果为主，Vision 仅补齐缺失字段；两引擎都提取不到则提示步骤设置可能有问题
+  const extractFileWithVisionFallback = useCallback(async (file: File, targetFields: string[]) => {
+    const result = await api.extractDocumentFile(file, targetFields);
+    if ((settings.ocr_engine || "vision") !== "umi") return result;
+    const fields = (result.fields || {}) as Record<string, string>;
+    const missing = targetFields.filter((f) => !String(fields[f] ?? "").trim());
+    if (missing.length === 0) return result;
+    rlog(`[OCR] UMI-OCR 未提取到 ${missing.length} 个保存步骤的目标字段（${missing.join("、")}），自动转 AI Vision 重试…`);
+    try {
+      const alt = await api.extractDocumentFile(file, targetFields, "vision");
+      const altFields = (alt.fields || {}) as Record<string, string>;
+      const merged: Record<string, string> = { ...fields };
+      for (const f of missing) {
+        const v = String(altFields[f] ?? "").trim();
+        if (v) merged[f] = altFields[f];
+      }
+      const stillMissing = missing.filter((f) => !String(merged[f] ?? "").trim());
+      if (stillMissing.length === 0) {
+        rlog(`[OCR] AI Vision 补齐成功（${missing.join("、")}）`);
+      } else {
+        rlog(`[OCR] AI Vision 仍未提取到：${stillMissing.join("、")} —— 步骤设置可能有问题，请检查保存的提取字段`);
+      }
+      return {
+        ...alt,
+        fields: merged,
+        text: `${result.text || ""}\n${alt.text || ""}`.trim(),
+        processed_image: alt.processed_image || result.processed_image,
+        fallback: { from: result.method || "umi_ocr", to: alt.method || "vision_ocr", reason: "UMI-OCR 缺目标字段，自动转 AI Vision 补齐" },
+      };
+    } catch (e) {
+      rlog(`[OCR] AI Vision 重试失败: ${e instanceof Error ? e.message : String(e)} —— 步骤设置可能有问题，请检查保存的提取字段`);
+      return result;
+    }
+  }, [settings.ocr_engine]);
+
+  /** URL 版：同上逻辑，用于网页直提 */
+  const extractUrlWithVisionFallback = useCallback(async (url: string, targetFields: string[], filename: string) => {
+    const result = await api.extractDocumentUrl(url, targetFields, filename);
+    if ((settings.ocr_engine || "vision") !== "umi") return result;
+    const fields = (result.fields || {}) as Record<string, string>;
+    const missing = targetFields.filter((f) => !String(fields[f] ?? "").trim());
+    if (missing.length === 0) return result;
+    rlog(`[OCR] UMI-OCR 未提取到 ${missing.length} 个保存步骤的目标字段（${missing.join("、")}），自动转 AI Vision 重试…`);
+    try {
+      const alt = await api.extractDocumentUrl(url, targetFields, filename, "vision");
+      const altFields = (alt.fields || {}) as Record<string, string>;
+      const merged: Record<string, string> = { ...fields };
+      for (const f of missing) {
+        const v = String(altFields[f] ?? "").trim();
+        if (v) merged[f] = altFields[f];
+      }
+      const stillMissing = missing.filter((f) => !String(merged[f] ?? "").trim());
+      if (stillMissing.length > 0) {
+        rlog(`[OCR] AI Vision 仍未提取到：${stillMissing.join("、")} —— 步骤设置可能有问题，请检查保存的提取字段`);
+      } else {
+        rlog(`[OCR] AI Vision 补齐成功（${missing.join("、")}）`);
+      }
+      return {
+        ...alt,
+        fields: merged,
+        text: `${result.text || ""}\n${alt.text || ""}`.trim(),
+        processed_image: alt.processed_image || result.processed_image,
+        fallback: { from: result.method || "umi_ocr", to: alt.method || "vision_ocr", reason: "UMI-OCR 缺目标字段，自动转 AI Vision 补齐" },
+      };
+    } catch (e) {
+      rlog(`[OCR] AI Vision 重试失败: ${e instanceof Error ? e.message : String(e)} —— 步骤设置可能有问题，请检查保存的提取字段`);
+      return result;
+    }
+  }, [settings.ocr_engine]);
+
   // ============ 在单个 view 上执行一个 mark（带变量替换） ============
   const executeMark = useCallback(async (
     mark: PickedMark,
@@ -5843,6 +6283,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       return;
     }
     const side: ViewSide = mark.side === "left" ? "left" : "right";
+    // 文件处理按钮记录步骤：仅作流程展示，配置阶段已生效，执行时直接跳过
+    if (mark.fileOp) {
+      rlog(`[executeMark] 文件处理记录步骤（no-op）: ${mark.label}`);
+      return;
+    }
     // 弹窗内元素：JS 执行路由到弹窗 BrowserView（弹窗由前序点击步骤打开）
     const inPopup = !!mark.inPopup;
     const execJS = (script: string) => inPopup
@@ -6088,28 +6533,31 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           // 3.5 存入运行时文件槽位（供后续上传步骤取文件）
           docRuntimeFileSlotsRef.current[mark.id] = { dataUrl: readResult.dataUrl, filename: readResult.filename || "local-doc" };
           lastDocRuntimeFileRef.current = { dataUrl: readResult.dataUrl, filename: readResult.filename || "local-doc", markId: mark.id };
-          // 4. 调 OCR 提取（后端会自动做图像预处理：EXIF 旋转 + 裁白边）
+          // 4. 调 OCR 提取（后端会自动做图像预处理：EXIF 旋转 + 裁白边 + AI 转正放大）
           const file = dataUrlToFile(readResult.dataUrl, readResult.filename || "local-doc");
           const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
           const targetFields = mappedFields.length > 0
             ? mappedFields
             : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender", "passport_issue", "issue_authority"];
           try {
-            const result = await api.extractDocumentFile(file, targetFields);
-            setDocExtractPanel({
-              imageUrl: toPreviewImageUrl(readResult.dataUrl, result.processed_image),
-              filename: result.filename,
-              method: result.method,
-              text: result.text,
-              fields: result.fields,
-              side,
-              workflow: side === "left" ? "entry" : "review",
-              fallback: result.fallback,
-              sourceDataUrl: readResult.dataUrl,
-              targetFields,
-              altResult: null,
-            });
-            setDocExtractActiveTab("primary");
+            const result = await extractFileWithVisionFallback(file, targetFields);
+            // LOOP 运行期不弹浮动审查面板（停止后会残留飘出）
+            if (!isAnyRunningRef.current) {
+              setDocExtractPanel({
+                imageUrl: toPreviewImageUrl(readResult.dataUrl, result.processed_image),
+                filename: result.filename,
+                method: result.method,
+                text: result.text,
+                fields: result.fields,
+                side,
+                workflow: side === "left" ? "entry" : "review",
+                fallback: result.fallback,
+                sourceDataUrl: readResult.dataUrl,
+                targetFields,
+                altResult: null,
+              });
+              setDocExtractActiveTab("primary");
+            }
           } catch (e) {
             rlog(`[executeMark] 本地文件 OCR 失败: ${e instanceof Error ? e.message : String(e)}`);
           }
@@ -6120,6 +6568,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           console.log(`[executeMark] DOC-DOWNLOAD side=${side}, selector=${mark.selector}`);
           // 1. 开启下载捕获
           await window.electronAPI.setDownloadCapture(side, true);
+          // 1.5 关键：点击前先注册下载完成监听。下载可能在几百毫秒内完成，
+          // 若等 grabDirectPreviewFile 的 1.5s 检测完再注册，会错过 download-captured 事件
+          // → 白等30s超时 → 误触保底机制连续回退页面 → 网页白屏
+          const downloadPromise = waitForDownload(side, 30000);
+          // 直览页场景会放弃等待该 Promise，提前挂静默 catch 避免未处理拒绝
+          downloadPromise.catch(() => {});
           // 2. 真实点击触发下载
           let clickResult = await performRealClick(side, mark.selector, inPopup);
           if (clickResult && typeof clickResult === "object" && "ok" in clickResult && clickResult.ok === false) {
@@ -6163,26 +6617,51 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             // 2. 后台启动完整OCR提取（同时进行）
             setDocWebStatus({ phase: "ocr", filename: fileData.filename });
             rlog(`[executeMark] 预览已开启，后台开始OCR: ${fileData.filename}`);
-            const result = await api.extractDocumentFile(file, targetFields);
+            const result = await extractFileWithVisionFallback(file, targetFields);
 
             // 3. 缓存OCR结果（供triggerWebExtract复用，避免重复提取；记录引擎以便切换引擎后缓存失效）
             bgOcrResultRef.current = { dataUrl: fileData.dataUrl, engine: settings.ocr_engine || "vision", result };
 
-            // 4. 设置提取面板（OCR结果就绪）
-            setDocExtractPanel({
-              imageUrl: toPreviewImageUrl(fileData.dataUrl, result.processed_image),
+            // 3.5 同步写入 docExtractsByRecord，让文件处理面板和提取元素面板实时显示
+            //（LOOP运行期间不弹浮动审查面板，但下方面板要能看到内容）
+            const newExtract: DocExtractState = {
               filename: result.filename,
               method: result.method,
               text: result.text,
               fields: result.fields,
-              side,
-              workflow: side === "left" ? "entry" : "review",
+              entries: [],
+              source: fileData.dataUrl,
+              file_url: fileData.dataUrl,
+              processed_image: result.processed_image,
+              mrz_warnings: result.mrz_warnings,
               fallback: result.fallback,
-              sourceDataUrl: fileData.dataUrl,
-              targetFields,
-              altResult: null,
+            };
+            const rid = record?.record_id || selected?.record_id || "_default";
+            setDocExtractsByRecord((prev) => {
+              const arr = prev[rid] || [];
+              const filtered = arr.filter((e) => e.file_url !== newExtract.file_url);
+              return { ...prev, [rid]: [...filtered, newExtract] };
             });
-            setDocExtractActiveTab("primary");
+            setActiveDocIndex(999);
+            setDocSignal((s) => s + 1);
+
+            // 4. 设置提取面板（OCR结果就绪，非运行期才弹浮动审查面板）
+            if (!isAnyRunningRef.current) {
+              setDocExtractPanel({
+                imageUrl: toPreviewImageUrl(fileData.dataUrl, result.processed_image),
+                filename: result.filename,
+                method: result.method,
+                text: result.text,
+                fields: result.fields,
+                side,
+                workflow: side === "left" ? "entry" : "review",
+                fallback: result.fallback,
+                sourceDataUrl: fileData.dataUrl,
+                targetFields,
+                altResult: null,
+              });
+              setDocExtractActiveTab("primary");
+            }
             setDocWebStatus({ phase: "success", filename: result.filename, size: fileData.size });
             return result.text || "";
           };
@@ -6253,7 +6732,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               window.electronAPI?.setDownloadCapture(side, false).catch(() => {});
               return;
             }
-            downloadData = await waitForDownload(side, 30000);
+            downloadData = await downloadPromise;
             rlog(`[executeMark] 下载完成: ${downloadData.filename} (${downloadData.size} bytes)`);
             // 4. 立即开预览 + 后台OCR提取
             const ocrText = await showPreviewAndBgOcr(downloadData);
@@ -6312,8 +6791,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         const targetFields = mappedFields.length > 0
           ? mappedFields
           : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender", "passport_issue", "issue_authority"];
-        api.extractDocumentUrl(docUrl, targetFields)
+        extractUrlWithVisionFallback(docUrl, targetFields, urlName)
           .then((result) => {
+            // LOOP 运行期不设置浮动审查面板状态（否则停止后面板会残留飘出）
+            if (isAnyRunningRef.current) return;
             setDocExtractPanel({
               imageUrl: toPreviewImageUrl(docUrl, result.processed_image),
               filename: result.filename,
@@ -6428,12 +6909,14 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     for (let fi = 0; fi < effectiveMappings.length; fi++) {
       if (batchStopRef.current) break;
       const mp = effectiveMappings[fi];
+      // 网页侧来源：目标元素所在面板侧（右侧Excel作数据源时为 left）
+      const webSide: "left" | "right" = mp.web_side || "right";
       // 更新当前审查字段索引（触发UI光标移动）
       setVerifyFieldIdx(fi);
 
-      // 1. 先pending高亮当前字段（右侧目标元素）
+      // 1. 先pending高亮当前字段（目标网页元素）
       const pendingLabel = `${mp.right_label || mp.left_field}：比对中…`;
-      window.electronAPI?.viewHighlightBoxes("right", [{
+      window.electronAPI?.viewHighlightBoxes(webSide, [{
         selector: mp.right_selector,
         status: "pending",
         label: pendingLabel,
@@ -6478,14 +6961,14 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       try {
         if (mp.widget) {
           // 控件映射：读触发框显示值（选项控件额外找面板选中态）
-          const readSide = mp.widget.side || "right";
+          const readSide = mp.widget.side || webSide;
           const result = await window.electronAPI.viewExecuteJS(readSide, buildWidgetReadScript(mp.widget)) as WidgetReadResult | null;
           if (result && typeof result === "object" && result.found) {
             rightFound = true;
             websiteValue = result.value || "";
           }
         } else {
-          const result = await window.electronAPI.viewExecuteJS("right", makeReadScript(mp.right_selector)) as { found: boolean; value: string } | null;
+          const result = await window.electronAPI.viewExecuteJS(webSide, makeReadScript(mp.right_selector)) as { found: boolean; value: string } | null;
           if (result && typeof result === "object" && result.found) {
             rightFound = true;
             websiteValue = result.value || "";
@@ -6532,7 +7015,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       // 2. 用结果颜色高亮当前字段（match=绿, mismatch=红, missing=黄灰）
       const resultStatus = match === "match" ? "match" : match === "mismatch" ? "mismatch" : "missing";
       const resultLabel = `${mp.right_label || mp.left_field}: ${wv || "—"}${match === "match" ? " ✓" : match === "mismatch" ? " ✗" : " ?"}`;
-      window.electronAPI?.viewHighlightBoxes("right", [{
+      window.electronAPI?.viewHighlightBoxes(webSide, [{
         selector: mp.right_selector,
         status: resultStatus,
         label: resultLabel,
@@ -6581,7 +7064,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     record: ApplicantRecord,
     recordIndex: number,
     onStepStart?: (recordIndex: number, mark: PickedMark) => void,
-    options?: { wrapWithVerify?: boolean; skipSubmit?: boolean; preOnly?: boolean; postThenPre?: boolean; entryReview?: boolean }
+    options?: { wrapWithVerify?: boolean; skipSubmit?: boolean; preOnly?: boolean; postThenPre?: boolean; entryReview?: boolean; onStepFail?: (recordIndex: number, mark: PickedMark, error: string) => void }
   ): Promise<{ success: boolean; failedOrder?: number; error?: string; comparisons?: FieldComparison[]; verifyOverall?: "match" | "mismatch" }> => {
     // 根据模板模式选择执行哪一段 marks
     // - entry 模式：只执行录入流（填表+提交）
@@ -6781,6 +7264,14 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e);
         rlog(`[batch] 第 ${recordIndex + 1} 行步骤 ${mark.order} 失败:`, e);
+        // 步骤行标记为失败（onStepStart 时已乐观打勾，这里纠正为失败态）
+        options?.onStepFail?.(recordIndex, mark, errMsg);
+        // 收尾点击是清理动作（关弹窗/回主页），失败不中断本记录剩余步骤——
+        // 否则"回到主页"还没跑记录就结束了，页面残留在详情页
+        if (mark.action === "click" && (mark.clickPhase === "post" || mark.docExtractClick)) {
+          rlog(`[batch] 第 ${recordIndex + 1} 行收尾点击失败，继续执行剩余收尾步骤: ${errMsg}`);
+          continue;
+        }
         // 条件断点：步骤执行出错时暂停，让人工干预后继续（而非直接失败返回）
         if (mark.breakpoint === "on-error") {
           const markLabel = mark.label || `步骤${mark.order}`;
@@ -6809,7 +7300,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     let comparisons: FieldComparison[] = [];
     let verifyOverall: "match" | "mismatch" = "match";
     if (options?.wrapWithVerify) {
-      const cmp = await compareFieldsForRecord(record, recordIndex, tpl.mappings);
+      // 模板未保存 mappings 时从审查 marks 兜底推导，保证字段对比有数据
+      const cmp = await compareFieldsForRecord(record, recordIndex, getTemplateMappings(tpl));
       comparisons = cmp.comparisons;
       verifyOverall = cmp.overall;
       // 条件断点：字段比对发现不匹配，且本次执行的 marks 中有 on-error 断点
@@ -6865,6 +7357,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setLoopReports([]);
     setVerifyStatus("idle");
     setResult(null);
+    // 清掉教学期残留的文件提取浮动面板，防止运行结束后残留飘出
+    setDocExtractPanel(null);
     // 重置执行阶段状态
     setExecPhase("idle");
     setVerifyFieldIdx(-1);
@@ -6915,6 +7409,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       : tpl.mode === "review"
       ? [...tpl.dataSourceMarks, ...tpl.reviewMarks]
       : [...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks];
+    // 回填本次 LOOP 的步骤与字段映射到会话面板：运行已保存 LOOP 时，
+    // 「字段对比」区域的步骤条和审查字段列表也能看到内容（否则面板空跑）
+    setPickedMarks(execMarks);
+    setMappings(getTemplateMappings(tpl));
     // 只重置右侧网页（目标网站），不重置左侧网页（数据源），
     // 避免左侧网页侧边栏等状态因重新加载而丢失。
     // 录入步骤从左网页读取值时也不重置左侧（左网页状态由用户控制）。
@@ -6964,6 +7462,22 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           timestamp: new Date().toISOString(),
         },
       ]);
+    };
+
+    const onStepFail = (recordIndex: number, mark: PickedMark, error: string) => {
+      // 找到该步骤对应的行（从后往前找该记录内最后一条匹配），把乐观的绿勾纠正为失败红叉
+      const prefix = `LOOP [${recordIndex + 1}/${targets.length}] 步骤 ${mark.order}:`;
+      setSteps((prev) => {
+        for (let k = prev.length - 1; k >= 0; k--) {
+          const s = prev[k];
+          if (s.description?.startsWith(prefix)) {
+            const next = [...prev];
+            next[k] = { ...s, success: false, detail: error };
+            return next;
+          }
+        }
+        return prev;
+      });
     };
 
     try {
@@ -7036,6 +7550,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
         const result = await executeTemplateForRecord(tpl, record, i, onStepStart, {
           wrapWithVerify: hasReviewSteps,
+          onStepFail,
         });
 
         const recordName = record.fields.name || record.record_id;
@@ -7330,6 +7845,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
         // 2. 批量执行该组所有卡片（复用现有 executeTemplateForRecord 逻辑）
         const targets = task.cardRecords;
+        // 回填该任务 LOOP 的步骤与字段映射到会话面板（字段对比区域可见）
+        setPickedMarks([...task.workflowTemplate.dataSourceMarks, ...task.workflowTemplate.reviewMarks, ...task.workflowTemplate.entryMarks]);
+        setMappings(getTemplateMappings(task.workflowTemplate));
+        setDocExtractPanel(null);
         breakpointTotalRef.current = targets.length;
         let successCount = 0;
         let failCount = 0;
@@ -7628,7 +8147,6 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   /** 选择本地文件（图片/PDF/Office）→ 提取字段 → 弹出审核弹窗 */
   const handleDocFilePick = useCallback(
     async (file: File) => {
-      setDocFileExtracting(true);
       setError(null);
       try {
         const targetFields = Array.from(
@@ -7646,8 +8164,6 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         setError(`文件提取失败: ${msg}`);
-      } finally {
-        setDocFileExtracting(false);
       }
     },
     [mappings, setError]
@@ -7736,6 +8252,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         // 确保使用的模板持久化保存
         lastTemplateRef.current = tpl;
       }
+      // 回填模板步骤/映射到会话面板（单卡查看时字段对比区域也能看到该 LOOP 的配置）
+      setPickedMarks([...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks]);
+      setMappings(getTemplateMappings(tpl));
+      setDocExtractPanel(null);
       if (batchRunning || singleRunning) return;
       // 从 cardPool 查找记录（cardPool 包含所有已生成的卡片，records 在重新导入 Excel 时会被替换）
       const recordIndex = cardPool.findIndex((r) => r.record_id === recordId);
@@ -8688,7 +9208,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const currentPendingAction = pendingActionRef.current;
     const currentPendingInputValue = pendingInputValueRef.current;
     const currentBindInputSide = bindInputSideRef.current;
-    const currentExcelCol = selectedExcelColumnRef.current;
+    const currentExcelCol = selectedExcelColumnRef.current || rightSelectedColumnRef.current;
     rlog("[onRightPicked]", { tag: info.tag, selector: info.selector, bindSide: currentBindInputSide, excelCol: currentExcelCol, pendingAction: currentPendingAction });
     // 记录拾取来源（弹窗/主 view），addPickedMark 据此打 inPopup 标记
     pickFromPopupRef.current.right = !!info.fromPopup;
@@ -9049,6 +9569,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
     // 普通映射流程：记录右侧拾取标记
     setRightPicked(info);
+    rightPickedSideRef.current = "right";
     // 审查模式（先右后左）：右侧拾取完成后切到左侧拾取来源；录入模式（先左后右）：两侧已完成，等待保存
     setPickTarget(currentLoopStepTypeRef.current === "review" ? "left" : null);
     // 录入/映射流程：点击右侧输入框时立即填入来源字段值（优先）或 Excel 列值
@@ -9096,7 +9617,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const currentPendingAction = pendingActionRef.current;
     const currentInputTarget = inputTargetRef.current;
     const currentBindInputSide = bindInputSideRef.current;
-    const currentExcelCol = selectedExcelColumnRef.current;
+    const currentExcelCol = selectedExcelColumnRef.current || rightSelectedColumnRef.current;
     rlog("[onLeftPicked]", { tag: info.tag, selector: info.selector, bindSide: currentBindInputSide, excelCol: currentExcelCol, pendingAction: currentPendingAction });
     // 记录拾取来源（弹窗/主 view），addPickedMark 据此打 inPopup 标记
     pickFromPopupRef.current.left = !!info.fromPopup;
@@ -9291,7 +9812,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const isInputLike = /^(input|textarea|select)$/i.test(info.tag || "") || !!info.isContentEditable || /^(text|search|email|tel|url|number|password)$/i.test(info.type || "");
     // 录入流来源字段：点击非输入字段时捕获其值，供之后点击输入框时复制填入
     // 非输入元素（表格单元格等）的 value 为空，文本在 info.text 中，需取 value || text
-    if (!isInputLike && (info.value || info.text)) {
+    // ⚠️ 绑定模式下不捕获：此时点按钮/链接是记录真实点击步骤，若捕获其文字，
+    //    下一次点输入框会把按钮文字（如"搜索"）当成来源值填入，覆盖 Excel 字段值
+    if (!currentBindInputSide && !isInputLike && (info.value || info.text)) {
       sourceFieldValueRef.current = String(info.value || info.text).trim();
       sourceFieldLabelRef.current = info.label || info.selector || "";
     }
@@ -9445,7 +9968,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     }
 
 // 普通映射流程：记录左侧拾取标记
+// 右侧 Excel 数据源模式：左网页是学校系统（比对目标），占 rightPicked 槽位
+if (rightExcelModeRef.current) {
+setRightPicked(info);
+rightPickedSideRef.current = "left";
+} else {
 setLeftPicked(info);
+}
 // 录入流来源字段：第一次点击网页字段时捕获其值，供之后点击输入框时复制填入
 // 非输入元素（表格单元格等）的 value 为空，文本在 info.text 中，需取 value || text
 if (info.value || info.text) {
@@ -9453,7 +9982,12 @@ if (info.value || info.text) {
   sourceFieldLabelRef.current = info.label || info.selector || "";
 }
 // 审查模式（先右后左）：两侧已完成，等待保存；录入模式（先左后右）：左源拾取完成后继续拾取右侧元素
-setPickTarget(currentLoopStepTypeRef.current === "entry" ? "right" : null);
+// 右侧 Excel 模式：审查=继续点右侧 Excel 来源字段；录入=两侧完成
+setPickTarget(
+  rightExcelModeRef.current
+    ? (currentLoopStepTypeRef.current === "entry" ? null : "right")
+    : (currentLoopStepTypeRef.current === "entry" ? "right" : null)
+);
 // addingStepMode 下不添加 pick mark，保存映射时才添加 input mark
 if (!addingStepModeRef.current) {
 addPickedMark({
@@ -9509,9 +10043,12 @@ type: info.type,
   }, []);
 
   const saveMapping = (m: FieldMapping) => {
+    // 网页侧来源：显式传入优先；否则跟随本轮 rightPicked 槽位元素的实际所在侧
+    const webSide: "left" | "right" = m.web_side ?? rightPickedSideRef.current ?? "right";
+    const mappingToSave: FieldMapping = { ...m, web_side: webSide };
     setMappings((prev) => [
       ...prev.filter((x) => x.right_selector !== m.right_selector),
-      m,
+      mappingToSave,
     ]);
     // 如果正在添加审查/录入步骤，把映射转化为 pickedMark
     const stepType = currentLoopStepTypeRef.current;
@@ -9525,7 +10062,7 @@ type: info.type,
       // label中的来源描述
       const sourceLabel = isExcelSource ? "Excel" : isManualSource ? "固定值" : isPassportSource ? "护照提取" : "左网页";
       addPickedMark({
-        side: "right",
+        side: webSide,
         source: isExcelSource ? "excel" : isPassportSource ? "passport" : "web",
         selector: m.right_selector,
         label: `${stepType === "review" ? "审查" : "录入"} · ${m.right_label || m.right_selector} ← ${sourceLabel}「${isManualSource ? (selected?.fields?.[m.left_field] || m.left_field) : m.left_field}」`,
@@ -9549,26 +10086,31 @@ type: info.type,
     }
     // 控件映射从面板保存，不进入下一轮拾取（用户未处于拾取流程）
     if (m.widget) return;
-    // 重置一轮，继续拾取下一个（审查模式回到右侧核对元素，录入模式回到左侧来源）
+    // 重置一轮，继续拾取下一个（审查模式回到核对元素侧，录入模式回到来源侧）
     setRightPicked(null);
     setLeftPicked(null);
-    const nextTarget = currentLoopStepTypeRef.current === "entry" ? "left" : "right";
-    setPickTarget(nextTarget as PickTarget);
+    rightPickedSideRef.current = "right";
+    // 标准：审查→右网页目标 / 录入→左侧来源；右侧Excel模式：审查→左网页目标 / 录入→右侧Excel来源
+    const nextTarget: PickTarget = rightExcelModeRef.current
+      ? (currentLoopStepTypeRef.current === "entry" ? "right" : "left")
+      : (currentLoopStepTypeRef.current === "entry" ? "left" : "right");
+    setPickTarget(nextTarget);
     setTimeout(() => {
+      // 只在对应侧显示网页时才启动 webview 拾取（显示 Excel 时靠单元格点击拾取）
       if (nextTarget === "left") {
         window.electronAPI?.viewStopPicking("right").catch(() => {});
-        window.electronAPI?.viewStartPicking("left");
+        if (leftViewMode === "web") window.electronAPI?.viewStartPicking("left");
       } else {
         window.electronAPI?.viewStopPicking("left").catch(() => {});
-        window.electronAPI?.viewStartPicking("right");
+        if (rightViewMode === "web") window.electronAPI?.viewStartPicking("right");
       }
     }, 200);
-    // 给右侧被选元素加个临时高亮提示已保存
+    // 给被选网页元素加个临时高亮提示已保存
     if (window.electronAPI) {
-      window.electronAPI.viewHighlightBoxes("right", [
+      window.electronAPI.viewHighlightBoxes(webSide, [
         { selector: m.right_selector, status: "pending", label: m.right_label || "已映射" },
       ]);
-      setTimeout(() => window.electronAPI?.viewClearHighlight("right"), 1200);
+      setTimeout(() => window.electronAPI?.viewClearHighlight(webSide), 1200);
     }
   };
 
@@ -9593,6 +10135,7 @@ type: info.type,
             : "database",
           left_field: leftPicked?.selector || "",
           verify_method: undefined,
+          web_side: rightPickedSideRef.current,
         });
       };
     } else {
@@ -9614,10 +10157,10 @@ type: info.type,
       if (mark) removePickedMark(mark.id);
       return;
     }
-    // doc: 文件提取步骤（pickedMark）/ 文件字段（customTextEntry）
+    // doc: 文件提取步骤/文件处理记录（pickedMark）/ 文件字段（customTextEntry）
     // custom: 自定义文本（customTextEntry）
-    // 先尝试删除 pickedMark（文件提取步骤 id 来自 mark.id）
-    const mark = pickedMarksRef.current.find((mk) => mk.id === id && mk.docExtract);
+    // 先尝试删除 pickedMark（文件提取/文件处理步骤 id 来自 mark.id）
+    const mark = pickedMarksRef.current.find((mk) => mk.id === id && (mk.docExtract || mk.fileOp));
     if (mark) {
       removePickedMark(id);
       return;
@@ -10818,6 +11361,15 @@ type: info.type,
     const currentPendingAction = pendingActionRef.current;
     const currentInputTarget = inputTargetRef.current;
     console.log("[onExcelPicked] 收到 Excel 点击", { info, currentPendingAction, currentInputTarget });
+    // 提取元素条目绑定态：点击的列绑定到该条目（LOOP 时按每张卡片该列取值）
+    if (excelBindEntryIdRef.current) {
+      const id = excelBindEntryIdRef.current;
+      setCustomTextEntries((prev) => prev.map((e) => (e.id === id ? { ...e, excelField: info.field } : e)));
+      setExcelBindEntryId(null);
+      excelBindEntryIdRef.current = null;
+      setSuccessToast(`已绑定 Excel 列「${info.field}」：跑 LOOP 时每张卡片取该行该列的值`);
+      return;
+    }
     // pendingAction=input：记录待填入的值，等用户按 Enter 时才真正填入网页框
     // 用户规定流程：S → 先点 Excel/网页取值 → 再点右侧输入框作为目标 → Enter 完成
     if (currentPendingAction === "input") {
@@ -10873,6 +11425,69 @@ type: info.type,
   };
   // 始终把最新版本的 onExcelPicked 写入 ref，供脱离 Excel 窗口的 IPC handler 调用
   onExcelPickedRef.current = onExcelPicked;
+
+  // 右侧 Excel 拾取：右侧 Excel 作为数据源（左网页=学校系统，为比对目标）。
+  // 与 onExcelPicked 对称：Excel 字段始终占 leftPicked 槽位（来源），区别仅在配对目标来自左网页。
+  const onRightExcelPicked = (info: ExcelPickedField) => {
+    const currentPendingAction = pendingActionRef.current;
+    console.log("[onRightExcelPicked] 收到右侧 Excel 点击", { info, currentPendingAction });
+    // 提取元素条目绑定态：点击的列绑定到该条目（LOOP 时按每张卡片该列取值）
+    if (excelBindEntryIdRef.current) {
+      const id = excelBindEntryIdRef.current;
+      setCustomTextEntries((prev) => prev.map((e) => (e.id === id ? { ...e, excelField: info.field } : e)));
+      setExcelBindEntryId(null);
+      excelBindEntryIdRef.current = null;
+      setSuccessToast(`已绑定 Excel 列「${info.field}」：跑 LOOP 时每张卡片取该行该列的值`);
+      return;
+    }
+    // S 输入模式：记录待填入的值，目标框在左网页
+    if (currentPendingAction === "input") {
+      const value = info.value || "";
+      setPendingInputValue(value);
+      pendingInputValueRef.current = value;
+      setPendingInputField(info.field);
+      pendingInputFieldRef.current = info.field;
+      setPickTarget("left");
+      if (leftViewMode === "web") {
+        window.electronAPI?.viewStartPicking("left");
+      }
+      return;
+    }
+    setLeftPicked({
+      selector: info.field,
+      label: info.field,
+      value: info.value,
+      tag: "excel-cell",
+      type: "text",
+      text: info.value,
+      rect: { x: 0, y: 0, width: 0, height: 0 },
+    });
+    if (info.value) {
+      sourceFieldValueRef.current = String(info.value).trim();
+      sourceFieldLabelRef.current = info.field || "";
+    }
+    // 录入流：来源确定后切到左网页选目标输入框；审查流：等待保存映射
+    const isEntry = addingStepModeRef.current === "entry" || currentLoopStepTypeRef.current === "entry";
+    setPickTarget(isEntry ? "left" : null);
+    if (isEntry && leftViewMode === "web") {
+      window.electronAPI?.viewStartPicking("left");
+    }
+    if (addingStepModeRef.current) return;
+    // 记录拾取标记（Excel 单元格，side=right 表示来自右侧 Excel）
+    addPickedMark({
+      side: "right",
+      source: "excel",
+      selector: info.field,
+      label: info.field,
+      value: info.value,
+      workflow: teachingPhase === "data-source" ? "data-source" : teachingPhase === "entry" ? "entry" : "review",
+      action: "pick",
+      recordId: selected?.record_id,
+      excelField: info.field,
+      excelRecordId: info.record_id,
+    });
+  };
+
   // 同理，把 onLeftPicked / onRightPicked 写入 ref，供脱离浏览器窗口的 IPC handler 调用
   onLeftPickedRef.current = onLeftPicked;
   onRightPickedRef.current = onRightPicked;
@@ -11463,14 +12078,14 @@ type: info.type,
       </div>
 
       {/* ============ 顶部工具栏 ============ */}
-      <header className="glass-frame z-20 flex shrink-0 items-center gap-2 border-b border-white/40 px-3 py-1">
+      <header className="z-20 flex shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-3 py-1">
         {/* SKILL 管理按钮 */}
         <button
           onClick={() => setShowSkillPanel(true)}
-          className="flex shrink-0 items-center gap-1 rounded-md bg-white/70 px-2 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-indigo-200 transition-all hover:bg-indigo-50 hover:text-slate-800"
+          className="flex shrink-0 items-center gap-1 rounded-md bg-white/70 px-2 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-slate-200 transition-all hover:bg-slate-100 hover:text-slate-900"
           title="查看已保存的 Loop 模板并执行"
         >
-          <Sparkles className="h-3 w-3 text-indigo-500" />
+          <Sparkles className="h-3 w-3 text-slate-400" />
           查看保存Loop
         </button>
 
@@ -11480,24 +12095,50 @@ type: info.type,
           className={[
             "flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium ring-1 transition-all",
             dockOpen
-              ? "bg-emerald-600 text-white ring-emerald-500 hover:bg-emerald-700"
-              : "bg-white/70 text-slate-700 ring-emerald-200 hover:bg-emerald-50 hover:text-slate-800",
+              ? "bg-slate-900 text-white ring-slate-900 hover:bg-slate-800"
+              : "bg-white/70 text-slate-700 ring-slate-200 hover:bg-slate-100 hover:text-slate-900",
           ].join(" ")}
           title="站外循环：在屏幕边缘挂一个悬浮条，设置「提取源」和「操作页」后 AI 自主循环填写；数据痕迹见下方「站外循环记录」"
         >
-          <Bot className={`h-3 w-3 ${dockOpen ? "" : "text-emerald-600"}`} />
+          <Bot className={`h-3 w-3 ${dockOpen ? "" : "text-slate-400"}`} />
           {dockOpen ? "站外循环已开" : "站外循环"}
         </button>
 
-        <div className="flex-1" />
+        {/* 中间空白区：错误/成功提示显示在工具栏同一行中央 */}
+        <div className="flex min-w-0 flex-1 items-center justify-center gap-2">
+          {error && (
+            <div className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md bg-rose-50 px-2 py-0.5 text-[11px] text-rose-700 ring-1 ring-rose-200 animate-slide-up">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              <span className="truncate">{error}</span>
+              <button onClick={() => setError(null)} className="ml-0.5 shrink-0 text-rose-400 hover:text-rose-600">
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          )}
+          {success && (
+            <div className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-700 ring-1 ring-emerald-200 animate-slide-up">
+              <CheckCircle2 className="h-3 w-3 shrink-0" />
+              <span className="truncate">{success}</span>
+              <button
+                onClick={() => {
+                  if (successTimerRef.current != null) window.clearTimeout(successTimerRef.current);
+                  setSuccess(null);
+                }}
+                className="ml-0.5 shrink-0 text-emerald-400 hover:text-emerald-600"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          )}
+        </div>
 
         {/* pendingAction 状态指示器（仅 S 输入模式显示；点击模式不显示提示） */}
         {pendingAction === "input" && (
           <div className={[
             "flex shrink-0 items-center gap-1.5 rounded-md px-2 py-0.5 text-[11px] font-medium animate-glow-pulse",
             pendingAction === "input"
-              ? "bg-blue-600 text-white ring-1 ring-blue-300"
-              : "bg-emerald-600 text-white ring-1 ring-emerald-300",
+              ? "bg-slate-800 text-white ring-1 ring-slate-600"
+              : "bg-slate-800 text-white ring-1 ring-slate-600",
           ].join(" ")}>
             {pendingAction === "input" && (
               <kbd className="rounded bg-white/20 px-1 py-0.5 text-[9px] font-bold">
@@ -11537,7 +12178,7 @@ type: info.type,
             "flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-all",
             selectMode
               ? "bg-slate-200 text-slate-600 ring-1 ring-slate-300 hover:bg-slate-300"
-              : "bg-white/70 text-slate-600 ring-1 ring-slate-200 hover:bg-white hover:text-brand-700",
+              : "bg-white/70 text-slate-600 ring-1 ring-slate-200 hover:bg-white hover:text-slate-900",
           ].join(" ")}
           title={appMode === "entry"
             ? "录入流操作：点右侧表单输入框，再从左侧 Excel 选对应字段填入"
@@ -11578,8 +12219,8 @@ type: info.type,
               className={[
                 "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium transition-all",
                 appMode === "review"
-                  ? "bg-sky-500 text-white shadow-sm"
-                  : "text-slate-500 hover:bg-sky-50 hover:text-sky-700",
+                  ? "bg-slate-900 text-white shadow-sm"
+                  : "text-slate-500 hover:bg-slate-100 hover:text-slate-700",
                 (teachingPhase !== "idle" || batchRunning) ? "cursor-not-allowed opacity-60" : "",
               ].join(" ")}
               title="包含审查步骤：对页面字段进行核对校验"
@@ -11608,8 +12249,8 @@ type: info.type,
               className={[
                 "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium transition-all",
                 appMode === "entry"
-                  ? "bg-violet-500 text-white shadow-sm"
-                  : "text-slate-500 hover:bg-violet-50 hover:text-violet-700",
+                  ? "bg-slate-900 text-white shadow-sm"
+                  : "text-slate-500 hover:bg-slate-100 hover:text-slate-700",
                 (teachingPhase !== "idle" || batchRunning) ? "cursor-not-allowed opacity-60" : "",
               ].join(" ")}
               title="包含录入步骤：把 Excel 数据批量填入表单"
@@ -11636,8 +12277,8 @@ type: info.type,
               className={[
                 "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium transition-all",
                 appMode === "loop"
-                  ? "bg-indigo-500 text-white shadow-sm"
-                  : "text-slate-500 hover:bg-indigo-50 hover:text-indigo-700",
+                  ? "bg-slate-900 text-white shadow-sm"
+                  : "text-slate-500 hover:bg-slate-100 hover:text-slate-700",
                 (teachingPhase !== "idle" || batchRunning) ? "cursor-not-allowed opacity-60" : "",
               ].join(" ")}
               title="完整 LOOP：审查 + 录入 全部步骤"
@@ -11656,7 +12297,7 @@ type: info.type,
               "flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-all",
               records.length === 0
                 ? "bg-white/40 text-slate-300 ring-1 ring-slate-200 cursor-not-allowed"
-                : "bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-300 hover:bg-emerald-700",
+                : "bg-slate-900 text-white shadow-sm ring-1 ring-slate-700 hover:bg-slate-800",
             ].join(" ")}
             title={`对所有 ${records.length} 张卡片批量执行模板${workflowTemplate.hasSearchSteps ? "（含搜索步骤）" : "（无搜索步骤，可能无法定位其他学生）"}`}
           >
@@ -11680,7 +12321,7 @@ type: info.type,
         {appMode !== "review" && teachingPhase === "done" && workflowTemplate && !batchRunning && (
           <button
             onClick={startTeaching}
-            className="flex items-center gap-1 rounded-md bg-white/70 px-2 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200 transition-all hover:bg-white hover:text-amber-700"
+            className="flex items-center gap-1 rounded-md bg-white/70 px-2 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200 transition-all hover:bg-white hover:text-slate-900"
             title="重新配置步骤（清除现有模板）"
           >
             <Settings2 className="h-3 w-3" />
@@ -11692,7 +12333,7 @@ type: info.type,
         {appMode !== "review" && teachingPhase === "done" && workflowTemplate && !batchRunning && (
           <button
             onClick={startNewLoop}
-            className="flex items-center gap-1 rounded-md bg-white/70 px-2 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200 transition-all hover:bg-white hover:text-indigo-700"
+            className="flex items-center gap-1 rounded-md bg-white/70 px-2 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200 transition-all hover:bg-white hover:text-slate-900"
             title="开始新 LOOP（清空所有模板、结果、日志，保留 Excel 数据）"
           >
             <Repeat2 className="h-3 w-3" />
@@ -11724,7 +12365,7 @@ type: info.type,
                 "flex items-center gap-1.5 rounded-md px-3 py-0.5 text-[11px] font-medium text-white transition-all",
                 batchRunning || stepCount === 0
                   ? "cursor-not-allowed bg-slate-400"
-                  : "bg-brand-600 hover:bg-brand-700 active:scale-[.98] shadow-sm",
+                  : "bg-slate-900 hover:bg-slate-800 active:scale-[.98] shadow-sm",
               ].join(" ")}
               title={
                 stepCount === 0
@@ -11744,7 +12385,7 @@ type: info.type,
               "flex items-center gap-1.5 rounded-md px-3 py-0.5 text-[11px] font-medium text-white transition-all",
               running || mappings.length === 0 || (!selected && !mappings.every((m) => m.left_source === "database"))
                 ? "cursor-not-allowed bg-slate-400"
-                : "bg-brand-600 hover:bg-brand-700 active:scale-[.98] shadow-sm",
+                : "bg-slate-900 hover:bg-slate-800 active:scale-[.98] shadow-sm",
             ].join(" ")}
             title={
               running
@@ -11778,33 +12419,6 @@ type: info.type,
         </button>
       </header>
 
-      {/* 错误提示 */}
-      {error && (
-        <div className="mx-4 mt-2 flex items-start gap-2 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700 animate-slide-up">
-          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span>{error}</span>
-          <button onClick={() => setError(null)} className="ml-auto text-rose-400 hover:text-rose-600">
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      )}
-      {/* 成功提示（绿色，2.5 秒后自动收回） */}
-      {success && (
-        <div className="mx-4 mt-2 flex items-start gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-700 animate-slide-up ring-1 ring-emerald-200">
-          <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span>{success}</span>
-          <button
-            onClick={() => {
-              if (successTimerRef.current != null) window.clearTimeout(successTimerRef.current);
-              setSuccess(null);
-            }}
-            className="ml-auto text-emerald-400 hover:text-emerald-600"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      )}
-
       {/* ============ 主体：三列 + 底部 ============ */}
       <main
         className={[
@@ -11824,11 +12438,10 @@ type: info.type,
               recordResults={recordResults}
               batchResults={batchResults}
               onDetach={() => detachPanel("left")}
+              aiSphereState={aiSphereState}
               onRunRecord={runSingleRecord}
               runDisabled={batchRunning || singleRunning}
               runningRecordId={singleRunning ? selectedId : null}
-              onPickDocument={handleDocFilePick}
-              docExtracting={docFileExtracting}
               onDropSkill={runSkillOnRecord}
               checkedIds={checkedIds}
               onCheckChange={setCheckedIds}
@@ -11846,13 +12459,15 @@ type: info.type,
               onClearCardImage={clearCardImage}
               fieldColumnMap={fieldColumnMap}
               onFieldColumnMapChange={handleFieldColumnMapChange}
-              onExcelUploaded={(map) => {
-                setDetectedColumnMap(map);
-                const autoMap: Record<string, string> = {};
-                Object.entries(map).forEach(([origCol, stdField]) => { autoMap[stdField] = origCol; });
-                setFieldColumnMap((prev) => ({ ...autoMap, ...prev }));
-              }}
               detectedColumnMap={detectedColumnMap}
+              execSteps={steps}
+              execRunning={isAnyRunning}
+              execPanelOpen={executionPanelOpen}
+              execChipVisible={hasRunOnce && edgeButtonVisible && !selectMode && !executionPanelOpen}
+              onOpenExecPanel={() => setExecutionPanelOpen(true)}
+              onExecBubblesGone={() => {
+                if (hasRunOnce) setEdgeButtonVisible(true);
+              }}
               emptyHint={
                 records.length > 0 && cardPool.length === 0
                   ? "已在 Excel 载入数据\n请在 Excel 视图点行号框选 LOOP 行范围\n然后点击「一键生成卡片」\n可多次框选不同段/不同Excel追加卡片"
@@ -11893,7 +12508,7 @@ type: info.type,
         >
           {/* 两个浏览器并排（脱离后对应位置留空或单列），可拖拽调整比例 */}
           <div
-            className={`flex min-h-0 min-w-0 flex-1 gap-1 overflow-hidden transition-[padding] duration-500 ${executionPanelOpen ? "pr-[360px]" : edgeButtonVisible ? "pr-12" : ""}`}
+            className={`flex min-h-0 min-w-0 flex-1 gap-1 overflow-hidden transition-[padding] duration-500 ${executionPanelOpen ? "pr-[360px]" : ""}`}
             onMouseMove={(e) => {
               if (!draggingRef.current) return;
               const rect = e.currentTarget.getBoundingClientRect();
@@ -11985,24 +12600,24 @@ type: info.type,
                     >
                       {browserExcelUploading ? (
                         <>
-                          <Loader2 className="h-10 w-10 animate-spin text-emerald-500" />
+                          <Loader2 className="h-10 w-10 animate-spin text-slate-400" />
                           <p className="text-xs text-slate-500">正在解析 Excel...</p>
                         </>
                       ) : (
                         <>
                           <button
                             onClick={() => browserExcelInputRef.current?.click()}
-                            className="group flex flex-col items-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/80 px-8 py-6 transition-all hover:border-emerald-400 hover:bg-emerald-50/50"
+                            className="group flex flex-col items-center gap-2 rounded-2xl border border-dashed border-slate-300 bg-white/60 px-8 py-6 transition-all hover:border-slate-400 hover:bg-slate-50"
                           >
-                            <FileSpreadsheet className="h-10 w-10 text-slate-400 transition-colors group-hover:text-emerald-500" />
+                            <FileSpreadsheet className="h-10 w-10 text-slate-300 transition-colors group-hover:text-slate-500" />
                             <div>
-                              <p className="text-sm font-medium text-slate-600 group-hover:text-emerald-700">Excel / CSV</p>
+                              <p className="text-sm font-medium text-slate-600">Excel / CSV</p>
                               <p className="text-[11px] text-slate-400">点击或拖拽文件到此处上传</p>
                             </div>
                           </button>
                           <button
                             onClick={() => { setLeftBlankExcel(true); }}
-                            className="text-[11px] font-medium text-emerald-600 transition-colors hover:text-emerald-700 hover:underline"
+                            className="text-[11px] font-medium text-slate-500 transition-colors hover:text-slate-700 hover:underline"
                           >
                             或新建空白表格
                           </button>
@@ -12019,7 +12634,7 @@ type: info.type,
                       embedded={true}
                       records={records}
                       selectedId={selectedId}
-                      picking={(selectMode && pickTarget === "left") || pendingAction === "input"}
+                      picking={(selectMode && pickTarget === "left") || pendingAction === "input" || excelBindEntryId != null}
                       onPickedField={onExcelPicked}
                       pickedMarks={pickedMarks}
                       selectedColumn={selectedExcelColumn}
@@ -12032,6 +12647,7 @@ type: info.type,
                       fieldColumnMap={fieldColumnMap}
                       onFieldColumnMapChange={handleFieldColumnMapChange}
                       detectedColumnMap={detectedColumnMap}
+                      boundFields={boundExcelFields}
                     />
                   )}
                 </BrowserPane>
@@ -12141,18 +12757,18 @@ type: info.type,
                     >
                       {rightExcelUploading ? (
                         <>
-                          <Loader2 className="h-10 w-10 animate-spin text-emerald-500" />
+                          <Loader2 className="h-10 w-10 animate-spin text-slate-400" />
                           <p className="text-xs text-slate-500">正在解析 Excel...</p>
                         </>
                       ) : (
                         <>
                           <button
                             onClick={() => rightExcelInputRef.current?.click()}
-                            className="group flex flex-col items-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/80 px-8 py-6 transition-all hover:border-sky-400 hover:bg-sky-50/50"
+                            className="group flex flex-col items-center gap-2 rounded-2xl border border-dashed border-slate-300 bg-white/60 px-8 py-6 transition-all hover:border-slate-400 hover:bg-slate-50"
                           >
-                            <FileSpreadsheet className="h-10 w-10 text-slate-400 transition-colors group-hover:text-sky-500" />
+                            <FileSpreadsheet className="h-10 w-10 text-slate-300 transition-colors group-hover:text-slate-500" />
                             <div>
-                              <p className="text-sm font-medium text-slate-600 group-hover:text-sky-700">Excel / CSV</p>
+                              <p className="text-sm font-medium text-slate-600">Excel / CSV</p>
                               <p className="text-[11px] text-slate-400">点击或拖拽文件到此处上传</p>
                             </div>
                           </button>
@@ -12166,14 +12782,14 @@ type: info.type,
                         <>
                           <button
                             onClick={() => setRightUrl("http://localhost:8000/demo-review/")}
-                            className="flex items-center rounded bg-indigo-600 px-1.5 py-0.5 text-[9px] font-medium text-white transition-all hover:bg-indigo-700"
+                            className="flex items-center rounded-md bg-white/70 px-1.5 py-0.5 text-[9px] font-medium text-slate-600 ring-1 ring-slate-200 transition-all hover:bg-slate-100 hover:text-slate-900"
                             title="审查流 DEMO：已提交申请表（含故意错误）"
                           >
                             审查DEMO
                           </button>
                           <button
                             onClick={() => setRightUrl("http://localhost:8000/demo-entry/")}
-                            className="flex items-center rounded bg-emerald-600 px-1.5 py-0.5 text-[9px] font-medium text-white transition-all hover:bg-emerald-700"
+                            className="flex items-center rounded-md bg-white/70 px-1.5 py-0.5 text-[9px] font-medium text-slate-600 ring-1 ring-slate-200 transition-all hover:bg-slate-100 hover:text-slate-900"
                             title="录入流 DEMO：空白申请表单"
                           >
                             录入DEMO
@@ -12190,17 +12806,18 @@ type: info.type,
                     <ExcelView
                       embedded={true}
                       records={rightRecords}
-                      selectedId={null}
-                      picking={false}
-                      pickedMarks={[]}
-                      selectedColumn={null}
-                      onSelectColumn={() => {}}
-                      rowRange={null}
-                      onRowRangeChange={() => {}}
-                      cardsGenerated={false}
-                      onGenerateCards={() => {}}
-                      onResetCards={() => {}}
-                      onPickedField={() => {}}
+                      selectedId={selectedId}
+                      picking={(selectMode && pickTarget === "right") || pendingAction === "input" || excelBindEntryId != null}
+                      pickedMarks={pickedMarks}
+                      selectedColumn={rightSelectedColumn}
+                      onSelectColumn={setRightSelectedColumn}
+                      rowRange={rightRowRange}
+                      onRowRangeChange={setRightRowRange}
+                      cardsGenerated={rightCardsGenerated}
+                      onGenerateCards={generateRightCards}
+                      onResetCards={resetRightCards}
+                      onPickedField={onRightExcelPicked}
+                      boundFields={boundExcelFields}
                     />
                   )}
                 </BrowserPane>
@@ -12299,7 +12916,7 @@ type: info.type,
                     onRequestQuickSave={handleQuickSaveLoop}
                     onRequestSaveSkill={() => { setSaveSkillRunAfter(false); setShowSaveSkill(true); }}
                     onDirectRun={finishTeachingAndRunBatch}
-                    selectedExcelColumn={selectedExcelColumn}
+                    selectedExcelColumn={selectedExcelColumn || rightSelectedColumn}
                     rightBindColumn={rightBindColumn}
                     onRightBindColumnChange={setRightBindColumn}
                     bindInputSide={bindInputSide}
@@ -12402,6 +13019,8 @@ type: info.type,
                   activeDocIndex={safeDocIndex}
                   onSelectDocIndex={setActiveDocIndex}
                   docExtracting={docExtracting}
+                  docLiveStatus={docWebStatus}
+                  docLivePreview={docSourcePreview}
                   ocrEngine={settings.ocr_engine || "vision"}
                   onChangeOcrEngine={handleChangeOcrEngine}
                   docBreakpoint={docBreakpoint}
@@ -12676,7 +13295,7 @@ type: info.type,
                     onRequestQuickSave={handleQuickSaveLoop}
                     onRequestSaveSkill={() => { setSaveSkillRunAfter(false); setShowSaveSkill(true); }}
                     onDirectRun={finishTeachingAndRunBatch}
-                    selectedExcelColumn={selectedExcelColumn}
+                    selectedExcelColumn={selectedExcelColumn || rightSelectedColumn}
                     rightBindColumn={rightBindColumn}
                     onRightBindColumnChange={setRightBindColumn}
                     bindInputSide={bindInputSide}
@@ -12776,7 +13395,7 @@ type: info.type,
                 onRequestQuickSave={handleQuickSaveLoop}
                 onRequestSaveSkill={() => { setSaveSkillRunAfter(false); setShowSaveSkill(true); }}
                 onDirectRun={finishTeachingAndRunBatch}
-                selectedExcelColumn={selectedExcelColumn}
+                selectedExcelColumn={selectedExcelColumn || rightSelectedColumn}
                 rightBindColumn={rightBindColumn}
                 onRightBindColumnChange={setRightBindColumn}
                 bindInputSide={bindInputSide}
@@ -12884,21 +13503,10 @@ type: info.type,
       )}
 
 
-      {/* ============ 批量执行进度浮层 ============ */}
-      {batchRunning && (
-        <BatchProgress
-          cursor={batchCursor}
-          total={batchTargets.length || cardRecords.length}
-          results={batchResults}
-          records={batchTargets.length > 0 ? batchTargets : cardRecords}
-          onStop={stopBatch}
-          positionClass={leftPanelOpen && !leftDetached ? "left-3 top-14" : "right-4 top-12"}
-        />
-      )}
 
       {/* ============ 文件提取审查面板：原图 + 提取字段框 + 同名图片对比 ============ */}
-      {/* 网页下载模式下结果内嵌在下方「文件提取配置」面板内，不再弹窗 */}
-      {docExtractPanel && !(addingDocExtractMode && docExtractSource === "web") && (
+      {/* 网页下载模式下结果内嵌在下方「文件提取配置」面板内，不再弹窗；LOOP/批量执行期间同样不弹（结果存 docExtractsByRecord） */}
+      {docExtractPanel && !isAnyRunning && !(addingDocExtractMode && docExtractSource === "web") && (
         <DocExtractReviewPanel
           panel={docExtractPanel}
           onClose={() => {
@@ -12911,7 +13519,7 @@ type: info.type,
           findingSameName={findingSameName}
           onFindSameName={findSameNameImages}
           onExtractFields={sendDocFieldsToExtractPanel}
-          onExport={() => setDocExportOpen(true)}
+          onExport={() => { recordFileOp("export", "导出文件（格式转换/压缩）"); setDocExportOpen(true); }}
           onBindUpload={startBindUpload}
         />
       )}
@@ -13060,16 +13668,7 @@ type: info.type,
         </div>
       )}
 
-      {/* ============ LOOP 执行气泡通知（运行时从右侧冒出，面板打开时隐藏） ============ */}
-      {!executionPanelOpen && (
-        <ExecutionBubbles
-          steps={steps}
-          running={running || singleRunning || batchRunning || queueRunning}
-          onAllGone={() => {
-            if (hasRunOnce) setEdgeButtonVisible(true);
-          }}
-        />
-      )}
+      {/* ============ LOOP 执行气泡已融入左侧 AI 球体（LeftPanel 内渲染） ============ */}
 
       {/* ============ 右侧独立「执行进度」面板 ============ */}
       <ExecutionPanel
@@ -13082,26 +13681,7 @@ type: info.type,
         }}
       />
 
-      {/* ============ 右侧边缘「执行进度」浮动按钮（气泡消失后显示，面板打开时隐藏） ============ */}
-      {hasRunOnce && edgeButtonVisible && !selectMode && !executionPanelOpen && (
-        <button
-          onClick={() => setExecutionPanelOpen(true)}
-          className={[
-            "fixed right-0 top-1/2 z-[9996] -translate-y-1/2 transition-all duration-500",
-            "flex items-center gap-2 rounded-l-xl px-3 py-4 shadow-lg backdrop-blur-sm",
-            "border border-r-0 border-slate-200 bg-white/90 hover:bg-white",
-            "animate-slide-in-right",
-          ].join(" ")}
-          title="查看执行进度"
-        >
-          <div className="flex flex-col items-center gap-1">
-            <Activity className="h-4 w-4 text-brand-600" />
-            <span className="[writing-mode:vertical-rl] text-[11px] font-semibold tracking-wider text-slate-700">
-              执行进度
-            </span>
-          </div>
-        </button>
-      )}
+      {/* ============ 「执行进度」浮动按钮已融入左侧 AI 球体下方（LeftPanel 内渲染） ============ */}
     </div>
   );
 }
@@ -13831,89 +14411,61 @@ function TeachingGuide({
   );
 }
 
-// ============ 批量执行进度浮层组件 ============
-function BatchProgress({
+// ============ 批量执行进度（内联横排，嵌入顶部工具栏中央空白区） ============
+function BatchProgressInline({
   cursor,
   total,
   results,
   records,
   onStop,
-  positionClass = "left-3 top-14",
 }: {
   cursor: number;
   total: number;
   results: Record<string, BatchResult>;
   records: ApplicantRecord[];
   onStop: () => void;
-  /** 浮层位置类：默认锚定左侧人物卡片区（React 层），避免被右侧原生 BrowserView 覆盖（z-index 对原生视图无效） */
-  positionClass?: string;
 }) {
   const successCount = Object.values(results).filter((r) => r.status === "success").length;
   const failedCount = Object.values(results).filter((r) => r.status === "failed").length;
   const progress = total > 0 ? Math.round(((cursor + 1) / total) * 100) : 0;
+  const currentName = cursor >= 0 && cursor < records.length
+    ? (records[cursor].fields.name || records[cursor].record_id)
+    : null;
 
   return (
-    <div className={`pointer-events-auto fixed ${positionClass} z-50 w-[244px]`}>
-      <div className="overflow-hidden rounded-xl border border-emerald-200 bg-white/95 shadow-2xl backdrop-blur-xl">
-        {/* 头部 */}
-        <div className="flex items-center gap-2 border-b border-emerald-100 bg-gradient-to-r from-emerald-50 to-teal-50 px-3 py-2">
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-600" />
-          <span className="text-[11px] font-semibold text-emerald-900">批量执行中</span>
-          <span className="ml-auto text-[10px] text-emerald-700">
-            {cursor + 1}/{total}
-          </span>
-        </div>
-
-        {/* 进度条 */}
-        <div className="h-1 bg-emerald-100">
-          <div
-            className="h-full bg-emerald-500 transition-all"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-
-        {/* 统计 */}
-        <div className="grid grid-cols-3 gap-2 px-3 py-2 text-center">
-          <div>
-            <div className="text-[14px] font-bold text-emerald-600">{successCount}</div>
-            <div className="text-[9px] text-slate-500">成功</div>
-          </div>
-          <div>
-            <div className="text-[14px] font-bold text-rose-600">{failedCount}</div>
-            <div className="text-[9px] text-slate-500">失败</div>
-          </div>
-          <div>
-            <div className="text-[14px] font-bold text-slate-600">{total - successCount - failedCount}</div>
-            <div className="text-[9px] text-slate-500">待执行</div>
-          </div>
-        </div>
-
-        {/* 当前卡片 */}
-        {cursor >= 0 && cursor < records.length && (
-          <div className="border-t border-slate-100 px-3 py-1.5">
-            <div className="text-[9px] text-slate-400">正在执行</div>
-            <div className="truncate text-[11px] font-medium text-slate-700">
-              {records[cursor].fields.name || records[cursor].record_id}
-            </div>
-          </div>
-        )}
-
-        {/* 最近失败 */}
-        {Object.values(results).filter((r) => r.status === "failed").slice(-2).map((r) => (
-          <div key={r.recordId} className="border-t border-rose-100 bg-rose-50/50 px-3 py-1 text-[10px] text-rose-700">
-            <div className="font-medium">✗ {records.find((x) => x.record_id === r.recordId)?.fields.name || r.recordId}</div>
-            {r.error && <div className="truncate text-rose-500">{r.error}</div>}
-          </div>
-        ))}
-
-        {/* 停止按钮 */}
-        <button
-          onClick={onStop}
-          className="w-full border-t border-slate-100 bg-rose-50 py-1.5 text-[11px] font-medium text-rose-700 hover:bg-rose-100"
-        >
-          停止批量执行
-        </button>
+    <div className="flex min-w-0 items-center gap-2 rounded-md bg-emerald-50 px-2 py-0.5 text-[11px] ring-1 ring-emerald-200 animate-slide-up">
+      <Loader2 className="h-3 w-3 shrink-0 animate-spin text-emerald-600" />
+      <span className="shrink-0 font-semibold text-emerald-900">批量执行</span>
+      <span className="shrink-0 text-[10px] text-emerald-700">
+        {cursor + 1}/{total}
+      </span>
+      {/* 进度条 */}
+      <div className="h-1 w-16 shrink-0 overflow-hidden rounded-full bg-emerald-100">
+        <div className="h-full bg-emerald-500 transition-all" style={{ width: `${progress}%` }} />
       </div>
+      {/* 统计横放 */}
+      <span className="shrink-0 text-[10px] text-slate-500">
+        <b className="text-emerald-600">{successCount}</b> 成功
+      </span>
+      <span className="shrink-0 text-[10px] text-slate-500">
+        <b className="text-rose-600">{failedCount}</b> 失败
+      </span>
+      <span className="shrink-0 text-[10px] text-slate-500">
+        <b className="text-slate-600">{total - successCount - failedCount}</b> 待执行
+      </span>
+      {currentName && (
+        <span className="min-w-0 truncate text-[10px] text-slate-400">
+          正在执行 <b className="font-medium text-slate-700">{currentName}</b>
+        </span>
+      )}
+      {/* 停止按钮 */}
+      <button
+        onClick={onStop}
+        className="ml-1 shrink-0 rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 transition-colors hover:bg-rose-200"
+        title="停止批量执行"
+      >
+        停止
+      </button>
     </div>
   );
 }

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import os
@@ -51,8 +52,8 @@ PDF_EXTS = {".pdf"}
 _WHITE_THRESH = 245      # 灰度 > 该值视为白边背景
 _BBOX_DETECT_MAX = 512   # bbox 检测缩略图最长边（小图检测极快）
 _MAX_OUTPUT_EDGE = 2560  # 输出图最长边上限（防止上传过大）
-_MIN_KEEP_MARGIN = 8     # 裁剪时四周至少保留 8px 边距，避免贴边误裁
-_BORDER_DIFF_THRESH = 30  # 边缘主色检测：与背景色差值 > 该值视为内容
+_MIN_KEEP_MARGIN = 16    # 裁剪时四周至少保留 16px 边距，避免贴边误裁（保护边缘首字符）
+_BORDER_DIFF_THRESH = 20  # 边缘主色检测：与背景色差值 > 该值视为内容（调低以保护浅色印刷字符不被裁掉）
 _API_MAX_B64_LEN = 9_000_000  # Vision API 上传保护：base64 字符数上限（≈6.7MB 二进制）
 
 
@@ -218,6 +219,136 @@ def preprocess_image(content: bytes) -> tuple[bytes, str | None]:
         raise RuntimeError(
             f"图片无法解码（文件可能已损坏或格式不受支持）: {e}"
         ) from e
+
+
+# ============ AI 自动转正 + 小图放大（OCR 前增强） ============
+# 场景：用户上传的 PDF/图片常是横放/倒置且内容占比小（如 A4 页中嵌一小张证件）。
+# 本地投影法粗判文字横竖 → 需精确角度时调 Vision 判断（0/90/180/270）→ PIL 转正；
+# 内容图最长边不足 _MIN_OCR_EDGE 时上采样放大，让 OCR 能识别小字。
+_MIN_OCR_EDGE = 1600     # 内容图最长边下限：低于则上采样放大，提升小字 OCR 识别率
+_MAX_UPSCALE = 3.0       # 放大倍数上限（避免过度插值产生伪影）
+_ORIENT_CACHE_MAX = 200  # 朝向检测结果缓存上限（按原始文件 hash，同文件预览/提取只检测一次）
+_orientation_cache: dict[str, int] = {}
+
+
+def _text_row_variance(img) -> float:
+    """水平文本行结构评分：二值化后逐行黑像素数的方差。
+    文字水平排列时，有字行/行间隙交替 → 方差大；文字竖排（图横放）时方差小。"""
+    gray = img.convert("L")
+    w, h = gray.size
+    if w < 32 or h < 32:
+        return 0.0
+    data = gray.tobytes()
+    thr = sum(data) / len(data)
+    bw = gray.point(lambda x: 0 if x < thr else 255)
+    bdata = bw.tobytes()
+    row_dark = [bdata[y * w:(y + 1) * w].count(0) for y in range(h)]
+    n = len(row_dark)
+    mean = sum(row_dark) / n
+    return sum((c - mean) ** 2 for c in row_dark) / n
+
+
+def _local_orientation_guess(img) -> tuple[str, bool]:
+    """本地投影法判断文字横竖。返回 ("horizontal" | "vertical" | "unknown", 是否高置信)。
+    局限：无法区分 0°/180°、90°/270°（投影结构相同），精确角度需 Vision。"""
+    try:
+        from PIL import Image
+        small = img.copy()
+        small.thumbnail((384, 384), Image.LANCZOS)
+        s0 = _text_row_variance(small)
+        s90 = _text_row_variance(small.transpose(Image.ROTATE_90))
+        lo, hi = min(s0, s90), max(s0, s90)
+        if hi < 1.0:  # 几乎无内容（空白图）
+            return ("unknown", False)
+        ratio = hi / (lo + 1e-6)
+        if ratio < 1.25:
+            return ("unknown", False)
+        return (("horizontal" if s0 >= s90 else "vertical"), ratio >= 1.6)
+    except Exception:
+        return ("unknown", False)
+
+
+async def _vision_detect_rotation(img) -> int:
+    """调 Vision 判断文字朝向，返回需【顺时针】旋转的角度（0/90/180/270）。失败返回 0。"""
+    try:
+        from PIL import Image
+        small = img.copy()
+        small.thumbnail((640, 640), Image.LANCZOS)
+        buf = io.BytesIO()
+        small.save(buf, format="JPEG", quality=80)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        prompt = (
+            "判断这张图片中文字内容的朝向。请回答：需要将图片顺时针旋转多少度"
+            "（只能是 0、90、180、270 之一），文字才能变成正常的水平阅读方向？\n"
+            "只返回 JSON：{\"rotate\": 角度数字}，不要输出任何其他内容。"
+            "图中无文字或无法判断时返回 {\"rotate\": 0}。"
+        )
+        text = await _call_vision_ocr(b64, prompt)
+        m = re.search(r'"?rotate"?\s*[:：]\s*(\d+)', text)
+        angle = int(m.group(1)) if m else -1
+        if angle not in (0, 90, 180, 270):
+            m2 = re.search(r"\b(0|90|180|270)\b", text)
+            angle = int(m2.group(1)) if m2 else 0
+        print(f"[ORIENT] Vision 朝向检测: rotate={angle} (raw={text[:80]!r})")
+        return angle
+    except Exception as e:
+        print(f"[ORIENT] Vision 朝向检测失败（保持原方向）: {e}")
+        return 0
+
+
+async def ai_orient_and_enhance(content: bytes, cache_key: str | None = None) -> tuple[bytes, str | None]:
+    """AI 自动转正（文字朝向检测）+ 小图放大，让 OCR 更好识别。
+
+    流程：本地投影法粗判横竖 → 非明确水平时调 Vision 精确判断（0/90/180/270）→ PIL 转正
+    → 内容图最长边 < _MIN_OCR_EDGE 时上采样放大（≤3x），便于 OCR 识别小字。
+
+    cache_key: 原始文件 hash，朝向结果按文件缓存（同文件的预览/正式提取只检测一次）。
+    返回 (处理后 JPEG bytes, base64 预览)；处理失败返回 (原 content, None)。
+    """
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(content)).convert("RGB")
+
+        # 1. 朝向检测（带文件级缓存：预览与正式提取复用同一次判断结果）
+        rotated = 0
+        if cache_key and cache_key in _orientation_cache:
+            rotated = _orientation_cache[cache_key]
+        else:
+            orientation, confident = _local_orientation_guess(img)
+            # horizontal 高置信时不调 Vision（180° 倒置由 PaddleOCR cls 方向分类器兜底）；
+            # vertical / unknown 时需 Vision 给出精确角度（本地无法区分 90/270、0/180）
+            if orientation != "horizontal":
+                if settings.vision_api_key and settings.vision_api_base:
+                    rotated = await _vision_detect_rotation(img)
+                elif orientation == "vertical" and confident:
+                    # 无 Vision 兜底：本地只能确定"文字竖着"，按扫描件常见朝向顺时针转 90°
+                    rotated = 90
+                    print("[ORIENT] 本地投影法判定文字竖排，默认顺时针转 90°（配置 Vision API 可精确判断 90/180/270）")
+            if cache_key:
+                if len(_orientation_cache) >= _ORIENT_CACHE_MAX:
+                    _orientation_cache.clear()
+                _orientation_cache[cache_key] = rotated
+
+        if rotated:
+            img = img.rotate(-rotated, expand=True)  # PIL rotate 为逆时针，取负即顺时针
+            print(f"[ORIENT] 已按文字朝向转正：顺时针 {rotated}°，尺寸 {img.size[0]}x{img.size[1]}")
+
+        # 2. 小图放大：最长边不足 _MIN_OCR_EDGE → 上采样（OCR 对过小字识别率差）
+        w, h = img.size
+        if 0 < max(w, h) < _MIN_OCR_EDGE:
+            ratio = min(_MIN_OCR_EDGE / max(w, h), _MAX_UPSCALE)
+            if ratio > 1.05:
+                new_size = (int(w * ratio), int(h * ratio))
+                img = img.resize(new_size, Image.LANCZOS)
+                print(f"[ORIENT] 内容图偏小，已放大 {ratio:.1f}x：{w}x{h} → {new_size[0]}x{new_size[1]}（便于 OCR 识别）")
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=92)
+        out = buf.getvalue()
+        return out, base64.b64encode(out).decode()
+    except Exception as e:
+        print(f"[ORIENT] 转正/放大失败（使用原图）: {e}")
+        return content, None
 
 
 # ============ PDF 预处理：渲染为高 DPI 图片 → 旋转 + 裁白边 ============
@@ -938,6 +1069,9 @@ def _parse_mrz(text: str) -> dict[str, str]:
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n").upper()
     # 去除OCR可能产生的空格
     cleaned = _re.sub(r'[ \t]+', '', cleaned)
+    # PaddleOCR 常把 MRZ 填充符 < 识别为 unicode 变体（«/‹/〈/全角＜等），统一归一
+    for _lt_variant in ("«", "‹", "〈", "＜", "≪", "⋘"):
+        cleaned = cleaned.replace(_lt_variant, "<")
 
     # 把所有连续的非字母数字<的字符作为行分隔
     lines = [l.strip() for l in cleaned.split("\n") if l.strip()]
@@ -946,11 +1080,30 @@ def _parse_mrz(text: str) -> dict[str, str]:
     mrz_line1 = None
     mrz_line2 = None
 
+    # MRZ 日期段（出生/有效期）在 OCR 中常见的数字混淆字符（0→O/Q/D，1→I/L，2→Z，5→S，8→B）
+    _DIGITISH = r'[0-9OQILZSB]'
+
     def _looks_like_mrz_line2(cand: str) -> bool:
-        """MRZ第二行特征：全是大写字母/数字/<，长度>=28，包含F/M性别标记，有6位数字日期"""
-        return (len(cand) >= 28 and _re.match(r'^[A-Z0-9<]+$', cand)
-                and ("F" in cand or "M" in cand)
-                and _re.search(r'\d{6}', cand) is not None)
+        """MRZ第二行特征：全是大写字母/数字/<，长度>=28，含6位日期段（容忍数字混淆）。
+        性别码 F/M 可能被 OCR 误识（F→E/P、M→N/H），不再强制要求；
+        两段 6 位日期段（出生+有效期）同时出现是更稳定的信号。"""
+        if not (len(cand) >= 28 and _re.match(r'^[A-Z0-9<]+$', cand)):
+            return False
+        if len(_re.findall(_DIGITISH + r'{6}', cand)) >= 2:
+            return True
+        return ("F" in cand or "M" in cand) and _re.search(_DIGITISH + r'{6}', cand) is not None
+
+    def _find_line2_after(idx: int) -> str | None:
+        """在 lines[idx] 之后的若干行中找 MRZ 第二行（OCR 可能在两行 MRZ 之间插入噪声行）。"""
+        for j in range(idx + 1, min(idx + 6, len(lines))):
+            cand = lines[j]
+            if _looks_like_mrz_line2(cand):
+                return cand
+            # 噪声行可能只混入少量小写/杂字符：清洗后再判一次
+            cand2 = _re.sub(r'[^A-Z0-9<]', '', cand)
+            if cand2 != cand and _looks_like_mrz_line2(cand2):
+                return cand2
+        return None
 
     def _find_mrz_line1_in(text_line: str) -> str | None:
         """在一行文本中查找MRZ第一行的起始位置，返回从 P< 开始的子串。
@@ -974,23 +1127,30 @@ def _parse_mrz(text: str) -> dict[str, str]:
         found = _find_mrz_line1_in(line)
         if found:
             mrz_line1 = found
-            # 在接下来的若干行中找MRZ第二行（OCR可能在两行MRZ之间插入噪声行）
-            for j in range(i + 1, min(i + 6, len(lines))):
-                cand = lines[j]
-                if _looks_like_mrz_line2(cand):
-                    mrz_line2 = cand
-                    break
-                # 噪声行可能只混入少量小写/杂字符：清洗后再判一次
-                cand2 = _re.sub(r'[^A-Z0-9<]', '', cand)
-                if cand2 != cand and _looks_like_mrz_line2(cand2):
-                    mrz_line2 = cand2
-                    break
+            mrz_line2 = _find_line2_after(i)
             break
+
+    # 回退：OCR 把 P 和国家码之间的 < 丢掉/误识别时，允许 P 直接跟三字母国家码
+    # （需同时存在 << 分隔与足够长度，避免误匹配 PLEASE 等普通单词）
+    if not mrz_line1:
+        for i, line in enumerate(lines):
+            for m in _re.finditer(r'P[A-Z]{3}', line):
+                candidate = line[m.start():]
+                mrz_chars = _re.match(r'[A-Z0-9<]+', candidate)
+                if not mrz_chars:
+                    continue
+                extracted = mrz_chars.group(0)
+                if "<<" in extracted and len(extracted) >= 20:
+                    mrz_line1 = extracted
+                    mrz_line2 = _find_line2_after(i)
+                    break
+            if mrz_line1:
+                break
 
     # 回退0：如果MRZ第一行和第二行在同一行（OCR合并），尝试从mrz_line1中切出第二行
     if mrz_line1 and not mrz_line2:
-        # 在mrz_line1中搜索第二行模式：9位字母数字+1位+3位国家码+6位数字+检查位+F/M+6位数字
-        m2 = _re.search(r'([A-Z0-9]{9}[A-Z0-9<][A-Z]{3}\d{6}\d[FM]\d{6}[A-Z0-9<]*)', mrz_line1)
+        # 在mrz_line1中搜索第二行模式：9位字母数字+1位+3位国家码+6位日期+检查位+F/M+6位日期
+        m2 = _re.search(r'([A-Z0-9]{9}[A-Z0-9<][A-Z]{3}' + _DIGITISH + r'{6}[0-9A-Z<][FM]' + _DIGITISH + r'{6}[A-Z0-9<]*)', mrz_line1)
         if m2:
             mrz_line2 = m2.group(1)
             # 第一行截断到第二行开始之前
@@ -1010,7 +1170,7 @@ def _parse_mrz(text: str) -> dict[str, str]:
     # 回退2：全文正则搜索MRZ第二行模式（护照号9位+检查位+国家码3位+出生6位+检查位+性别+有效期6位）
     if mrz_line1 and not mrz_line2:
         flat = cleaned.replace("\n", "")
-        m = _re.search(r'[A-Z0-9]{9}[A-Z0-9<][A-Z]{3}\d{6}\d[FM]\d{6}[A-Z0-9<]*', flat)
+        m = _re.search(r'[A-Z0-9]{9}[A-Z0-9<][A-Z]{3}' + _DIGITISH + r'{6}[0-9A-Z<][FM]' + _DIGITISH + r'{6}[A-Z0-9<]*', flat)
         if m:
             mrz_line2 = m.group(0)
 
@@ -1159,48 +1319,92 @@ def _parse_mrz(text: str) -> dict[str, str]:
         if _re.match(r'^[A-Z0-9]{4,}$', passport_no):
             result["passport_no"] = passport_no
 
-        # 出生日期：YYMMDD 格式（在性别F/M前面的6位数字）
-        # MRZ第二行TD3标准布局：护照号(9)检查位(1)国家码(3)出生日期(6)检查位(1)性别(1)有效期(6)...
-        # 性别固定在位置20（0-indexed），优先取该位置，避免护照号中含F/M字母导致错位
-        sex_pos = -1
-        sex_char = ""
-        if len(line2) > 20 and line2[20] in "FM":
-            sex_pos = 20
-            sex_char = line2[20]
-        else:
-            # 位置20不是F/M（OCR错位/缺字符）→ 在18-24窗口内搜索F/M
-            window_match = _re.search(r'[FM]', line2[16:26]) if len(line2) >= 26 else None
-            if window_match:
-                sex_pos = 16 + window_match.start()
-                sex_char = window_match.group(0)
-            else:
-                # 最终回退：全文搜索F/M（老逻辑，可能错位但聊胜于无）
-                m_any = _re.search(r'[FM]', line2)
-                if m_any:
-                    sex_pos = m_any.start()
-                    sex_char = m_any.group(0)
-        if sex_pos >= 0:
-            result["gender"] = sex_char
-            # MRZ第二行格式：...出生日期(6位)检查位(1位)性别(1位)有效期(6位)检查位(1位)...
-            # 出生日期在性别前：向前数7个位置取6位（跳过检查位）
-            if sex_pos >= 7:
-                birth_str = line2[sex_pos - 7:sex_pos - 1]
-                if _re.match(r'^\d{6}$', birth_str):
-                    byy = birth_str[:2]
-                    bmm = birth_str[2:4]
-                    bdd = birth_str[4:6]
-                    byy_int = int(byy)
-                    year_prefix = 19 if byy_int > 30 else 20
-                    result["birth_date"] = f"{year_prefix}{byy}-{bmm}-{bdd}"
+        # === 出生日期 / 性别 / 有效期（TD3标准布局：护照号9 检查位1 国家码3 出生6 检查位1 性别1 有效期6） ===
+        # OCR 数字混淆纠正：MRZ 字体下 PaddleOCR 常把 0→O/Q/D、1→I/L、2→Z、5→S、8→B、6→G、7→T
+        def _fix_ocr_digits(s: str) -> str:
+            return (s.replace("O", "0").replace("Q", "0").replace("D", "0")
+                     .replace("I", "1").replace("L", "1")
+                     .replace("Z", "2").replace("S", "5").replace("B", "8")
+                     .replace("G", "6").replace("T", "7"))
 
-            # 有效期：性别后面直接是6位YYMMDD（后面是检查位）
-            if sex_pos + 7 <= len(line2):
-                expiry_str = line2[sex_pos + 1:sex_pos + 7]
-                if _re.match(r'^\d{6}$', expiry_str):
-                    eyy = expiry_str[:2]
-                    emm = expiry_str[2:4]
-                    edd = expiry_str[4:6]
-                    result["passport_expiry"] = f"20{eyy}-{emm}-{edd}"
+        def _valid_date6(s: str) -> bool:
+            """6位 YYMMDD 合法性校验（防止从错误偏移截出垃圾日期）。"""
+            if not _re.match(r'^\d{6}$', s):
+                return False
+            mm, dd = int(s[2:4]), int(s[4:6])
+            return 1 <= mm <= 12 and 1 <= dd <= 31
+
+        birth_str = ""
+        expiry_str = ""
+        sex_char = ""
+
+        def _recover_sex(ch: str) -> str:
+            """性别位字符恢复：MRZ 性别域只会是 F/M/<，OCR 常见误识 F→E/P、M→N/H，就近映射。"""
+            if ch in "FM":
+                return ch
+            if ch in "EP":
+                return "F"
+            if ch in "NH":
+                return "M"
+            return ""
+
+        def _match_dates_pattern(sex_inner: str, segment: str, anchored: bool) -> tuple[str, str, str] | None:
+            """按 出生6+检查位+性别+有效期6 结构在 segment 中匹配，双日期校验通过才返回。
+            anchored=True 时要求从 segment 起始处匹配（segment 为国家码之后的串）；
+            anchored=False 时在 segment 全文搜「任意三字母 + 日期结构」。"""
+            pat = r'(' + _DIGITISH + r'{6})[0-9A-Z<]([' + sex_inner + r'])(' + _DIGITISH + r'{6})'
+            matches = [_re.match(pat, segment)] if anchored else _re.finditer(r'[A-Z]{3}' + pat, segment)
+            for m in matches:
+                if not m:
+                    continue
+                b = _fix_ocr_digits(m.group(1))
+                e = _fix_ocr_digits(m.group(3))
+                if _valid_date6(b) and _valid_date6(e):
+                    return b, _recover_sex(m.group(2)), e
+            return None
+
+        hit: tuple[str, str, str] | None = None
+        # 方案1：锚定已知国家码（第二行10-12位）之后结构化提取——对护照号移位/丢字符免疫。
+        # 性别位先严（F/M）后宽（任意字母，OCR 误识 F→E、M→N 时仍能定位出生/有效期）。
+        if country_code:
+            cc_start = 9
+            while not hit:
+                cc_idx = line2.find(country_code, cc_start)
+                if cc_idx < 0:
+                    break
+                tail = line2[cc_idx + 3:]
+                hit = (_match_dates_pattern("FM", tail, anchored=True)
+                       or _match_dates_pattern("A-Z<", tail, anchored=True))
+                cc_start = cc_idx + 1
+        # 方案2：固定位置（TD3 标准布局：出生13-18 检查位19 性别20 有效期21-26 检查位27）
+        if not hit and len(line2) > 26:
+            b2 = _fix_ocr_digits(line2[13:19])
+            e2 = _fix_ocr_digits(line2[21:27])
+            if _valid_date6(b2) and _valid_date6(e2):
+                hit = (b2, _recover_sex(line2[20]), e2)
+        # 方案3：全文结构化兜底（国家码未知时；任意三字母后接日期结构，日期校验防误锚）
+        if not hit:
+            hit = (_match_dates_pattern("FM", line2, anchored=False)
+                   or _match_dates_pattern("A-Z<", line2, anchored=False))
+        if hit:
+            birth_str, sex_char, expiry_str = hit
+
+        # 方案4：日期均失败时，仅在 16-26 窗口内搜 F/M 取性别（宁缺毋错，
+        # 不用「全文任意F/M」错位回退——护照号含F/M时会截出错误日期）
+        if not sex_char and len(line2) >= 26:
+            wm = _re.search(r'[FM]', line2[16:26])
+            if wm:
+                sex_char = wm.group(0)
+
+        if sex_char:
+            result["gender"] = sex_char
+        if _valid_date6(birth_str):
+            byy, bmm, bdd = birth_str[:2], birth_str[2:4], birth_str[4:6]
+            year_prefix = 19 if int(byy) > 30 else 20
+            result["birth_date"] = f"{year_prefix}{byy}-{bmm}-{bdd}"
+        if _valid_date6(expiry_str):
+            eyy, emm, edd = expiry_str[:2], expiry_str[2:4], expiry_str[4:6]
+            result["passport_expiry"] = f"20{eyy}-{emm}-{edd}"
 
     return result
 
@@ -1230,12 +1434,13 @@ def _extract_date_by_keywords(text: str, keywords: list[str]) -> str:
 
     用于在 MRZ 解析失败时作为回退，从 VIZ 可视区文字中提取日期。
     关键词中的空格在匹配时视为可选（OCR 常把 "Date of expiry" 识别成 "Dateof expiry"）。
+    撇号先归一化删除（法语 "DATE D'EXPIRATION" OCR 常变成 "D EXPIRATION"/"DEXPIRATION"）。
     """
     if not text:
         return ""
-    upper = text.upper()
+    upper = text.upper().replace("'", "").replace("'", "").replace("`", "")
     for kw in keywords:
-        kw_up = kw.upper()
+        kw_up = kw.upper().replace("'", "")
         # 把关键词按空格拆分，各部分分别转义后用 \s* 连接，
         # 容忍 OCR 丢失或多余空格（如 "Dateof expiry" 匹配 "Date of expiry"）
         parts = [re.escape(p) for p in kw_up.split() if p]
@@ -1244,8 +1449,8 @@ def _extract_date_by_keywords(text: str, keywords: list[str]) -> str:
         if not m:
             continue
         idx = m.start()
-        # 取关键词后面 80 个字符作为搜索窗口
-        window = text[idx: idx + 80]
+        # 取关键词后面 100 个字符作为搜索窗口（OCR 换行/噪声可能拉大标签与值的距离）
+        window = text[idx: idx + 100]
         # 匹配各种日期格式
         # YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD
         m = re.search(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', window)
@@ -1282,6 +1487,12 @@ def _extract_expiry_from_text(text: str) -> str:
     return _extract_date_by_keywords(text, [
         "DATE OF EXPIRY", "EXPIRY DATE", "DATE OF EXPIRATION", "VALID UNTIL",
         "VALID THRU", "BESTEHEN BIS", "有效期至", "有效期", "失效日期",
+        # 法/德/西/意等双语护照常见标注
+        "DATE D'EXPIRATION", "DEXPIRATION", "EXPIRATION",
+        "GÜLTIG BIS", "GULTIG BIS", "VERFALLSDATUM",
+        "FECHA DE CADUCIDAD", "FECHA DE VENCIMIENTO", "VENCIMIENTO", "CADUCIDAD",
+        "DATA DI SCADENZA", "SCADENZA", "VALABLE JUSQU", "VALIDE JUSQU",
+        "EXPIRY",
     ])
 
 
@@ -1290,6 +1501,11 @@ def _extract_issue_from_text(text: str) -> str:
     return _extract_date_by_keywords(text, [
         "DATE OF ISSUE", "ISSUED ON", "VALID FROM", "ISSUING DATE",
         "签发日期", "发证日期", "有效期开始",
+        # 法/德/西/意等双语护照常见标注
+        "DATE DE DELIVRANCE", "DELIVRANCE",
+        "AUSSTELLUNGSDATUM", "AUSGESTELLT",
+        "FECHA DE EXPEDICION", "EXPEDICION",
+        "DATA DI RILASCIO", "RILASCIO",
     ])
 
 
@@ -1391,12 +1607,20 @@ _LABEL_GENDER = [
 _LABEL_ISSUE_DATE = [
     r"DATE\s*OF\s*ISSUE", r"ISSUED\s*ON", r"VALID\s*FROM", r"ISSUING\s*DATE",
     r"ДАТА\s*ВЫДАЧИ",  # 俄语
+    r"DATE\s*DE\s*DELIVRANCE", r"DELIVRANCE",  # 法语
+    r"AUSSTELLUNGSDATUM",  # 德语
+    r"FECHA\s*DE\s*EXPEDICION",  # 西语
+    r"DATA\s*DI\s*RILASCIO",  # 意语
     r"签发日期", r"发证日期",
 ]
 _LABEL_EXPIRY_DATE = [
     r"DATE\s*OF\s*EXPIRY", r"EXPIRY\s*DATE", r"DATE\s*OF\s*EXPIRATION",
     r"VALID\s*UNTIL", r"VALID\s*THRU", r"BESTEHEN\s*BIS",
     r"СРОК\s*ДЕЙСТВИЯ",  # 俄语
+    r"DATE\s*D.EXPIRATION", r"DEXPIRATION",  # 法语（撇号OCR常丢失）
+    r"G[UÜ]LTIG\s*BIS", r"VERFALLSDATUM",  # 德语
+    r"FECHA\s*DE\s*(CADUCIDAD|VENCIMIENTO)", r"VENCIMIENTO",  # 西语
+    r"DATA\s*DI\s*SCADENZA", r"SCADENZA",  # 意语
     r"有效期至", r"有效期", r"失效日期",
 ]
 _LABEL_ISSUE_AUTHORITY = [
@@ -1510,14 +1734,30 @@ def _extract_latin_name_after_label(text_upper: str, labels: list[str]) -> str:
 
 def _extract_alphanum_after_label(text_upper: str, labels: list[str],
                                     min_len: int = 4, max_len: int = 20) -> str:
-    """在标签后提取字母数字组合（如护照号）。"""
+    """在标签后提取字母数字组合（如护照号）。
+
+    支持护照印刷常见的"分段号码"：如 "PASSPORT NO 76 312345"（号码被空格拆成两段）。
+    合并规则：仅当后续段为【纯数字】时才合并（避免把 DATE/SEX 等下一个标签词粘进来）。
+    """
     import re as _re
     for label in labels:
-        pattern = label + r"[\s:：/\\|]*([A-Z0-9]{" + str(min_len) + r"," + str(max_len) + r"})"
+        # 首段字母数字；后续段仅纯数字（同行空格分隔，最多再并 2 段）
+        pattern = (label + r"[\s:：/\\|]*([A-Z0-9]+)((?:[ \t]+\d+){0,2})")
         m = _re.search(pattern, text_upper)
         if m:
-            val = m.group(1).strip().rstrip("<")
-            # 排除纯字母国家码（太短或全是字母且<=3）
+            first = m.group(1).rstrip("<")
+            merged = (first + (m.group(2) or "").replace(" ", "").replace("\t", "")).rstrip("<")
+            # 优先用合并值（如 76+312345 → 76312345）；超长则回退首段
+            for val in (merged, first):
+                if min_len <= len(val) <= max_len:
+                    # 排除纯字母国家码（太短或全是字母且<=3）
+                    if not (val.isalpha() and len(val) <= 3):
+                        return val
+        # 回退：合并匹配失败时按原逻辑取单段
+        pattern_single = label + r"[\s:：/\\|]*([A-Z0-9]{" + str(min_len) + r"," + str(max_len) + r"})"
+        m2 = _re.search(pattern_single, text_upper)
+        if m2:
+            val = m2.group(1).strip().rstrip("<")
             if len(val) >= min_len:
                 return val
     return ""
@@ -1536,6 +1776,20 @@ def _extract_gender_near_label(text_upper: str) -> str:
     if m:
         return m.group(1)
     return ""
+
+
+def _rescue_segmented_number(text_upper: str, val: str, max_len: int = 20) -> str:
+    """若 val 是全文中某个更长"字母数字串（允许空格/制表符分段）"的子串，返回更长合并值。
+    修复 OCR/正则把 '76 312345' 截断成 '6312345' 一类的首段丢失问题。"""
+    import re as _re
+    if not val or len(val) < 4:
+        return val
+    best = val
+    for m in _re.finditer(r"[A-Z0-9]+(?:[ \t]+\d+)+", text_upper):
+        merged = _re.sub(r"[ \t]+", "", m.group(0))
+        if len(best) < len(merged) <= max_len and val in merged:
+            best = merged
+    return best
 
 
 def _extract_local_fields(text: str, target_fields: list[str]) -> dict[str, str]:
@@ -1573,6 +1827,9 @@ def _extract_local_fields(text: str, target_fields: list[str]) -> dict[str, str]
     # 护照号
     if "passport_no" in target_fields:
         val = _extract_alphanum_after_label(upper, _LABEL_PASSPORT_NO, min_len=5)
+        if val:
+            # 交叉验证：若全文存在包含该值的更长分段号码（如 "76 312345"），用更长值
+            val = _rescue_segmented_number(upper, val)
         if val:
             result["passport_no"] = val
 
@@ -1701,6 +1958,7 @@ async def extract_fields_from_text(text: str, target_fields: list[str]) -> dict[
     if not target_fields:
         return {}
     if not settings.vision_api_key:
+        print(f"[EXTRACT-DEBUG] 未配置 Vision API Key，跳过 LLM 字段提取（{len(target_fields)} 个字段将走本地关键词兜底）: {target_fields}")
         return {f: "" for f in target_fields}
 
     url = settings.vision_api_base.rstrip("/") + "/chat/completions"
@@ -1719,8 +1977,12 @@ async def extract_fields_from_text(text: str, target_fields: list[str]) -> dict[
             resp.raise_for_status()
             data = resp.json()
             content = data["choices"][0]["message"]["content"] or ""
-            return _parse_json_fields(content)
-    except Exception:
+            parsed = _parse_json_fields(content)
+            if not parsed:
+                print(f"[EXTRACT-WARN] LLM 字段提取返回了无法解析的内容: {content[:200]!r}")
+            return parsed
+    except Exception as e:
+        print(f"[EXTRACT-WARN] LLM 字段提取失败（{type(e).__name__}）: {e} —— 这些字段将走本地关键词兜底: {target_fields}")
         return {f: "" for f in target_fields}
 
 
@@ -1743,7 +2005,10 @@ async def _extract_viz_fields_from_image(
 
     仅在检测到 MRZ（确认是护照）时调用，避免对非证件图片产生误识别。
     """
-    if not viz_fields or not settings.vision_api_key:
+    if not viz_fields:
+        return {}
+    if not settings.vision_api_key:
+        print(f"[EXTRACT-DEBUG] VIZ 字段 {viz_fields} 需要 Vision API Key 看图提取，未配置，跳过（将走文本关键词兜底）")
         return {}
     b64_img = base64.b64encode(image_content).decode()
     field_specs = ",\n".join(
@@ -1784,8 +2049,12 @@ async def _extract_viz_fields_from_image(
             resp.raise_for_status()
             data = resp.json()
             content = data["choices"][0]["message"]["content"] or ""
-            return _parse_json_fields(content)
-    except Exception:
+            parsed = _parse_json_fields(content)
+            if not parsed:
+                print(f"[EXTRACT-WARN] VIZ 看图提取返回了无法解析的内容: {content[:200]!r}")
+            return parsed
+    except Exception as e:
+        print(f"[EXTRACT-WARN] VIZ 看图字段提取失败（{type(e).__name__}）: {e} —— 字段: {viz_fields}")
         return {}
 
 
@@ -1801,13 +2070,18 @@ async def preview_document(content: bytes, filename: str) -> dict:
     processed_image: str | None = None
     method: str = ""
     text_preview: str | None = None
+    # 朝向检测缓存 key（同一原始文件的预览/正式提取只检测一次朝向）
+    file_hash = hashlib.sha1(content).hexdigest()[:16]
 
     # 基于魔数嗅探真实文件类型（扩展名/Content-Type 可能错误，例如下载链接无后缀）
     kind = _sniff_content_kind(content, filename)
 
     if kind == "image":
-        # 图片：仅做预处理（EXIF 旋转 + 裁白边 + 降采样），不 OCR
-        _, processed_image = preprocess_image(content)
+        # 图片：预处理（EXIF 旋转 + 裁白边 + 降采样）→ AI 转正 + 放大，不 OCR
+        processed, processed_image = preprocess_image(content)
+        _, orient_b64 = await ai_orient_and_enhance(processed, cache_key=file_hash)
+        if orient_b64:
+            processed_image = orient_b64
         method = "image"
 
     elif kind == "pdf":
@@ -1822,7 +2096,9 @@ async def preview_document(content: bytes, filename: str) -> dict:
         # 同时渲染首页为预览图（无论有无文字层，都给用户一个可视化预览）
         rendered = render_pdf_to_image(content, dpi=150)  # 预览用稍低 DPI 更快
         if rendered is not None:
-            _, processed_image = rendered
+            # AI 转正 + 放大后再作为预览（解决扫描件横放/内容过小）
+            _, orient_b64 = await ai_orient_and_enhance(rendered[0], cache_key=file_hash)
+            processed_image = orient_b64 or rendered[1]
         if not method:
             method = "pdf_render"
     else:
@@ -1860,6 +2136,8 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
     text: str = ""
     method: str = ""
     fallback: dict | None = None
+    # 朝向检测缓存 key（与 preview_document 共享，同文件只检测一次朝向）
+    file_hash = hashlib.sha1(content).hexdigest()[:16]
 
     # 基于魔数嗅探真实文件类型（扩展名/Content-Type 可能错误）
     kind = _sniff_content_kind(content, filename)
@@ -1868,6 +2146,10 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
         # === 图片：预处理（EXIF 旋转 + 裁白边 + 降采样）→ OCR ===
         orig_len = len(content)
         content, processed_image = preprocess_image(content)
+        # AI 自动转正 + 小图放大（扫描件常横放/内容占比小，转正放大后 OCR 更准）
+        content, orient_b64 = await ai_orient_and_enhance(content, cache_key=file_hash)
+        if orient_b64:
+            processed_image = orient_b64
         try:
             from PIL import Image as _Img
             with _Img.open(io.BytesIO(content)) as _im:
@@ -1884,20 +2166,23 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
 
     elif kind == "pdf":
         # === PDF：先试 MarkItDown 提取文字层（原生数字 PDF 最快） ===
-        # === 无文字层（扫描件）→ PyMuPDF 渲染为图片 → 预处理 → OCR ===
+        # === 文字层过短（扫描件/垃圾文字层）→ PyMuPDF 渲染为图片 → 预处理 → OCR ===
         md_error = ""
         try:
             text = _extract_with_markitdown(content, filename)
         except Exception as md_exc:
             text = ""
             md_error = str(md_exc)
-        if text and len(text.strip()) >= 10:
+        # 垃圾文字层守卫：扫描件 PDF 常带几个~几十个字符的噪声文字层（页眉/水印/乱码），
+        # 不足以构成有效内容，必须走 OCR（护照等正常文字层通常有数百字符）
+        _PDF_TEXT_LAYER_MIN = 50
+        if text and len(text.strip()) >= _PDF_TEXT_LAYER_MIN:
             # 文字层有效，直接用
             method = "markitdown"
             print(f"[EXTRACT-DEBUG] PDF 文字层提取成功: {filename}, {len(text)} 字符 (MarkItDown，无需OCR)")
         else:
-            # 文字层为空或太短 → 扫描件 → 渲染为图片走 OCR
-            print(f"[EXTRACT-DEBUG] PDF 无文字层（{len(text.strip()) if text else 0} 字符），渲染为图片走OCR: {filename}, engine={active_engine}")
+            # 文字层为空或为垃圾 → 渲染为图片走 OCR
+            print(f"[EXTRACT-DEBUG] PDF 文字层过短（{len(text.strip()) if text else 0} 字符 < {_PDF_TEXT_LAYER_MIN}），渲染为图片走OCR: {filename}, engine={active_engine}")
             rendered = render_pdf_to_image(content, dpi=200)
             if rendered is None:
                 # PyMuPDF 不可用，回退提示
@@ -1908,18 +2193,38 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
                 method = "markitdown"
             else:
                 content, processed_image = rendered
-                text, fallback = await ocr_image_bytes(content, engine=engine)
-                if fallback and fallback["to"] == "vision_ocr":
-                    method = "pdf_ocr"
-                else:
-                    method = "pdf_umi_ocr" if active_engine == "umi" else "pdf_ocr"
-                print(f"[EXTRACT-DEBUG] PDF OCR完成: {filename}, method={method}, {len(text)} 字符"
-                      + (f", 回退: {fallback['from']}→{fallback['to']} ({fallback['reason']})" if fallback else ""))
-                # 记录 MarkItDown 无文字层的回退
-                if not fallback and md_error:
-                    fallback = {"from": "markitdown", "to": method, "reason": f"MarkItDown 提取失败：{md_error}"}
-                elif not fallback and not (text and len(text.strip()) >= 10):
-                    pass  # MarkItDown 返回空文本（扫描件），这是正常回退
+                # AI 自动转正 + 小图放大（扫描件常横放/内容占比小，转正放大后 OCR 更准）
+                content, orient_b64 = await ai_orient_and_enhance(content, cache_key=file_hash)
+                if orient_b64:
+                    processed_image = orient_b64
+                ocr_text = ""
+                try:
+                    ocr_text, fallback = await ocr_image_bytes(content, engine=engine)
+                except RuntimeError:
+                    if text and text.strip():
+                        # OCR 双引擎都失败，但文字层尚有内容 → 用文字层兜底，不让整个提取失败
+                        print(f"[EXTRACT-DEBUG] PDF OCR 失败，回退使用文字层文本（{len(text.strip())} 字符）")
+                        method = "markitdown"
+                        fallback = None
+                    else:
+                        raise
+                if method != "markitdown":
+                    if not ocr_text.strip() and text.strip():
+                        # OCR 没识别到文字但文字层有内容 → 文字层兜底
+                        print(f"[EXTRACT-DEBUG] PDF OCR 未识别到文字，回退使用文字层文本（{len(text.strip())} 字符）")
+                        method = "markitdown"
+                        fallback = None
+                    else:
+                        text = ocr_text
+                        if fallback and fallback["to"] == "vision_ocr":
+                            method = "pdf_ocr"
+                        else:
+                            method = "pdf_umi_ocr" if active_engine == "umi" else "pdf_ocr"
+                        print(f"[EXTRACT-DEBUG] PDF OCR完成: {filename}, method={method}, {len(text)} 字符"
+                              + (f", 回退: {fallback['from']}→{fallback['to']} ({fallback['reason']})" if fallback else ""))
+                        # 记录 MarkItDown 无文字层的回退
+                        if not fallback and md_error:
+                            fallback = {"from": "markitdown", "to": method, "reason": f"MarkItDown 提取失败：{md_error}"}
     else:
         # === 其他文档（docx/pptx/xlsx/html）→ MarkItDown ===
         try:
@@ -1935,15 +2240,19 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
     mrz_warnings: list[str] = []
     mrz_fields: dict[str, str] = {}
 
-    # 策略：MRZ优先（护照图片）。先尝试MRZ解析，覆盖到的字段直接用MRZ值，
+    # 策略：MRZ优先（护照）。先尝试MRZ解析，覆盖到的字段直接用MRZ值，
     # 仅对MRZ未覆盖的目标字段才调用LLM字段提取，减少LLM调用次数、提升速度。
     _OCR_METHODS = ("vision_ocr", "pdf_ocr", "umi_ocr", "pdf_umi_ocr")
-    # MRZ解析不依赖 target_fields，只要是OCR结果就尝试解析（即使未指定字段也存入fields）
-    if method in _OCR_METHODS:
+    # MRZ解析是纯本地正则、零成本，对任何路径的文本都尝试
+    # （含 markitdown 文字层——原生护照 PDF 的文字层里同样带 MRZ 两行）
+    if text:
         try:
             mrz_fields = _parse_mrz(text)
-        except Exception:
+        except Exception as _mrz_exc:
+            print(f"[EXTRACT-WARN] MRZ 解析异常（{type(_mrz_exc).__name__}）: {_mrz_exc}")
             mrz_fields = {}
+        if mrz_fields:
+            print(f"[EXTRACT-DEBUG] MRZ 解析命中字段: {sorted(mrz_fields.keys())}")
 
     if target_fields:
         # 计算MRZ已覆盖的字段（有值即算覆盖）
@@ -1981,18 +2290,40 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
         if "name" in target_fields and (fields.get("surname") or fields.get("given_name")):
             fields["name"] = f"{fields.get('surname','')} {fields.get('given_name','')}".strip()
 
-        # 检测到护照MRZ时，对 VIZ 可视区专有字段（签发日期/签发机关/签发地点）
-        # 直接看图提取（这些字段不在MRZ里，看图比OCR文字更可靠）
-        is_passport = bool(mrz_fields.get("passport_no") or mrz_fields.get("surname"))
+        # 检测到护照特征时，对 VIZ 可视区专有字段（签发日期/签发机关/签发地点）
+        # 直接看图提取（这些字段不在MRZ里，看图比OCR文字更可靠）。
+        # 门控放宽：MRZ 整体失败（OCR 噪声导致行检测不到）时，只要文本像护照也触发。
+        upper_text = text.upper()
+        is_passport = bool(
+            mrz_fields.get("passport_no") or mrz_fields.get("surname")
+            or re.search(r"P<[A-Z]{3}", upper_text)
+            or any(kw in upper_text for kw in ("PASSPORT", "PASSEPORT", "PASAPORTE", "REISEPASS", "护照"))
+        )
+        if is_passport and not mrz_fields and method in _OCR_METHODS:
+            mrz_warnings.append(
+                "识别到护照特征但 MRZ 机读区解析失败（底部两行可能被裁切/模糊），"
+                "以下字段全部来自可视区兜底提取，请核对"
+            )
         viz_targets = [
             k for k in target_fields
-            if k in _VIZ_FIELDS and not mrz_fields.get(k, "").strip()
+            if k in _VIZ_FIELDS and not fields.get(k, "").strip()
         ]
-        if is_passport and viz_targets and method in _OCR_METHODS:
-            viz_fields = await _extract_viz_fields_from_image(content, viz_targets)
-            for k, v in viz_fields.items():
-                if v.strip():
-                    fields[k] = v
+        if is_passport and viz_targets:
+            viz_image: bytes | None = None
+            if method in _OCR_METHODS:
+                viz_image = content  # OCR 路径：content 已是预处理后的图片字节
+            elif method == "markitdown" and kind == "pdf":
+                # 原生 PDF 文字层路径：渲染页面为图片再看图提取
+                rendered = render_pdf_to_image(content, dpi=200)
+                if rendered is not None:
+                    viz_image = rendered[0]
+                    if processed_image is None:
+                        processed_image = rendered[1]
+            if viz_image is not None:
+                viz_fields = await _extract_viz_fields_from_image(viz_image, viz_targets)
+                for k, v in viz_fields.items():
+                    if v.strip():
+                        fields[k] = v
 
         # 仍未覆盖的字段交给文本 LLM 提取
         already_filled = set(k for k in target_fields if fields.get(k, "").strip())
@@ -2047,7 +2378,7 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
             if v.strip() and not fields.get(k, "").strip():
                 fields[k] = v
 
-    elif not target_fields and method in _OCR_METHODS:
+    elif not target_fields and (method in _OCR_METHODS or mrz_fields):
         # 没指定target_fields时：MRZ + 本地关键词提取都尝试，存入fields供参考
         for k, v in mrz_fields.items():
             if v.strip():

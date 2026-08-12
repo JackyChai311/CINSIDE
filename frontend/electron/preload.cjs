@@ -79,6 +79,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   viewStopPicking: (side) => ipcRenderer.invoke("view-stop-picking", side),
   // 浏览器回退（网页提取时点错撤销）
   viewGoBack: (side) => ipcRenderer.invoke("view-go-back", side),
+  // 浏览器前进（保底机制过度回退后恢复页面）
+  viewGoForward: (side) => ipcRenderer.invoke("view-go-forward", side),
 
   // 一键直传：把文件直接填入网页 file input
   viewQuickUpload: (side, fileInputSelector, filename, mime, base64Data) =>

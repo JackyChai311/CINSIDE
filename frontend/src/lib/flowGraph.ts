@@ -20,6 +20,8 @@ export function buildLinearGraph(tpl: WorkflowTemplate): FlowGraph {
   for (const ph of phases) {
     const sorted = [...ph.marks].sort((a, b) => a.order - b.order);
     for (const m of sorted) {
+      // 文件处理类步骤（文件提取/上传/面板按钮记录）跨泳道居中宽卡片，与普通录入/审查步骤区分
+      const wide = !!(m.fileOp || m.docExtract || m.docUpload || m.panelAction);
       nodes.push({
         id: genId("step"),
         kind: "step",
@@ -28,6 +30,7 @@ export function buildLinearGraph(tpl: WorkflowTemplate): FlowGraph {
         markId: m.id,
         markSide: m.side,
         breakpoint: m.breakpoint,
+        wide,
       });
     }
   }
@@ -48,6 +51,7 @@ export function buildStepLabel(m: PickedMark): string {
     pick: "取值",
   };
   const phaseTag = m.clickPhase === "post" ? " [收尾]" : m.clickPhase === "mid" ? " [过程]" : m.clickPhase === "pre" ? " [导航]" : "";
+  if (m.fileOp) return `🗂 ${m.label || "文件处理"}`;
   if (m.docExtract) return `📄 提取文件${phaseTag}: ${m.label || m.selector}`;
   if (m.docUpload) return `📎 上传文件${phaseTag}: ${m.label || m.selector}`;
   if (m.widget) {

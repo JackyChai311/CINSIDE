@@ -16,6 +16,8 @@ interface Props {
   steps: VerificationStep[];
   running: boolean;
   onAllGone?: () => void;
+  /** edge=屏幕右边缘（默认）；sphere=融入 AI 球体：气泡从球体下方吐出，旧的向下堆叠渐淡，消散时收回球体 */
+  variant?: "edge" | "sphere";
 }
 
 const MAX_STACK = 3;
@@ -23,7 +25,7 @@ const HOLD_DURATION = 1200; // 运行结束后停留时间
 const EXIT_STAGGER = 200;   // 每个气泡退出错开时间
 const EXIT_DURATION = 800;  // 单个气泡退出动画时长
 
-export default function ExecutionBubbles({ steps, running, onAllGone }: Props) {
+export default function ExecutionBubbles({ steps, running, onAllGone, variant = "edge" }: Props) {
   const [bubbles, setBubbles] = useState<Bubble[]>([]);
   const [tick, setTick] = useState(0);
   const bubbleIdRef = useRef(0);
@@ -141,12 +143,15 @@ export default function ExecutionBubbles({ steps, running, onAllGone }: Props) {
   if (bubbles.length === 0) return null;
 
   const now = Date.now();
-  const bubbleGap = 48;
+  const isSphere = variant === "sphere";
+  const bubbleGap = isSphere ? 46 : 48;
 
   return (
     <div
-      className="fixed right-3 bottom-20 z-[9997] pointer-events-none"
-      style={{ width: 270, height: bubbleGap * MAX_STACK + 80 }}
+      className={isSphere
+        ? "pointer-events-none absolute left-1/2 top-full z-30 -translate-x-1/2"
+        : "fixed right-3 bottom-20 z-[9997] pointer-events-none"}
+      style={{ width: isSphere ? 210 : 270, height: bubbleGap * MAX_STACK + 80 }}
     >
       {bubbles.map((b) => {
         const s = b.step;
@@ -170,6 +175,11 @@ export default function ExecutionBubbles({ steps, running, onAllGone }: Props) {
             // 停留期间保持原位
             opacity = pos === 0 ? 1 : pos === 1 ? 0.6 : 0.3;
             scale = pos === 0 ? 1 : pos === 1 ? 0.93 : 0.86;
+          } else if (isSphere) {
+            // 球体变体：消散时向上收回球体
+            translateY = -30 * eased;
+            opacity = Math.max(0, (pos === 0 ? 1 : pos === 1 ? 0.55 : 0.26) * (1 - eased));
+            scale = (pos === 0 ? 1 : pos === 1 ? 0.94 : 0.88) * (1 - 0.25 * eased);
           } else {
             translateX = 80 * eased;
             translateY = -40 * eased;
@@ -177,62 +187,86 @@ export default function ExecutionBubbles({ steps, running, onAllGone }: Props) {
             scale = (pos === 0 ? 1 : pos === 1 ? 0.93 : 0.86) * (1 - 0.2 * eased);
           }
         } else if (pos === 0) {
-          translateX = (1 - enterP) * 60;
-          opacity = enterP;
-          scale = 0.9 + enterP * 0.1;
+          if (isSphere) {
+            // 新气泡从球体内吐出：从上方(-22px)浮现下落到位
+            translateY = (1 - enterP) * -22;
+            opacity = enterP;
+            scale = 0.72 + enterP * 0.28;
+          } else {
+            translateX = (1 - enterP) * 60;
+            opacity = enterP;
+            scale = 0.9 + enterP * 0.1;
+          }
         } else if (pos === 1) {
-          opacity = 0.6;
-          scale = 0.93;
+          opacity = isSphere ? 0.55 : 0.6;
+          scale = isSphere ? 0.94 : 0.93;
         } else if (pos === 2) {
-          opacity = 0.3;
-          scale = 0.86;
+          opacity = isSphere ? 0.26 : 0.3;
+          scale = isSphere ? 0.88 : 0.86;
         } else {
           const extraP = Math.min(1, (pos - 2) * 0.5);
-          translateY = -20 * extraP;
-          translateX = 60 * extraP;
-          opacity = Math.max(0, 0.3 - extraP * 0.3);
-          scale = 0.86 - extraP * 0.1;
+          if (isSphere) {
+            translateY = 18 * extraP;
+            opacity = Math.max(0, 0.26 - extraP * 0.26);
+            scale = 0.88 - extraP * 0.08;
+          } else {
+            translateY = -20 * extraP;
+            translateX = 60 * extraP;
+            opacity = Math.max(0, 0.3 - extraP * 0.3);
+            scale = 0.86 - extraP * 0.1;
+          }
         }
 
-        const baseBottom = Math.min(pos, MAX_STACK) * bubbleGap;
-        const bottomOffset = baseBottom + translateY;
-
         let icon: ReactNode;
-        let bgClass = "bg-white";
-        let borderClass = "border-slate-200";
+        let bgClass = isSphere ? "bg-white/85" : "bg-white";
+        let borderClass = isSphere ? "border-slate-200/70" : "border-slate-200";
         let textClass = "text-slate-700";
 
         if (s.isTaskStart) {
-          icon = <Layers className="h-4 w-4 text-white" />;
+          icon = <Layers className={`${isSphere ? "h-3.5 w-3.5" : "h-4 w-4"} text-white`} />;
           bgClass = "bg-gradient-to-r from-indigo-600 to-violet-600";
           borderClass = "border-indigo-400";
           textClass = "text-white";
         } else if (s.isRecordStart) {
-          icon = <UserCircle className="h-4 w-4 text-indigo-500" />;
+          icon = <UserCircle className={`${isSphere ? "h-3.5 w-3.5" : "h-4 w-4"} text-indigo-500`} />;
           bgClass = "bg-indigo-50";
           borderClass = "border-indigo-200";
           textClass = "text-indigo-800";
         } else if (s.success) {
-          icon = <CheckCircle2 className="h-4 w-4 text-emerald-500" />;
+          icon = <CheckCircle2 className={`${isSphere ? "h-3.5 w-3.5" : "h-4 w-4"} text-emerald-500`} />;
         } else {
-          icon = <XCircle className="h-4 w-4 text-rose-500" />;
+          icon = <XCircle className={`${isSphere ? "h-3.5 w-3.5" : "h-4 w-4"} text-rose-500`} />;
         }
+
+        // 球体变体：水平居中、top 锚定向下堆叠；边缘变体：right/bottom 锚定向上堆叠
+        const posStyle = isSphere
+          ? { top: Math.min(pos, MAX_STACK) * bubbleGap + translateY }
+          : { bottom: Math.min(pos, MAX_STACK) * bubbleGap + translateY };
 
         return (
           <div
             key={b.id}
-            className={`pointer-events-auto absolute right-0 flex w-[260px] items-start gap-2 rounded-xl border ${borderClass} ${bgClass} px-3 py-2 shadow-lg backdrop-blur-sm`}
+            className={[
+              "absolute flex items-start rounded-xl border shadow-lg backdrop-blur-sm",
+              isSphere
+                ? "left-1/2 w-[204px] gap-1.5 px-2 py-1.5 pointer-events-none"
+                : "right-0 w-[260px] gap-2 px-3 py-2 pointer-events-auto",
+              borderClass,
+              bgClass,
+            ].join(" ")}
             style={{
-              bottom: bottomOffset,
+              ...posStyle,
               opacity,
-              transform: `translateX(${translateX}px) scale(${scale})`,
-              transformOrigin: "right bottom",
+              transform: isSphere
+                ? `translateX(-50%) scale(${scale})`
+                : `translateX(${translateX}px) scale(${scale})`,
+              transformOrigin: isSphere ? "center top" : "right bottom",
               transition: b.exiting ? "none" : "all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1)",
             }}
           >
             <span className="mt-0.5 shrink-0">{icon}</span>
             <div className="min-w-0 flex-1">
-              <p className={`text-[11px] leading-tight font-medium ${textClass} break-words`}>
+              <p className={`${isSphere ? "text-[10px]" : "text-[11px]"} leading-tight font-medium ${textClass} break-words`}>
                 {s.description}
                 {s.taskName && s.isTaskStart && (
                   <span className="ml-1 text-[10px] opacity-80">{s.taskIndex}/{s.taskTotal}</span>

@@ -32,8 +32,9 @@ async function gzipBytes(data: Uint8Array): Promise<Uint8Array> {
   // 复制到纯 ArrayBuffer 支撑的 Uint8Array，规避 TS lib 的 SharedArrayBuffer 类型不兼容
   const buf = new Uint8Array(data.byteLength);
   buf.set(data);
-  writer.write(buf.buffer as ArrayBuffer);
-  writer.close();
+  // 写 Uint8Array（而非 .buffer）：浏览器与 Node 的 CompressionStream 都接受，且 Node 拒绝裸 ArrayBuffer。
+  // 写入与读取必须并发：大体积数据时 CompressionStream 有背压，先 await write 再读会死锁
+  const writePromise = (async () => { await writer.write(buf); await writer.close(); })();
   const reader = stream.readable.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -45,6 +46,7 @@ async function gzipBytes(data: Uint8Array): Promise<Uint8Array> {
       total += value.length;
     }
   }
+  await writePromise;
   const out = new Uint8Array(total);
   let offset = 0;
   for (const c of chunks) {
@@ -59,8 +61,7 @@ async function gunzipBytes(data: Uint8Array): Promise<Uint8Array> {
   const writer = stream.writable.getWriter();
   const buf = new Uint8Array(data.byteLength);
   buf.set(data);
-  writer.write(buf.buffer as ArrayBuffer);
-  writer.close();
+  const writePromise = (async () => { await writer.write(buf); await writer.close(); })();
   const reader = stream.readable.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -72,6 +73,7 @@ async function gunzipBytes(data: Uint8Array): Promise<Uint8Array> {
       total += value.length;
     }
   }
+  await writePromise;
   const out = new Uint8Array(total);
   let offset = 0;
   for (const c of chunks) {
@@ -107,6 +109,7 @@ function sanitizeTemplate(tpl: WorkflowTemplate): unknown {
     reviewMarks: sanitizeMarks(tpl.reviewMarks),
     entryMarks: sanitizeMarks(tpl.entryMarks),
     mappings: tpl.mappings,
+    customTextEntries: tpl.customTextEntries,
     flowGraph: tpl.flowGraph,
     hasSearchSteps: tpl.hasSearchSteps,
     hasSubmitStep: tpl.hasSubmitStep,
@@ -155,6 +158,7 @@ export async function decodeShareCode(code: string): Promise<DecodeResult> {
       reviewMarks: Array.isArray(data.reviewMarks) ? data.reviewMarks : [],
       entryMarks: Array.isArray(data.entryMarks) ? data.entryMarks : [],
       mappings: Array.isArray(data.mappings) ? data.mappings : undefined,
+      customTextEntries: Array.isArray(data.customTextEntries) ? data.customTextEntries : undefined,
       flowGraph: data.flowGraph,
       hasSearchSteps: !!data.hasSearchSteps,
       hasSubmitStep: !!data.hasSubmitStep,

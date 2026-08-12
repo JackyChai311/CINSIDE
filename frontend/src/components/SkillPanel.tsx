@@ -18,9 +18,9 @@ interface SkillPanelProps {
 }
 
 const MODE_LABELS: Record<AppMode, { label: string; color: string }> = {
-  loop: { label: "全流程", color: "bg-indigo-100 text-indigo-700" },
-  review: { label: "审查", color: "bg-sky-100 text-sky-700" },
-  entry: { label: "录入", color: "bg-violet-100 text-violet-700" },
+  loop: { label: "全流程", color: "bg-slate-100 text-slate-600" },
+  review: { label: "审查", color: "bg-slate-100 text-slate-600" },
+  entry: { label: "录入", color: "bg-slate-100 text-slate-600" },
 };
 
 const SKILL_DRAG_MIME = "application/x-cinside-skill-id";
@@ -176,6 +176,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
       reviewMarks: Array.isArray(data?.reviewMarks) ? data.reviewMarks : [],
       entryMarks: Array.isArray(data?.entryMarks) ? data.entryMarks : [],
       mappings: Array.isArray(data?.mappings) ? data.mappings : undefined,
+      customTextEntries: Array.isArray(data?.customTextEntries) ? data.customTextEntries : undefined,
       flowGraph: data?.flowGraph,
       hasSearchSteps: !!data?.hasSearchSteps,
       hasSubmitStep: !!data?.hasSubmitStep,
@@ -384,15 +385,10 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
         onClick={(e) => e.stopPropagation()}
       >
         {/* 头部：标题 + 搜索栏 */}
-        <div className={`relative overflow-hidden border-b border-white/10 bg-gradient-to-br px-6 pt-5 pb-5 ${applyMode ? "from-emerald-500/15 via-teal-500/10 to-cyan-500/15" : "from-violet-500/15 via-indigo-500/10 to-fuchsia-500/15"}`}>
-          {/* 装饰光斑 */}
-          <div className={`pointer-events-none absolute -top-20 -right-16 h-48 w-48 rounded-full blur-3xl ${applyMode ? "bg-emerald-400/20" : "bg-violet-400/20"}`} />
-          <div className={`pointer-events-none absolute -bottom-16 -left-12 h-40 w-40 rounded-full blur-3xl ${applyMode ? "bg-cyan-400/20" : "bg-fuchsia-400/20"}`} />
-          <div className={`pointer-events-none absolute top-1/2 left-1/3 h-24 w-24 -translate-y-1/2 rounded-full blur-2xl ${applyMode ? "bg-teal-400/10" : "bg-indigo-400/10"}`} />
+        <div className="relative border-b border-slate-200 bg-white/70 px-6 pt-5 pb-5 dark:border-white/10 dark:bg-transparent">
           <div className="relative flex items-center gap-3.5">
-            <div className={`relative flex h-11 w-11 items-center justify-center rounded-2xl text-white shadow-lg ${applyMode ? "bg-gradient-to-br from-emerald-500 to-teal-600 shadow-emerald-500/25" : "bg-gradient-to-br from-violet-500 to-indigo-600 shadow-violet-500/25"}`}>
+            <div className="relative flex h-11 w-11 items-center justify-center rounded-2xl bg-slate-900 text-white dark:bg-white dark:text-slate-900">
               {applyMode ? <Layers className="h-5 w-5" /> : <Sparkles className="h-5 w-5" />}
-              <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-white/30 to-transparent" />
             </div>
             <div className="min-w-0">
               <h2 className="text-xl font-bold tracking-tight text-slate-800 dark:text-slate-100">{applyMode ? "应用 LOOP 模板" : "循环管理"}</h2>
@@ -404,7 +400,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
             </div>
             <button
               onClick={openImport}
-              className="flex items-center gap-1.5 rounded-xl bg-white/60 px-3 py-2 text-[12px] font-medium text-slate-600 shadow-sm ring-1 ring-white/20 backdrop-blur-sm transition-all hover:bg-white hover:text-violet-600 hover:ring-violet-200 dark:bg-slate-900/40 dark:text-slate-300 dark:ring-white/5 dark:hover:bg-slate-800/60 dark:hover:text-violet-300"
+              className="flex items-center gap-1.5 rounded-xl bg-white/60 px-3 py-2 text-[12px] font-medium text-slate-600 shadow-sm ring-1 ring-slate-200 backdrop-blur-sm transition-all hover:bg-white hover:text-slate-900 dark:bg-slate-900/40 dark:text-slate-300 dark:ring-white/5 dark:hover:bg-slate-800/60 dark:hover:text-slate-100"
               title="输入分享密钥导入 LOOP 卡片"
             >
               <KeyRound className="h-3.5 w-3.5" />
@@ -426,7 +422,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="搜索技能名称或介绍…"
-              className="w-full rounded-xl border border-white/20 bg-white/60 py-2.5 pl-10 pr-10 text-[13px] text-slate-700 dark:text-slate-200 shadow-sm outline-none backdrop-blur-sm transition placeholder:text-slate-400 focus:border-violet-300/50 focus:bg-white/80 focus:ring-2 focus:ring-violet-400/20 dark:bg-slate-900/40 dark:border-white/5 dark:focus:bg-slate-900/60"
+              className="w-full rounded-xl border border-slate-200 bg-white/60 py-2.5 pl-10 pr-10 text-[13px] text-slate-700 dark:text-slate-200 shadow-sm outline-none backdrop-blur-sm transition placeholder:text-slate-400 focus:border-slate-400 focus:bg-white/80 focus:ring-2 focus:ring-slate-200 dark:bg-slate-900/40 dark:border-white/5 dark:focus:bg-slate-900/60"
             />
             {search && (
               <button
@@ -453,8 +449,8 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                 </>
               ) : (
                 <>
-                  <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-50 to-indigo-50 dark:from-violet-500/10 dark:to-indigo-500/10">
-                    <Sparkles className="h-7 w-7 text-violet-400" />
+                  <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-100 dark:bg-white/5">
+                    <Sparkles className="h-7 w-7 text-slate-400" />
                   </div>
                   <p className="text-sm font-medium text-slate-500 dark:text-slate-400">还没有保存任何技能</p>
                   <p className="mt-1.5 text-[12px] text-slate-400 dark:text-slate-500">配置好步骤后，点「保存为技能」即可复用</p>
@@ -478,12 +474,12 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                       "group relative flex items-stretch gap-3 overflow-hidden rounded-2xl border bg-white/70 p-0 shadow-sm backdrop-blur-sm transition-all duration-200",
                       "dark:bg-slate-800/40 dark:border-white/5",
                       isEditing
-                        ? "border-violet-300/60 ring-2 ring-violet-400/30 items-center dark:border-violet-400/40 dark:ring-violet-500/20"
+                        ? "border-slate-300 ring-2 ring-slate-300/60 items-center dark:border-slate-500/40 dark:ring-slate-500/20"
                         : applyMode
-                          ? "border-slate-200/60 hover:border-emerald-200/60 hover:shadow-lg hover:shadow-emerald-500/5 hover:-translate-y-0.5 dark:border-white/5 dark:hover:border-emerald-400/30 dark:hover:shadow-black/20 cursor-pointer"
-                          : "border-slate-200/60 hover:border-violet-200/60 hover:shadow-lg hover:shadow-violet-500/5 hover:-translate-y-0.5 dark:border-white/5 dark:hover:border-violet-400/30 dark:hover:shadow-black/20",
+                          ? "border-slate-200/60 hover:border-slate-300 hover:shadow-lg hover:shadow-slate-900/5 hover:-translate-y-0.5 dark:border-white/5 dark:hover:border-white/20 dark:hover:shadow-black/20 cursor-pointer"
+                          : "border-slate-200/60 hover:border-slate-300 hover:shadow-lg hover:shadow-slate-900/5 hover:-translate-y-0.5 dark:border-white/5 dark:hover:border-white/20 dark:hover:shadow-black/20",
                       !isEditing && !applyMode && "cursor-grab active:cursor-grabbing",
-                      isImgDragOver && !isEditing ? "ring-2 ring-violet-400/50 border-violet-400/50" : "",
+                      isImgDragOver && !isEditing ? "ring-2 ring-slate-400/60 border-slate-400/60" : "",
                     ].filter(Boolean).join(" ")}
                     draggable={!isEditing && !applyMode}
                     onDragStart={(e) => !isEditing && !applyMode && handleDragStart(e, skill)}
@@ -574,7 +570,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                           ) : (
                             <button
                               onClick={() => setShowIconPicker(!showIconPicker)}
-                              className="flex h-full w-full items-center justify-center rounded-xl bg-gradient-to-br from-violet-50 to-indigo-50 text-2xl hover:from-violet-100 hover:to-indigo-100 dark:from-violet-500/10 dark:to-indigo-500/10 dark:hover:from-violet-500/20 dark:hover:to-indigo-500/20 transition-all"
+                              className="flex h-full w-full items-center justify-center rounded-xl bg-slate-50 text-2xl hover:bg-slate-100 dark:bg-white/5 dark:hover:bg-white/10 transition-all"
                             >
                               {editIcon}
                             </button>
@@ -586,7 +582,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                             value={editName}
                             onChange={(e) => setEditName(e.target.value)}
                             onKeyDown={(e) => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") cancelEdit(); }}
-                            className="w-full rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900/50 px-3 py-1.5 text-sm font-medium text-slate-800 dark:text-slate-200 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-400/20 transition-all"
+                            className="w-full rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900/50 px-3 py-1.5 text-sm font-medium text-slate-800 dark:text-slate-200 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200 transition-all"
                           />
                           <textarea
                             value={editDesc}
@@ -595,7 +591,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                             rows={2}
                             maxLength={80}
                             placeholder="填写介绍（最多80字）"
-                            className="mt-2 w-full resize-none rounded-lg border border-slate-200 dark:border-white/10 bg-white/50 dark:bg-slate-900/30 px-3 py-1.5 text-xs text-slate-600 dark:text-slate-300 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-400/20 transition-all"
+                            className="mt-2 w-full resize-none rounded-lg border border-slate-200 dark:border-white/10 bg-white/50 dark:bg-slate-900/30 px-3 py-1.5 text-xs text-slate-600 dark:text-slate-300 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200 transition-all"
                           />
                           <div className={`mt-1 text-right text-[10px] ${editDesc.length >= 80 ? "text-rose-500" : "text-slate-400"}`}>
                             {editDesc.length}/80
@@ -606,7 +602,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                                 <button
                                   key={ic}
                                   onClick={() => { setEditIcon(ic); setShowIconPicker(false); }}
-                                  className={`flex h-9 w-9 items-center justify-center rounded-lg text-xl transition-all ${editIcon === ic ? "bg-violet-100 dark:bg-violet-500/20 ring-2 ring-violet-400" : "bg-slate-50 dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10"}`}
+                                  className={`flex h-9 w-9 items-center justify-center rounded-lg text-xl transition-all ${editIcon === ic ? "bg-slate-200 dark:bg-white/10 ring-2 ring-slate-400" : "bg-slate-50 dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10"}`}
                                 >
                                   {ic}
                                 </button>
@@ -617,7 +613,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                         <div className="flex flex-col gap-1 pr-3 py-4">
                           <button
                             onClick={saveEdit}
-                            className="flex h-8 w-8 items-center justify-center rounded-lg text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors"
+                            className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 dark:hover:bg-white/10 transition-colors"
                           >
                             <Check className="h-4 w-4" />
                           </button>
@@ -653,7 +649,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                             <div className="flex shrink-0 items-center gap-1">
                               <button
                                 onClick={(e) => { e.stopPropagation(); handleShare(skill); }}
-                                className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-sky-50 hover:text-sky-500 dark:hover:bg-sky-500/10 dark:hover:text-sky-400 opacity-70 group-hover:opacity-100"
+                                className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-300 opacity-70 group-hover:opacity-100"
                                 title="生成分享密钥"
                               >
                                 <Share2 className="h-3.5 w-3.5" />
@@ -674,7 +670,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                               </button>
                               <button
                                 onClick={(e) => { e.stopPropagation(); onEditFlow?.(skill); }}
-                                className="flex h-8 items-center gap-1.5 rounded-lg bg-violet-50 dark:bg-violet-500/15 px-2.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300 ring-1 ring-violet-200/50 dark:ring-violet-400/20 transition-all hover:bg-violet-100 dark:hover:bg-violet-500/25 hover:ring-violet-300/50"
+                                className="flex h-8 items-center gap-1.5 rounded-lg bg-white/70 dark:bg-white/5 px-2.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300 ring-1 ring-slate-200 dark:ring-white/10 transition-all hover:bg-slate-100 dark:hover:bg-white/10 hover:text-slate-900 dark:hover:text-slate-100"
                                 title="编辑流程"
                               >
                                 <GitBranch className="h-3 w-3" />
@@ -683,7 +679,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                               {applyMode ? (
                                 <button
                                   onClick={(e) => { e.stopPropagation(); onApplySkill?.(skill); }}
-                                  className="flex h-8 items-center gap-1.5 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 px-3 text-[11px] font-semibold text-white shadow-md shadow-emerald-500/20 transition-all hover:shadow-lg hover:shadow-emerald-500/30 hover:from-emerald-600 hover:to-teal-600 active:scale-95"
+                                  className="flex h-8 items-center gap-1.5 rounded-lg bg-slate-900 px-3 text-[11px] font-semibold text-white shadow-sm transition-all hover:bg-slate-700 active:scale-95"
                                   title="应用此模板的步骤到当前设置"
                                 >
                                   <Layers className="h-3 w-3" />
@@ -692,7 +688,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                               ) : (
                                 <button
                                   onClick={(e) => { e.stopPropagation(); onRunSkill(skill); }}
-                                  className="flex h-8 items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-500 px-3 text-[11px] font-semibold text-white shadow-md shadow-indigo-500/20 transition-all hover:shadow-lg hover:shadow-indigo-500/30 hover:from-indigo-600 hover:to-violet-600 active:scale-95"
+                                  className="flex h-8 items-center gap-1.5 rounded-lg bg-slate-900 px-3 text-[11px] font-semibold text-white shadow-sm transition-all hover:bg-slate-700 active:scale-95"
                                   title="执行"
                                 >
                                   <Play className="h-3 w-3 fill-current" />
@@ -709,7 +705,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                         <button
                           onClick={(e) => { e.stopPropagation(); handlePickImage(skill.id); }}
                           onPaste={(e) => handleCardPaste(e, skill.id)}
-                          className="group/ico relative -my-0 -ml-0 flex w-20 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-l-2xl bg-gradient-to-br from-violet-50 via-indigo-50 to-fuchsia-50 dark:from-violet-500/10 dark:via-indigo-500/10 dark:to-fuchsia-500/10 text-3xl select-none transition-all hover:from-violet-100 hover:via-indigo-100 hover:to-fuchsia-100 dark:hover:from-violet-500/20 dark:hover:via-indigo-500/20 dark:hover:to-fuchsia-500/20"
+                          className="group/ico relative -my-0 -ml-0 flex w-20 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-l-2xl bg-slate-50 dark:bg-white/5 text-3xl select-none transition-all hover:bg-slate-100 dark:hover:bg-white/10"
                           title="点击上传图片"
                         >
                           <div className="relative z-10 transition-transform group-hover/ico:scale-110">{currentIcon}</div>
@@ -739,7 +735,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                             <div className="flex shrink-0 items-center gap-1">
                               <button
                                 onClick={(e) => { e.stopPropagation(); handleShare(skill); }}
-                                className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-sky-50 hover:text-sky-500 dark:hover:bg-sky-500/10 dark:hover:text-sky-400 opacity-70 group-hover:opacity-100"
+                                className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-300 opacity-70 group-hover:opacity-100"
                                 title="生成分享密钥"
                               >
                                 <Share2 className="h-3.5 w-3.5" />
@@ -760,7 +756,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                               </button>
                               <button
                                 onClick={(e) => { e.stopPropagation(); onEditFlow?.(skill); }}
-                                className="flex h-8 items-center gap-1.5 rounded-lg bg-violet-50 dark:bg-violet-500/15 px-2.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300 ring-1 ring-violet-200/50 dark:ring-violet-400/20 transition-all hover:bg-violet-100 dark:hover:bg-violet-500/25 hover:ring-violet-300/50"
+                                className="flex h-8 items-center gap-1.5 rounded-lg bg-white/70 dark:bg-white/5 px-2.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300 ring-1 ring-slate-200 dark:ring-white/10 transition-all hover:bg-slate-100 dark:hover:bg-white/10 hover:text-slate-900 dark:hover:text-slate-100"
                                 title="编辑流程"
                               >
                                 <GitBranch className="h-3 w-3" />
@@ -769,7 +765,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                               {applyMode ? (
                                 <button
                                   onClick={(e) => { e.stopPropagation(); onApplySkill?.(skill); }}
-                                  className="flex h-8 items-center gap-1.5 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 px-3 text-[11px] font-semibold text-white shadow-md shadow-emerald-500/20 transition-all hover:shadow-lg hover:shadow-emerald-500/30 hover:from-emerald-600 hover:to-teal-600 active:scale-95"
+                                  className="flex h-8 items-center gap-1.5 rounded-lg bg-slate-900 px-3 text-[11px] font-semibold text-white shadow-sm transition-all hover:bg-slate-700 active:scale-95"
                                   title="应用此模板的步骤到当前设置"
                                 >
                                   <Layers className="h-3 w-3" />
@@ -778,7 +774,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                               ) : (
                                 <button
                                   onClick={(e) => { e.stopPropagation(); onRunSkill(skill); }}
-                                  className="flex h-8 items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-500 px-3 text-[11px] font-semibold text-white shadow-md shadow-indigo-500/20 transition-all hover:shadow-lg hover:shadow-indigo-500/30 hover:from-indigo-600 hover:to-violet-600 active:scale-95"
+                                  className="flex h-8 items-center gap-1.5 rounded-lg bg-slate-900 px-3 text-[11px] font-semibold text-white shadow-sm transition-all hover:bg-slate-700 active:scale-95"
                                   title="执行"
                                 >
                                   <Play className="h-3 w-3 fill-current" />
@@ -816,7 +812,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start gap-3">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-400 to-cyan-500 text-white shadow-md shadow-sky-500/25">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white dark:bg-white dark:text-slate-900">
                 <Share2 className="h-5 w-5" />
               </div>
               <div className="min-w-0 flex-1">
@@ -836,7 +832,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
             <div className="mt-4">
               {shareEncoding ? (
                 <div className="flex items-center justify-center gap-2 rounded-xl bg-slate-50 py-8 text-[13px] text-slate-400 dark:bg-slate-900/40">
-                  <Loader2 className="h-4 w-4 animate-spin text-sky-500" />
+                  <Loader2 className="h-4 w-4 animate-spin text-slate-400" />
                   正在生成分享密钥…
                 </div>
               ) : shareError ? (
@@ -853,7 +849,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                         disabled={!shareOnlineCode}
                         className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-medium transition-all ${
                           shareMode === "online"
-                            ? "bg-white text-sky-600 shadow-sm dark:bg-slate-700 dark:text-sky-400"
+                            ? "bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100"
                             : "text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
                         } ${!shareOnlineCode ? "cursor-not-allowed opacity-40" : ""}`}
                       >
@@ -864,7 +860,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                         onClick={() => switchShareMode("offline")}
                         className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-medium transition-all ${
                           shareMode === "offline"
-                            ? "bg-white text-violet-600 shadow-sm dark:bg-slate-700 dark:text-violet-400"
+                            ? "bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100"
                             : "text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
                         }`}
                       >
@@ -881,7 +877,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                   )}
 
                   {shareMode === "online" && shareOnlineCode && (
-                    <div className="mb-2 flex items-center gap-1.5 text-[11px] text-emerald-600 dark:text-emerald-400">
+                    <div className="mb-2 flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
                       <Wifi className="h-3 w-3" />
                       联网短码 · 对方只需联网即可导入，无需其他配置
                     </div>
@@ -910,12 +906,10 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                   </div>
                   <button
                     onClick={handleCopyCode}
-                    className={`mt-3 flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-[13px] font-semibold text-white shadow-md transition-all active:scale-[0.98] ${
+                    className={`mt-3 flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-[13px] font-semibold text-white shadow-sm transition-all active:scale-[0.98] ${
                       shareCopied
-                        ? "bg-emerald-500 shadow-emerald-500/25"
-                        : shareMode === "online"
-                          ? "bg-gradient-to-r from-sky-500 to-cyan-500 shadow-sky-500/25 hover:shadow-lg hover:shadow-sky-500/30"
-                          : "bg-gradient-to-r from-violet-500 to-indigo-500 shadow-violet-500/25 hover:shadow-lg hover:shadow-violet-500/30"
+                        ? "bg-emerald-500"
+                        : "bg-slate-900 hover:bg-slate-700"
                     }`}
                   >
                     {shareCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
@@ -939,7 +933,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start gap-3">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 text-white shadow-md shadow-violet-500/25">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white dark:bg-white dark:text-slate-900">
                 <KeyRound className="h-5 w-5" />
               </div>
               <div className="min-w-0 flex-1">
@@ -963,7 +957,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                 placeholder="在此粘贴分享密钥（CSG: 联网短码 或 CSL1: 离线码）…"
                 rows={5}
                 disabled={importing}
-                className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50 p-3 font-mono text-[11px] leading-relaxed text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-violet-300 focus:ring-2 focus:ring-violet-400/20 dark:border-white/10 dark:bg-slate-900/50 dark:text-slate-300 dark:placeholder:text-slate-600"
+                className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50 p-3 font-mono text-[11px] leading-relaxed text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-slate-400 focus:ring-2 focus:ring-slate-200 dark:border-white/10 dark:bg-slate-900/50 dark:text-slate-300 dark:placeholder:text-slate-600"
               />
               {importError && (
                 <p className="mt-2 text-[12px] text-rose-500">{importError}</p>
@@ -977,7 +971,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
               <button
                 onClick={handleImport}
                 disabled={importing || !importCode.trim()}
-                className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-violet-500 to-indigo-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-md shadow-violet-500/25 transition-all hover:shadow-lg hover:shadow-violet-500/30 active:scale-[0.98] disabled:opacity-50"
+                className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-xl bg-slate-900 px-4 py-2.5 text-[13px] font-semibold text-white shadow-sm transition-all hover:bg-slate-700 active:scale-[0.98] disabled:opacity-50"
               >
                 {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                 {importing ? "正在导入…" : "导入卡片"}

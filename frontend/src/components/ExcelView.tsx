@@ -4,6 +4,7 @@ import {
   Check,
   ExternalLink,
   FileSpreadsheet,
+  Link2,
   MousePointerClick,
   Search,
   Users,
@@ -72,6 +73,8 @@ interface Props {
   onFieldColumnMapChange?: (field: string, columnKey: string | null) => void;
   /** 后端自动识别的列映射：原始列名 -> 标准字段名（用于过滤重复的标准别名列） */
   detectedColumnMap?: Record<string, string>;
+  /** 已绑定到提取元素条目/输入步骤的列名集合（高亮显示绑定状态） */
+  boundFields?: Set<string>;
 }
 
 /**
@@ -97,6 +100,7 @@ export default function ExcelView({
   fieldColumnMap = {},
   onFieldColumnMapChange,
   detectedColumnMap = {},
+  boundFields,
 }: Props) {
   const [filter, setFilter] = useState("");
   // 行范围框选的锚点行（第一次点击的行号，0-based records 索引）
@@ -127,6 +131,9 @@ export default function ExcelView({
     Object.entries(fieldColumnMap).forEach(([std, col]) => m.set(col, std));
     return m;
   }, [fieldColumnMap]);
+
+  // 已绑定列集合（兜底空集合，避免每次渲染新建）
+  const boundSet = useMemo(() => boundFields ?? new Set<string>(), [boundFields]);
 
   // 被detectedColumnMap映射到的标准字段集合（这些标准key是后端自动添加的别名，应过滤掉）
   const detectedStandardKeys = useMemo(() => {
@@ -348,6 +355,7 @@ export default function ExcelView({
                   const isSelected = selectedColumn === c;
                   const stdKey = colToStandard.get(c);
                   const stdField = stdKey ? STANDARD_FIELDS.find((f) => f.key === stdKey) : null;
+                  const isBound = boundSet.has(c);
                   return (
                     <th
                       key={c}
@@ -359,18 +367,30 @@ export default function ExcelView({
                         "hover:bg-slate-100",
                         isSelected
                           ? "bg-brand-100 text-brand-700 ring-1 ring-brand-300"
+                          : isBound
+                          ? "bg-violet-100 text-violet-700 ring-1 ring-violet-300"
                           : stdField
                           ? "bg-emerald-50 text-emerald-700"
                           : "text-slate-500",
                       ].join(" ")}
                       title={
-                        onFieldColumnMapChange
+                        (isBound ? `已绑定到提取元素/输入步骤 · LOOP 时逐行取「${c}」列的值\n` : "") +
+                        (onFieldColumnMapChange
                           ? `右键标记此列（姓名/护照/学号）${onSelectColumn ? "；左键点击选中为 LOOP 变量" : ""}`
-                          : onSelectColumn ? (isSelected ? "点击取消选中该列" : "点击选中该列作为 LOOP 变量") : c
+                          : onSelectColumn ? (isSelected ? "点击取消选中该列" : "点击选中该列作为 LOOP 变量") : c)
                       }
                     >
                       <div className="flex items-center gap-1">
                         <span className="max-w-[150px] truncate">{c}</span>
+                        {isBound && (
+                          <span
+                            className="inline-flex items-center gap-0.5 rounded-full bg-violet-500/15 px-1 py-0 text-[9px] font-bold text-violet-700"
+                            title={`该列已绑定到提取元素/输入步骤：LOOP 时逐行取「${c}」列的值`}
+                          >
+                            <Link2 className="h-2.5 w-2.5" />
+                            绑定
+                          </span>
+                        )}
                         {stdField && (
                           <span
                             className="inline-flex items-center gap-0.5 rounded-full bg-emerald-500/15 px-1 py-0 text-[9px] font-bold text-emerald-700"
