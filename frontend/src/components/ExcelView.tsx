@@ -75,6 +75,14 @@ interface Props {
   detectedColumnMap?: Record<string, string>;
   /** 已绑定到提取元素条目/输入步骤的列名集合（高亮显示绑定状态） */
   boundFields?: Set<string>;
+  /** LOOP 审查期：当前执行的记录 id（平滑滚动到该行并高亮） */
+  activeRecordId?: string | null;
+  /** LOOP 审查期：当前比对的 Excel 列名（平滑滚动到该单元格并聚焦） */
+  activeField?: string | null;
+  /** LOOP 审查期：当前比对单元格状态 pending=比对中, match/mismatch/missing=比对结果 */
+  activeFieldStatus?: "pending" | "match" | "mismatch" | "missing" | null;
+  /** LOOP 审查期：当前记录已完成比对的列→结果（保持单元格着色） */
+  fieldResults?: Record<string, "match" | "mismatch" | "missing">;
 }
 
 /**
@@ -101,6 +109,10 @@ export default function ExcelView({
   onFieldColumnMapChange,
   detectedColumnMap = {},
   boundFields,
+  activeRecordId = null,
+  activeField = null,
+  activeFieldStatus = null,
+  fieldResults,
 }: Props) {
   const [filter, setFilter] = useState("");
   // 行范围框选的锚点行（第一次点击的行号，0-based records 索引）
@@ -117,6 +129,31 @@ export default function ExcelView({
   const [dragSelecting, setDragSelecting] = useState(false);
   const dragStartRef = useRef<number | null>(null);
   const tbodyRef = useRef<HTMLTableSectionElement | null>(null);
+
+  // ===== LOOP 审查期：平滑滚动定位到当前执行行/比对单元格（与网页侧高亮一致的直观对比） =====
+  // 记录切换时：平滑滚动到该行（垂直居中）
+  useEffect(() => {
+    if (!activeRecordId) return;
+    const tbody = tbodyRef.current;
+    if (!tbody) return;
+    const tr = tbody.querySelector(`tr[data-record-id="${CSS.escape(activeRecordId)}"]`);
+    if (tr) {
+      tr.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    }
+  }, [activeRecordId]);
+
+  // 比对字段切换时：平滑滚动到该行的具体单元格（水平居中，让"哪里在对比"直观可见）
+  useEffect(() => {
+    if (!activeRecordId || !activeField) return;
+    const tbody = tbodyRef.current;
+    if (!tbody) return;
+    const cell = tbody.querySelector(
+      `tr[data-record-id="${CSS.escape(activeRecordId)}"] td[data-field="${CSS.escape(activeField)}"]`
+    );
+    if (cell) {
+      cell.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+    }
+  }, [activeRecordId, activeField]);
 
   // record_id → records 数组索引（行范围基于完整 records 顺序，与搜索过滤无关）
   const recordIndexMap = useMemo(() => {
@@ -415,12 +452,17 @@ export default function ExcelView({
                 const realIdx = recordIndexMap.get(r.record_id) ?? idx;
                 const inRange = !!rowRange && realIdx >= rowRange.start && realIdx <= rowRange.end;
                 const isAnchor = rangeSelecting && rangeAnchor === realIdx;
+                // LOOP 审查期：当前执行行高亮（中性聚焦色，区别于框选/选中色）
+                const isActiveRow = !!activeRecordId && r.record_id === activeRecordId;
                 return (
                   <tr
                     key={r.record_id}
+                    data-record-id={r.record_id}
                     className={[
                       "transition-colors",
-                      inRange
+                      isActiveRow
+                        ? "bg-slate-200/50"
+                        : inRange
                         ? cardsGenerated
                           ? "bg-emerald-50/60"
                           : "bg-indigo-50/70"
@@ -458,10 +500,29 @@ export default function ExcelView({
                       const colSelected = selectedColumn === c;
                       // 框选模式下，点击 LOOP 列单元格也能选择范围
                       const isLoopCol = rangeSelecting && c === selectedColumn;
+                      // LOOP 审查期：该单元格的比对状态（当前比对中 / 已有结果）
+                      const isActiveCell = isActiveRow && !!activeField && c === activeField;
+                      const cellReviewResult = isActiveRow ? fieldResults?.[c] : undefined;
+                      const reviewCellCls = isActiveCell
+                        ? activeFieldStatus === "match"
+                          ? "bg-emerald-100 outline outline-2 outline-emerald-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(16,185,129,0.22),0_0_14px_rgba(16,185,129,0.45)]"
+                          : activeFieldStatus === "mismatch"
+                          ? "bg-rose-100 outline outline-2 outline-rose-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(244,63,94,0.22),0_0_14px_rgba(244,63,94,0.45)]"
+                          : activeFieldStatus === "missing"
+                          ? "bg-amber-100 outline outline-2 outline-amber-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(245,158,11,0.22),0_0_14px_rgba(245,158,11,0.45)]"
+                          : "bg-indigo-100 outline outline-2 outline-indigo-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(99,102,241,0.22),0_0_14px_rgba(99,102,241,0.45)] animate-glow-pulse"
+                        : cellReviewResult === "match"
+                        ? "bg-emerald-50/80 outline outline-1 outline-emerald-300 -outline-offset-1"
+                        : cellReviewResult === "mismatch"
+                        ? "bg-rose-50/80 outline outline-1 outline-rose-300 -outline-offset-1"
+                        : cellReviewResult === "missing"
+                        ? "bg-amber-50/80 outline outline-1 outline-amber-300 -outline-offset-1"
+                        : "";
                       return (
                         <td
                           key={c}
                           data-real-idx={realIdx}
+                          data-field={c}
                           onClick={() => {
                             if (isLoopCol) {
                               handleRowNumClick(realIdx);
@@ -487,6 +548,8 @@ export default function ExcelView({
                             isLoopCol && inRange ? "bg-indigo-50/70" : "",
                             isLoopCol && isAnchor ? "bg-indigo-200" : "",
                             justPicked ? "animate-glow-pulse" : "",
+                            // LOOP 审查期单元格着色优先级最高（覆盖拾取/列选色）
+                            reviewCellCls,
                           ].join(" ")}
                           title={
                             isLoopCol

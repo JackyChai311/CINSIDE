@@ -955,6 +955,13 @@ input[type="range"]::-moz-range-thumb {
 }
 .animate-glow-pulse { animation: glow-pulse 1.6s ease-in-out infinite; }
 
+/* LOOP 运行卡片：字段对逐对填入（淡入 + 下滑） */
+@keyframes pair-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-pair-in { animation: pair-in 0.25s ease-out both; }
+
 /* BrowserPane 拾取态呼吸灯：柔和的多层内发光 + 顶部高光线 */
 @keyframes picking-breath {
   0%, 100% {

@@ -47,6 +47,7 @@ import type {
   FieldComparison,
   FieldMapping,
   FieldMatch,
+  LivePair,
   PickedMark,
   ScreenshotEvent,
   VerificationReport,
@@ -103,6 +104,8 @@ interface Props {
   shots: ScreenshotEvent[];
   steps?: VerificationStep[];
   running: boolean;
+  /** LOOP 运行期：当前记录逐对填入的字段对比/录入数据（一对一对填入卡片效果） */
+  livePairs?: { recordId: string; pairs: LivePair[] };
   appMode?: AppMode;
   onDetach?: () => void;
   onClose?: () => void;
@@ -268,6 +271,7 @@ export default function ResultsPanel({
   shots,
   steps = [],
   running,
+  livePairs,
   appMode = "loop",
   onDetach,
   onClose,
@@ -392,6 +396,7 @@ export default function ResultsPanel({
           shots={shots}
           running={running}
           steps={steps}
+          livePairs={livePairs}
           appMode={appMode}
           addingStepMode={addingStepMode}
           onPickExtractedField={onPickExtractedField}
@@ -756,6 +761,7 @@ function ReportTab({
   shots,
   running,
   steps,
+  livePairs,
   appMode,
   addingStepMode,
   onPickExtractedField,
@@ -848,6 +854,8 @@ function ReportTab({
   shots: ScreenshotEvent[];
   running: boolean;
   steps: VerificationStep[];
+  /** LOOP 运行期逐对填入卡片的字段对比/录入数据（一对一对填入效果） */
+  livePairs?: { recordId: string; pairs: LivePair[] };
   appMode: AppMode;
   addingStepMode?: "review" | "entry" | null;
   onPickExtractedField?: (side: "left" | "right", field: string, value: string) => void;
@@ -1634,10 +1642,13 @@ function ReportTab({
     }, [isRunning, rec.fieldSteps.length]);
 
     const doneCount = rec.fieldSteps.filter((f) => f.done).length;
+    // 逐对填卡数据：当前记录有 livePairs 时，卡片切换到「字段对比态」（一对一对填入）
+    const cardPairs = livePairs && livePairs.recordId === rec.recordId ? livePairs.pairs : [];
+    // 状态色系：执行中=无色系（中性灰），通过=绿，需检查=红
     const accent = isFailed
       ? { head: "bg-rose-50/80 border-rose-200", text: "text-rose-700", badge: "bg-rose-500", badgeSoft: "bg-rose-100 text-rose-700", spin: "text-rose-500" }
       : isRunning
-      ? { head: "bg-indigo-50/80 border-indigo-200", text: "text-indigo-700", badge: "bg-indigo-500", badgeSoft: "bg-indigo-100 text-indigo-700", spin: "text-indigo-500" }
+      ? { head: "bg-white border-slate-200", text: "text-slate-700", badge: "bg-slate-400", badgeSoft: "bg-slate-100 text-slate-600", spin: "text-slate-400" }
       : { head: "bg-emerald-50/80 border-emerald-200", text: "text-emerald-700", badge: "bg-emerald-500", badgeSoft: "bg-emerald-100 text-emerald-700", spin: "text-emerald-500" };
 
     return (
@@ -1671,7 +1682,7 @@ function ReportTab({
             </button>
           )}
           <span className={`inline-flex shrink-0 items-center rounded-full ${accent.badge} px-2 py-0.5 text-[10px] font-semibold text-white`}>
-            {isRunning ? `${doneCount}步` : isFailed ? "失败" : "通过"}
+            {isRunning ? `执行中 ${doneCount}步` : isFailed ? "需检查" : "通过"}
           </span>
           <button
             onClick={() => setExpanded((v) => !v)}
@@ -1680,7 +1691,63 @@ function ReportTab({
             <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
           </button>
         </div>
-        {expanded && rec.fieldSteps.length > 0 && (
+        {expanded && cardPairs.length > 0 ? (
+          /* 字段对比态：一对一对填入（左=提取/Excel值，右=网页/审查值） */
+          <div className="border-t border-slate-200/60 bg-white/70 px-3 py-1.5">
+            <ul className="space-y-1">
+              {cardPairs.map((p, i) => (
+                <li
+                  key={i}
+                  className={[
+                    "animate-pair-in flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px]",
+                    p.status === "mismatch" ? "bg-rose-50/80" : p.status === "missing" ? "bg-amber-50/80" : "",
+                  ].join(" ")}
+                >
+                  {p.status === "pending" ? (
+                    <Loader2 className="h-3 w-3 shrink-0 animate-spin text-amber-500" />
+                  ) : p.status === "match" ? (
+                    <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-500" />
+                  ) : p.status === "mismatch" ? (
+                    <XCircle className="h-3 w-3 shrink-0 text-rose-500" />
+                  ) : (
+                    <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" />
+                  )}
+                  <span className="shrink-0 font-medium text-slate-700">{p.label}</span>
+                  {p.kind === "compare" ? (
+                    <span className="flex min-w-0 flex-1 items-center gap-1 font-mono text-[10px]">
+                      <span
+                        className={`truncate rounded px-1 py-0.5 ${p.status === "pending" && !p.leftValue ? "text-slate-400" : "bg-indigo-50/80 text-indigo-700"}`}
+                        title={p.leftValue}
+                      >
+                        {p.leftValue || (p.status === "pending" ? "读取中…" : "—")}
+                      </span>
+                      <MoveRight className="h-3 w-3 shrink-0 text-slate-400" />
+                      <span
+                        className={[
+                          "truncate rounded px-1 py-0.5",
+                          p.status === "pending"
+                            ? "text-slate-400"
+                            : p.status === "match"
+                            ? "bg-emerald-50/80 text-emerald-700"
+                            : p.status === "mismatch"
+                            ? "bg-rose-100/80 font-semibold text-rose-700"
+                            : "bg-amber-100/80 text-amber-700",
+                        ].join(" ")}
+                        title={p.rightValue}
+                      >
+                        {p.rightValue || (p.status === "pending" ? "比对中…" : "—")}
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="min-w-0 flex-1 truncate rounded bg-sky-50/80 px-1 py-0.5 font-mono text-[10px] text-sky-700" title={p.leftValue}>
+                      {p.leftValue || "—"}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : expanded && rec.fieldSteps.length > 0 ? (
           <div className="border-t border-slate-200/60 bg-white/70 px-3 py-1.5">
             <ul className="space-y-1">
               {rec.fieldSteps.map((f, i) => {
@@ -1688,15 +1755,15 @@ function ReportTab({
                 return (
                   <li key={i} className="flex items-center gap-1.5 text-[11px]">
                     {isCurrent ? (
-                      <Loader2 className="h-3 w-3 shrink-0 animate-spin text-indigo-500" />
+                      <Loader2 className="h-3 w-3 shrink-0 animate-spin text-slate-400" />
                     ) : (
                       <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-500" />
                     )}
-                    <span className={isCurrent ? "font-medium text-indigo-700" : "text-slate-600"}>
+                    <span className={isCurrent ? "font-medium text-slate-700" : "text-slate-600"}>
                       {f.label}
                     </span>
                     {isCurrent && f.detail && (
-                      <span className="ml-1 truncate rounded bg-indigo-50 px-1 py-0.5 font-mono text-[9px] text-indigo-500">
+                      <span className="ml-1 truncate rounded bg-slate-100 px-1 py-0.5 font-mono text-[9px] text-slate-500">
                         {f.detail.replace(/^填入:\s*/, "")}
                       </span>
                     )}
@@ -1705,7 +1772,7 @@ function ReportTab({
               })}
             </ul>
           </div>
-        )}
+        ) : null}
       </div>
     );
   };
@@ -1766,11 +1833,13 @@ function ReportTab({
     const isReview = r.overall === "review" || hasMrzWarning;
 
     // 状态色系（MRZ警告时强制amber黄色系）
+    // 通过=emerald绿 / 有问题=amber黄 / 需检查=rose红
     const accent = isPass
-      ? { headerBg: "bg-emerald-50/60", badge: "bg-emerald-500", badgeSoft: "bg-emerald-100 text-emerald-700", footer: "bg-slate-50 text-emerald-700", border: "border-emerald-300/70 ring-1 ring-emerald-200/50" }
+      ? { headerBg: "bg-emerald-50/60", badge: "bg-emerald-500", badgeSoft: "bg-emerald-100 text-emerald-700", footer: "bg-slate-50 text-emerald-700", border: "border-emerald-300/70 ring-1 ring-emerald-200/50", stripe: "bg-emerald-400", text: "text-emerald-600" }
       : isReview
-      ? { headerBg: "bg-amber-50/50", badge: "bg-amber-500", badgeSoft: "bg-amber-100 text-amber-700", footer: "bg-slate-50 text-amber-700", border: "border-amber-300/70 ring-1 ring-amber-200/50" }
-      : { headerBg: "bg-rose-50/60", badge: "bg-rose-500", badgeSoft: "bg-rose-100 text-rose-700", footer: "bg-slate-50 text-rose-700", border: "border-rose-300/70 ring-1 ring-rose-200/50" };
+      ? { headerBg: "bg-amber-50/50", badge: "bg-amber-500", badgeSoft: "bg-amber-100 text-amber-700", footer: "bg-slate-50 text-amber-700", border: "border-amber-300/70 ring-1 ring-amber-200/50", stripe: "bg-amber-400", text: "text-amber-600" }
+      : { headerBg: "bg-rose-50/60", badge: "bg-rose-500", badgeSoft: "bg-rose-100 text-rose-700", footer: "bg-slate-50 text-rose-700", border: "border-rose-300/70 ring-1 ring-rose-200/50", stripe: "bg-rose-400", text: "text-rose-600" };
+    const OverallIcon = isPass ? CheckCircle2 : isReview ? AlertTriangle : XCircle;
 
     // 中间状态图标 —— 录入=箭头，审查=✓/✗/−
     const StatusIcon = ({ match }: { match: FieldMatch }) => {
@@ -1794,13 +1863,16 @@ function ReportTab({
     const studentId = r.student_id || getStudentId(srcRec);
 
     return (
-      <div className={`overflow-hidden rounded-lg border bg-white shadow-sm transition-all hover:shadow-md ${accent.border}`}>
+      <div className={`relative overflow-hidden rounded-xl border bg-white shadow-sm transition-all hover:shadow-md ${accent.border}`}>
+        {/* 左侧状态色条 */}
+        <div className={`absolute inset-y-0 left-0 w-1 ${accent.stripe}`} />
         {/* 头部 */}
-        <div className={`flex items-center gap-2 px-4 py-2.5 ${accent.headerBg}`}>
+        <div className={`flex items-center gap-2 py-2.5 pl-5 pr-4 ${accent.headerBg}`}>
           <button
             onClick={() => setExpanded((v) => !v)}
             className="flex flex-1 items-center gap-2 text-left transition-colors hover:brightness-[0.97]"
           >
+            <OverallIcon className={`h-4 w-4 shrink-0 ${accent.text}`} />
             <span className="text-sm font-semibold text-slate-800">{displayName}</span>
             {studentId && (
               <span className="rounded bg-slate-200/70 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">
@@ -1829,7 +1901,8 @@ function ReportTab({
               查看
             </button>
           )}
-          <span className={`inline-flex shrink-0 items-center rounded-full ${accent.badge} px-2.5 py-0.5 text-[11px] font-semibold text-white`}>
+          <span className={`inline-flex shrink-0 items-center gap-1 rounded-full ${accent.badge} px-2.5 py-0.5 text-[11px] font-semibold text-white shadow-sm`}>
+            <OverallIcon className="h-3 w-3" />
             {OVERALL_LABELS[r.overall]}
           </span>
           <button
@@ -1975,23 +2048,25 @@ function ReportTab({
   // 构建字段对比内容
   let fieldContent: React.ReactNode;
   let summaryBar: React.ReactNode = null;
+  // 执行状态徽标（执行中/✓通过/✗失败/◐运行中）：渲染在「字段对比」标题行内
+  let headerBadges: React.ReactNode = null;
 
   // 运行中或刚结束（有实时记录但还没有最终报告）：显示逐人可视化卡片
   if (liveRecords.length > 0 && (!hasReports || running)) {
     const passCount = liveRecords.filter((r) => r.status === "success").length;
     const failCount = liveRecords.filter((r) => r.status === "failed").length;
     const runCount = liveRecords.filter((r) => r.status === "running").length;
-    summaryBar = (
-      <div className="mb-2 flex shrink-0 flex-wrap items-center gap-1.5">
+    headerBadges = (
+      <>
         <span className="rounded-full bg-slate-800 px-2.5 py-0.5 text-[10px] font-medium text-white">
           {running ? "执行中" : "执行完成"}
         </span>
         {passCount > 0 && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">✓ {passCount}</span>}
         {failCount > 0 && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-medium text-rose-700">✗ {failCount}</span>}
-        {runCount > 0 && <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-medium text-indigo-700">
+        {runCount > 0 && <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-medium text-slate-600">
           <Loader2 className="mr-0.5 inline h-2.5 w-2.5 animate-spin" />{runCount}
         </span>}
-      </div>
+      </>
     );
     fieldContent = <div className="space-y-1.5">{liveRecords.map((r, i) => <LiveRecordCard key={`${r.index}-${i}`} rec={r} />)}</div>;
   } else if (hasReports) {
@@ -2000,19 +2075,20 @@ function ReportTab({
     const reviewCount = reports.filter((r) => r.overall === "review").length;
     const filtered = filter === "all" ? reports : reports.filter((r) => r.overall === filter);
 
+    // 紧凑版筛选 chip：渲染在「字段对比」标题行内（与运行中徽标同一行，跑完不掉下来）
     const FilterChip = ({ target, label, activeBg, inactiveBg, activeText, inactiveText, activeRing }: { target: typeof filter; label: string; activeBg: string; inactiveBg: string; activeText: string; inactiveText: string; activeRing: string }) => (
-      <button onClick={() => setFilter(target)} className={["rounded-full px-2.5 py-1 text-[11px] font-medium transition-all", filter === target ? `${activeBg} ${activeText} ring-2 ${activeRing} shadow-sm` : `${inactiveBg} ${inactiveText} ring-1 ring-transparent hover:ring-slate-300`].join(" ")}>
+      <button onClick={() => setFilter(target)} className={["shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium transition-all", filter === target ? `${activeBg} ${activeText} ring-2 ${activeRing} shadow-sm` : `${inactiveBg} ${inactiveText} ring-1 ring-transparent hover:ring-slate-300`].join(" ")}>
         {label}
       </button>
     );
 
-    summaryBar = (
-      <div className="mb-3 flex shrink-0 flex-wrap items-center gap-2">
+    headerBadges = (
+      <>
         <FilterChip target="all" label={`共 ${reports.length} 人`} activeBg="bg-slate-800" inactiveBg="bg-slate-200" activeText="text-white" inactiveText="text-slate-600" activeRing="ring-slate-500" />
         {passCount > 0 && <FilterChip target="pass" label={`✓ 通过 ${passCount}`} activeBg="bg-emerald-500" inactiveBg="bg-emerald-100" activeText="text-white" inactiveText="text-emerald-700" activeRing="ring-emerald-300" />}
-        {failCount > 0 && <FilterChip target="fail" label={`✗ 问题 ${failCount}`} activeBg="bg-rose-500" inactiveBg="bg-rose-100" activeText="text-white" inactiveText="text-rose-700" activeRing="ring-rose-300" />}
-        {reviewCount > 0 && <FilterChip target="review" label={`⚠ 复核 ${reviewCount}`} activeBg="bg-amber-500" inactiveBg="bg-amber-100" activeText="text-white" inactiveText="text-amber-700" activeRing="ring-amber-300" />}
-      </div>
+        {reviewCount > 0 && <FilterChip target="review" label={`有问题 ${reviewCount}`} activeBg="bg-amber-500" inactiveBg="bg-amber-100" activeText="text-white" inactiveText="text-amber-700" activeRing="ring-amber-300" />}
+        {failCount > 0 && <FilterChip target="fail" label={`需检查 ${failCount}`} activeBg="bg-rose-500" inactiveBg="bg-rose-100" activeText="text-white" inactiveText="text-rose-700" activeRing="ring-rose-300" />}
+      </>
     );
     fieldContent = <div className="space-y-3">{filtered.map((r) => <PersonReportCard key={r.task_id || r.record_id} r={r} />)}</div>;
   } else if (showSample) {
@@ -2030,7 +2106,7 @@ function ReportTab({
       <div className="mb-3 flex shrink-0 flex-wrap items-center gap-2">
         <FilterChip target="all" label={`共 ${sampleReports.length} 人`} activeBg="bg-slate-800" inactiveBg="bg-slate-200" activeText="text-white" inactiveText="text-slate-600" activeRing="ring-slate-500" />
         <FilterChip target="pass" label={`✓ 通过 ${passCount}`} activeBg="bg-emerald-500" inactiveBg="bg-emerald-100" activeText="text-white" inactiveText="text-emerald-700" activeRing="ring-emerald-300" />
-        <FilterChip target="fail" label={`✗ 问题 ${failCount}`} activeBg="bg-rose-500" inactiveBg="bg-rose-100" activeText="text-white" inactiveText="text-rose-700" activeRing="ring-rose-300" />
+        <FilterChip target="fail" label={`需检查 ${failCount}`} activeBg="bg-rose-500" inactiveBg="bg-rose-100" activeText="text-white" inactiveText="text-rose-700" activeRing="ring-rose-300" />
         <button
           onClick={() => { setShowSample(false); setFilter("all"); }}
           className="ml-auto rounded-md bg-slate-100 px-2 py-1 text-[10px] text-slate-600 hover:bg-slate-200"
@@ -3214,6 +3290,9 @@ function ReportTab({
           <div className="flex shrink-0 items-center gap-1.5 border-b border-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-700">
             <Table2 className="h-3.5 w-3.5 text-slate-500 shrink-0" />
             <span className="shrink-0">字段对比</span>
+            {!fieldSetupMode && headerBadges && (
+              <span className="ml-1 flex shrink-0 items-center gap-1">{headerBadges}</span>
+            )}
             {onSaveToBatch && fieldSetupMode && (
               <button
                 onClick={() => { if (!running) onSaveToBatch?.(); }}

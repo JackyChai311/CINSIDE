@@ -78,6 +78,7 @@ import type {
   FieldComparison,
   FieldMapping,
   FieldMatch,
+  LivePair,
   Overall,
   PickedMark,
   QueuedTask,
@@ -1258,6 +1259,14 @@ const bgOcrResultRef = useRef<{ dataUrl: string; engine: string; result: Awaited
 const fallbackWaitResolveRef = useRef<((file: { filename: string; dataUrl: string; size: number; mime: string } | null) => void) | null>(null);
 // LOOP执行时当前记录的开头点击步骤数（供保底机制回退页面用）
 const currentPreClickCountRef = useRef(0);
+// 保底机制处于活动阶段（扫描/下载/人工审查）：强制渲染文件提取面板让人工可见
+const docFallbackActive = docWebStatus.phase === "fallback-scanning"
+  || docWebStatus.phase === "fallback-downloading"
+  || docWebStatus.phase === "fallback-review";
+// 当前执行步骤的日志前缀（用于把阶段进展实时写回运行中卡片的步骤 detail）
+const liveStepPrefixRef = useRef<string | null>(null);
+// LOOP 运行期逐对填入卡片的字段对比/录入数据（一对一对填入效果）
+const [livePairs, setLivePairs] = useState<{ recordId: string; pairs: LivePair[] }>({ recordId: "", pairs: [] });
 // 本地文件提取：已上传的文件列表
 const [docLocalFiles, setDocLocalFiles] = useState<File[]>([]);
 // 本地文件提取：用于匹配文件名的字段（绑定的 Excel 字段）
@@ -1585,8 +1594,38 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const [verifyFieldIdx, setVerifyFieldIdx] = useState(-1);
   /** 每个审查字段的结果，key=mappings索引 */
   const [reviewFieldResults, setReviewFieldResults] = useState<Record<number, FieldMatch>>({});
+  /** 当前正在 LOOP 执行的记录 id（驱动 Excel 平滑滚动定位） */
+  const [execRecordId, setExecRecordId] = useState<string | null>(null);
   const batchStopRef = useRef(false);
   const runBatchRef = useRef<((tplOverride?: WorkflowTemplate, targetIds?: string[]) => Promise<void>) | null>(null);
+
+  // ===== LOOP 审查期 Excel 联动：平滑滚动到当前行 + 聚焦比对单元格 =====
+  // 当前比对的映射（verify 阶段有效）
+  const activeVerifyMapping = execPhase === "verify" && verifyFieldIdx >= 0 ? mappings[verifyFieldIdx] : undefined;
+  // Excel 侧当前比对列（仅左侧值来自 Excel 时才联动）
+  const excelActiveField = activeVerifyMapping && activeVerifyMapping.left_source === "excel" && activeVerifyMapping.left_field
+    ? activeVerifyMapping.left_field
+    : null;
+  // 当前比对单元格状态：结果未出=pending，已出=match/mismatch/missing
+  const excelActiveFieldStatus: "pending" | "match" | "mismatch" | "missing" | null = (() => {
+    if (!excelActiveField) return null;
+    const r = reviewFieldResults[verifyFieldIdx];
+    if (r === "match" || r === "mismatch" || r === "missing") return r;
+    if (r === "error" || r === "partial") return "mismatch";
+    return "pending";
+  })();
+  // 当前记录已完成比对的列→结果（保持已比对单元格着色）
+  const excelFieldResults = useMemo(() => {
+    const out: Record<string, "match" | "mismatch" | "missing"> = {};
+    if (execPhase !== "verify" && execPhase !== "done") return out;
+    mappings.forEach((m, i) => {
+      if (m.left_source !== "excel" || !m.left_field) return;
+      const r = reviewFieldResults[i];
+      if (r === "match" || r === "mismatch" || r === "missing") out[m.left_field] = r;
+      else if (r === "error" || r === "partial") out[m.left_field] = "mismatch";
+    });
+    return out;
+  }, [mappings, reviewFieldResults, execPhase]);
 
   // ============ 断点暂停机制 ============
   /** 断点弹窗的 UI 状态（null=未暂停） */
@@ -2419,8 +2458,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       const f = m.excelField || m.variableField;
       if (f) s.add(f);
     }
+    // 审查/录入映射里来源为 Excel 的列（如文件提取字段 ↔ Excel 列对比）：同样属于已绑定列
+    for (const mp of mappings) {
+      if (mp.left_source === "excel" && mp.left_field) s.add(mp.left_field);
+    }
     return s;
-  }, [customTextEntries, pickedMarks]);
+  }, [customTextEntries, pickedMarks, mappings]);
 
   // cardRecords：已保存批次放顶部（按保存时间setAt升序，第一批最上，第二批紧随其后），未保存卡片放底部
   const cardRecords = useMemo(() => {
@@ -3544,6 +3587,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         name: FIELD_LABELS[f] || f,
         text: v,
         source: "doc" as const,
+        docField: f,
         createdAt: baseTs + idx,
       }));
     if (entries.length === 0) return;
@@ -5982,6 +6026,23 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     }
   }, []);
 
+  // 把当前执行步骤的阶段进展实时写回运行卡片的步骤 detail（下载中/OCR中/保底中…）
+  const updateLiveStepDetail = useCallback((note: string) => {
+    const prefix = liveStepPrefixRef.current;
+    if (!prefix) return;
+    setSteps((prev) => {
+      for (let k = prev.length - 1; k >= 0; k--) {
+        const s = prev[k];
+        if (s.description?.startsWith(prefix)) {
+          const next = [...prev];
+          next[k] = { ...s, detail: note };
+          return next;
+        }
+      }
+      return prev;
+    });
+  }, []);
+
   // 保底下载：回退到前置页面，扫描所有可下载链接，批量下载，尝试匹配
   const runDocExtractFallback = useCallback(async (
     side: "left" | "right",
@@ -5989,9 +6050,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     preClickCount: number
   ): Promise<{ filename: string; dataUrl: string; size: number; mime: string } | "manual-review"> => {
     rlog(`[fallback] 启动文件提取保底机制, side=${side}, preClickCount=${preClickCount}`);
-    
-    // 步骤1：更新UI状态为扫描中
+
+    // 步骤1：更新UI状态为扫描中（并强制展开下面板，让人工能看到保底进展/审查界面）
     setDocWebStatus({ phase: "fallback-scanning", message: "保底机制：回退页面并扫描可下载文件..." });
+    setBottomPanelOpen(true);
+    updateLiveStepDetail("文件与学生不匹配，保底机制扫描中…");
 
     // 读取当前页面URL（用于空白页检测）
     const readCurrentUrl = async (): Promise<string> => {
@@ -6087,6 +6150,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
     // 步骤4：批量下载所有文件
     setDocWebStatus({ phase: "fallback-downloading", total: uniqueLinks.length, current: 0 });
+    updateLiveStepDetail(`保底机制：批量下载 ${uniqueLinks.length} 个候选文件…`);
     
     const downloadResult = await window.electronAPI?.viewBatchDownloadUrls(side, uniqueLinks.map(l => l.url), 30000);
     
@@ -6128,6 +6192,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
     // 5.2 文件名没匹配到，尝试快速OCR内容匹配（前几个文件）
     setDocWebStatus({ phase: "fallback-downloading", total: files.length, current: files.length, currentFile: "正在OCR匹配文件内容..." });
+    updateLiveStepDetail("保底机制：OCR 匹配候选文件内容…");
     
     const filesToPreview = files.slice(0, Math.min(files.length, 8)); // 最多预览前8个
     for (let i = 0; i < filesToPreview.length; i++) {
@@ -6145,6 +6210,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
     // 步骤6：所有自动匹配都失败，进入人工审查模式
     rlog(`[fallback] 自动匹配失败，进入人工审查模式，共 ${files.length} 个文件`);
+    updateLiveStepDetail("⚠️ 请在下方「文件处理」面板人工选择正确文件…");
     // 人工审查前也先把页面前进恢复原页面（审查 UI 是 HTML 浮层，不依赖被回退的页面）
     await restorePage();
     await new Promise(r => setTimeout(r, 800));
@@ -6159,7 +6225,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
     // 返回特殊标记，表示需要人工选择
     return "manual-review";
-  }, [getRecordMatchKeywords, filenameMatchesRecord, quickPreviewForMatch]);
+  }, [getRecordMatchKeywords, filenameMatchesRecord, quickPreviewForMatch, updateLiveStepDetail]);
 
   // 保底人工审查：选择一个文件继续
   const selectFallbackFile = useCallback((filename: string) => {
@@ -6574,6 +6640,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           const downloadPromise = waitForDownload(side, 30000);
           // 直览页场景会放弃等待该 Promise，提前挂静默 catch 避免未处理拒绝
           downloadPromise.catch(() => {});
+          updateLiveStepDetail("点击触发下载，等待文件…");
           // 2. 真实点击触发下载
           let clickResult = await performRealClick(side, mark.selector, inPopup);
           if (clickResult && typeof clickResult === "object" && "ok" in clickResult && clickResult.ok === false) {
@@ -6616,6 +6683,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
             // 2. 后台启动完整OCR提取（同时进行）
             setDocWebStatus({ phase: "ocr", filename: fileData.filename });
+            updateLiveStepDetail(`OCR 识别中：${fileData.filename}`);
             rlog(`[executeMark] 预览已开启，后台开始OCR: ${fileData.filename}`);
             const result = await extractFileWithVisionFallback(file, targetFields);
 
@@ -6663,6 +6731,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               setDocExtractActiveTab("primary");
             }
             setDocWebStatus({ phase: "success", filename: result.filename, size: fileData.size });
+            updateLiveStepDetail(`文件提取完成：${result.filename}`);
             return result.text || "";
           };
 
@@ -6686,6 +6755,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               if (fallbackResult === "manual-review") {
                 // 需要人工审查，等待用户选择
                 rlog(`[executeMark] 等待人工选择文件...`);
+                updateLiveStepDetail("⚠️ 自动匹配失败，请在下方「文件处理」面板选择正确文件…");
                 const manualFile = await new Promise<{ filename: string; dataUrl: string; size: number; mime: string } | null>((resolve) => {
                   fallbackWaitResolveRef.current = resolve;
                   // 超时保护：10分钟后自动超时
@@ -6734,6 +6804,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             }
             downloadData = await downloadPromise;
             rlog(`[executeMark] 下载完成: ${downloadData.filename} (${downloadData.size} bytes)`);
+            updateLiveStepDetail(`下载完成：${downloadData.filename}`);
             // 4. 立即开预览 + 后台OCR提取
             const ocrText = await showPreviewAndBgOcr(downloadData);
             
@@ -6856,21 +6927,75 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       })();
     `;
     await window.electronAPI.viewExecuteJS(side, script);
-  }, [performInputValue, performRealClick, mappings, waitElementAppear, getRecordDocFields, waitForDownload, triggerWebExtract, grabDirectPreviewFile]);
+  }, [performInputValue, performRealClick, mappings, waitElementAppear, getRecordDocFields, waitForDownload, triggerWebExtract, grabDirectPreviewFile, runDocExtractFallback, updateLiveStepDetail]);
 
   // ============ 前端字段比对：执行完workflow后，直接从右侧BrowserView读取字段值与期望比对 ============
   // 不调用后端 startConfigurableVerify（它会通过Playwright重新导航页面，破坏LOOP当前状态）
   // 而是通过 viewExecuteJS 在当前已打开的页面上直接读取mapping对应的值，做前端比对
+  /**
+   * 文件提取条目（source="doc" 且绑定 Excel 列）的运行时对比：
+   * 左=「提取元素」面板字段的运行时 OCR 提取值，右=该条目绑定 Excel 列的当前行值
+   */
+  const compareDocBindEntries = useCallback((
+    entries: CustomTextEntry[],
+    record: ApplicantRecord,
+  ): { label: string; fieldKey: string; excelField: string; ocrVal: string; excelVal: string; match: FieldMatch }[] => {
+    const rows: { label: string; fieldKey: string; excelField: string; ocrVal: string; excelVal: string; match: FieldMatch }[] = [];
+    const extracts = docExtractsByRecordRef.current[record.record_id] || [];
+    for (const e of entries) {
+      if (e.source !== "doc" || !e.excelField) continue;
+      // 解析 OCR 字段 key：docField 属性 → id 尾段（ct-ts-rand-field 格式）→ FIELD_LABELS 反查 name → name 原样
+      let fk = e.docField || "";
+      if (!fk) {
+        const tail = e.id.split("-").pop() || "";
+        if (FIELD_LABELS[tail]) fk = tail;
+      }
+      if (!fk) {
+        const hit = Object.entries(FIELD_LABELS).find(([, lbl]) => lbl === e.name);
+        if (hit) fk = hit[0];
+      }
+      if (!fk) fk = e.name;
+      let ocrVal = "";
+      for (const d of extracts) {
+        const v = d.fields?.[fk];
+        if (v && String(v).trim()) { ocrVal = String(v).trim(); break; }
+      }
+      const excelVal = String(record.fields[e.excelField] ?? "").trim();
+      let match: FieldMatch;
+      if (!ocrVal) match = "missing";
+      else if (!excelVal) match = "unknown";
+      else match = valuesEquivalent(fk, ocrVal, excelVal) ? "match" : "mismatch";
+      rows.push({ label: e.name || FIELD_LABELS[fk] || fk, fieldKey: fk, excelField: e.excelField, ocrVal, excelVal, match });
+    }
+    return rows;
+  }, []);
+
   const compareFieldsForRecord = useCallback(async (
     record: ApplicantRecord,
     recordIndex: number,
     mappingsOverride?: FieldMapping[],
+    docEntriesOverride?: CustomTextEntry[],
   ): Promise<{ comparisons: FieldComparison[]; overall: "match" | "mismatch" }> => {
     const comparisons: FieldComparison[] = [];
     // 优先使用模板自带的 mappings（复用已保存 LOOP 模板时，会话 mappings 可能为空或不匹配）
     const effectiveMappings = mappingsOverride && mappingsOverride.length > 0 ? mappingsOverride : mappings;
-    if (!window.electronAPI || effectiveMappings.length === 0) {
-      return { comparisons, overall: "match" };
+    // 文件提取条目的 Excel 绑定列对比（左=提取值，右=绑定列值）
+    const docBindRows = compareDocBindEntries(docEntriesOverride || customTextEntriesRef.current, record);
+    if (!window.electronAPI || (effectiveMappings.length === 0 && docBindRows.length === 0)) {
+      // 比对根本没跑：不能静默当作"一致"返回，否则最终报告会出现 0/0 的真空通过
+      rlog(`[batch] 第 ${recordIndex + 1} 行字段比对未执行：字段映射为空（模板未保存映射且无法从步骤推导）`);
+      setSteps((prev) => [
+        ...prev,
+        {
+          step: prev.length + 1,
+          action: "error",
+          description: `LOOP [${recordIndex + 1}] 字段比对未执行：无字段映射`,
+          success: false,
+          detail: "模板未保存字段映射，且无法从审查步骤推导。请重新设置字段对比（审查映射）后重新保存 LOOP",
+          timestamp: new Date().toISOString(),
+        },
+      ]);
+      return { comparisons, overall: "mismatch" };
     }
 
     // 进入逐字段审查阶段
@@ -6913,6 +7038,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       const webSide: "left" | "right" = mp.web_side || "right";
       // 更新当前审查字段索引（触发UI光标移动）
       setVerifyFieldIdx(fi);
+      // 逐对填卡：先推入 pending 对（标签就位，左右值随后逐格填入）
+      const pairLabel = mp.right_label || mp.left_field;
+      setLivePairs((prev) => prev.recordId === record.record_id
+        ? { ...prev, pairs: [...prev.pairs, { label: pairLabel, leftValue: "", rightValue: "", status: "pending", kind: "compare" }] }
+        : prev);
 
       // 1. 先pending高亮当前字段（目标网页元素）
       const pendingLabel = `${mp.right_label || mp.left_field}：比对中…`;
@@ -6955,6 +7085,16 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       } else {
         leftValue = record.fields[mp.left_field] || "";
       }
+
+      // 逐对填卡：左侧（提取/Excel）值先填入
+      const lv0 = (leftValue || "").trim();
+      setLivePairs((prev) => {
+        if (prev.recordId !== record.record_id) return prev;
+        const pairs = [...prev.pairs];
+        const idx = pairs.findIndex((p) => p.kind === "compare" && p.label === pairLabel && p.status === "pending");
+        if (idx >= 0) pairs[idx] = { ...pairs[idx], leftValue: leftFound ? lv0 : "（未找到）" };
+        return { ...prev, pairs };
+      });
 
       let websiteValue = "";
       let rightFound = false;
@@ -7029,9 +7169,49 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       }
       // 记录结果到state（供UI显示颜色）
       setReviewFieldResults((prev) => ({ ...prev, [fi]: match }));
+      // 逐对填卡：右侧（网页/审查）值 + 比对结果填入，完成这一对
+      setLivePairs((prev) => {
+        if (prev.recordId !== record.record_id) return prev;
+        const pairs = [...prev.pairs];
+        const idx = pairs.findIndex((p) => p.kind === "compare" && p.label === pairLabel && p.status === "pending");
+        if (idx >= 0) pairs[idx] = { ...pairs[idx], rightValue: rightFound ? wv : "（未找到）", status: match === "match" ? "match" : match === "mismatch" ? "mismatch" : "missing" };
+        return { ...prev, pairs };
+      });
 
       // 字段间短暂停留
       await new Promise((r) => setTimeout(r, 400));
+    }
+
+    // 文件提取字段 ↔ Excel 绑定列：左=「提取元素」面板运行时 OCR 值，右=绑定 Excel 列当前行值（一对一对填入卡片）
+    for (const row of docBindRows) {
+      if (batchStopRef.current) break;
+      // 同一 Excel 列已被 mappings 覆盖对比过的跳过，避免重复行
+      if (effectiveMappings.some((m) => m.left_source === "excel" && m.left_field === row.excelField)) continue;
+      const pairLabel = row.label;
+      setLivePairs((prev) => prev.recordId === record.record_id
+        ? { ...prev, pairs: [...prev.pairs, { label: pairLabel, leftValue: "", rightValue: "", status: "pending", kind: "compare" }] }
+        : prev);
+      await new Promise((r) => setTimeout(r, 350));
+      comparisons.push({
+        field: row.label,
+        excel_value: row.excelVal,
+        passport_value: row.ocrVal,
+        website_value: "",
+        match: row.match,
+        website_label: `${row.label}（Excel·${row.excelField}）`,
+        selector_hint: "",
+        evidence_source: "passport",
+      });
+      if (row.match === "mismatch" || row.match === "missing") allMatch = false;
+      const pairStatus = row.match === "match" ? "match" : row.match === "mismatch" ? "mismatch" : "missing";
+      setLivePairs((prev) => {
+        if (prev.recordId !== record.record_id) return prev;
+        const pairs = [...prev.pairs];
+        const idx = pairs.findIndex((p) => p.kind === "compare" && p.label === pairLabel && p.status === "pending");
+        if (idx >= 0) pairs[idx] = { ...pairs[idx], leftValue: row.ocrVal || "（未找到）", rightValue: row.excelVal || "（未找到）", status: pairStatus };
+        return { ...prev, pairs };
+      });
+      await new Promise((r) => setTimeout(r, 250));
     }
 
     // 审查阶段结束
@@ -7054,7 +7234,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     ]);
 
     return { comparisons, overall: allMatch ? "match" : "mismatch" };
-  }, [mappings, getRecordDocFields]);
+  }, [mappings, getRecordDocFields, compareDocBindEntries]);
 
   // ============ 对单张卡片执行整个模板 ============
   // 执行流程：先按顺序执行所有 marks（填入搜索词→点搜索→点人物→点附加按钮），
@@ -7064,8 +7244,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     record: ApplicantRecord,
     recordIndex: number,
     onStepStart?: (recordIndex: number, mark: PickedMark) => void,
-    options?: { wrapWithVerify?: boolean; skipSubmit?: boolean; preOnly?: boolean; postThenPre?: boolean; entryReview?: boolean; onStepFail?: (recordIndex: number, mark: PickedMark, error: string) => void }
-  ): Promise<{ success: boolean; failedOrder?: number; error?: string; comparisons?: FieldComparison[]; verifyOverall?: "match" | "mismatch" }> => {
+    options?: { wrapWithVerify?: boolean; skipSubmit?: boolean; preOnly?: boolean; postThenPre?: boolean; entryReview?: boolean; onStepFail?: (recordIndex: number, mark: PickedMark, error: string) => void; onStepSkip?: (recordIndex: number, mark: PickedMark, note: string) => void }
+  ): Promise<{ success: boolean; failedOrder?: number; error?: string; comparisons?: FieldComparison[]; verifyOverall?: "match" | "mismatch"; skippedErrors?: string[]; fills?: { label: string; field: string; value: string }[] }> => {
     // 根据模板模式选择执行哪一段 marks
     // - entry 模式：只执行录入流（填表+提交）
     // - review 模式：只执行审查流（搜索+对比）
@@ -7160,6 +7340,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setExecPhase("marks");
     setVerifyFieldIdx(-1);
     setReviewFieldResults({});
+    // 重置本记录的逐对填卡数据（一对一对填入卡片对比效果）
+    setLivePairs({ recordId: record.record_id, pairs: [] });
+
+    // 本记录实际填入的值（供录入流报告卡片展示一左一右内容，不再空白）
+    const fills: { label: string; field: string; value: string }[] = [];
+    // 本记录被跳过/吞掉的失败步骤（收尾点击失败、断点人工跳过）——必须体现在最终报告里
+    const skippedErrors: string[] = [];
 
     for (let mi = 0; mi < allMarks.length; mi++) {
       if (batchStopRef.current) {
@@ -7209,6 +7396,29 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         // 步骤开始前通知外层，用于高亮/日志/动画
         onStepStart?.(recordIndex, mark);
         await executeMark(mark, record);
+        // 记录填入值（录入流报告卡片的一左一右内容：左=来源值，右=填入的网页字段）
+        if (mark.action === "input") {
+          const docFields = getRecordDocFields(record.record_id);
+          const v = mark.variableField
+            ? (record.fields[mark.variableField] ?? record.passport_fields?.[mark.variableField] ?? docFields[mark.variableField] ?? "")
+            : (mark.value || "");
+          fills.push({
+            label: mark.label || mark.inputTarget || mark.selector,
+            field: mark.variableField || "",
+            value: String(v ?? "").trim(),
+          });
+          // 逐对填入卡片：录入值作为一对（左=来源字段值，右=填入的网页字段）
+          const fillPair: LivePair = {
+            label: mark.label || mark.inputTarget || mark.selector,
+            leftValue: String(v ?? "").trim(),
+            rightValue: "",
+            status: "match",
+            kind: "fill",
+          };
+          setLivePairs((prev) => prev.recordId === record.record_id
+            ? { ...prev, pairs: [...prev.pairs, fillPair] }
+            : prev);
+        }
         // 根据动作类型等待页面响应
         if (mark.action === "click") {
           // 点击按钮/链接后等待页面加载/跳转（智能等待页面稳定，替代纯固定延时）
@@ -7264,14 +7474,24 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e);
         rlog(`[batch] 第 ${recordIndex + 1} 行步骤 ${mark.order} 失败:`, e);
-        // 步骤行标记为失败（onStepStart 时已乐观打勾，这里纠正为失败态）
-        options?.onStepFail?.(recordIndex, mark, errMsg);
         // 收尾点击是清理动作（关弹窗/回主页），失败不中断本记录剩余步骤——
         // 否则"回到主页"还没跑记录就结束了，页面残留在详情页
         if (mark.action === "click" && (mark.clickPhase === "post" || mark.docExtractClick)) {
-          rlog(`[batch] 第 ${recordIndex + 1} 行收尾点击失败，继续执行剩余收尾步骤: ${errMsg}`);
+          // 目标已不存在 = 闭环目的已达成（弹窗已自行关闭/页面已在主页）：
+          // 标记为"跳过"而非失败，避免实时卡片误红、最终报告误绿的两头矛盾
+          if (/元素未找到|元素未出现|not.?found|不存在/i.test(errMsg)) {
+            rlog(`[batch] 第 ${recordIndex + 1} 行收尾点击目标不存在，视为已闭环跳过: ${mark.label || mark.selector}`);
+            options?.onStepSkip?.(recordIndex, mark, "目标已不存在，视为已闭环");
+          } else {
+            // 真正的收尾失败：步骤标红 + 记入 skippedErrors，最终报告必须体现
+            options?.onStepFail?.(recordIndex, mark, errMsg);
+            skippedErrors.push(`收尾点击「${mark.label || mark.selector}」失败：${errMsg}`);
+            rlog(`[batch] 第 ${recordIndex + 1} 行收尾点击失败，继续执行剩余收尾步骤: ${errMsg}`);
+          }
           continue;
         }
+        // 步骤行标记为失败（onStepStart 时已乐观打勾，这里纠正为失败态）
+        options?.onStepFail?.(recordIndex, mark, errMsg);
         // 条件断点：步骤执行出错时暂停，让人工干预后继续（而非直接失败返回）
         if (mark.breakpoint === "on-error") {
           const markLabel = mark.label || `步骤${mark.order}`;
@@ -7283,7 +7503,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             type: "on-error",
             error: `执行出错：${errMsg}`,
           });
-          // 人工点继续后，跳过当前失败步骤继续执行下一个
+          // 人工点继续后，跳过当前失败步骤继续执行下一个——但要记入报告，不能装没事
+          skippedErrors.push(`步骤${mark.order}「${markLabel}」执行出错，人工选择跳过：${errMsg}`);
           continue;
         }
         return {
@@ -7301,11 +7522,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     let verifyOverall: "match" | "mismatch" = "match";
     if (options?.wrapWithVerify) {
       // 模板未保存 mappings 时从审查 marks 兜底推导，保证字段对比有数据
-      const cmp = await compareFieldsForRecord(record, recordIndex, getTemplateMappings(tpl));
+      const cmp = await compareFieldsForRecord(record, recordIndex, getTemplateMappings(tpl), tpl.customTextEntries);
       comparisons = cmp.comparisons;
       verifyOverall = cmp.overall;
       // 条件断点：字段比对发现不匹配，且本次执行的 marks 中有 on-error 断点
-      if (verifyOverall === "mismatch" && allMarks.some((m) => m.breakpoint === "on-error")) {
+      // （比对未执行/无比对条目时不触发，避免"0 个字段不匹配"的空断点）
+      if (verifyOverall === "mismatch" && comparisons.length > 0 && allMarks.some((m) => m.breakpoint === "on-error")) {
         const mismatchFields = comparisons.filter((c) => c.match === "mismatch" || c.match === "error");
         const detail = mismatchFields.map((c) => `${c.field}: 「${c.excel_value}」vs「${c.website_value}」`).join("; ");
         rlog(`[batch] 断点（条件-字段不匹配）触发：${mismatchFields.length} 个字段不匹配`);
@@ -7319,8 +7541,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       }
     }
 
-    return { success: true, comparisons, verifyOverall };
-  }, [executeMark, compareFieldsForRecord, checkViewOnline, waitNetworkRestore, waitPageSettled]);
+    return { success: true, comparisons, verifyOverall, skippedErrors, fills };
+  }, [executeMark, compareFieldsForRecord, checkViewOnline, waitNetworkRestore, waitPageSettled, getRecordDocFields]);
 
   // ============ 批量执行：对所有卡片按模板执行，从当前选中卡片开始 ============
   const runBatch = useCallback(async (tplOverride?: WorkflowTemplate, targetIds?: string[]) => {
@@ -7363,6 +7585,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setExecPhase("idle");
     setVerifyFieldIdx(-1);
     setReviewFieldResults({});
+    setExecRecordId(null);
 
     // 执行前退出选择/编辑模式（手动退出，不调用exitSelectMode以避免清空workflowTemplate）
     if (selectMode) {
@@ -7413,6 +7636,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 「字段对比」区域的步骤条和审查字段列表也能看到内容（否则面板空跑）
     setPickedMarks(execMarks);
     setMappings(getTemplateMappings(tpl));
+    // 提取元素面板条目（含文件提取字段的 Excel 列绑定）回填：运行时对比与表头绑定高亮都依赖它
+    if ((tpl.customTextEntries?.length ?? 0) > 0) setCustomTextEntries(tpl.customTextEntries!);
     // 只重置右侧网页（目标网站），不重置左侧网页（数据源），
     // 避免左侧网页侧边栏等状态因重新加载而丢失。
     // 录入步骤从左网页读取值时也不重置左侧（左网页状态由用户控制）。
@@ -7433,7 +7658,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setSteps([
       {
         step: 1,
-        action: "start",
+        action: "log",
         description: `LOOP 启动：共 ${targets.length} 条记录，从当前选中卡片（${targets[0]?.fields.name || targets[0]?.record_id}）开始执行`,
         success: true,
         timestamp: new Date().toISOString(),
@@ -7444,6 +7669,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
     const onStepStart = (recordIndex: number, mark: PickedMark) => {
       setBatchMarkCursor({ recordIndex, markOrder: mark.order });
+      // 记录当前步骤日志前缀，供文件提取等长耗时阶段实时回写 detail 进展
+      liveStepPrefixRef.current = `LOOP [${recordIndex + 1}/${targets.length}] 步骤 ${mark.order}:`;
       const side: ViewSide = mark.side === "left" ? "left" : "right";
       const selector = mark.action === "input" && mark.inputTarget ? mark.inputTarget : mark.selector;
       const label = `${mark.order} · ${mark.label || selector}`;
@@ -7480,6 +7707,22 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       });
     };
 
+    // 良性跳过（如收尾点击的目标已不存在）：保持绿勾，只补一句跳过说明，不标红
+    const onStepSkip = (recordIndex: number, mark: PickedMark, note: string) => {
+      const prefix = `LOOP [${recordIndex + 1}/${targets.length}] 步骤 ${mark.order}:`;
+      setSteps((prev) => {
+        for (let k = prev.length - 1; k >= 0; k--) {
+          const s = prev[k];
+          if (s.description?.startsWith(prefix)) {
+            const next = [...prev];
+            next[k] = { ...s, success: true, detail: note };
+            return next;
+          }
+        }
+        return prev;
+      });
+    };
+
     try {
       for (let i = 0; i < targets.length; i++) {
         if (batchStopRef.current) {
@@ -7498,6 +7741,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         const record = targets[i];
         setBatchCursor(i);
         setSelectedId(record.record_id);
+        setExecRecordId(record.record_id);
         setBatchResults((prev) => ({
           ...prev,
           [record.record_id]: {
@@ -7551,11 +7795,14 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         const result = await executeTemplateForRecord(tpl, record, i, onStepStart, {
           wrapWithVerify: hasReviewSteps,
           onStepFail,
+          onStepSkip,
         });
 
         const recordName = record.fields.name || record.record_id;
         // 本条记录的比对条目（用于按人物拆分报告）
         const currentRecordEntries: VerificationReportEntry[] = [];
+        // 审查流程但比对未产出任何条目（映射为空/比对未真正执行）——不能算通过
+        let compareEmpty = false;
 
         if (!result.success) {
           failCount++;
@@ -7597,13 +7844,15 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             if (result.comparisons) {
               allComparisons.push(...result.comparisons);
               for (const c of result.comparisons) {
+                // 文件提取 vs Excel 绑定列的对比（无网页值）：左=提取值，右=Excel 绑定列值
+                const docVsExcel = c.evidence_source === "passport" && !c.website_value && !!c.excel_value;
                 const entry: VerificationReportEntry = {
                   right_selector: c.selector_hint || "",
                   right_label: c.website_label || c.field,
                   left_source: c.evidence_source || "excel",
                   left_field: c.field,
-                  right_value: c.website_value,
-                  left_value: c.excel_value || c.passport_value,
+                  right_value: docVsExcel ? c.excel_value : c.website_value,
+                  left_value: docVsExcel ? c.passport_value : (c.excel_value || c.passport_value),
                   match: c.match,
                   timestamp: new Date().toISOString(),
                 };
@@ -7611,63 +7860,218 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 currentRecordEntries.push(entry);
               }
             }
+            // 比对跑了但一个条目都没有：放一行说明性条目，让报告卡片展开能看到原因，
+            // 同时让 hasMismatch 生效（overall 判 fail），避免 0/0 真空通过
+            if (currentRecordEntries.length === 0) {
+              compareEmpty = true;
+              const noteEntry: VerificationReportEntry = {
+                right_selector: "",
+                right_label: "字段比对",
+                left_source: "excel",
+                left_field: "",
+                right_value: "未执行",
+                left_value: "",
+                match: "error",
+                reasoning: "字段比对未执行：模板未保存字段映射，且无法从审查步骤推导。请重新设置字段对比（审查映射）后重新保存 LOOP",
+                timestamp: new Date().toISOString(),
+              };
+              allEntries.push(noteEntry);
+              currentRecordEntries.push(noteEntry);
+            }
             rlog(`[batch] 第 ${i + 1} 行完成: ${recordName}, 比对结果: ${result.verifyOverall}`);
           } else {
-            // 纯录入流程：步骤执行成功即算成功，无比对
+            // 纯录入/提取流程：步骤执行成功即算成功。
+            // 把"填入值"和"文件提取字段"写成一左一右的报告行，卡片不再是 0/0 空白
             successCount++;
-            rlog(`[batch] 第 ${i + 1} 行录入完成: ${recordName}`);
+            for (const f of result.fills || []) {
+              const entry: VerificationReportEntry = {
+                right_selector: "",
+                right_label: `${f.label}（填入）`,
+                left_source: "excel",
+                left_field: f.field,
+                left_value: f.value,
+                right_value: f.value,
+                match: "match",
+                timestamp: new Date().toISOString(),
+              };
+              allEntries.push(entry);
+              currentRecordEntries.push(entry);
+            }
+            // 文件提取字段：左=Excel/记录值，右=提取值（与教学时提取面板的对比口径一致）
+            // 只放入"用上的"字段（一一对照录入/填入用到的），OCR 全量字段里没被引用的不放入报告
+            const usedExtractFields = new Set<string>();
+            for (const m of getTemplateMappings(tpl)) {
+              if (m.left_field) usedExtractFields.add(m.left_field);
+            }
+            for (const mk of [...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks]) {
+              if (mk.variableField) usedExtractFields.add(mk.variableField);
+              if (mk.excelField) usedExtractFields.add(mk.excelField);
+            }
+            for (const f of result.fills || []) usedExtractFields.add(f.field);
+            const normV = (s: string) => (s || "").trim().toLowerCase().replace(/\s+/g, "");
+            const recordExtracts = docExtractsByRecordRef.current[record.record_id] || [];
+            const seenExtractFields = new Set<string>();
+            let skippedUnusedFields = 0;
+            // 「提取元素」面板文件提取条目的 Excel 绑定列：按绑定关系逐字段对比（左=运行时提取值，右=绑定 Excel 列当前行值）
+            for (const row of compareDocBindEntries(tpl.customTextEntries || customTextEntriesRef.current, record)) {
+              seenExtractFields.add(row.fieldKey); // 绑定条目已覆盖的 OCR 字段不再进下面的通用循环
+              const bPairStatus = row.match === "match" ? "match" : row.match === "mismatch" ? "mismatch" : "missing";
+              setLivePairs((prev) => prev.recordId === record.record_id
+                ? { ...prev, pairs: [...prev.pairs, { label: row.label, leftValue: row.ocrVal || "（未找到）", rightValue: row.excelVal || "（未找到）", status: bPairStatus, kind: "compare" }] }
+                : prev);
+              const bindEntry: VerificationReportEntry = {
+                right_selector: "",
+                right_label: `${row.label}（文件提取）`,
+                left_source: "passport",
+                left_field: row.fieldKey,
+                left_value: row.ocrVal,
+                right_value: row.excelVal,
+                match: row.match,
+                timestamp: new Date().toISOString(),
+              };
+              allEntries.push(bindEntry);
+              currentRecordEntries.push(bindEntry);
+            }
+            for (const d of recordExtracts) {
+              for (const [f, rightValRaw] of Object.entries(d.fields || {})) {
+                if (seenExtractFields.has(f)) continue;
+                // 未被任何映射/步骤引用的提取字段：跳过，不进报告
+                if (!usedExtractFields.has(f)) {
+                  skippedUnusedFields++;
+                  continue;
+                }
+                seenExtractFields.add(f);
+                const leftVal = String(record.fields[f] ?? record.passport_fields?.[f] ?? "");
+                const rightVal = String(rightValRaw ?? "");
+                const l = normV(leftVal);
+                const r = normV(rightVal);
+                let m: FieldMatch = "mismatch";
+                if (!r) m = "missing";
+                else if (!l) m = "unknown";
+                else if (l === r) m = "match";
+                else if (l.includes(r) || r.includes(l)) m = "partial";
+                const entry: VerificationReportEntry = {
+                  right_selector: "",
+                  right_label: `${FIELD_LABELS[f] || f}（文件提取）`,
+                  left_source: "passport",
+                  left_field: f,
+                  left_value: rightVal,
+                  right_value: leftVal,
+                  match: m,
+                  timestamp: new Date().toISOString(),
+                };
+                allEntries.push(entry);
+                currentRecordEntries.push(entry);
+              }
+            }
+            rlog(`[batch] 第 ${i + 1} 行录入完成: ${recordName}, 填入${(result.fills || []).length}项, 提取${seenExtractFields.size}字段${skippedUnusedFields > 0 ? `（${skippedUnusedFields}个未引用字段已略过）` : ""}`);
+          }
+        }
+
+        // 被跳过/吞掉的失败步骤必须体现在报告里（运行时红了，最终就不能装绿）
+        if (result.success) {
+          for (const se of result.skippedErrors || []) {
+            const entry: VerificationReportEntry = {
+              right_selector: "",
+              right_label: "步骤跳过",
+              left_source: "excel",
+              left_field: "",
+              left_value: "",
+              right_value: "失败已跳过",
+              match: "error",
+              reasoning: se,
+              timestamp: new Date().toISOString(),
+            };
+            allEntries.push(entry);
+            currentRecordEntries.push(entry);
+          }
+          // 兜底：执行成功但卡片无任何内容（纯点击流），放一行执行说明，杜绝 0/0 空白卡片
+          if (currentRecordEntries.length === 0) {
+            const entry: VerificationReportEntry = {
+              right_selector: "",
+              right_label: "LOOP 步骤",
+              left_source: "excel",
+              left_field: "",
+              left_value: "",
+              right_value: "全部步骤执行完成",
+              match: "match",
+              timestamp: new Date().toISOString(),
+            };
+            allEntries.push(entry);
+            currentRecordEntries.push(entry);
           }
         }
 
         // 构建本条记录的按人物报告并累加到 loopReports
-        {
-          const hasMismatch = currentRecordEntries.some((e) => e.match === "mismatch" || e.match === "error");
-          // 聚合该记录所有文档的MRZ警告
-          const recordDocExtracts = docExtractsByRecordRef.current[record.record_id] || [];
-          const allMrzWarnings = recordDocExtracts.flatMap((d) => d.mrz_warnings || []);
-          // 如果有MRZ警告，将overall从pass提升为review（需要人工检查）
-          const effectiveOverall: Overall = !result.success
-            ? "fail"
-            : hasReviewSteps
-            ? (hasMismatch ? "fail" : allMrzWarnings.length > 0 ? "review" : "pass")
-            : (allMrzWarnings.length > 0 ? "review" : "pass");
-          const personReport: VerificationReport = {
-            task_id: `loop-${record.record_id}-${Date.now()}`,
-            record_id: record.record_id,
-            record_name: recordName,
-            university_url: rightUrl,
-            entries: currentRecordEntries,
-            overall: effectiveOverall,
-            summary: !result.success
-              ? `执行失败：${result.error || "未知错误"}`
-              : allMrzWarnings.length > 0
+        // missing（页面/文件没读到值）也算不一致：字段明明配置了却读不到，不能判通过
+        const badEntries = currentRecordEntries.filter((e) => e.match === "mismatch" || e.match === "error" || e.match === "missing");
+        const goodEntries = currentRecordEntries.filter((e) => e.match === "match");
+        const hasMismatch = badEntries.length > 0;
+        // 聚合该记录所有文档的MRZ警告
+        const recordDocExtracts = docExtractsByRecordRef.current[record.record_id] || [];
+        const allMrzWarnings = recordDocExtracts.flatMap((d) => d.mrz_warnings || []);
+        // 三态语义：
+        //   pass(绿)   = 完全没问题（所有对照项一致）
+        //   review(黄) = 部分对部分错（有好有坏，或MRZ警告）
+        //   fail(红)   = 执行失败 / 找不到文件 / 缺项严重 / 没有一个正确
+        const effectiveOverall: Overall = !result.success
+          ? "fail"
+          : !hasMismatch
+          ? allMrzWarnings.length > 0
+            ? "review"
+            : "pass"
+          : goodEntries.length === 0
+          ? "fail"
+          : "review";
+        const personReport: VerificationReport = {
+          task_id: `loop-${record.record_id}-${Date.now()}`,
+          record_id: record.record_id,
+          record_name: recordName,
+          university_url: rightUrl,
+          entries: currentRecordEntries,
+          overall: effectiveOverall,
+          flow: hasReviewSteps ? "review" : "entry",
+          summary: !result.success
+            ? `执行失败：${result.error || "未知错误"}`
+            : compareEmpty
+            ? "字段比对未执行：模板缺少字段映射，请重新设置字段对比后保存 LOOP"
+            : effectiveOverall === "fail"
+            ? "无一字段一致 / 缺项严重，需检查"
+            : effectiveOverall === "review"
+            ? allMrzWarnings.length > 0 && !hasMismatch
               ? `MRZ交叉验证发现${allMrzWarnings.length}处姓名等字段不一致，已以MRZ为准，请人工复核`
-              : hasReviewSteps
-              ? (hasMismatch ? "存在不一致" : "全部一致")
-              : "录入完成",
-            started_at: startedAt,
-            finished_at: new Date().toISOString(),
-            mrz_warnings: allMrzWarnings.length > 0 ? allMrzWarnings : undefined,
-          };
-          setLoopReports((prev) => [...prev, personReport]);
-        }
+              : `${goodEntries.length} 项一致，${badEntries.length} 项不一致`
+            : hasReviewSteps
+            ? "全部一致"
+            : "录入完成",
+          started_at: startedAt,
+          finished_at: new Date().toISOString(),
+          mrz_warnings: allMrzWarnings.length > 0 ? allMrzWarnings : undefined,
+        };
+        setLoopReports((prev) => [...prev, personReport]);
+        // 同步到卡片三态着色（通过=绿 / 有问题=黄 / 需检查=红）
+        setRecordResults((prev) => ({ ...prev, [record.record_id]: effectiveOverall }));
 
         setBatchResults((prev) => ({
           ...prev,
           [record.record_id]: {
             recordId: record.record_id,
-            // 纯录入流程：步骤执行成功即算成功；审查流程：步骤成功且字段比对一致才算成功
-            status: !result.success
+            // 状态与报告结论保持一致：报告判 fail 这里就 failed，不再两张皮
+            status: !result.success || effectiveOverall === "fail"
               ? "failed"
-              : hasReviewSteps && result.verifyOverall === "mismatch"
-              ? "failed"
+              : effectiveOverall === "review"
+              ? "review"
               : "success",
             startedAt: prev[record.record_id]?.startedAt,
             finishedAt: Date.now(),
             error: !result.success
               ? result.error
-              : hasReviewSteps && result.verifyOverall === "mismatch"
-              ? "字段比对不一致"
+              : compareEmpty
+              ? "字段比对未执行：模板缺少字段映射"
+              : effectiveOverall === "fail"
+              ? "无一字段一致 / 缺项严重"
+              : effectiveOverall === "review"
+              ? `${goodEntries.length} 项一致，${badEntries.length} 项不一致`
               : undefined,
             failedOrder: result.failedOrder,
           },
@@ -7719,6 +8123,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       setBatchRunning(false);
       setBatchCursor(-1);
       setBatchMarkCursor(null);
+      liveStepPrefixRef.current = null;
       // 保持execPhase="done"让用户看到最终结果，不重置verifyFieldIdx/reviewFieldResults（方便查看最终状态）
 
       const total = successCount + failCount;
@@ -7848,6 +8253,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         // 回填该任务 LOOP 的步骤与字段映射到会话面板（字段对比区域可见）
         setPickedMarks([...task.workflowTemplate.dataSourceMarks, ...task.workflowTemplate.reviewMarks, ...task.workflowTemplate.entryMarks]);
         setMappings(getTemplateMappings(task.workflowTemplate));
+        // 提取元素面板条目（含文件提取字段的 Excel 列绑定）回填
+        if ((task.workflowTemplate.customTextEntries?.length ?? 0) > 0) setCustomTextEntries(task.workflowTemplate.customTextEntries!);
         setDocExtractPanel(null);
         breakpointTotalRef.current = targets.length;
         let successCount = 0;
@@ -7859,6 +8266,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
           const record = targets[ri];
           setSelectedId(record.record_id);
+          setExecRecordId(record.record_id);
           setBatchCursor(ri);
           setBatchResults((prev) => ({
             ...prev,
@@ -7932,7 +8340,20 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             ]);
           }, { wrapWithVerify: hasReviewSteps });
 
-          if (result.success) {
+          // 三态判定：pass=全部一致 / review=部分对部分错 / fail=执行失败·缺项严重·无一正确
+          const verifyFailed = hasReviewSteps && result.success && result.verifyOverall === "mismatch";
+          const qCmps = result.comparisons || [];
+          const qGood = qCmps.filter((c) => c.match === "match").length;
+          const qBad = qCmps.length - qGood;
+          const qOverall: Overall = !result.success
+            ? "fail"
+            : !verifyFailed
+            ? "pass"
+            : qGood === 0
+            ? "fail"
+            : "review";
+          setRecordResults((prev) => ({ ...prev, [record.record_id]: qOverall }));
+          if (qOverall === "pass") {
             successCount++;
             setBatchResults((prev) => ({
               ...prev,
@@ -7948,19 +8369,40 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 timestamp: new Date().toISOString(),
               },
             ]);
-          } else {
-            failCount++;
-            errors.push(result.error || "未知错误");
+          } else if (qOverall === "review") {
+            // 部分一致：执行层面成功，但标黄提示复核
+            successCount++;
+            const reviewReason = `${qGood} 项一致，${qBad} 项不一致`;
             setBatchResults((prev) => ({
               ...prev,
-              [record.record_id]: { recordId: record.record_id, status: "failed", finishedAt: Date.now(), error: result.error },
+              [record.record_id]: { recordId: record.record_id, status: "review", finishedAt: Date.now(), error: reviewReason },
+            }));
+            setSteps((prev) => [
+              ...prev,
+              {
+                step: prev.length + 1,
+                action: "complete",
+                description: `LOOP [${ri + 1}/${targets.length}] 有问题：${record.fields.name || record.record_id} — ${reviewReason}`,
+                success: true,
+                timestamp: new Date().toISOString(),
+              },
+            ]);
+          } else {
+            failCount++;
+            const failReason = verifyFailed
+              ? (qCmps.length > 0 ? "无一字段一致，需检查" : "字段比对未执行：模板缺少字段映射")
+              : (result.error || "未知错误");
+            errors.push(failReason);
+            setBatchResults((prev) => ({
+              ...prev,
+              [record.record_id]: { recordId: record.record_id, status: "failed", finishedAt: Date.now(), error: failReason },
             }));
             setSteps((prev) => [
               ...prev,
               {
                 step: prev.length + 1,
                 action: "error",
-                description: `LOOP [${ri + 1}/${targets.length}] 失败：${record.fields.name || record.record_id} — ${result.error}`,
+                description: `LOOP [${ri + 1}/${targets.length}] 需检查：${record.fields.name || record.record_id} — ${failReason}`,
                 success: false,
                 timestamp: new Date().toISOString(),
               },
@@ -8264,6 +8706,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       const recordName = record.fields.name || record.fields.fullname || record.fields.passport_no || record.fields.student_id || record.record_id;
 
       setSelectedId(recordId);
+      setExecRecordId(recordId);
       setHasRunOnce(true);
       setSingleRunning(true);
       setLogSignal((s) => s + 1);
@@ -8285,6 +8728,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
       const onStepStart = (ri: number, mark: PickedMark) => {
         setBatchMarkCursor({ recordIndex: ri, markOrder: mark.order });
+        liveStepPrefixRef.current = `定位步骤 ${mark.order}:`;
         const side: ViewSide = mark.side === "left" ? "left" : "right";
         const selector = mark.action === "input" && mark.inputTarget ? mark.inputTarget : mark.selector;
         const label = `${mark.order} · ${mark.label || selector}`;
@@ -8415,6 +8859,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
       const onStepStart = (ri: number, mark: PickedMark) => {
         setBatchMarkCursor({ recordIndex: ri, markOrder: mark.order });
+        liveStepPrefixRef.current = `[${tpl.icon || "🔍"}${tpl.name}] 步骤 ${mark.order}:`;
         const side: ViewSide = mark.side === "left" ? "left" : "right";
         const selector = mark.action === "input" && mark.inputTarget ? mark.inputTarget : mark.selector;
         const label = `${mark.order} · ${mark.label || selector}`;
@@ -12313,7 +12758,7 @@ type: info.type,
             title="停止批量执行"
           >
             <Square className="h-3 w-3" />
-            停止 ({batchCursor + 1}/{records.length})
+            停止 ({batchCursor + 1}/{batchTargets.length})
           </button>
         )}
 
@@ -12648,6 +13093,10 @@ type: info.type,
                       onFieldColumnMapChange={handleFieldColumnMapChange}
                       detectedColumnMap={detectedColumnMap}
                       boundFields={boundExcelFields}
+                      activeRecordId={execRecordId}
+                      activeField={excelActiveField}
+                      activeFieldStatus={excelActiveFieldStatus}
+                      fieldResults={excelFieldResults}
                     />
                   )}
                 </BrowserPane>
@@ -13012,6 +13461,7 @@ type: info.type,
                   shots={shots}
                   steps={steps}
                   running={running || singleRunning || batchRunning || queueRunning}
+                  livePairs={livePairs}
                   appMode={appMode}
                   onDetach={() => detachPanel("bottom")}
                   onClose={selectMode ? undefined : () => setBottomPanelOpen(false)}
@@ -13030,9 +13480,10 @@ type: info.type,
                   onFieldPanelActive={() => setFieldPanelActive(true)}
                   fieldSetupToggleSignal={fieldSetupToggleSignal}
                   onPickExtractedField={onPickExtractedField}
-                  docLocalConfigContent={addingDocExtractMode && (docExtractSource === "choose" || docExtractSource === "local" || docExtractSource === "web") ? (
+                  docLocalConfigContent={(addingDocExtractMode && (docExtractSource === "choose" || docExtractSource === "local" || docExtractSource === "web")) || docFallbackActive ? (
                     <DocLocalExtractConfig
-                      mode={docExtractSource}
+                      // LOOP 执行期保底机制激活时强制以 web 模式渲染（人工审查界面在 web 分支内）
+                      mode={docFallbackActive && !addingDocExtractMode ? "web" : (docExtractSource ?? "choose")}
                       hideHeader={docExtractSource === "choose"}
                       excelFields={excelFields}
                       selectedExcelColumn={selectedExcelColumn}
@@ -13051,7 +13502,7 @@ type: info.type,
                       onUndoClick={undoDocExtractClick}
                       onGoBack={docExtractGoBack}
                       onResumePicking={forceResumeDocPicking}
-                      webStatus={docExtractSource === "web" ? docWebStatus : undefined}
+                      webStatus={(docExtractSource === "web" || docFallbackActive) ? docWebStatus : undefined}
                       docLocalRootPath={docLocalRootPath}
                       docLocalDirFiles={docLocalDirFiles}
                       docLocalSamplePath={docLocalSamplePath}

@@ -1317,8 +1317,10 @@ function formatDateOnly(raw?: string | null): string | null {
 function BatchStatusBadge({ status }: { status: BatchStatus }) {
   const config: Record<BatchStatus, { label: string; cls: string }> = {
     pending: { label: "待执行", cls: "bg-slate-100 text-slate-500" },
-    running: { label: "执行中", cls: "bg-blue-100 text-blue-700 animate-glow-pulse" },
+    // 执行中=无色系（中性灰），不靠颜色抢状态语义
+    running: { label: "执行中", cls: "bg-slate-200 text-slate-600" },
     success: { label: "✓", cls: "bg-emerald-500 text-white" },
+    review: { label: "!", cls: "bg-amber-500 text-white" },
     failed: { label: "✗", cls: "bg-rose-500 text-white" },
     skipped: { label: "跳过", cls: "bg-slate-100 text-slate-400" },
   };

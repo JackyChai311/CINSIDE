@@ -90,6 +90,15 @@ export interface FieldComparison {
   evidence_source?: EvidenceSource;  // 左侧证据来源：passport > excel > none
 }
 
+/** LOOP 运行期逐对填入卡片的字段行：compare=审查比对（左提取值 vs 右网页值），fill=录入填入 */
+export interface LivePair {
+  label: string;
+  leftValue: string;
+  rightValue: string;
+  status: "pending" | "match" | "mismatch" | "missing";
+  kind: "compare" | "fill";
+}
+
 export interface VerificationResult {
   task_id: string;
   record_id: string;
@@ -326,6 +335,8 @@ export interface CustomTextEntry {
   workflow?: "review" | "entry";
   /** 绑定的 Excel 列名：设置后保存步骤时转为 variableField，LOOP 运行时按当前卡片行的该列取值 */
   excelField?: string;
+  /** 文件提取字段 key（source="doc" 时可用，如 passport_no）：LOOP 运行时按此 key 取 OCR 提取值，与 excelField 绑定列对比 */
+  docField?: string;
 }
 
 /** 已拾取的元素标记（用于在 UI 上显示顺序编号 1, 2, 3...） */
@@ -417,8 +428,8 @@ export type TeachingPhase = "idle" | "data-source" | "review" | "entry" | "done"
 /** 应用模式：LOOP（教学批量循环）/ 审查（单次核验）/ 录入（批量填表） */
 export type AppMode = "loop" | "review" | "entry";
 
-/** 批量执行中每张卡片的执行状态 */
-export type BatchStatus = "pending" | "running" | "success" | "failed" | "skipped";
+/** 批量执行中每张卡片的执行状态（review=部分字段不一致，需复核） */
+export type BatchStatus = "pending" | "running" | "success" | "review" | "failed" | "skipped";
 
 // ========== LOOP 流程图编辑器（v0.4.5+） ==========
 
@@ -607,6 +618,8 @@ export interface VerificationReport {
   error?: string | null;
   /** MRZ交叉验证警告：该记录的护照文件中上方识别与MRZ不一致的提示 */
   mrz_warnings?: string[];
+  /** 产生该报告的流程类型：entry=录入/提取流（卡片用箭头展示填入值），review=审查流（卡片用✓/✗展示比对） */
+  flow?: "entry" | "review";
 }
 
 // ========== 文档提取（功能1/2） ==========
@@ -767,8 +780,8 @@ export const MATCH_STYLES: Record<FieldMatch, string> = {
 
 export const OVERALL_LABELS: Record<Overall, string> = {
   pass: "通过",
-  fail: "存在问题",
-  review: "需人工复核",
+  fail: "需检查",
+  review: "有问题",
 };
 
 export const OVERALL_STYLES: Record<Overall, string> = {
