@@ -2326,9 +2326,15 @@ function stopBackend() {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // 清空 Windows 任务栏跳转列表，移除默认的 "Electron" 分类
   try { app.setJumpList([]); } catch (e) { debugLog(`[jumplist] clear failed: ${e.message}`); }
+
+  // 确保对 localhost / 127.0.0.1 的请求不走系统代理（企业 VPN/代理会导致 fetch 后端超时）
+  try {
+    await session.defaultSession.setProxy({ proxyBypassRules: "localhost,127.0.0.1,<local>" });
+    debugLog("[proxy] bypass rules set for localhost/127.0.0.1");
+  } catch (e) { debugLog(`[proxy] setProxy failed: ${e.message}`); }
 
   createSplashWindow();
   startBackend();

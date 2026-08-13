@@ -322,7 +322,12 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
       onSaved(settings);
       onClose();
     } catch (e: any) {
-      setError(e.message || "保存失败");
+      const msg = e.message || "保存失败";
+      if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) {
+        setError("无法连接后端服务，请确认程序已完全启动（等待启动动画结束），或检查是否有代理/VPN 拦截 localhost");
+      } else {
+        setError(msg);
+      }
     } finally {
       setSaving(false);
     }

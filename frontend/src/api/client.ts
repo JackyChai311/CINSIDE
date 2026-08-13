@@ -33,42 +33,61 @@ const API_HOST =
     : "";
 const BASE = `${API_HOST}/api`;
 
-async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
-  const resp = await fetch(url, init);
-  if (!resp.ok) {
-    // 只读一次 body：先拿 text，再尝试解析成 JSON 提取 detail/message
-    // （避免先 json() 失败再 text() 触发 "body stream already read"）
-    const text = await resp.text().catch(() => "");
-    let msg = `${resp.status}`;
-    if (text) {
-      try {
-        const j = JSON.parse(text);
-        msg = j.detail || j.message || text;
-      } catch {
-        msg = text;
+async function jsonFetch<T>(url: string, init?: RequestInit, timeoutMs = 30000): Promise<T> {
+  const controller = new AbortController();
+  const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const resp = await fetch(url, { ...init, signal: controller.signal });
+    if (!resp.ok) {
+      // 只读一次 body：先拿 text，再尝试解析成 JSON 提取 detail/message
+      // （避免先 json() 失败再 text() 触发 "body stream already read"）
+      const text = await resp.text().catch(() => "");
+      let msg = `${resp.status}`;
+      if (text) {
+        try {
+          const j = JSON.parse(text);
+          msg = j.detail || j.message || text;
+        } catch {
+          msg = text;
+        }
       }
+      throw new Error(msg);
     }
-    throw new Error(msg);
+    return resp.json() as Promise<T>;
+  } catch (e: any) {
+    if (e.name === "AbortError") {
+      throw new Error(`请求超时（${timeoutMs / 1000}s），后端可能未启动或被代理拦截`);
+    }
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  return resp.json() as Promise<T>;
 }
 
 export const api = {
   getConfig: () => jsonFetch<AppConfig>(`${BASE}/config`),
 
-  getSettings: () => jsonFetch<AppSettings>(`${BASE}/config/settings`),
+  getSettings: () => jsonFetch<AppSettings>(`${BASE}/config/settings`, undefined, 10000),
 
   saveSettings: (settings: AppSettings) =>
-    jsonFetch<{ ok: boolean }>(`${BASE}/config/settings`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(settings),
-    }),
+    jsonFetch<{ ok: boolean }>(
+      `${BASE}/config/settings`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(settings),
+      },
+      15000
+    ),
 
   testVision: () =>
-    jsonFetch<{ supports_images: boolean; message: string }>(`${BASE}/config/test-vision`, {
-      method: "POST",
-    }),
+    jsonFetch<{ supports_images: boolean; message: string }>(
+      `${BASE}/config/test-vision`,
+      {
+        method: "POST",
+      },
+      30000
+    ),
 
   testUmiOcr: () =>
     jsonFetch<{ ok: boolean; message: string; host: string; port: number }>(`${BASE}/config/test-umi-ocr`, {
@@ -91,21 +110,29 @@ export const api = {
   getDepsStatus: () =>
     jsonFetch<DepsStatus>(`${BASE}/config/deps-status`),
   installPythonDeps: () =>
-    jsonFetch<{ ok: boolean; message: string }>(`${BASE}/config/install-python-deps`, {
-      method: "POST",
-    }),
+    jsonFetch<{ ok: boolean; message: string }>(
+      `${BASE}/config/install-python-deps`,
+      { method: "POST" },
+      300000
+    ),
   downloadUmiOcr: () =>
-    jsonFetch<{ ok: boolean; message: string; exe_path: string }>(`${BASE}/config/download-umi-ocr`, {
-      method: "POST",
-    }),
+    jsonFetch<{ ok: boolean; message: string; exe_path: string }>(
+      `${BASE}/config/download-umi-ocr`,
+      { method: "POST" },
+      300000
+    ),
   installRemotion: () =>
-    jsonFetch<{ ok: boolean; message: string }>(`${BASE}/config/install-remotion`, {
-      method: "POST",
-    }),
+    jsonFetch<{ ok: boolean; message: string }>(
+      `${BASE}/config/install-remotion`,
+      { method: "POST" },
+      300000
+    ),
   installOfficecli: () =>
-    jsonFetch<{ ok: boolean; message: string }>(`${BASE}/config/install-officecli`, {
-      method: "POST",
-    }),
+    jsonFetch<{ ok: boolean; message: string }>(
+      `${BASE}/config/install-officecli`,
+      { method: "POST" },
+      300000
+    ),
 
   uploadExcel: (file: File) => {
     const fd = new FormData();
