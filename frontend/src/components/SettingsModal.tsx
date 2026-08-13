@@ -318,7 +318,11 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
     setSaving(true);
     setError(null);
     try {
-      await api.saveSettings(settings);
+      const r = await api.saveSettings(settings);
+      // 后端 persist 失败时返回 ok:false（内存已回滚），必须拦截，否则"保存好了但重启丢失"
+      if (!r.ok) {
+        throw new Error(r.error || "保存失败（设置未写入磁盘）");
+      }
       onSaved(settings);
       onClose();
     } catch (e: any) {

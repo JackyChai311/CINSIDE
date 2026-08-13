@@ -70,7 +70,7 @@ export const api = {
   getSettings: () => jsonFetch<AppSettings>(`${BASE}/config/settings`, undefined, 10000),
 
   saveSettings: (settings: AppSettings) =>
-    jsonFetch<{ ok: boolean }>(
+    jsonFetch<{ ok: boolean; error?: string }>(
       `${BASE}/config/settings`,
       {
         method: "POST",

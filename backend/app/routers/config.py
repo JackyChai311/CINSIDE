@@ -8,7 +8,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from ..config import settings
+from ..config import settings, SETTING_KEYS
 from ..services.document_extract import ensure_umi_ocr_running, launch_umi_ocr, browse_umi_ocr_executable, check_markitdown_available
 from ..services.dependency_manager import (
     download_and_install_umi_ocr,
@@ -55,13 +55,31 @@ def get_settings():
 @router.post("/settings")
 def save_settings(body: AppSettings):
     """保存设置到内存并持久化到 .env。"""
+    import time
     data = body.model_dump()
+    # 备份当前内存值，persist 失败时回滚，避免"当前会话生效但重启丢失"的假象
+    backup = {name: getattr(settings, name) for name in SETTING_KEYS}
+
     settings.update_from_dict(data)
+    t0 = time.time()
     try:
         settings.persist()
     except RuntimeError as e:
+        _rollback(backup)
+        print(f"[save-settings] persist FAILED ({time.time()-t0:.2f}s): {e}", flush=True)
         return {"ok": False, "error": str(e)}
+    except Exception as e:
+        _rollback(backup)
+        print(f"[save-settings] persist ERROR ({time.time()-t0:.2f}s): {e}", flush=True)
+        return {"ok": False, "error": f"写入 .env 失败: {e}"}
+    print(f"[save-settings] persist OK in {time.time()-t0:.3f}s", flush=True)
     return {"ok": True}
+
+
+def _rollback(backup: dict) -> None:
+    """persist 失败时把内存设置恢复到持久化前的值。"""
+    for name, val in backup.items():
+        setattr(settings, name, val)
 
 
 @router.post("/test-vision")

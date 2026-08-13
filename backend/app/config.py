@@ -43,10 +43,19 @@ def _get_user_data_dir() -> Path:
 _BASE_DIR = _get_base_dir()
 _USER_DATA_DIR = _get_user_data_dir()
 
-# .env 文件路径：优先用户数据目录，其次基础目录
+# .env 路径：始终使用用户数据目录（可写持久化）。
+# 生产环境安装目录（Program Files 等）可能只读，绝不能把 .env 指向那里，
+# 否则 persist 写盘失败 → 当前会话生效但重启丢失。
 _ENV_PATH = _USER_DATA_DIR / ".env"
-if not _ENV_PATH.exists():
-    _ENV_PATH = _BASE_DIR / ".env"
+
+# 若用户目录无 .env，但基础目录有旧配置，则一次性迁移过来（复制而非改写原文件）
+_LEGACY_ENV = _BASE_DIR / ".env"
+if not _ENV_PATH.exists() and _LEGACY_ENV.exists():
+    try:
+        import shutil
+        shutil.copy2(_LEGACY_ENV, _ENV_PATH)
+    except Exception:
+        pass
 
 try:
     from dotenv import load_dotenv, set_key
