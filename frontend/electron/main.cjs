@@ -5,7 +5,7 @@ const path = require("path");
 const fs = require("fs");
 const http = require("http");
 const https = require("https");
-const { spawn } = require("child_process");
+const { spawn, execFile } = require("child_process");
 const { autoUpdater } = require("electron-updater");
 
 // 统一日志文件，供调试用
@@ -2257,6 +2257,63 @@ const CLEAR_HIGHLIGHT_SCRIPT = `
 `;
 
 // ============ 后端进程 ============
+// 端口占用自愈：启动后端前先检测 BACKEND_PORT 是否被残留/重复的 CINSIDE 后端占用。
+// 若占用者是本项目后端（python.exe / cinside-backend.exe），先递归杀掉再启动，
+// 保证前端永远只连到一个干净的、代码最新的后端，避免"多后端抢端口打到旧代码"。
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function findPidOnPort(port) {
+  return new Promise((resolve) => {
+    execFile("netstat", ["-ano"], { windowsHide: true }, (err, stdout) => {
+      if (err) return resolve(null);
+      const lines = String(stdout).split(/\r?\n/);
+      for (const line of lines) {
+        const m = line.match(/^\s*TCP\s+[^:]+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i);
+        if (m && Number(m[1]) === port) {
+          const pid = Number(m[2]);
+          if (pid > 0) return resolve(pid);
+        }
+      }
+      resolve(null);
+    });
+  });
+}
+
+function getProcessName(pid) {
+  return new Promise((resolve) => {
+    execFile("tasklist", ["/FI", `PID eq ${pid}`, "/NH"], { windowsHide: true }, (err, stdout) => {
+      if (err) return resolve("");
+      const line = String(stdout).split(/\r?\n/).find((l) => l.includes(String(pid)));
+      if (!line) return resolve("");
+      resolve((line.trim().split(/\s+/)[0] || "").toLowerCase());
+    });
+  });
+}
+
+function killProcessTree(pid) {
+  return new Promise((resolve) => {
+    execFile("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true }, (err) => {
+      resolve(!err);
+    });
+  });
+}
+
+async function cleanupStaleBackend() {
+  const holder = await findPidOnPort(BACKEND_PORT);
+  if (!holder) return;
+  const name = await getProcessName(holder);
+  const isOurs = name === "python.exe" || name === "python" || name === "cinside-backend.exe";
+  if (!isOurs) {
+    debugLog(`[backend] port ${BACKEND_PORT} occupied by unrelated process "${name}" (PID ${holder}), skip killing`);
+    return;
+  }
+  debugLog(`[backend] port ${BACKEND_PORT} occupied by stale backend "${name}" (PID ${holder}), killing before start`);
+  await killProcessTree(holder);
+  await sleep(500);
+}
+
 function startBackend() {
   if (backendProcess) return;
 
@@ -2322,8 +2379,15 @@ function startBackend() {
 
 function stopBackend() {
   if (backendProcess) {
-    backendProcess.kill();
+    const pid = backendProcess.pid;
+    backendProcess.kill(); // 先发 SIGTERM 给 launcher
     backendProcess = null;
+    backendReady = false;
+    // venv launcher 会派生实际解释器子进程（也占用端口），递归杀掉进程树，
+    // 确保退出后不残留后端继续占着 8000 端口。
+    if (pid) {
+      killProcessTree(pid);
+    }
   }
 }
 
@@ -2338,6 +2402,7 @@ app.whenReady().then(async () => {
   } catch (e) { debugLog(`[proxy] setProxy failed: ${e.message}`); }
 
   createSplashWindow();
+  await cleanupStaleBackend();
   startBackend();
   createWindow();
   createBrowserViews();
