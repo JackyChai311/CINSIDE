@@ -2286,6 +2286,7 @@ function startBackend() {
     env: {
       ...process.env,
       PYTHONIOENCODING: "utf-8",
+      PYTHONUTF8: "1", // 让解释器所有默认编码（含文件读写/open()）都用 UTF-8，避免 charmap 编码错误
       BROWSER_USE_CDP_URL: "http://localhost:9222",
     },
   });

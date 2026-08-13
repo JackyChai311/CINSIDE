@@ -3,6 +3,18 @@
 用绝对导入 `from app.main import app`，确保 `app.main` 作为包模块被导入，
 这样 main.py 内部的相对导入（from .config import ...）才能正常工作。
 """
+# ===== 首行强制 UTF-8 输出 =====
+# Windows 默认用 charmap（中文系统为 GBK/cp936），OCR 结果含西里尔字母/特殊符号时
+# 写 stdout/stderr 会抛 UnicodeEncodeError，导致预览与提取失败。这里强制 UTF-8。
+import sys as _sys
+
+for _s in (_sys.stdout, _sys.stderr, _sys.stdin):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+_sys.setdefaultencoding = lambda: None  # 保险：屏蔽第三方对默认编码的依赖
+
 import sys
 from pathlib import Path
 
