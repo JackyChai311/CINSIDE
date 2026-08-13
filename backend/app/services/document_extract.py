@@ -607,10 +607,10 @@ async def _call_vision_ocr(b64_img: str, prompt: str) -> str:
         "temperature": 0.1,
     }
     try:
-        async with httpx.AsyncClient(timeout=90.0, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=240.0, trust_env=False) as client:
             resp = await client.post(url, headers=headers, json=payload)
     except httpx.TimeoutException as e:
-        raise RuntimeError(f"Vision API 请求超时（90秒），请检查网络或稍后重试: {e}") from e
+        raise RuntimeError(f"Vision API 请求超时（240秒），请检查网络或稍后重试: {e}") from e
     except httpx.ConnectError as e:
         raise RuntimeError(f"无法连接 Vision API（{url}），请检查网络或 API Base URL: {e}") from e
     except httpx.RequestError as e:
@@ -2127,7 +2127,7 @@ async def extract_fields_from_text(text: str, target_fields: list[str]) -> dict[
         "temperature": 0.1,
     }
     try:
-        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=240.0, trust_env=False) as client:
             resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -2199,7 +2199,7 @@ async def _extract_viz_fields_from_image(
         "temperature": 0.1,
     }
     try:
-        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=240.0, trust_env=False) as client:
             resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()

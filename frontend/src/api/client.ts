@@ -64,13 +64,11 @@ async function jsonFetch<T>(url: string, init?: RequestInit, timeoutMs = 30000):
   }
 }
 
-// 文档/OCR 接口超时：PDF/PNG 等扫描件走 AI Vision 处理较慢，
-// 30s 默认超时会导致处理中被强制中断 → 误判"识别不到字段"→ 触发保底。
-// 按文件名扩展名给慢格式更多时间；JPG/JPEG 等快格式保持默认 30s。
-const OCR_SLOW_EXTS = ["pdf", "png", "tif", "tiff", "heic", "heif", "avif", "bmp", "webp"];
-function docTimeout(filename?: string): number {
-  const ext = (filename || "").split(".").pop()?.toLowerCase() || "";
-  return OCR_SLOW_EXTS.includes(ext) ? 180000 : 30000;
+// 文档/OCR 接口超时：AI Vision 处理扫描件/图片（JPG/PDF/PNG 都可能慢）时，
+// 30s 默认超时会被强制中断 → 误判"识别不到字段"→ 触发保底 → 跳过换下一位。
+// 统一给足 240s（4 分钟），提升容错；网络/服务端稍慢也不会被误杀。
+function docTimeout(_filename?: string): number {
+  return 240000;
 }
 
 export const api = {

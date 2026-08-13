@@ -5926,10 +5926,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   );
 
   /** 等待下载完成（LOOP 执行时用）：开启捕获 → 等待 download-captured 事件 → 返回文件数据
-   *  智能超时：下载未启动 30s 超时；启动后 120s 总超时；有进度时 30s 无新进度才超时。
-   *  修复：部分网络环境下小文件下载也可能 >30s，固定 30s 会导致误超时→触发保底→导航走→下载被干扰。
+   *  智能超时：下载未启动 60s 超时；启动后 300s 总超时；有进度时 60s 无新进度才超时。
+   *  修复：部分网络环境下（JPG/PNG 等图片、慢网）下载可能明显 >30s，固定 30s 会导致
+   *  误超时→触发保底→导航走→下载被干扰→AI Vision 拿不到文件。统一放宽给足容错。
    */
-  const waitForDownload = useCallback(async (side: "left" | "right", timeoutMs = 30000): Promise<{ filename: string; dataUrl: string; size: number; mime: string }> => {
+  const waitForDownload = useCallback(async (side: "left" | "right", timeoutMs = 60000): Promise<{ filename: string; dataUrl: string; size: number; mime: string }> => {
     return new Promise((resolve, reject) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout>;
@@ -5957,20 +5958,20 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         cleanup();
         reject(new Error(`下载失败: ${data.error || data.state || "unknown"}`));
       };
-      // 下载已开始：延长总超时到 120s，重置无进度计时器
+      // 下载已开始：延长总超时到 300s，重置无进度计时器
       const onStarted = (data: { side: string; filename: string }) => {
         if (settled || data.side !== side) return;
         if (!downloadStarted) {
           downloadStarted = true;
-          rlog(`[waitForDownload] 下载已开始: ${data.filename}，延长超时至 120s`);
+          rlog(`[waitForDownload] 下载已开始: ${data.filename}，延长超时至 300s`);
         }
         clearTimeout(timer);
         timer = setTimeout(() => {
           if (settled) return;
           settled = true;
           cleanup();
-          reject(new Error("下载超时（启动后30s无新进度）"));
-        }, 30000);
+          reject(new Error("下载超时（启动后60s无新进度）"));
+        }, 60000);
       };
       // 下载进度更新：重置无进度计时器
       const onProgress = (data: { side: string; filename: string; received: number; total: number; percent: number }) => {
@@ -5983,8 +5984,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             if (settled) return;
             settled = true;
             cleanup();
-            reject(new Error("下载超时（30s无新进度）"));
-          }, 30000);
+            reject(new Error("下载超时（60s无新进度）"));
+          }, 60000);
         }
       };
       const removeCaptured = window.electronAPI?.onDownloadCaptured(onCaptured);
@@ -5992,20 +5993,20 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       const removeStarted = window.electronAPI?.onDownloadStarted?.(onStarted);
       const removeProgress = window.electronAPI?.onDownloadProgress?.(onProgress);
 
-      // 初始超时：30s 内未检测到下载开始
+      // 初始超时：60s 内未检测到下载开始
       timer = setTimeout(() => {
         if (settled) return;
         settled = true;
         cleanup();
-        reject(new Error("下载超时（30s内未检测到下载）"));
+        reject(new Error("下载超时（60s内未检测到下载）"));
       }, timeoutMs);
-      // 总超时兜底：120s 无论如何都超时
+      // 总超时兜底：300s 无论如何都超时
       overallTimer = setTimeout(() => {
         if (settled) return;
         settled = true;
         cleanup();
-        reject(new Error("下载超时（120s总超时）"));
-      }, 120000);
+        reject(new Error("下载超时（300s总超时）"));
+      }, 300000);
 
       // 确保下载捕获已开启
       window.electronAPI?.setDownloadCapture(side, true).catch(() => {});
