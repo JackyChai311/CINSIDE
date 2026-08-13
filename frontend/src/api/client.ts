@@ -64,6 +64,15 @@ async function jsonFetch<T>(url: string, init?: RequestInit, timeoutMs = 30000):
   }
 }
 
+// 文档/OCR 接口超时：PDF/PNG 等扫描件走 AI Vision 处理较慢，
+// 30s 默认超时会导致处理中被强制中断 → 误判"识别不到字段"→ 触发保底。
+// 按文件名扩展名给慢格式更多时间；JPG/JPEG 等快格式保持默认 30s。
+const OCR_SLOW_EXTS = ["pdf", "png", "tif", "tiff", "heic", "heif", "avif", "bmp", "webp"];
+function docTimeout(filename?: string): number {
+  const ext = (filename || "").split(".").pop()?.toLowerCase() || "";
+  return OCR_SLOW_EXTS.includes(ext) ? 180000 : 30000;
+}
+
 export const api = {
   getConfig: () => jsonFetch<AppConfig>(`${BASE}/config`),
 
@@ -293,7 +302,7 @@ export const api = {
     return jsonFetch<DocumentPreviewResult>(`${BASE}/document/preview`, {
       method: "POST",
       body: fd,
-    });
+    }, docTimeout(file.name));
   },
 
   /** 上传本地文件（图片/PDF/Office）提取文字 + 字段；engine 可临时指定 "umi" 或 "vision" */
@@ -305,7 +314,7 @@ export const api = {
     return jsonFetch<DocumentExtractResult>(`${BASE}/document/extract`, {
       method: "POST",
       body: fd,
-    });
+    }, docTimeout(file.name));
   },
 
   /** 从网页 URL 下载 PDF/图片并提取文字 + 字段；engine 可临时指定 "umi" 或 "vision" */
@@ -319,7 +328,7 @@ export const api = {
         fields: fields && fields.length > 0 ? fields.join(",") : null,
         engine: engine || null,
       }),
-    }),
+    }, docTimeout(filename)),
 
   /** 文件格式转换 + 压缩到目标大小（文件处理面板「导出」用）；sourceUrl 为远端文件时后端先下载再转换 */
   convertDocument: (dataB64: string, filename: string, targetFormat: string, targetKb: number, sourceUrl?: string) =>
@@ -333,7 +342,7 @@ export const api = {
         target_kb: targetKb,
         source_url: sourceUrl || null,
       }),
-    }),
+    }, docTimeout(filename)),
 
   // ========== 外挂插件（体外循环） ==========
 
