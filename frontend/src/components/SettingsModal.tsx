@@ -287,6 +287,12 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
   };
 
   const handleTest = async () => {
+    const base = (settings.vision_api_base || "").trim();
+    // 本地先校验 URL 协议，填错（如 hhttps://）直接提示，不发起请求干等
+    if (base && !base.startsWith("http://") && !base.startsWith("https://")) {
+      setTestResult({ ok: false, message: `API Base URL 格式错误（应以 http:// 或 https:// 开头）：${base.slice(0, 60)}` });
+      return;
+    }
     setTesting(true);
     setTestResult(null);
     setError(null);

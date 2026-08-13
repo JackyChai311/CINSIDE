@@ -492,6 +492,7 @@ function computePopupBounds(parentBounds) {
 function createPopupView(parentSide, url, win) {
   // 先关闭已有的弹窗
   closePopupView(parentSide);
+  debugLog(`[popup] 创建弹窗: side=${parentSide} url=${String(url || "").slice(0, 200)}`);
 
   if (!win || win.isDestroyed()) return;
 
@@ -2343,6 +2344,22 @@ app.whenReady().then(() => {
     let side = null;
     if (rightBrowserView && webContents === rightBrowserView.webContents) side = "right";
     else if (leftBrowserView && webContents === leftBrowserView.webContents) side = "left";
+    // 弹窗 view 的下载也要识别归属（webContents 不属于 left/right 主 view）
+    let popupSide = null;
+    if (!side) {
+      for (const s of ["left", "right"]) {
+        const p = popupViews[s];
+        if (p && p.view && !p.view.webContents.isDestroyed() && webContents === p.view.webContents) { popupSide = s; break; }
+      }
+    }
+
+    // 全量日志：任何下载事件都记录，便于诊断"点击了但没捕获"的问题
+    try {
+      debugLog(`[download] will-download: url=${String(item.getURL() || "").slice(0, 200)} filename=${item.getFilename()} side=${side || "null"} popupSide=${popupSide || "null"} capture=${side ? downloadCapture[side] : (popupSide ? downloadCapture[popupSide] : "-")}`);
+    } catch (e) {}
+
+    // 弹窗里的下载归属到父 side：父侧捕获开启时，弹窗触发的下载同样捕获
+    if (!side && popupSide) side = popupSide;
 
     if (!side || !downloadCapture[side]) {
       // 不在捕获模式，阻止默认下载行为

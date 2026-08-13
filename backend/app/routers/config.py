@@ -74,7 +74,11 @@ async def test_vision():
     if not settings.vision_model:
         return {"supports_images": False, "message": "未配置 Vision Model"}
 
-    url = settings.vision_api_base.rstrip("/") + "/chat/completions"
+    base = settings.vision_api_base.strip().rstrip("/")
+    # 提前校验 URL 协议，避免 hhttps:// 这类拼写错误导致请求长时间挂起
+    if not base.startswith(("http://", "https://")):
+        return {"supports_images": False, "message": f"API Base URL 格式错误（应以 http:// 或 https:// 开头）：{base[:60]}"}
+    url = base + "/chat/completions"
     headers = {
         "Authorization": f"Bearer {settings.vision_api_key}",
         "Content-Type": "application/json",
@@ -95,7 +99,7 @@ async def test_vision():
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=12.0, trust_env=False) as client:
             resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()

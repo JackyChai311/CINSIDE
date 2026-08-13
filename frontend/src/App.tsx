@@ -6716,6 +6716,14 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             await waitElementAppear(side, mark.selector, 6000, inPopup);
             clickResult = await performRealClick(side, mark.selector, inPopup);
           }
+          // 诊断：记录点击结果与点击后页面状态（排查"点击了但没触发下载"）
+          try {
+            const diagScript = `(function(){ return JSON.stringify({ href: location.href.slice(0,200), ct: (document.contentType||''), title: (document.title||'').slice(0,80) }); })()`;
+            const diagRaw = inPopup
+              ? await window.electronAPI.popupExecuteJS(side, diagScript)
+              : await window.electronAPI.viewExecuteJS(side, diagScript);
+            rlog(`[executeMark] DOC-DOWNLOAD 点击后状态: click=${JSON.stringify(clickResult)} page=${diagRaw}`);
+          } catch { /* 诊断失败不影响主流程 */ }
           
           // 下载完成后：先开预览，后台同时OCR提取
           // showPreviewAndBgOcr: 立即开预览（轻量）+ 后台启动OCR（重量），返回OCR文字供校验
