@@ -1,6 +1,7 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type RefObject } from "react";
 import {
   Activity,
+  Bot,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -8,18 +9,22 @@ import {
   ExternalLink,
   FileSpreadsheet,
   GripVertical,
+  Layers,
   ListChecks,
   Loader2,
   Play,
   RefreshCw,
   Sparkles,
   Trash2,
+  UserCircle,
   X,
+  XCircle,
 } from "lucide-react";
 import type { ApplicantRecord, BatchResult, BatchStatus, Overall, VerificationStep } from "../types";
 import { OVERALL_LABELS } from "../types";
 import AISphere, { type AISphereState } from "./AISphere";
 import ExecutionBubbles from "./ExecutionBubbles";
+import PluginPanel from "./PluginPanel";
 
 const SKILL_DRAG_MIME = "application/x-cinside-skill-id";
 
@@ -91,14 +96,30 @@ interface Props {
   execSteps?: VerificationStep[];
   /** 是否正在执行 LOOP */
   execRunning?: boolean;
-  /** 执行进度面板是否已打开（打开时隐藏气泡） */
+  /** 执行进度面板是否已打开（打开时隐藏气泡，卡片区域变为执行进度视图） */
   execPanelOpen?: boolean;
   /** 是否显示「执行进度」药丸按钮（气泡消散后、面板未开时） */
   execChipVisible?: boolean;
-  /** 点击「执行进度」药丸按钮 */
+  /** 点击「执行进度」按钮 */
   onOpenExecPanel?: () => void;
+  /** 关闭执行进度视图，返回卡片列表 */
+  onCloseExecPanel?: () => void;
+  /** 执行步骤列表底部锚点（新步骤时自动滚动到底） */
+  logEndRef?: RefObject<HTMLDivElement>;
   /** 气泡全部消散回调（用于触发药丸按钮显现） */
   onExecBubblesGone?: () => void;
+  /** 执行分析：文本框是否打开（打开时卡片区域变为分析文本框） */
+  analysisOpen?: boolean;
+  /** 是否有可查看的执行分析（首次 LOOP 审查结束后为 true） */
+  analysisAvailable?: boolean;
+  /** 分析文本内容 */
+  analysisText?: string | null;
+  /** 分析生成中（AI 异步工作，球体同步为 processing 动画） */
+  analysisLoading?: boolean;
+  /** 切换分析文本框开关 */
+  onToggleAnalysis?: (open: boolean) => void;
+  /** 重新生成分析 */
+  onRegenerateAnalysis?: () => void;
 }
 
 export default function LeftPanel({
@@ -138,7 +159,15 @@ export default function LeftPanel({
   execPanelOpen = false,
   execChipVisible = false,
   onOpenExecPanel,
+  onCloseExecPanel,
+  logEndRef,
   onExecBubblesGone,
+  analysisOpen = false,
+  analysisAvailable = false,
+  analysisText = null,
+  analysisLoading = false,
+  onToggleAnalysis,
+  onRegenerateAnalysis,
 }: Props) {
   /** 范围勾选：上次点击的记录索引（群组起点） */
   const lastCheckIdxRef = useRef<number>(-1);
@@ -265,6 +294,12 @@ export default function LeftPanel({
     setShowGroupPanel(false);
   }, [checkedIds, onCheckChange, records, cardLoopMap]);
 
+  /** 执行进度视图内的 Tab：执行步骤 / 体外循环（打开时重置为步骤） */
+  const [execTab, setExecTab] = useState<"steps" | "plugin">("steps");
+  useEffect(() => {
+    if (execPanelOpen) setExecTab("steps");
+  }, [execPanelOpen]);
+
   return (
     <div className="panel-solid flex h-full flex-col gap-3 p-3">
       {/* AI 助手：黑白方格粒子球（无边框无文字，LOOP 运行/告警/讲解时形态变化）
@@ -280,18 +315,175 @@ export default function LeftPanel({
           />
         )}
         {execChipVisible && !execPanelOpen && (
-          <button
-            onClick={onOpenExecPanel}
-            className="absolute -bottom-1 left-1/2 z-30 flex -translate-x-1/2 items-center gap-1 rounded-full border border-slate-200 bg-white/90 px-2.5 py-1 text-[10px] font-medium text-slate-600 shadow-sm backdrop-blur-sm transition-all duration-300 animate-fade-in hover:bg-white hover:text-slate-800 hover:shadow"
-            title="查看执行进度"
-          >
-            <Activity className="h-3 w-3 text-brand-600" />
-            执行进度
-          </button>
+          <div className="absolute -bottom-2 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 animate-fade-in">
+            <button
+              onClick={onOpenExecPanel}
+              className="flex items-center gap-1 text-[11px] font-semibold text-slate-900 transition-opacity hover:opacity-60"
+              title="查看日志"
+            >
+              <Activity className="h-3 w-3 text-slate-900" />
+              日志
+            </button>
+            {analysisAvailable && onToggleAnalysis && (
+              <>
+                <span className="h-3 w-px bg-slate-300" />
+                <button
+                  onClick={() => onToggleAnalysis(true)}
+                  className="flex items-center gap-1 text-[11px] font-semibold text-slate-900 transition-opacity hover:opacity-60"
+                  title="查看执行分析（AI 对本次审查结果的总结）"
+                >
+                  <Sparkles className="h-3 w-3 text-slate-900" />
+                  分析
+                </button>
+              </>
+            )}
+          </div>
         )}
       </div>
 
-      {/* 记录列表（无外框，直接融入面板） */}
+      {/* 执行进度视图：与执行分析同一位置（卡片区域原位切换），含 LOOP 执行步骤 / 体外循环 两个 Tab */}
+      {execPanelOpen ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2">
+            <div className="flex items-center gap-1.5">
+              <Activity className="h-3 w-3 text-slate-900" />
+              <span className="text-xs font-semibold text-slate-700">日志</span>
+              <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">
+                {execSteps.length} 步
+              </span>
+            </div>
+            <button
+              onClick={onCloseExecPanel}
+              className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+              title="关闭，返回卡片列表"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+          {/* Tab 切换栏 */}
+          <div className="flex shrink-0 border-b border-slate-100 bg-slate-50/40">
+            <button
+              onClick={() => setExecTab("steps")}
+              className={[
+                "flex flex-1 items-center justify-center gap-1.5 px-3 py-2 text-[11px] font-medium transition-all",
+                execTab === "steps"
+                  ? "bg-white text-slate-800 shadow-[inset_0_-2px_0_0_#0f172a]"
+                  : "text-slate-500 hover:bg-white/60 hover:text-slate-700",
+              ].join(" ")}
+            >
+              <Activity className="h-3.5 w-3.5" />
+              LOOP 执行步骤
+            </button>
+            <button
+              onClick={() => setExecTab("plugin")}
+              className={[
+                "flex flex-1 items-center justify-center gap-1.5 px-3 py-2 text-[11px] font-medium transition-all",
+                execTab === "plugin"
+                  ? "bg-white text-slate-800 shadow-[inset_0_-2px_0_0_#0f172a]"
+                  : "text-slate-500 hover:bg-white/60 hover:text-slate-700",
+              ].join(" ")}
+            >
+              <Bot className="h-3.5 w-3.5" />
+              体外循环
+            </button>
+          </div>
+          {/* Tab 内容 */}
+          {execTab === "steps" ? (
+            <div className="min-h-0 flex-1 overflow-auto p-3">
+              {execSteps.length === 0 ? (
+                <div className="flex h-full flex-col items-center justify-center text-[11px] text-slate-400">
+                  <Activity className="mb-1 h-8 w-8 text-slate-300" />
+                  执行时显示进度
+                </div>
+              ) : (
+                <ul className="space-y-1.5">
+                  {execSteps.map((s) => {
+                    if (s.isTaskStart) {
+                      return (
+                        <li key={`task-${s.step}`} className="-mx-2 my-2 first:mt-0">
+                          <div className="flex items-center gap-2 rounded-lg border-2 border-indigo-300 bg-gradient-to-r from-indigo-600 to-violet-600 px-3 py-2 shadow-md">
+                            <Layers className="h-4 w-4 shrink-0 text-white" />
+                            <span className="text-[12px] font-bold text-white">{s.taskName || "任务"}</span>
+                            <span className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] font-semibold text-white">{s.taskIndex}/{s.taskTotal}</span>
+                            <span className="ml-auto text-[10px] text-indigo-200">{s.taskRecordCount}张卡片</span>
+                          </div>
+                        </li>
+                      );
+                    }
+                    if (s.isRecordStart) {
+                      return (
+                        <li key={`record-${s.step}`} className="-mx-1 my-1.5">
+                          <div className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50/80 px-3 py-1.5 shadow-sm">
+                            <UserCircle className="h-4 w-4 shrink-0 text-indigo-600" />
+                            <span className="text-[11px] font-bold text-indigo-900">{s.recordName || "人物卡片"}</span>
+                            <span className="rounded-full bg-indigo-600 px-2 py-0.5 text-[10px] font-semibold text-white">{s.recordIndex}/{s.recordTotal}</span>
+                          </div>
+                        </li>
+                      );
+                    }
+                    const icon = s.success
+                      ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                      : <XCircle className="h-3.5 w-3.5 shrink-0 text-rose-500" />;
+                    return (
+                      <li key={s.step} className="flex items-start gap-2 rounded px-2 py-1 hover:bg-slate-50/60">
+                        {icon}
+                        <span className="text-[11px] leading-5 text-slate-600">
+                          {s.description}
+                          {s.detail && <span className="ml-1 text-slate-400">— {s.detail}</span>}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              <div ref={logEndRef} />
+            </div>
+          ) : (
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <PluginPanel />
+            </div>
+          )}
+        </div>
+      ) : analysisOpen ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2">
+            <div className="flex items-center gap-1.5">
+              <Sparkles className="h-3 w-3 text-indigo-500" />
+              <span className="text-xs font-semibold text-slate-700">执行分析</span>
+              {analysisLoading && <Loader2 className="h-3 w-3 animate-spin text-slate-400" />}
+            </div>
+            <div className="flex items-center gap-0.5">
+              {onRegenerateAnalysis && (
+                <button
+                  onClick={onRegenerateAnalysis}
+                  disabled={analysisLoading}
+                  className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
+                  title="按当前审查结果重新生成分析"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                </button>
+              )}
+              <button
+                onClick={() => onToggleAnalysis?.(false)}
+                className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                title="关闭分析，返回卡片列表"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto px-3 py-2">
+            {analysisLoading && !analysisText ? (
+              <div className="flex h-full flex-col items-center justify-center gap-2 text-xs text-slate-400">
+                <Loader2 className="h-5 w-5 animate-spin text-slate-300" />
+                AI 正在分析本次执行结果…
+              </div>
+            ) : (
+              <div className="whitespace-pre-wrap text-xs leading-relaxed text-slate-700">{analysisText || "暂无分析内容"}</div>
+            )}
+          </div>
+        </div>
+      ) : (
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2">
           <div className="flex items-center gap-1.5">
@@ -301,6 +493,15 @@ export default function LeftPanel({
             </span>
           </div>
           <div className="flex items-center gap-0.5">
+            {analysisAvailable && onToggleAnalysis && (
+              <button
+                onClick={() => onToggleAnalysis(true)}
+                className="rounded p-1 text-slate-500 hover:bg-indigo-50 hover:text-indigo-600"
+                title="查看执行分析（AI 对本次审查结果的总结）"
+              >
+                <Sparkles className="h-3 w-3" />
+              </button>
+            )}
             <button
               onClick={onRefresh}
               className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
@@ -661,6 +862,7 @@ export default function LeftPanel({
           )}
         </div>
       </div>
+      )}
     </div>
   );
 }

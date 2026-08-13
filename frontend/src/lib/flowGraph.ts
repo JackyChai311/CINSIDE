@@ -59,13 +59,14 @@ export function buildStepLabel(m: PickedMark): string {
     return `🎛 ${wkind}控件${phaseTag}: ${m.widget.triggerLabel || m.label || m.selector}`;
   }
   if (m.action === "input" && m.variableField) {
-    return `⌨️ 填入「${m.variableField}」→ ${m.inputTargetLabel || m.label}`;
+    return `⌨️ ${m.workflow === "entry" ? "填入" : "定位"}「${m.variableField}」→ ${(m.inputTargetLabel || m.label || "").replace(/^输入\s*·?\s*/, "")}`;
   }
   if (m.action === "click") {
     return `🖱 点击${phaseTag}: ${m.label || m.selector}`;
   }
   if (m.action === "input") {
-    return `⌨️ 输入${phaseTag}: ${m.label || m.selector}`;
+    const w = m.workflow === "entry" ? "录入" : "审查";
+    return `⌨️ ${w}${phaseTag}: ${(m.label || m.selector).replace(/^输入\s*·?\s*/, "")}`;
   }
   return `${actionMap[m.action || "pick"] || "步骤"}: ${m.label || m.selector}`;
 }

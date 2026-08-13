@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Check,
+  Download,
   ExternalLink,
   FileSpreadsheet,
   Link2,
@@ -14,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import type { ApplicantRecord, PickedMark } from "../types";
+import { api } from "../api/client";
 
 export interface ExcelPickedField {
   /** 字段名（列名） */
@@ -83,6 +85,8 @@ interface Props {
   activeFieldStatus?: "pending" | "match" | "mismatch" | "missing" | null;
   /** LOOP 审查期：当前记录已完成比对的列→结果（保持单元格着色） */
   fieldResults?: Record<string, "match" | "mismatch" | "missing">;
+  /** 数据侧（left/right）：底部状态条显示「导出」按钮，把修正后的数据写回 Excel */
+  side?: "left" | "right";
 }
 
 /**
@@ -113,10 +117,36 @@ export default function ExcelView({
   activeField = null,
   activeFieldStatus = null,
   fieldResults,
+  side,
 }: Props) {
   const [filter, setFilter] = useState("");
   // 行范围框选的锚点行（第一次点击的行号，0-based records 索引）
   const [rangeAnchor, setRangeAnchor] = useState<number | null>(null);
+  // 导出 Excel：把内存中（修正后）的数据写回文件
+  const [exporting, setExporting] = useState(false);
+  const handleExport = async () => {
+    if (!side || exporting) return;
+    setExporting(true);
+    try {
+      const r = await api.exportExcel(side);
+      if (r.mode === "inplace") {
+        console.log(`[ExcelView] 已原地写回原文件：${r.path}`);
+      } else {
+        const a = document.createElement("a");
+        a.href = r.path!;
+        a.download = r.filename!;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(r.path!), 5000);
+      }
+    } catch (e) {
+      console.warn("[ExcelView] 导出失败", e);
+      alert(`导出失败：${e instanceof Error ? e.message : e}`);
+    } finally {
+      setExporting(false);
+    }
+  };
 
   // 表头右键菜单状态
   const [ctxMenu, setCtxMenu] = useState<{
@@ -657,7 +687,20 @@ export default function ExcelView({
         {/* 底部状态条 */}
         <div className="flex shrink-0 items-center justify-between border-t border-slate-200/60 px-2 py-0.5 text-[10px] text-slate-400">
           <span>{filtered.length} / {records.length} 行</span>
-          <span>{columns.length} 列</span>
+          <span className="flex items-center gap-2">
+            <span>{columns.length} 列</span>
+            {side && (
+              <button
+                onClick={handleExport}
+                disabled={exporting}
+                className="flex items-center gap-0.5 rounded-md bg-slate-100 px-1.5 py-0.5 font-medium text-slate-600 ring-1 ring-slate-300 transition-colors hover:bg-slate-200 hover:text-slate-800 disabled:opacity-50"
+                title="把修正后的数据写回 Excel（本地文件原地写回，否则下载副本）"
+              >
+                <Download className="h-3 w-3" />
+                {exporting ? "导出中…" : "导出"}
+              </button>
+            )}
+          </span>
         </div>
       </div>
     );

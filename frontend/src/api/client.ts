@@ -156,6 +156,38 @@ export const api = {
       }
     ),
 
+  updateRecordFields: (recordId: string, fields: Record<string, string>) =>
+    jsonFetch<{ ok: boolean; record_id: string; updated: string[] }>(
+      `${BASE}/records/${recordId}/fields`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields }),
+      }
+    ),
+
+  /** LOOP 执行分析：AI 总结各卡片错误、高频错误字段与可能原因（LLM 未配置时后端返回本地统计摘要） */
+  loopAnalysis: (payload: {
+    cards: Array<{
+      name: string;
+      overall: string;
+      summary: string;
+      mismatches: Array<{
+        label: string;
+        source_value: string;
+        target_value: string;
+        match: string;
+        reasoning: string;
+      }>;
+      mrz_warnings: string[];
+    }>;
+  }) =>
+    jsonFetch<{ text: string; source: "ai" | "local" }>(`${BASE}/verify/analysis/loop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+
   startVerify: (recordId: string, universityUrl?: string) =>
     jsonFetch<{ task_id: string; record_id: string }>(`${BASE}/verify`, {
       method: "POST",
@@ -185,6 +217,34 @@ export const api = {
       if (!resp.ok) throw new Error("下载失败");
       return resp.blob();
     });
+  },
+
+  /** 登记 Excel 本地路径（Electron File.path）：导出时可原地写回原文件 */
+  setExcelSource: (side: "left" | "right", path: string, filename: string) =>
+    jsonFetch<{ ok: boolean; mode: string }>(`${BASE}/upload/excel-source`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ side, path, filename }),
+    }),
+
+  /** 导出 Excel：把内存中（修正后）的字段值写回文件；本地路径=原地写回，否则下载副本 */
+  exportExcel: async (side: "left" | "right"): Promise<{ mode: "inplace" | "download"; path?: string; filename?: string }> => {
+    const resp = await fetch(`${BASE}/upload/excel-export?side=${side}`);
+    if (!resp.ok) {
+      let msg = "导出失败";
+      try { const j = await resp.json(); msg = j.detail || msg; } catch { /* ignore */ }
+      throw new Error(msg);
+    }
+    const ct = resp.headers.get("content-type") || "";
+    if (ct.includes("application/json")) {
+      const j = await resp.json();
+      return { mode: "inplace", path: j.path };
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get("content-disposition") || "";
+    const m = /filename=([^;]+)/.exec(cd);
+    const filename = m ? m[1].trim().replace(/^"|"$/g, "") : "data_updated.xlsx";
+    return { mode: "download", filename, path: URL.createObjectURL(blob) };
   },
 
   continueManualStep: (taskId: string) =>

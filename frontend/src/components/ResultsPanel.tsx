@@ -7,11 +7,13 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Circle,
   CirclePause,
   AlertOctagon,
   Columns2,
   Crosshair,
   Database,
+  Download,
   Eye,
   ExternalLink,
   FileText,
@@ -35,6 +37,7 @@ import {
   Trash2,
   Type,
   Upload,
+  Wrench,
   X,
   XCircle,
   ZoomIn,
@@ -51,6 +54,7 @@ import type {
   PickedMark,
   ScreenshotEvent,
   VerificationReport,
+  VerificationReportEntry,
   VerificationStep,
 } from "../types";
 import { api } from "../api/client";
@@ -60,6 +64,9 @@ import {
   OVERALL_LABELS,
 } from "../types";
 import { extractMethodLabel, isUmiMethod, isVisionMethod } from "../utils/formatNormalize";
+
+/** 报告卡片展开状态的模块级缓存（key=record_id）：组件因查看定位/报告替换重挂载后保持展开 */
+const personCardExpandedCache = new Map<string, boolean>();
 
 /** 提取元素汇总项：字段对比设置态「提取元素」小卡片（文件提取步骤 + 自定义文本 + 控件，按设置时间 FIFO） */
 export interface ExtractSummaryItem {
@@ -104,6 +111,8 @@ interface Props {
   shots: ScreenshotEvent[];
   steps?: VerificationStep[];
   running: boolean;
+  /** 真实 LOOP 执行中（批量/队列运行）；「查看」定位不算 —— 决定实时卡片是否接管报告区，缺省回退为 running */
+  execRunning?: boolean;
   /** LOOP 运行期：当前记录逐对填入的字段对比/录入数据（一对一对填入卡片效果） */
   livePairs?: { recordId: string; pairs: LivePair[] };
   appMode?: AppMode;
@@ -246,8 +255,22 @@ interface Props {
   docSplitView?: boolean;
   /** 数据源记录（用于卡片显示名字+学号） */
   records?: ApplicantRecord[];
+  /** 字段列映射：标准字段名 -> Excel 原始列 key（卡片姓名/学号解析用） */
+  fieldColumnMap?: Record<string, string>;
   /** 点击人物卡片跳转到该记录 */
   onSelectRecord?: (recordId: string) => void;
+  /** 审查修正：把来源值写入被审查字段（网页填值/Excel列更新），返回是否成功 */
+  onFixField?: (recordId: string, entry: VerificationReportEntry, rowKey: string) => Promise<boolean>;
+  /** 审查修正：一键修正全部不一致字段并重新审查该卡片 */
+  onFixAllAndRerun?: (recordId: string, entries: VerificationReportEntry[]) => void;
+  /** 导出修正后的 Excel（按钮显示在「字段对比」标题行，仅结果显示模式） */
+  onExportExcel?: () => void;
+  /** 导出 Excel 进行中 */
+  exportingExcel?: boolean;
+  /** 正在修正的字段行 key（行级加载态） */
+  fixingFieldKey?: string | null;
+  /** 正在修正并重新审查的记录 id（卡片级加载态） */
+  fixRerunRecordId?: string | null;
   // ============ 执行时光标动画相关 ============
   /** 执行阶段：idle=未执行，marks=执行点击/输入，verify=逐字段审查，done=完成 */
   execPhase?: "idle" | "marks" | "verify" | "done";
@@ -271,6 +294,7 @@ export default function ResultsPanel({
   shots,
   steps = [],
   running,
+  execRunning,
   livePairs,
   appMode = "loop",
   onDetach,
@@ -345,7 +369,14 @@ export default function ResultsPanel({
   splitWidgetRequest = 0,
   docSplitView = false,
   records = [],
+  fieldColumnMap = {},
   onSelectRecord,
+  onFixField,
+  onFixAllAndRerun,
+  onExportExcel,
+  exportingExcel = false,
+  fixingFieldKey = null,
+  fixRerunRecordId = null,
   switchToDocSignal,
   fieldSetupToggleSignal,
   execPhase = "idle",
@@ -395,6 +426,7 @@ export default function ResultsPanel({
           onToggleDocBreakpoint={onToggleDocBreakpoint}
           shots={shots}
           running={running}
+          execRunning={execRunning}
           steps={steps}
           livePairs={livePairs}
           appMode={appMode}
@@ -460,7 +492,14 @@ export default function ResultsPanel({
           splitWidgetRequest={splitWidgetRequest}
           docSplitView={docSplitView}
           records={records}
+          fieldColumnMap={fieldColumnMap}
           onSelectRecord={onSelectRecord}
+          onFixField={onFixField}
+          onFixAllAndRerun={onFixAllAndRerun}
+          onExportExcel={onExportExcel}
+          exportingExcel={exportingExcel}
+          fixingFieldKey={fixingFieldKey}
+          fixRerunRecordId={fixRerunRecordId}
           switchToDocSignal={switchToDocSignal}
           fieldSetupToggleSignal={fieldSetupToggleSignal}
           execPhase={execPhase}
@@ -484,6 +523,8 @@ interface SideCompareRow {
   rightValue: string;
   match: FieldMatch;
   note?: string | null;
+  /** 原始报告条目（审查修正功能用） */
+  entry?: VerificationReportEntry;
 }
 
 function MatchIcon({ match }: { match: FieldMatch }) {
@@ -760,6 +801,7 @@ function ReportTab({
   onToggleDocBreakpoint,
   shots,
   running,
+  execRunning,
   steps,
   livePairs,
   appMode,
@@ -825,7 +867,14 @@ function ReportTab({
   splitWidgetRequest = 0,
   docSplitView = false,
   records = [],
+  fieldColumnMap = {},
   onSelectRecord,
+  onFixField,
+  onFixAllAndRerun,
+  onExportExcel,
+  exportingExcel = false,
+  fixingFieldKey = null,
+  fixRerunRecordId = null,
   switchToDocSignal,
   fieldSetupToggleSignal,
   execPhase = "idle",
@@ -853,6 +902,8 @@ function ReportTab({
   onToggleDocBreakpoint?: () => void;
   shots: ScreenshotEvent[];
   running: boolean;
+  /** 真实 LOOP 执行中（批量/队列运行）；「查看」定位不算 —— 决定实时卡片是否接管报告区，缺省回退为 running */
+  execRunning?: boolean;
   steps: VerificationStep[];
   /** LOOP 运行期逐对填入卡片的字段对比/录入数据（一对一对填入效果） */
   livePairs?: { recordId: string; pairs: LivePair[] };
@@ -979,8 +1030,22 @@ function ReportTab({
   docSplitView?: boolean;
   /** 数据源记录（用于卡片显示名字+学号） */
   records?: ApplicantRecord[];
+  /** 字段列映射：标准字段名 -> Excel 原始列 key（卡片姓名/学号解析用） */
+  fieldColumnMap?: Record<string, string>;
   /** 点击人物卡片跳转到该记录 */
   onSelectRecord?: (recordId: string) => void;
+  /** 审查修正：把来源值写入被审查字段（网页填值/Excel列更新），返回是否成功 */
+  onFixField?: (recordId: string, entry: VerificationReportEntry, rowKey: string) => Promise<boolean>;
+  /** 审查修正：一键修正全部不一致字段并重新审查该卡片 */
+  onFixAllAndRerun?: (recordId: string, entries: VerificationReportEntry[]) => void;
+  /** 导出修正后的 Excel（按钮显示在「字段对比」标题行，仅结果显示模式） */
+  onExportExcel?: () => void;
+  /** 导出 Excel 进行中 */
+  exportingExcel?: boolean;
+  /** 正在修正的字段行 key（行级加载态） */
+  fixingFieldKey?: string | null;
+  /** 正在修正并重新审查的记录 id（卡片级加载态） */
+  fixRerunRecordId?: string | null;
   /** 外部信号：递增时切换到文件处理面板的结果模式（显示已提取文件） */
   switchToDocSignal?: number;
   /** 外部信号：递增时切换字段对比面板的「步骤设置/结果显示」模式（L 快捷键） */
@@ -1022,6 +1087,12 @@ function ReportTab({
   /** 内嵌文件预览的旋转和缩放（切换文件时重置） */
   const [filePreviewRotation, setFilePreviewRotation] = useState(0);
   const [filePreviewZoom, setFilePreviewZoom] = useState(1);
+  /** 预览平移偏移（拖拽移动 / 滚轮缩放时围绕鼠标位置同步调整） */
+  const [filePreviewPan, setFilePreviewPan] = useState({ x: 0, y: 0 });
+  const [filePreviewDragging, setFilePreviewDragging] = useState(false);
+  const filePreviewBoxRef = useRef<HTMLDivElement | null>(null);
+  const filePreviewDragRef = useRef<{ id: number; startX: number; startY: number; panX: number; panY: number } | null>(null);
+  const filePreviewZoomRef = useRef(1);
   /** UMI-OCR 连通性状态 */
   const [umiStatus, setUmiStatus] = useState<"idle" | "checking" | "available" | "unavailable">("idle");
   const [umiStatusMsg, setUmiStatusMsg] = useState("");
@@ -1354,7 +1425,7 @@ function ReportTab({
     for (const m of allPickedMarks) {
       items.push({
         key: `mark:${m.order}`,
-        label: m.label || (m.action === "input" ? "输入" : "点击"),
+        label: (m.label || "").replace(/^输入/, m.workflow === "entry" ? "录入" : "审查") || (m.action === "input" ? (m.workflow === "entry" ? "录入" : "审查") : "点击"),
         type: "mark",
         mark: m,
         side: m.side,
@@ -1526,22 +1597,44 @@ function ReportTab({
   }, [leftWidth, midWidth]);
 
   // ============ LOOP 实时进度：将 steps 按 recordStart 分组 ============
-  // 用 recordMap 快速查找记录信息（姓名/学号）
+  // 用 recordMap 快速查找记录信息（姓名/学号）；卡片 record_id 带「__随机后缀」，同时按原始 id 建索引
   const recordMap = useMemo(() => {
     const m = new Map<string, ApplicantRecord>();
-    records.forEach((r) => m.set(r.record_id, r));
+    records.forEach((r) => {
+      m.set(r.record_id, r);
+      const base = r.record_id.split("__")[0];
+      if (!m.has(base)) m.set(base, r);
+    });
     return m;
   }, [records]);
 
-  // 辅助：从 record 中获取学号（兼容标准字段和常见别名）
+  /** 按 record_id（可带后缀）查找记录 */
+  const findRecord = (rid: string | undefined): ApplicantRecord | undefined => {
+    if (!rid) return undefined;
+    return recordMap.get(rid) || recordMap.get(rid.split("__")[0]);
+  };
+
+  // 辅助：按标准字段取值（优先标准字段，其次 fieldColumnMap 手动映射的原始列）
+  const getMappedField = (rec: ApplicantRecord | undefined, field: "name" | "passport_no" | "student_id"): string => {
+    if (!rec) return "";
+    const direct = rec.fields[field];
+    if (direct && direct.trim()) return direct.trim();
+    const mapped = fieldColumnMap[field];
+    if (mapped) {
+      const v = rec.fields[mapped];
+      if (v && v.trim()) return v.trim();
+    }
+    return "";
+  };
+  // 辅助：从 record 中获取学号（兼容标准字段、手动映射列和常见别名）
   const getStudentId = (rec: ApplicantRecord | undefined): string => {
     if (!rec) return "";
-    return rec.fields.student_id || rec.fields.student_no || rec.fields.sid || rec.fields.id || rec.fields.学号 || "";
+    return getMappedField(rec, "student_id") || rec.fields.student_no || rec.fields.sid || rec.fields.id || rec.fields.学号 || "";
   };
-  // 辅助：从 record 中获取姓名
+  // 辅助：从 record 中获取姓名（优先标准字段/手动映射列，其次 fullname 别名）
   const getDisplayName = (rec: ApplicantRecord | undefined, fallback: string): string => {
     if (!rec) return fallback;
-    return rec.fields.name || rec.fields.fullname || fallback;
+    return getMappedField(rec, "name") || (rec.fields.fullname || "").trim() || fallback;
   };
 
   interface LiveRecord {
@@ -1573,7 +1666,7 @@ function ReportTab({
       }
       // 从records中查找补充姓名和学号
       const rid = s.recordId || "";
-      const rec = rid ? recordMap.get(rid) : undefined;
+      const rec = findRecord(rid);
       cur = {
         name: getDisplayName(rec, name),
         studentId: getStudentId(rec),
@@ -1644,7 +1737,7 @@ function ReportTab({
     const doneCount = rec.fieldSteps.filter((f) => f.done).length;
     // 逐对填卡数据：当前记录有 livePairs 时，卡片切换到「字段对比态」（一对一对填入）
     const cardPairs = livePairs && livePairs.recordId === rec.recordId ? livePairs.pairs : [];
-    // 状态色系：执行中=无色系（中性灰），通过=绿，需检查=红
+    // 状态色系：执行中=无色系（中性灰），已完成=绿，需检查=红
     const accent = isFailed
       ? { head: "bg-rose-50/80 border-rose-200", text: "text-rose-700", badge: "bg-rose-500", badgeSoft: "bg-rose-100 text-rose-700", spin: "text-rose-500" }
       : isRunning
@@ -1682,7 +1775,7 @@ function ReportTab({
             </button>
           )}
           <span className={`inline-flex shrink-0 items-center rounded-full ${accent.badge} px-2 py-0.5 text-[10px] font-semibold text-white`}>
-            {isRunning ? `执行中 ${doneCount}步` : isFailed ? "需检查" : "通过"}
+            {isRunning ? `执行中 ${doneCount}步` : isFailed ? "需检查" : "已完成"}
           </span>
           <button
             onClick={() => setExpanded((v) => !v)}
@@ -1815,7 +1908,29 @@ function ReportTab({
 
   // 精美的人员对比卡片
   const PersonReportCard = ({ r }: { r: VerificationReport }) => {
-    const [expanded, setExpanded] = useState(false);
+    // 展开状态按 record_id 写入模块级缓存：查看定位/修正重跑导致组件重挂载后，卡片保持展开不自己收起
+    const expandKey = r.record_id || r.task_id || "";
+    const [expandedState, setExpandedState] = useState(() => personCardExpandedCache.get(expandKey) ?? false);
+    const setExpanded = (v: boolean | ((p: boolean) => boolean)) => {
+      setExpandedState((prev) => {
+        const next = typeof v === "function" ? v(prev) : v;
+        personCardExpandedCache.set(expandKey, next);
+        return next;
+      });
+    };
+    const expanded = expandedState;
+    /** 已修正的字段行 key（修正成功后标记，重新审查生成新报告后自动重置） */
+    const [fixedKeys, setFixedKeys] = useState<Set<string>>(new Set());
+    /** 人工确认打勾的字段行 key：人类检查后确认该字段无需修正/已核对（随卡片组件生命周期保留） */
+    const [confirmedKeys, setConfirmedKeys] = useState<Set<string>>(new Set());
+    const toggleConfirmed = (key: string) => {
+      setConfirmedKeys((prev) => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+      });
+    };
     const isEntry = appMode === "entry";
     const rows: SideCompareRow[] = r.entries.map((e, i) => ({
       key: `${e.left_field || e.right_label || "field"}-${i}`,
@@ -1825,7 +1940,19 @@ function ReportTab({
       rightValue: e.right_value || "",
       match: e.match,
       note: e.reasoning,
+      entry: e,
     }));
+    /** 该行是否可一键修正：不一致 + 来源值非空 + 被审查侧可写（网页元素/Excel绑定列/文件提取绑定列）；录入模式同样支持（提取值→Excel列） */
+    const canFixRow = (row: SideCompareRow): boolean => {
+      const e = row.entry;
+      if (!e || !onFixField) return false;
+      if (e.match !== "mismatch" && e.match !== "error") return false;
+      if (!(e.left_value || "").trim()) return false;
+      return !!e.right_selector || /（(?:Excel|文件提取)·.+）$/.test(e.right_label || "");
+    };
+    /** 可修正的不一致行数（决定卡片级按钮显隐） */
+    const fixableRows = rows.filter(canFixRow);
+    const isFixRerunning = fixRerunRecordId === r.record_id;
     const mc = rows.filter((x) => x.match === "match").length;
     const mmc = rows.filter((x) => x.match === "mismatch" || x.match === "error").length;
     const hasMrzWarning = (r.mrz_warnings?.length ?? 0) > 0;
@@ -1858,8 +1985,13 @@ function ReportTab({
     };
 
     // 从 records 中补充学号信息（如果后端没返回 student_id）
-    const srcRec = r.record_id ? recordMap.get(r.record_id) : undefined;
-    const displayName = r.record_name || getDisplayName(srcRec, "人物卡片");
+    const srcRec = findRecord(r.record_id);
+    // 姓名显示：优先报告内烘焙的名字；若为空或是 REC 编号样式（早期映射缺失时生成），则从记录实时解析（含手动映射列）
+    const bakedName = (r.record_name || "").trim();
+    const isIdLikeName = !bakedName || bakedName === r.record_id || /^rec[-_]/i.test(bakedName);
+    const displayName = !isIdLikeName
+      ? bakedName
+      : getMappedField(srcRec, "name") || (srcRec?.fields.fullname || "").trim() || getMappedField(srcRec, "passport_no") || bakedName || "人物卡片";
     const studentId = r.student_id || getStudentId(srcRec);
 
     return (
@@ -1971,6 +2103,40 @@ function ReportTab({
                           <div className={`mt-1 text-[13px] leading-relaxed ${isMismatch && !isEntry ? "font-semibold text-rose-600" : isMatch && !isEntry ? "text-emerald-700" : "text-slate-700"}`}>
                             {row.rightValue || <span className="text-slate-300">—</span>}
                           </div>
+                          {/* 一键修正：确认来源正确后，把来源值写入被审查字段 */}
+                          {canFixRow(row) && r.record_id && (
+                            <div className="mt-1.5 flex items-center gap-1.5">
+                              {fixedKeys.has(row.key) ? (
+                                <span className="inline-flex items-center gap-1 rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500 ring-1 ring-slate-200">
+                                  <CheckCircle2 className="h-3 w-3" />
+                                  已修正
+                                </span>
+                              ) : (
+                                <button
+                                  onClick={async () => {
+                                    if (!row.entry || !onFixField || !r.record_id) return;
+                                    const ok = await onFixField(r.record_id, row.entry, row.key);
+                                    if (ok) setFixedKeys((prev) => new Set(prev).add(row.key));
+                                  }}
+                                  disabled={running || fixingFieldKey !== null || fixRerunRecordId !== null}
+                                  className="inline-flex items-center gap-1 rounded-md bg-white px-2 py-0.5 text-[10px] font-medium text-slate-600 ring-1 ring-slate-300 transition-colors hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                                  title="确认来源正确？点击把来源值写入被审查字段（网页填值/Excel列更新）"
+                                >
+                                  {fixingFieldKey === row.key ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wrench className="h-3 w-3" />}
+                                  以来源为准修正
+                                </button>
+                              )}
+                              {/* 人工确认打勾：人类检查后认为该字段没问题，勾选标记（再点取消） */}
+                              <button
+                                onClick={() => toggleConfirmed(row.key)}
+                                className={`inline-flex items-center gap-0.5 rounded-md px-1 py-0.5 text-[10px] transition-colors ${confirmedKeys.has(row.key) ? "text-emerald-600" : "text-slate-300 hover:text-slate-500"}`}
+                                title={confirmedKeys.has(row.key) ? "已人工确认无误（点击取消）" : "人工检查后确认该字段没问题，打勾标记"}
+                              >
+                                {confirmedKeys.has(row.key) ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Circle className="h-3.5 w-3.5" />}
+                                {confirmedKeys.has(row.key) ? "已确认" : "确认"}
+                              </button>
+                            </div>
+                          )}
                         </td>
                       </tr>
                     );
@@ -1980,8 +2146,22 @@ function ReportTab({
             </div>
 
             {/* 底部统计条 */}
-            <div className={`border-t border-slate-100 px-4 py-2 text-xs font-medium ${accent.footer}`}>
-              {mc}/{rows.length} 项{isEntry ? "已填入" : "一致"}{mmc === 0 ? (isEntry ? " · 全部完成" : " · 全部一致") : (isEntry ? ` · ${mmc} 项待处理` : ` · ${mmc} 处不一致`)}
+            <div className={`flex items-center justify-between gap-2 border-t border-slate-100 px-4 py-2 text-xs font-medium ${accent.footer}`}>
+              <span>
+                {mc}/{rows.length} 项{isEntry ? "已填入" : "一致"}{mmc === 0 ? (isEntry ? " · 全部完成" : " · 全部一致") : (isEntry ? ` · ${mmc} 项待处理` : ` · ${mmc} 处不一致`)}
+              </span>
+              {/* 一键修正全部不一致字段并重新审查该卡片 */}
+              {fixableRows.length > 0 && onFixAllAndRerun && r.record_id && (
+                <button
+                  onClick={() => onFixAllAndRerun(r.record_id!, r.entries)}
+                  disabled={running || fixingFieldKey !== null || fixRerunRecordId !== null}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-md bg-white px-2 py-0.5 text-[10px] font-medium text-slate-600 ring-1 ring-slate-300 transition-colors hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  title="把全部不一致字段以来源值覆盖被审查字段，然后重新审查该卡片"
+                >
+                  {isFixRerunning ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wrench className="h-3 w-3" />}
+                  {isFixRerunning ? "修正并重新审查中…" : `以来源为准修正并重新审查（${fixableRows.length}）`}
+                </button>
+              )}
             </div>
           </>
         )}
@@ -2052,7 +2232,8 @@ function ReportTab({
   let headerBadges: React.ReactNode = null;
 
   // 运行中或刚结束（有实时记录但还没有最终报告）：显示逐人可视化卡片
-  if (liveRecords.length > 0 && (!hasReports || running)) {
+  // 注意用 execRunning（批量/队列执行）判断：「查看」定位卡片只是 singleRunning，不应把报告区切走
+  if (liveRecords.length > 0 && (!hasReports || (execRunning ?? running))) {
     const passCount = liveRecords.filter((r) => r.status === "success").length;
     const failCount = liveRecords.filter((r) => r.status === "failed").length;
     const runCount = liveRecords.filter((r) => r.status === "running").length;
@@ -2165,11 +2346,36 @@ function ReportTab({
   const safeDocIdx = docExtracts.length > 0 ? Math.min(activeDocIndex, docExtracts.length - 1) : 0;
   const docExtract = docExtracts[safeDocIdx] || null;
 
-  // 切换文件时重置预览旋转和缩放
+  // 切换文件时重置预览旋转、缩放和平移
   useEffect(() => {
     setFilePreviewRotation(0);
     setFilePreviewZoom(1);
+    setFilePreviewPan({ x: 0, y: 0 });
   }, [docExtract?.file_url, docExtract?.filename]);
+
+  // 预览区滚轮缩放：以鼠标位置为中心（原生监听，passive:false 才能阻止页面滚动）
+  useEffect(() => {
+    const el = filePreviewBoxRef.current;
+    if (!el) return;
+    filePreviewZoomRef.current = filePreviewZoom;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const z = filePreviewZoomRef.current;
+      const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+      const nz = Math.min(5, Math.max(0.25, +(z * factor).toFixed(3)));
+      if (nz === z) return;
+      // 保持鼠标下的图像点不动：pan' = c - (nz/z)·(c - pan)，与旋转角度无关（旋转与标量可交换）
+      const rect = el.getBoundingClientRect();
+      const cx = e.clientX - rect.left - rect.width / 2;
+      const cy = e.clientY - rect.top - rect.height / 2;
+      const ratio = nz / z;
+      filePreviewZoomRef.current = nz;
+      setFilePreviewPan((p) => ({ x: cx - ratio * (cx - p.x), y: cy - ratio * (cy - p.y) }));
+      setFilePreviewZoom(nz);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  });
 
   // 文件处理内容：放置从网页下载的 PDF / JPG / JPEG 文件
   // 点击「+文件提取」→ 点击网页下载按钮 → 文件下载到此处 → 自动旋转到正面 + 裁剪白边 → OCR 提取
@@ -2186,7 +2392,7 @@ function ReportTab({
     fileProcessContent = (
       <div className="flex h-full min-h-[100px] flex-col items-center justify-center gap-2 p-2 text-[11px] text-slate-400">
         {liveImg && (
-          <div className="max-h-36 min-h-0 overflow-hidden rounded-md border border-slate-200">
+          <div className="max-h-60 min-h-0 overflow-hidden rounded-md border border-slate-200">
             <img src={liveImg} alt={docLiveStatus!.filename || "文件预览"} className="h-full w-full object-contain" />
           </div>
         )}
@@ -2294,7 +2500,7 @@ function ReportTab({
         // 图片预览（预处理后或原始图片）：支持旋转和缩放
         const isRotated = filePreviewRotation === 90 || filePreviewRotation === 270;
         filePreview = (
-          <div className="mb-2 flex min-h-0 flex-1 flex-col">
+          <div className="mb-2 flex min-h-[300px] flex-1 flex-col">
             {docExtract.processed_image && (
               <div className="mb-1 flex items-center gap-1 text-[9px] font-medium text-emerald-600">
                 <CheckCircle2 className="h-3 w-3" />
@@ -2319,38 +2525,69 @@ function ReportTab({
               </button>
               <div className="mx-0.5 h-3 w-px bg-slate-300" />
               <button
-                onClick={() => setFilePreviewZoom((z) => Math.max(0.25, +(z - 0.25).toFixed(2)))}
+                onClick={() => {
+                  const nz = Math.max(0.25, +(filePreviewZoom - 0.25).toFixed(2));
+                  const ratio = nz / filePreviewZoom;
+                  setFilePreviewPan((p) => ({ x: p.x * ratio, y: p.y * ratio }));
+                  setFilePreviewZoom(nz);
+                }}
                 className="rounded p-0.5 text-slate-500 hover:bg-white hover:text-slate-700"
                 title="缩小"
               >
                 <ZoomOut className="h-3 w-3" />
               </button>
               <button
-                onClick={() => { setFilePreviewZoom(1); setFilePreviewRotation(0); }}
+                onClick={() => { setFilePreviewZoom(1); setFilePreviewRotation(0); setFilePreviewPan({ x: 0, y: 0 }); }}
                 className="rounded px-1 text-[9px] font-medium text-slate-500 hover:bg-white hover:text-slate-700"
                 title="重置缩放和旋转"
               >
                 {Math.round(filePreviewZoom * 100)}%
               </button>
               <button
-                onClick={() => setFilePreviewZoom((z) => Math.min(5, +(z + 0.25).toFixed(2)))}
+                onClick={() => {
+                  const nz = Math.min(5, +(filePreviewZoom + 0.25).toFixed(2));
+                  const ratio = nz / filePreviewZoom;
+                  setFilePreviewPan((p) => ({ x: p.x * ratio, y: p.y * ratio }));
+                  setFilePreviewZoom(nz);
+                }}
                 className="rounded p-0.5 text-slate-500 hover:bg-white hover:text-slate-700"
                 title="放大"
               >
                 <ZoomIn className="h-3 w-3" />
               </button>
             </div>
-            <div className="min-h-0 flex-1 overflow-auto rounded-md border border-slate-200 bg-slate-50 p-1">
-              <div className="flex h-full min-h-[120px] items-center justify-center">
+            <div
+              ref={filePreviewBoxRef}
+              className={[
+                "min-h-0 flex-1 touch-none select-none overflow-hidden rounded-md border border-slate-200 bg-slate-50 p-1",
+                filePreviewDragging ? "cursor-grabbing" : "cursor-grab",
+              ].join(" ")}
+              title="滚轮缩放 · 按住拖拽平移"
+              onPointerDown={(e) => {
+                e.currentTarget.setPointerCapture(e.pointerId);
+                filePreviewDragRef.current = { id: e.pointerId, startX: e.clientX, startY: e.clientY, panX: filePreviewPan.x, panY: filePreviewPan.y };
+                setFilePreviewDragging(true);
+              }}
+              onPointerMove={(e) => {
+                const d = filePreviewDragRef.current;
+                if (!d || d.id !== e.pointerId) return;
+                setFilePreviewPan({ x: d.panX + (e.clientX - d.startX), y: d.panY + (e.clientY - d.startY) });
+              }}
+              onPointerUp={() => { filePreviewDragRef.current = null; setFilePreviewDragging(false); }}
+              onPointerCancel={() => { filePreviewDragRef.current = null; setFilePreviewDragging(false); }}
+            >
+              <div className="flex h-full min-h-[220px] items-center justify-center">
                 <img
                   src={previewImgSrc}
                   alt={docExtract.filename}
+                  draggable={false}
                   className={[
                     "max-w-full rounded object-contain transition-transform duration-150",
                     isRotated ? "max-h-none" : "max-h-full",
+                    filePreviewDragging ? "transition-none" : "",
                   ].join(" ")}
                   style={{
-                    transform: `rotate(${filePreviewRotation}deg) scale(${filePreviewZoom})`,
+                    transform: `translate(${filePreviewPan.x}px, ${filePreviewPan.y}px) rotate(${filePreviewRotation}deg) scale(${filePreviewZoom})`,
                     transformOrigin: "center center",
                   }}
                   onError={(e) => {
@@ -2846,27 +3083,29 @@ function ReportTab({
           <div className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
             {preClickMarks.map((m) => {
               const isInput = m.action === "input";
+              const actionWord = isInput ? (m.workflow === "entry" ? "录入" : "审查") : "点击";
+              const displayLabel = (m.label || "").replace(/^输入/, m.workflow === "entry" ? "录入" : "审查");
               return (
                 <div
                   key={m.id}
                   onClick={() => onPreviewMark?.(m)}
                   className="group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm"
-                  title={`${isInput ? "输入" : "点击"} · ${m.label}（点击在网页定位）`}
+                  title={`${actionWord} · ${displayLabel}（点击在网页定位）`}
                 >
                   <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-[12px] font-bold text-white shadow-sm">
                     {m.order}
                   </span>
                   <div className="flex min-w-0 flex-1 flex-col gap-0.5 pr-5">
                     <span className="text-[10px] font-bold text-slate-500">
-                      {isInput ? "输入" : "点击"}
+                      {actionWord}
                     </span>
-                    <span className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-700">{m.label}</span>
+                    <span className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-700">{displayLabel}</span>
                   </div>
                   {onRemoveMark && (
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (window.confirm(`确定要删除这个${isInput ? "输入" : "点击"}步骤吗？`)) {
+                        if (window.confirm(`确定要删除这个${actionWord}步骤吗？`)) {
                           onRemoveMark(m.id);
                         }
                       }}
@@ -3360,6 +3599,17 @@ function ReportTab({
                 执行
               </button>
             )}
+            {onExportExcel && !fieldSetupMode && (
+              <button
+                onClick={(e) => { e.stopPropagation(); if (!exportingExcel) onExportExcel(); }}
+                disabled={exportingExcel}
+                className="ml-auto flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold text-slate-600 ring-1 ring-slate-300 transition-all hover:bg-slate-100 hover:text-slate-900 disabled:opacity-50"
+                title="把修正后的数据导出为 Excel（本地文件原地写回，否则下载副本）"
+              >
+                {exportingExcel ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                导出Excel
+              </button>
+            )}
             <button
               onClick={(e) => { e.stopPropagation(); onRefresh?.(); }}
               className="flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
@@ -3371,7 +3621,7 @@ function ReportTab({
               onClick={() => setFieldSetupMode((v) => !v)}
               className={[
                 "flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
-                fieldSetupMode ? "ml-1" : "ml-auto",
+                fieldSetupMode ? "ml-1" : onExportExcel ? "ml-0" : "ml-auto",
                 fieldSetupMode
                   ? "bg-slate-200 text-slate-700"
                   : "text-slate-400 hover:bg-slate-100 hover:text-slate-600",

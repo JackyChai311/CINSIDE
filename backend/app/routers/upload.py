@@ -5,7 +5,7 @@ import os
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Response, UploadFile
 from pydantic import BaseModel
 
 from ..config import settings
@@ -15,6 +15,11 @@ from ..services.passport_ocr import extract_passport
 from ..services.task_manager import clear_right_records, list_records, list_right_records, upsert_passport, upsert_records, upsert_right_records
 
 router = APIRouter(prefix="/api", tags=["upload"])
+
+# 上传源信息：记录原始文件路径/字节，用于「导出 Excel」时把内存中的修正值写回原文件
+# kind: path=本地文件（Electron 直接传路径，可原地写回）；bytes=浏览器上传（仅内存，导出为副本）
+LEFT_SOURCE: dict = {}
+RIGHT_SOURCE: dict = {}
 
 
 @router.post("/upload/excel")
@@ -31,6 +36,9 @@ async def upload_excel(file: UploadFile = File(...)):
         raise HTTPException(400, f"解析失败: {e}")
 
     upsert_records(records)
+    # 保存上传源字节：导出时可在原始布局上写回修正值（Electron 本地路径会再覆盖为 path 模式）
+    LEFT_SOURCE.clear()
+    LEFT_SOURCE.update({"kind": "bytes", "bytes": content, "filename": file.filename or "data.xlsx"})
     return {
         "count": len(records),
         "records": [r.model_dump() for r in records],
@@ -52,11 +60,130 @@ async def upload_excel_right(file: UploadFile = File(...)):
         raise HTTPException(400, f"解析失败: {e}")
 
     upsert_right_records(records)
+    RIGHT_SOURCE.clear()
+    RIGHT_SOURCE.update({"kind": "bytes", "bytes": content, "filename": file.filename or "data.xlsx"})
     return {
         "count": len(records),
         "records": [r.model_dump() for r in records],
         "detected_column_map": detected_map,
     }
+
+
+class ExcelSourceBody(BaseModel):
+    """Electron 渲染层可拿到 File.path：登记本地路径后导出可直接原地写回原文件。"""
+    side: str = "left"
+    path: str = ""
+    filename: str = ""
+
+
+@router.post("/upload/excel-source")
+def set_excel_source(body: ExcelSourceBody):
+    target = LEFT_SOURCE if body.side == "left" else RIGHT_SOURCE
+    if body.path and os.path.exists(body.path):
+        target.clear()
+        target.update({"kind": "path", "path": body.path, "filename": body.filename or os.path.basename(body.path)})
+    elif body.filename:
+        target["filename"] = body.filename
+    return {"ok": True, "mode": target.get("kind", "bytes")}
+
+
+def _apply_records_to_first_sheet(wb, recs) -> int:
+    """把内存 records 的字段值写回工作簿第一个有数据的 sheet（按 rec-XXX 行序对应）。"""
+    ws = None
+    for sheet in wb.worksheets:
+        for row in sheet.iter_rows(min_row=1, max_row=min(50, sheet.max_row or 1)):
+            if any(c.value is not None and str(c.value).strip() != "" for c in row):
+                ws = sheet
+                break
+        if ws:
+            break
+    if ws is None:
+        return 0
+    # 表头行：第一个非空行；记录 列名 -> 列号
+    headers: dict[str, int] = {}
+    header_row = 0
+    for row in ws.iter_rows(min_row=1):
+        if any(c.value is not None and str(c.value).strip() != "" for c in row):
+            header_row = row[0].row
+            for c in row:
+                if c.value is not None and str(c.value).strip():
+                    headers[str(c.value).strip()] = c.column
+            break
+    if not header_row:
+        return 0
+    written = 0
+    data_idx = 0
+    for row in ws.iter_rows(min_row=header_row + 1):
+        if all(c.value is None or str(c.value).strip() == "" for c in row):
+            continue  # 解析时同样跳过空行，行序保持一致
+        data_idx += 1
+        rec = next((r for r in recs if r.record_id == f"rec-{data_idx:03d}"), None)
+        if not rec:
+            continue
+        for key, col in headers.items():
+            if key in rec.fields:
+                ws.cell(row=row[0].row, column=col, value=rec.fields[key])
+        written += 1
+    return written
+
+
+@router.get("/upload/excel-export")
+def export_excel(side: str = "left"):
+    """导出 Excel：把内存中的（修正后）字段值写回文件。
+    - 本地路径模式：原地写回原 .xlsx，返回 JSON {mode: inplace, path}
+    - 字节模式：在原始布局上写回后作为附件下载
+    """
+    import io
+
+    from ..services.task_manager import store
+    src = LEFT_SOURCE if side == "left" else RIGHT_SOURCE
+    recs = list(store.records.values()) if side == "left" else list(store.right_records.values())
+    if not recs:
+        raise HTTPException(400, "没有可导出的数据，请先上传 Excel")
+
+    path = src.get("path")
+    if path and os.path.exists(path) and str(path).lower().endswith((".xlsx", ".xlsm")):
+        from openpyxl import load_workbook
+        wb = load_workbook(path)
+        _apply_records_to_first_sheet(wb, recs)
+        wb.save(path)
+        return {"ok": True, "mode": "inplace", "path": path, "count": len(recs)}
+
+    data = src.get("bytes")
+    if data and (src.get("filename") or "").lower().endswith((".xlsx", ".xlsm")):
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(data))
+        _apply_records_to_first_sheet(wb, recs)
+        buf = io.BytesIO()
+        wb.save(buf)
+        out_name = os.path.splitext(src.get("filename") or "data.xlsx")[0] + "_updated.xlsx"
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={out_name}"},
+        )
+
+    # 兜底：无原始文件（如 CSV 上传）→ 由内存数据新建 xlsx
+    from openpyxl import Workbook
+    cols: list[str] = []
+    for r in recs:
+        for k in r.fields:
+            if not k.startswith("_") and k not in cols:
+                cols.append(k)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "data"
+    ws.append(cols)
+    for r in recs:
+        ws.append([r.fields.get(c, "") for c in cols])
+    buf = io.BytesIO()
+    wb.save(buf)
+    out_name = os.path.splitext(src.get("filename") or "data.xlsx")[0] + "_updated.xlsx"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={out_name}"},
+    )
 
 
 @router.post("/upload/passport/{record_id}")
@@ -112,6 +239,23 @@ def clear_records():
     store.records.clear()
     store.passports.clear()
     return {"ok": True}
+
+
+class FieldsUpdate(BaseModel):
+    """更新记录字段请求体（审查修正：以来源值为准修正 Excel 字段）。"""
+    fields: dict[str, str]
+
+
+@router.patch("/records/{record_id}/fields")
+def update_record_fields(record_id: str, body: FieldsUpdate):
+    """更新指定记录的一个或多个字段值。"""
+    from ..services.task_manager import store
+    rec = store.records.get(record_id)
+    if not rec:
+        raise HTTPException(404, f"record {record_id} not found")
+    for k, v in body.fields.items():
+        rec.fields[k] = v
+    return {"ok": True, "record_id": record_id, "updated": list(body.fields.keys())}
 
 
 class AvatarUpdate(BaseModel):

@@ -132,7 +132,6 @@ import BreakpointDialog from "./components/BreakpointDialog";
 import SaveSkillDialog from "./components/SaveSkillDialog";
 import CredentialsPanel from "./components/CredentialsPanel";
 import DocLocalExtractConfig from "./components/DocLocalExtractConfig";
-import ExecutionPanel from "./components/ExecutionPanel";
 import { saveSkill, getSkillById, loadSkills } from "./lib/skills";
 import { getBlockRules, addBlockRule, removeBlockRule, getHost, type BlockRule, SIDEBAR_AUTO_SELECTORS, getSidebarAutoCollapse, setSidebarAutoCollapse } from "./lib/blockRules";
 import { getAllCredentials, addCredential, removeCredential, type Credential } from "./lib/credentials";
@@ -167,7 +166,7 @@ const deriveMappingsFromMarks = (marks: PickedMark[]): FieldMapping[] => {
     const leftSource: FieldMapping["left_source"] = m.excelField ? "excel" : isPass ? "passport" : m.value ? "manual" : "excel";
     const leftField = m.excelField || (isPass ? (m.variableField || "") : (m.value || m.variableField || ""));
     if (!leftField) continue;
-    const cleanLabel = (m.label || "").replace(/^(审查|录入)\s*·\s*/, "").split(" ← ")[0].trim();
+    const cleanLabel = (m.label || "").replace(/^(审查|录入|输入)\s*·\s*/, "").split(" ← ")[0].trim();
     out.push({
       right_selector: m.selector,
       right_label: cleanLabel || m.selector,
@@ -180,6 +179,13 @@ const deriveMappingsFromMarks = (marks: PickedMark[]): FieldMapping[] => {
     });
   }
   return out;
+};
+
+/** 运行展示用步骤标签：input 步骤的「输入」前缀按流程纠正为「审查/录入」（审查流不显示“输入”字样，用字严谨；兼容历史模板） */
+const markDisplayLabel = (m: PickedMark): string => {
+  const raw = m.label || m.inputTarget || m.selector;
+  if (m.action === "input") return raw.replace(/^输入/, m.workflow === "entry" ? "录入" : "审查");
+  return raw;
 };
 
 /** 取模板有效映射：优先模板自带 mappings，缺失时从 marks 反推 */
@@ -1598,6 +1604,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const [execRecordId, setExecRecordId] = useState<string | null>(null);
   const batchStopRef = useRef(false);
   const runBatchRef = useRef<((tplOverride?: WorkflowTemplate, targetIds?: string[]) => Promise<void>) | null>(null);
+  // 防重入：LOOP 批量执行期间为 true，任何重复触发（双击/effect 重放/IPC 重复投递）直接忽略
+  const runBatchInFlightRef = useRef(false);
 
   // ===== LOOP 审查期 Excel 联动：平滑滚动到当前行 + 聚焦比对单元格 =====
   // 当前比对的映射（verify 阶段有效）
@@ -2166,6 +2174,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   useEffect(() => {
     if (isAnyRunning) setEdgeButtonVisible(false);
   }, [isAnyRunning]);
+  // 运行结束后兜底显示按钮：延迟 2.5s（等气泡消散动画跑完），不依赖 onAllGone 回调是否触发
+  useEffect(() => {
+    if (!isAnyRunning && hasRunOnce) {
+      const t = setTimeout(() => setEdgeButtonVisible(true), 2500);
+      return () => clearTimeout(t);
+    }
+  }, [isAnyRunning, hasRunOnce]);
 
   // LOOP/批量执行期间关闭文件提取审查浮层：提取结果已存入 docExtractsByRecord
   // （文件处理面板可见），浮层弹出会遮挡右侧 BrowserPane 并阻断网页点击
@@ -2213,16 +2228,23 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const [verifyStatus, setVerifyStatus] = useState<VerifyStatus>("idle");
   // 每条记录的核验结论：record_id -> overall（pass/fail/review）
   const [recordResults, setRecordResults] = useState<Record<string, Overall>>({});
+  // ---- 执行分析：LOOP 执行结束后 AI 异步总结（哪张卡错了什么、高频错误字段、可能原因），文本框可开关 ----
+  const [analysisOpen, setAnalysisOpen] = useState(false);
+  const [analysisAvailable, setAnalysisAvailable] = useState(false);
+  const [analysisText, setAnalysisText] = useState<string | null>(null);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  /** 分析请求序号：防止旧响应覆盖新结果 */
+  const analysisSeqRef = useRef(0);
   // ---- AI 球体（左侧面板 AI 角色）：手动讲解态（点击卡片触发）优先于自动状态 ----
   const [aiManual, setAiManual] = useState<AISphereState | null>(null);
   const aiManualTimerRef = useRef<number | null>(null);
-  // 自动状态：LOOP 运行中 > 有问题告警 > 待命
+  // 自动状态：LOOP 运行中 / AI 分析中 > 有问题告警 > 待命
   const aiAuto = useMemo<AISphereState>(() => {
-    if (batchRunning || singleRunning || queueRunning) return "processing";
+    if (batchRunning || singleRunning || queueRunning || analysisLoading) return "processing";
     const failedCount = Object.values(batchResults).filter((r) => r.status === "failed").length;
     const reviewCount = Object.values(recordResults).filter((o) => o === "fail" || o === "review").length;
     return failedCount > 0 || reviewCount > 0 ? "alert" : "idle";
-  }, [batchRunning, singleRunning, queueRunning, batchResults, recordResults]);
+  }, [batchRunning, singleRunning, queueRunning, analysisLoading, batchResults, recordResults]);
   const aiSphereState: AISphereState = aiManual ?? aiAuto;
   const taskIdRef = useRef("");
   const wsRef = useRef<WebSocket | null>(null);
@@ -2329,8 +2351,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       source: "excel",
       selector: targetSelector,
       label: excelField
-        ? `输入「${valueToFill.slice(0, 18)}${valueToFill.length > 18 ? "…" : ""}」← Excel「${excelField}」 · 变量:${excelField}`
-        : `输入「${valueToFill.slice(0, 18)}${valueToFill.length > 18 ? "…" : ""}」← 网页`,
+        ? `${workflow === "entry" ? "录入" : "审查"}「${valueToFill.slice(0, 18)}${valueToFill.length > 18 ? "…" : ""}」← Excel「${excelField}」 · 变量:${excelField}`
+        : `${workflow === "entry" ? "录入" : "审查"}「${valueToFill.slice(0, 18)}${valueToFill.length > 18 ? "…" : ""}」← 网页`,
       value: valueToFill,
       workflow,
       action: "input",
@@ -2445,6 +2467,27 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       return next;
     });
   }, []);
+  /** 按标准字段取记录显示值：优先标准字段，其次 fieldColumnMap 手动/自动映射的列（解决俄文/中文列名识别不到姓名的问题） */
+  const getRecordFieldValue = useCallback((rec: ApplicantRecord | undefined, field: "name" | "passport_no" | "student_id"): string => {
+    if (!rec) return "";
+    const direct = rec.fields[field];
+    if (direct && direct.trim()) return direct.trim();
+    const mapped = fieldColumnMap[field];
+    if (mapped) {
+      const v = rec.fields[mapped];
+      if (v && v.trim()) return v.trim();
+    }
+    return "";
+  }, [fieldColumnMap]);
+  /** 取卡片显示名：name → fullname → 映射的姓名列 → passport_no → student_id → record_id */
+  const getRecordDisplayName = useCallback((rec: ApplicantRecord | undefined): string => {
+    if (!rec) return "";
+    return getRecordFieldValue(rec, "name")
+      || (rec.fields.fullname || "").trim()
+      || getRecordFieldValue(rec, "passport_no")
+      || getRecordFieldValue(rec, "student_id")
+      || rec.record_id;
+  }, [getRecordFieldValue]);
   /** 后端自动识别的列映射（原始列名 -> 标准字段名），用于过滤Excel表头中的别名列和自动初始化fieldColumnMap */
   const [detectedColumnMap, setDetectedColumnMap] = useState<Record<string, string>>({});
 
@@ -2635,6 +2678,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setBrowserExcelUploading(true);
     try {
       const r = await api.uploadExcel(file);
+      // Electron 下 File.path 可用：登记本地路径，导出时原地写回原文件
+      const fp = (file as File & { path?: string }).path;
+      if (fp) api.setExcelSource("left", fp, file.name).catch(() => {});
       if (r.count === 0) {
         alert("Excel 文件为空或没有有效数据行，请检查文件内容。");
       } else {
@@ -2664,6 +2710,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setRightExcelUploading(true);
     try {
       const r = await api.uploadExcelRight(file);
+      const fp = (file as File & { path?: string }).path;
+      if (fp) api.setExcelSource("right", fp, file.name).catch(() => {});
       if (r.records.length === 0) {
         alert("Excel 文件为空或没有有效数据行，请检查文件内容。");
       } else {
@@ -6607,6 +6655,27 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender", "passport_issue", "issue_authority"];
           try {
             const result = await extractFileWithVisionFallback(file, targetFields);
+            // 同步写入 docExtractsByRecord：LOOP 运行时字段对比（提取值 vs Excel 绑定列）与提取元素面板都按当前记录从这里读取
+            const localExtract: DocExtractState = {
+              filename: result.filename,
+              method: result.method,
+              text: result.text,
+              fields: result.fields,
+              entries: [],
+              source: readResult.dataUrl,
+              file_url: readResult.dataUrl,
+              processed_image: result.processed_image,
+              mrz_warnings: result.mrz_warnings,
+              fallback: result.fallback,
+            };
+            const localRid = record?.record_id || "_default";
+            setDocExtractsByRecord((prev) => {
+              const arr = prev[localRid] || [];
+              const filtered = arr.filter((e) => e.file_url !== localExtract.file_url);
+              return { ...prev, [localRid]: [...filtered, localExtract] };
+            });
+            setActiveDocIndex(999);
+            setDocSignal((s) => s + 1);
             // LOOP 运行期不弹浮动审查面板（停止后会残留飘出）
             if (!isAnyRunningRef.current) {
               setDocExtractPanel({
@@ -7403,13 +7472,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             ? (record.fields[mark.variableField] ?? record.passport_fields?.[mark.variableField] ?? docFields[mark.variableField] ?? "")
             : (mark.value || "");
           fills.push({
-            label: mark.label || mark.inputTarget || mark.selector,
+            label: markDisplayLabel(mark),
             field: mark.variableField || "",
             value: String(v ?? "").trim(),
           });
           // 逐对填入卡片：录入值作为一对（左=来源字段值，右=填入的网页字段）
           const fillPair: LivePair = {
-            label: mark.label || mark.inputTarget || mark.selector,
+            label: markDisplayLabel(mark),
             leftValue: String(v ?? "").trim(),
             rightValue: "",
             status: "match",
@@ -7438,7 +7507,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         }
 
         // ---- 断点检查（步骤成功执行后） ----
-        const markLabel = mark.label || (mark.action === "click" ? "点击" : mark.action === "input" ? "输入" : "提取");
+        const markLabel = mark.label
+          ? markDisplayLabel(mark)
+          : mark.action === "click" ? "点击" : mark.action === "input" ? (mark.workflow === "entry" ? "录入" : "审查") : "提取";
         if (mark.breakpoint === "always") {
           rlog(`[batch] 断点（强制）触发：第 ${recordIndex + 1} 行步骤「${markLabel}」，等待人工继续`);
           await waitForBreakpointRef.current({
@@ -7545,17 +7616,64 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   }, [executeMark, compareFieldsForRecord, checkViewOnline, waitNetworkRestore, waitPageSettled, getRecordDocFields]);
 
   // ============ 批量执行：对所有卡片按模板执行，从当前选中卡片开始 ============
+  // ============ 执行分析：LOOP 结束后 AI 异步总结结果（球体进入处理态表明 AI 正在工作） ============
+  const generateLoopAnalysis = useCallback(async (reports: VerificationReport[]) => {
+    // 审查与录入提取流程的报告都纳入分析（录入流程同样有 提取值 vs Excel 的不一致项）
+    const reviewReports = reports;
+    if (reviewReports.length === 0) return;
+    const seq = ++analysisSeqRef.current;
+    setAnalysisAvailable(true);
+    setAnalysisLoading(true);
+    setAnalysisOpen(true); // 自动把卡片区域切换为分析文本框
+    try {
+      const res = await api.loopAnalysis({
+        cards: reviewReports.map((r) => ({
+          name: r.record_name || r.record_id,
+          overall: r.overall,
+          summary: r.summary || "",
+          mismatches: r.entries
+            .filter((e) => e.match === "mismatch" || e.match === "error" || e.match === "missing")
+            .slice(0, 10)
+            .map((e) => ({
+              label: e.right_label || e.left_field || "字段",
+              source_value: (e.left_value || "").slice(0, 60),
+              target_value: (e.right_value || "").slice(0, 60),
+              match: e.match,
+              reasoning: (e.reasoning || "").slice(0, 120),
+            })),
+          mrz_warnings: r.mrz_warnings || [],
+        })),
+      });
+      if (seq !== analysisSeqRef.current) return; // 已有更新的分析请求在跑
+      setAnalysisText(res.text);
+    } catch (e) {
+      if (seq !== analysisSeqRef.current) return;
+      setAnalysisText(`分析生成失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      if (seq === analysisSeqRef.current) setAnalysisLoading(false);
+    }
+  }, []);
+
   const runBatch = useCallback(async (tplOverride?: WorkflowTemplate, targetIds?: string[]) => {
+    // 防重入：已有 LOOP 在执行时忽略重复触发（双击/effect 重放/IPC 重复投递），杜绝"结束后自己又跑一遍"
+    if (runBatchInFlightRef.current) {
+      console.warn("[runBatch] ⚠️ 已有 LOOP 正在执行，忽略重复触发");
+      rlog("[runBatch] 已有 LOOP 正在执行，忽略重复触发");
+      return;
+    }
+    runBatchInFlightRef.current = true;
     const tpl = tplOverride ?? workflowTemplateRef.current ?? lastTemplateRef.current;
     console.log("[runBatch] 🚀 开始执行，tpl=", !!tpl, "records.length=", records.length, "selectedId=", selectedId, "targetIds=", targetIds?.length);
     if (!tpl) {
       console.warn("[runBatch] ❌ 无 workflowTemplate，退出");
+      runBatchInFlightRef.current = false;
       return;
     }
     // 持久化保存当前使用的模板
     lastTemplateRef.current = tpl;
     if (cardRecords.length === 0) {
       console.warn("[runBatch] ❌ cardRecords 为空（未框选生成卡片），退出");
+      runBatchInFlightRef.current = false;
       setError("请先在 Excel 视图框选 LOOP 行范围并点击「一键生成卡片」");
       return;
     }
@@ -7571,6 +7689,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
     batchStopRef.current = false;
     setBatchRunning(true);
+    setHasRunOnce(true); // 跑完 LOOP 后「日志」按钮需要 hasRunOnce 才显示
     setBatchResults({});
     setBatchMarkCursor(null);
     setError(null);
@@ -7581,6 +7700,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setResult(null);
     // 清掉教学期残留的文件提取浮动面板，防止运行结束后残留飘出
     setDocExtractPanel(null);
+    // 清空上一轮/教学期残留的文件提取缓存：每张卡片的字段对比只许用本次新鲜提取，杜绝串行（列对行错、拿别人的信息检查当前卡）
+    setDocExtractsByRecord({});
+    setLivePairs({ recordId: "", pairs: [] });
     // 重置执行阶段状态
     setExecPhase("idle");
     setVerifyFieldIdx(-1);
@@ -7614,6 +7736,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     if (targets.length === 0) {
       console.warn("[runBatch] ⚠️ 待执行卡片为空（已全部跳过示范卡）");
       setBatchRunning(false);
+      runBatchInFlightRef.current = false;
       return;
     }
     setBatchTargets(targets);
@@ -7652,6 +7775,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     let mismatchCount = 0;
     const allEntries: VerificationReportEntry[] = [];
     const allComparisons: FieldComparison[] = [];
+    // 本次执行的人物报告累积：供结束后 AI 执行分析使用（state 异步，finally 里读不到最新值）
+    const collectedReports: VerificationReport[] = [];
+    // 新一轮执行：清空上一轮分析文本（分析面板保留开关状态，结束后自动生成新分析并自动展开）
+    setAnalysisText(null);
 
     // 首条日志同步写入，让用户点击后立刻看到 LOOP 已启动
     rlog(`[batch] 开始LOOP执行，共 ${targets.length} 条${skipFirst ? "（已跳过示范卡，从第二张开始）" : "（勾选模式）"}`);
@@ -7673,7 +7800,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       liveStepPrefixRef.current = `LOOP [${recordIndex + 1}/${targets.length}] 步骤 ${mark.order}:`;
       const side: ViewSide = mark.side === "left" ? "left" : "right";
       const selector = mark.action === "input" && mark.inputTarget ? mark.inputTarget : mark.selector;
-      const label = `${mark.order} · ${mark.label || selector}`;
+      const label = `${mark.order} · ${markDisplayLabel(mark)}`;
       window.electronAPI?.viewClearHighlight(side).catch(() => {});
       window.electronAPI?.viewHighlightBoxes(side, [{ selector, status: "pending", label }]).catch(() => {});
       setSteps((prev) => [
@@ -7681,10 +7808,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         {
           step: prev.length + 1,
           action: mark.action || "pick",
-          description: `LOOP [${recordIndex + 1}/${targets.length}] 步骤 ${mark.order}: ${mark.label || selector}`,
+          description: `LOOP [${recordIndex + 1}/${targets.length}] 步骤 ${mark.order}: ${markDisplayLabel(mark)}`,
           success: true,
           detail: mark.action === "input"
-            ? `填入: ${mark.variableField ? `[${mark.variableField}]` : (mark.value || "")}`
+            ? `${mark.workflow === "entry" ? "填入" : "定位"}: ${mark.variableField ? `[${mark.variableField}]` : (mark.value || "")}`
             : undefined,
           timestamp: new Date().toISOString(),
         },
@@ -7798,7 +7925,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           onStepSkip,
         });
 
-        const recordName = record.fields.name || record.record_id;
+        const recordName = getRecordDisplayName(record);
         // 本条记录的比对条目（用于按人物拆分报告）
         const currentRecordEntries: VerificationReportEntry[] = [];
         // 审查流程但比对未产出任何条目（映射为空/比对未真正执行）——不能算通过
@@ -7921,7 +8048,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 : prev);
               const bindEntry: VerificationReportEntry = {
                 right_selector: "",
-                right_label: `${row.label}（文件提取）`,
+                // 标签带上绑定的 Excel 列名：「以来源为准修正」按此定位要更新的列
+                right_label: `${row.label}（文件提取·${row.excelField}）`,
                 left_source: "passport",
                 left_field: row.fieldKey,
                 left_value: row.ocrVal,
@@ -7952,7 +8080,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 else if (l.includes(r) || r.includes(l)) m = "partial";
                 const entry: VerificationReportEntry = {
                   right_selector: "",
-                  right_label: `${FIELD_LABELS[f] || f}（文件提取）`,
+                  // 标签带上对应 Excel 列名（=记录字段 key）：「以来源为准修正」按此定位要更新的列
+                  right_label: `${FIELD_LABELS[f] || f}（文件提取·${f}）`,
                   left_source: "passport",
                   left_field: f,
                   left_value: rightVal,
@@ -8049,6 +8178,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           mrz_warnings: allMrzWarnings.length > 0 ? allMrzWarnings : undefined,
         };
         setLoopReports((prev) => [...prev, personReport]);
+        collectedReports.push(personReport);
         // 同步到卡片三态着色（通过=绿 / 有问题=黄 / 需检查=红）
         setRecordResults((prev) => ({ ...prev, [record.record_id]: effectiveOverall }));
 
@@ -8120,6 +8250,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         }
       }
     } finally {
+      runBatchInFlightRef.current = false;
       setBatchRunning(false);
       setBatchCursor(-1);
       setBatchMarkCursor(null);
@@ -8174,8 +8305,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
       window.electronAPI?.viewClearHighlight("left").catch(() => {});
       rlog("[batch] LOOP 执行结束:", summary);
+
+      // 执行结束：AI 异步介入分析执行结果（审查/录入提取流程都分析；分析期间球体保持 processing 动画，左侧卡片区域自动切换为分析文本框）
+      if (collectedReports.length > 0) {
+        void generateLoopAnalysis(collectedReports);
+      }
     }
-  }, [workflowTemplate, records, cardRecords, selectedId, executeTemplateForRecord, selectMode, avatarMode, exitSelectMode, exitAvatarMode, rightUrl, leftUrl, waitViewReady]);
+  }, [workflowTemplate, records, cardRecords, selectedId, executeTemplateForRecord, selectMode, avatarMode, exitSelectMode, exitAvatarMode, rightUrl, leftUrl, waitViewReady, generateLoopAnalysis]);
   // 始终把最新版本的 runBatch 写入 ref，供 finishTeachingAndRunBatch 直接调用
   runBatchRef.current = runBatch;
 
@@ -8195,6 +8331,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     queueStopRef.current = false;
     setQueueRunning(true);
     setQueueCursor(-1);
+    setHasRunOnce(true); // 跑完 LOOP 后「日志」按钮需要 hasRunOnce 才显示
     setLogSignal((s) => s + 1); // 自动切换到执行日志tab
 
     // 重置所有任务状态
@@ -8256,6 +8393,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         // 提取元素面板条目（含文件提取字段的 Excel 列绑定）回填
         if ((task.workflowTemplate.customTextEntries?.length ?? 0) > 0) setCustomTextEntries(task.workflowTemplate.customTextEntries!);
         setDocExtractPanel(null);
+        // 清空上一任务/教学期残留的文件提取缓存，防止字段对比串行（拿别人的信息检查当前卡）
+        setDocExtractsByRecord({});
         breakpointTotalRef.current = targets.length;
         let successCount = 0;
         let failCount = 0;
@@ -8322,7 +8461,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             setBatchMarkCursor({ recordIndex, markOrder: mark.order });
             const side: ViewSide = mark.side === "left" ? "left" : "right";
             const selector = mark.action === "input" ? (mark.inputTarget || mark.selector) : mark.selector;
-            const label = mark.label || mark.selector;
+            const label = markDisplayLabel(mark);
             window.electronAPI?.viewClearHighlight(side).catch(() => {});
             window.electronAPI?.viewHighlightBoxes(side, [{ selector, status: "pending", label }]).catch(() => {});
             setSteps((prev) => [
@@ -8330,10 +8469,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               {
                 step: prev.length + 1,
                 action: mark.action || "pick",
-                description: `LOOP [${ri + 1}/${targets.length}] 步骤 ${mark.order}: ${mark.label || selector}`,
+                description: `LOOP [${ri + 1}/${targets.length}] 步骤 ${mark.order}: ${markDisplayLabel(mark)}`,
                 success: true,
                 detail: mark.action === "input"
-                  ? `填入: ${mark.variableField ? `[${mark.variableField}]` : (mark.value || "")}`
+                  ? `${mark.workflow === "entry" ? "填入" : "定位"}: ${mark.variableField ? `[${mark.variableField}]` : (mark.value || "")}`
                   : undefined,
                 timestamp: new Date().toISOString(),
               },
@@ -8703,7 +8842,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       const recordIndex = cardPool.findIndex((r) => r.record_id === recordId);
       if (recordIndex < 0) return;
       const record = cardPool[recordIndex];
-      const recordName = record.fields.name || record.fields.fullname || record.fields.passport_no || record.fields.student_id || record.record_id;
+      const recordName = getRecordDisplayName(record);
 
       setSelectedId(recordId);
       setExecRecordId(recordId);
@@ -8731,7 +8870,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         liveStepPrefixRef.current = `定位步骤 ${mark.order}:`;
         const side: ViewSide = mark.side === "left" ? "left" : "right";
         const selector = mark.action === "input" && mark.inputTarget ? mark.inputTarget : mark.selector;
-        const label = `${mark.order} · ${mark.label || selector}`;
+        const label = `${mark.order} · ${markDisplayLabel(mark)}`;
         window.electronAPI?.viewClearHighlight(side).catch(() => {});
         window.electronAPI?.viewHighlightBoxes(side, [{ selector, status: "pending", label }]).catch(() => {});
         setSteps((prev) => [
@@ -8739,10 +8878,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           {
             step: prev.length + 1,
             action: mark.action || "pick",
-            description: `定位步骤 ${mark.order}: ${mark.label || selector}`,
+            description: `定位步骤 ${mark.order}: ${markDisplayLabel(mark)}`,
             success: true,
             detail: mark.action === "input"
-              ? `填入: ${mark.variableField ? `[${mark.variableField}]` : (mark.value || "")}`
+              ? `${mark.workflow === "entry" ? "填入" : "定位"}: ${mark.variableField ? `[${mark.variableField}]` : (mark.value || "")}`
               : undefined,
             timestamp: new Date().toISOString(),
           },
@@ -8814,6 +8953,503 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     [workflowTemplate, appMode, batchRunning, singleRunning, cardPool, cardLoopMap, selectMode, avatarMode, docPickMode, exitSelectMode, exitAvatarMode, executeTemplateForRecord, setError, setSuccessToast]
   );
 
+  // ============ 审查修正：人工确认来源字段正确后，一键把来源值写入被审查字段（网页/Excel），并可重新审查 ============
+  const [fixingFieldKey, setFixingFieldKey] = useState<string | null>(null);
+  const [fixRerunRecordId, setFixRerunRecordId] = useState<string | null>(null);
+
+  /** 判断报告条目是否可一键修正（被审查侧是网页元素或 Excel 绑定列，且来源值非空） */
+  const isFixableEntry = (e: VerificationReportEntry): boolean =>
+    (e.match === "mismatch" || e.match === "error") &&
+    !!(e.left_value || "").trim() &&
+    (!!e.right_selector || /（(?:Excel|文件提取)·.+）$/.test(e.right_label || ""));
+
+  /** 查找卡片对应的 LOOP 模板（活动模板 → 持久化模板 → 卡片所属批次模板） */
+  const findTemplateForRecord = (recordId: string): WorkflowTemplate | null => {
+    let tpl = workflowTemplateRef.current || workflowTemplate || lastTemplateRef.current;
+    if (!tpl) {
+      const loopInfo = cardLoopMap[recordId];
+      if (loopInfo) tpl = getSkillById(loopInfo.loopId);
+    }
+    return tpl || null;
+  };
+
+  /** 卡片 record_id 形如「原ID__随机后缀」（generateCards 防冲突加的）：后端 records 存储用的是原 ID，调后端接口前需剥掉后缀 */
+  const toBaseRecordId = (id: string) => id.split("__")[0];
+
+  /**
+   * 把来源值写入被审查字段：
+   * - 网页元素（right_selector 非空）：普通输入框走 performInputValue；选项/日历控件走控件脚本
+   * - Excel 绑定列（right_label 形如「姓名（Excel·列名）」）：更新后端记录字段 + 前端卡片数据
+   * 返回 { ok, error?, excelField? }，excelField 非空表示改的是本地 Excel 字段
+   */
+  const applySourceToTarget = useCallback(async (
+    record: ApplicantRecord,
+    entry: VerificationReportEntry,
+    tpl?: WorkflowTemplate | null,
+  ): Promise<{ ok: boolean; error?: string; excelField?: string }> => {
+    const sourceValue = (entry.left_value || "").trim();
+    if (!sourceValue) return { ok: false, error: "来源值为空" };
+    const label = entry.right_label || entry.left_field || "字段";
+
+    // 找映射（取 widget / web_side 信息）：优先模板映射，回退会话映射
+    const mappingsAll = tpl ? getTemplateMappings(tpl) : mappings;
+    const mp = entry.right_selector
+      ? mappingsAll.find((m) => m.right_selector === entry.right_selector)
+      : undefined;
+
+    // A. 被审查侧是网页元素
+    if (entry.right_selector) {
+      if (!window.electronAPI) return { ok: false, error: "electronAPI 不可用" };
+      const side: ViewSide = mp?.web_side || "right";
+      if (mp?.widget) {
+        const w = mp.widget;
+        const wgSide = w.side || side;
+        if (w.kind === "option") {
+          const wres = (await window.electronAPI.viewExecuteJS(
+            wgSide,
+            w.inline ? buildInlineOptionSelectScript(w, sourceValue) : buildOptionSelectScript(w, sourceValue)
+          )) as OptionSelectResult | null;
+          if (!wres?.ok) return { ok: false, error: `选项控件未匹配「${sourceValue}」: ${wres?.reason || "未知"}` };
+        } else {
+          const cands = parseDateCandidates(sourceValue);
+          if (!cands.length) return { ok: false, error: `「${sourceValue}」不是可识别的日期` };
+          const [yy, mm, dd] = cands[0].split("-").map(Number);
+          const wres = (await window.electronAPI.viewExecuteJS(wgSide, buildCalendarSetScript(w, yy, mm, dd))) as CalendarSetResult | null;
+          if (!wres?.ok) return { ok: false, error: `日历控件设定失败: ${wres?.reason || "未知"}` };
+        }
+      } else {
+        await waitElementAppear(side, entry.right_selector, 4000).catch(() => {});
+        const res = await performInputValue(side, entry.right_selector, sourceValue);
+        if (!res?.ok) return { ok: false, error: `网页填入失败: ${res?.reason || "未知原因"}` };
+      }
+      // 绿色高亮确认修正位置
+      window.electronAPI?.viewHighlightBoxes(side, [{
+        selector: entry.right_selector,
+        status: "match",
+        label: `${label}: 已以来源为准修正 ✓`,
+      }]).catch(() => {});
+      return { ok: true };
+    }
+
+    // B. 被审查侧是 Excel 绑定列（文件提取 vs Excel 对比行）
+    const mExcel = /（(?:Excel|文件提取)·(.+)）$/.exec(entry.right_label || "");
+    if (mExcel) {
+      const excelField = mExcel[1];
+      try {
+        await api.updateRecordFields(toBaseRecordId(record.record_id), { [excelField]: sourceValue });
+      } catch (e) {
+        return { ok: false, error: `Excel 更新失败: ${e instanceof Error ? e.message : String(e)}` };
+      }
+      // 同步前端卡片数据，保证重新审查/界面显示读到新值（cardPool 用卡片ID，records 用原始ID）
+      const baseId = toBaseRecordId(record.record_id);
+      setCardPool((prev) => prev.map((r) => (r.record_id === record.record_id ? { ...r, fields: { ...r.fields, [excelField]: sourceValue } } : r)));
+      setRecords((prev) => prev.map((r) => (r.record_id === baseId ? { ...r, fields: { ...r.fields, [excelField]: sourceValue } } : r)));
+      return { ok: true, excelField };
+    }
+
+    return { ok: false, error: "该字段不支持一键修正" };
+  }, [mappings, performInputValue, waitElementAppear]);
+
+  /** 单字段修正（不重新审查）：返回是否成功；成功后就地更新报告条目为一致并重算卡片三态 */
+  const handleFixField = useCallback(async (recordId: string, entry: VerificationReportEntry, rowKey: string): Promise<boolean> => {
+    if (batchRunning || singleRunning || queueRunning || fixingFieldKey) return false;
+    const record = cardPool.find((r) => r.record_id === recordId) || records.find((r) => r.record_id === recordId);
+    if (!record) { setError("找不到该卡片记录"); return false; }
+    const tpl = findTemplateForRecord(recordId);
+    setFixingFieldKey(rowKey);
+    try {
+      const r = await applySourceToTarget(record, entry, tpl);
+      if (r.ok) {
+        setSuccessToast(`已以来源值修正「${entry.right_label || entry.left_field}」`);
+        setSteps((prev) => [...prev, {
+          step: prev.length + 1,
+          action: "fix",
+          description: `修正字段「${entry.right_label || entry.left_field}」：以来源值「${(entry.left_value || "").trim()}」覆盖被审查值`,
+          success: true,
+          timestamp: new Date().toISOString(),
+        }]);
+        // 报告就地更新：该条目转为一致，并重算卡片三态（全部不一致项修好 → 通过）
+        const rep = loopReports.find((x) => x.record_id === recordId);
+        if (rep) {
+          let idx = rep.entries.indexOf(entry);
+          if (idx < 0) {
+            idx = rep.entries.findIndex((e) =>
+              e.left_field === entry.left_field &&
+              e.right_label === entry.right_label &&
+              e.right_selector === entry.right_selector &&
+              e.match === entry.match
+            );
+          }
+          if (idx >= 0) {
+            const oldEntry = rep.entries[idx];
+            const newEntries = [...rep.entries];
+            newEntries[idx] = {
+              ...oldEntry,
+              match: "match",
+              right_value: (entry.left_value || "").trim(),
+              reasoning: `已以来源为准修正（原被审查值：${(oldEntry.right_value || "").trim() || "空"}）`,
+            };
+            const badCount = newEntries.filter((e) => e.match === "mismatch" || e.match === "error" || e.match === "missing").length;
+            const goodCount = newEntries.filter((e) => e.match === "match").length;
+            const hasMrz = (rep.mrz_warnings?.length ?? 0) > 0;
+            const overall: Overall = badCount === 0 ? (hasMrz ? "review" : "pass") : goodCount === 0 ? "fail" : "review";
+            const summary = badCount === 0
+              ? hasMrz
+                ? rep.summary
+                : rep.flow === "review"
+                ? "全部一致"
+                : "录入完成"
+              : `${goodCount} 项一致，${badCount} 项不一致`;
+            const newRep: VerificationReport = { ...rep, entries: newEntries, overall, summary };
+            setLoopReports((prev) => prev.map((x) => (x.record_id === recordId ? newRep : x)));
+            // 同步卡片三态着色与批次状态
+            setRecordResults((prev) => ({ ...prev, [recordId]: overall }));
+            setBatchResults((prev) => prev[recordId]
+              ? {
+                  ...prev,
+                  [recordId]: {
+                    ...prev[recordId],
+                    status: overall === "pass" ? "success" : overall === "review" ? "review" : "failed",
+                    error: overall === "pass" ? undefined : prev[recordId].error,
+                  },
+                }
+              : prev
+            );
+          }
+        }
+        return true;
+      }
+      setError(`修正失败：${r.error || "未知原因"}`);
+      return false;
+    } finally {
+      setFixingFieldKey(null);
+    }
+  }, [batchRunning, singleRunning, queueRunning, fixingFieldKey, cardPool, records, loopReports, cardLoopMap, workflowTemplate, applySourceToTarget, setError, setSuccessToast]);
+
+  /** 一键修正该卡片全部不一致字段（以来源为准），然后重新审查该卡片并替换报告 */
+  const handleFixAllAndRerun = useCallback(async (recordId: string, entries: VerificationReportEntry[]) => {
+    if (batchRunning || singleRunning || queueRunning) return;
+    const tpl = findTemplateForRecord(recordId);
+    if (!tpl) { setError("找不到该卡片的 LOOP 模板，无法重新审查"); return; }
+    const record = cardPool.find((r) => r.record_id === recordId) || records.find((r) => r.record_id === recordId);
+    if (!record) { setError("找不到该卡片记录"); return; }
+    const recordName = getRecordDisplayName(record);
+
+    setSelectedId(recordId);
+    setExecRecordId(recordId);
+    setHasRunOnce(true);
+    setSingleRunning(true);
+    setFixRerunRecordId(recordId);
+    setError(null);
+    setLogSignal((s) => s + 1);
+    const startedAt = new Date().toISOString();
+
+    try {
+      // 1. 逐条以来源值修正不一致字段
+      let fixedRecord = record;
+      let fixedCount = 0;
+      let fixFailCount = 0;
+      for (let idx = 0; idx < entries.length; idx++) {
+        const e = entries[idx];
+        if (!isFixableEntry(e)) continue;
+        const rowKey = `${e.left_field || e.right_label || "field"}-${idx}`;
+        setFixingFieldKey(rowKey);
+        const r = await applySourceToTarget(fixedRecord, e, tpl);
+        if (r.ok) {
+          fixedCount++;
+          if (r.excelField) {
+            fixedRecord = { ...fixedRecord, fields: { ...fixedRecord.fields, [r.excelField]: (e.left_value || "").trim() } };
+          }
+          setSteps((prev) => [...prev, {
+            step: prev.length + 1,
+            action: "fix",
+            description: `修正字段「${e.right_label || e.left_field}」：以来源值「${(e.left_value || "").trim()}」覆盖被审查值`,
+            success: true,
+            timestamp: new Date().toISOString(),
+          }]);
+        } else {
+          fixFailCount++;
+          setSteps((prev) => [...prev, {
+            step: prev.length + 1,
+            action: "fix",
+            description: `修正字段「${e.right_label || e.left_field}」失败：${r.error || "未知原因"}`,
+            success: false,
+            timestamp: new Date().toISOString(),
+          }]);
+        }
+        await new Promise((res) => setTimeout(res, 400));
+      }
+      setFixingFieldKey(null);
+
+      // 2. 重新审查该卡片（与批量执行同一口径：审查模板走字段比对，录入提取模板走填入+提取对比）
+      setSteps((prev) => [...prev, {
+        step: prev.length + 1,
+        action: "start",
+        description: `修正完成（${fixedCount} 项${fixFailCount > 0 ? `，${fixFailCount} 项失败` : ""}），重新审查「${recordName}」...`,
+        success: true,
+        timestamp: new Date().toISOString(),
+      }]);
+      const tplHasReview = tpl.reviewMarks.length > 0;
+      const result = await executeTemplateForRecord(tpl, fixedRecord, 0, undefined, { wrapWithVerify: tplHasReview });
+
+      // 3. 用最新结果重建该卡片报告（替换旧报告）
+      const currentRecordEntries: VerificationReportEntry[] = [];
+      let compareEmpty = false;
+      if (!result.success) {
+        currentRecordEntries.push({
+          right_selector: recordId,
+          right_label: recordName,
+          left_source: "excel",
+          left_field: "",
+          right_value: "ERROR",
+          left_value: "",
+          match: "mismatch",
+          reasoning: result.error,
+          timestamp: new Date().toISOString(),
+        });
+      } else if (tplHasReview) {
+        // 审查流程：网页/Excel 字段比对结果
+        for (const c of result.comparisons || []) {
+          // 文件提取 vs Excel 绑定列的对比（无网页值）：左=提取值，右=Excel 绑定列值
+          const docVsExcel = c.evidence_source === "passport" && !c.website_value && !!c.excel_value;
+          currentRecordEntries.push({
+            right_selector: c.selector_hint || "",
+            right_label: c.website_label || c.field,
+            left_source: c.evidence_source || "excel",
+            left_field: c.field,
+            right_value: docVsExcel ? c.excel_value : c.website_value,
+            left_value: docVsExcel ? c.passport_value : (c.excel_value || c.passport_value),
+            match: c.match,
+            timestamp: new Date().toISOString(),
+          });
+        }
+        if (currentRecordEntries.length === 0) {
+          compareEmpty = true;
+          currentRecordEntries.push({
+            right_selector: "",
+            right_label: "字段比对",
+            left_source: "excel",
+            left_field: "",
+            right_value: "未执行",
+            left_value: "",
+            match: "error",
+            reasoning: "字段比对未执行：模板未保存字段映射，且无法从审查步骤推导",
+            timestamp: new Date().toISOString(),
+          });
+        }
+        for (const se of result.skippedErrors || []) {
+          currentRecordEntries.push({
+            right_selector: "",
+            right_label: "步骤跳过",
+            left_source: "excel",
+            left_field: "",
+            left_value: "",
+            right_value: "失败已跳过",
+            match: "error",
+            reasoning: se,
+            timestamp: new Date().toISOString(),
+          });
+        }
+      } else {
+        // 录入/提取流程：填入行 + 文件提取 vs Excel 对比行（与批量执行同一口径）
+        for (const f of result.fills || []) {
+          currentRecordEntries.push({
+            right_selector: "",
+            right_label: `${f.label}（填入）`,
+            left_source: "excel",
+            left_field: f.field,
+            left_value: f.value,
+            right_value: f.value,
+            match: "match",
+            timestamp: new Date().toISOString(),
+          });
+        }
+        // 绑定 Excel 列的提取条目：左=提取值，右=绑定列当前值（修正后已是新值）
+        const seenExtractFields = new Set<string>();
+        for (const row of compareDocBindEntries(tpl.customTextEntries || customTextEntriesRef.current, fixedRecord)) {
+          seenExtractFields.add(row.fieldKey);
+          currentRecordEntries.push({
+            right_selector: "",
+            right_label: `${row.label}（文件提取·${row.excelField}）`,
+            left_source: "passport",
+            left_field: row.fieldKey,
+            left_value: row.ocrVal,
+            right_value: row.excelVal,
+            match: row.match,
+            timestamp: new Date().toISOString(),
+          });
+        }
+        // 未绑定但被引用的提取字段（通用对比，口径同批量执行）
+        const usedExtractFields = new Set<string>();
+        for (const m of getTemplateMappings(tpl)) {
+          if (m.left_field) usedExtractFields.add(m.left_field);
+        }
+        for (const mk of [...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks]) {
+          if (mk.variableField) usedExtractFields.add(mk.variableField);
+          if (mk.excelField) usedExtractFields.add(mk.excelField);
+        }
+        for (const f of result.fills || []) usedExtractFields.add(f.field);
+        const normV = (s: string) => (s || "").trim().toLowerCase().replace(/\s+/g, "");
+        const recordExtracts = docExtractsByRecordRef.current[recordId] || [];
+        for (const d of recordExtracts) {
+          for (const [f, rightValRaw] of Object.entries(d.fields || {})) {
+            if (seenExtractFields.has(f)) continue;
+            if (!usedExtractFields.has(f)) continue;
+            seenExtractFields.add(f);
+            const leftVal = String(fixedRecord.fields[f] ?? fixedRecord.passport_fields?.[f] ?? "");
+            const rightVal = String(rightValRaw ?? "");
+            const l = normV(leftVal);
+            const rv = normV(rightVal);
+            let m: FieldMatch = "mismatch";
+            if (!rv) m = "missing";
+            else if (!l) m = "unknown";
+            else if (l === rv) m = "match";
+            else if (l.includes(rv) || rv.includes(l)) m = "partial";
+            currentRecordEntries.push({
+              right_selector: "",
+              right_label: `${FIELD_LABELS[f] || f}（文件提取·${f}）`,
+              left_source: "passport",
+              left_field: f,
+              left_value: rightVal,
+              right_value: leftVal,
+              match: m,
+              timestamp: new Date().toISOString(),
+            });
+          }
+        }
+        if (currentRecordEntries.length === 0) {
+          currentRecordEntries.push({
+            right_selector: "",
+            right_label: "LOOP 步骤",
+            left_source: "excel",
+            left_field: "",
+            left_value: "",
+            right_value: "全部步骤执行完成",
+            match: "match",
+            timestamp: new Date().toISOString(),
+          });
+        }
+      }
+      const badEntries = currentRecordEntries.filter((e) => e.match === "mismatch" || e.match === "error" || e.match === "missing");
+      const goodEntries = currentRecordEntries.filter((e) => e.match === "match");
+      const hasMismatch = badEntries.length > 0;
+      const recordDocExtracts = docExtractsByRecordRef.current[recordId] || [];
+      const allMrzWarnings = recordDocExtracts.flatMap((d) => d.mrz_warnings || []);
+      const effectiveOverall: Overall = !result.success
+        ? "fail"
+        : !hasMismatch
+        ? allMrzWarnings.length > 0 ? "review" : "pass"
+        : goodEntries.length === 0
+        ? "fail"
+        : "review";
+      const personReport: VerificationReport = {
+        task_id: `loop-${recordId}-${Date.now()}`,
+        record_id: recordId,
+        record_name: recordName,
+        university_url: rightUrl,
+        entries: currentRecordEntries,
+        overall: effectiveOverall,
+        flow: tplHasReview ? "review" : "entry",
+        summary: !result.success
+          ? `执行失败：${result.error || "未知错误"}`
+          : compareEmpty
+          ? "字段比对未执行：模板缺少字段映射，请重新设置字段对比后保存 LOOP"
+          : effectiveOverall === "fail"
+          ? "无一字段一致 / 缺项严重，需检查"
+          : effectiveOverall === "review"
+          ? allMrzWarnings.length > 0 && !hasMismatch
+            ? `MRZ交叉验证发现${allMrzWarnings.length}处姓名等字段不一致，已以MRZ为准，请人工复核`
+            : `${goodEntries.length} 项一致，${badEntries.length} 项不一致`
+          : tplHasReview
+          ? "全部一致"
+          : "录入完成",
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        mrz_warnings: allMrzWarnings.length > 0 ? allMrzWarnings : undefined,
+      };
+      // 替换该记录旧报告（保持卡片位置不变）
+      setLoopReports((prev) => {
+        const ri = prev.findIndex((r) => r.record_id === recordId);
+        if (ri >= 0) {
+          const next = [...prev];
+          next[ri] = personReport;
+          return next;
+        }
+        return [...prev, personReport];
+      });
+      // 同步卡片三态着色
+      setRecordResults((prev) => ({ ...prev, [recordId]: effectiveOverall }));
+      setBatchResults((prev) => ({
+        ...prev,
+        [recordId]: {
+          recordId,
+          status: !result.success || effectiveOverall === "fail"
+            ? "failed"
+            : effectiveOverall === "review"
+            ? "review"
+            : "success",
+          startedAt: prev[recordId]?.startedAt,
+          finishedAt: Date.now(),
+          error: !result.success
+            ? result.error
+            : compareEmpty
+            ? "字段比对未执行：模板缺少字段映射"
+            : effectiveOverall === "fail"
+            ? "无一字段一致 / 缺项严重"
+            : effectiveOverall === "review"
+            ? `${goodEntries.length} 项一致，${badEntries.length} 项不一致`
+            : undefined,
+          failedOrder: result.failedOrder,
+        },
+      }));
+      if (result.success) {
+        setSuccessToast(effectiveOverall === "pass"
+          ? `「${recordName}」修正 ${fixedCount} 项，重新审查全部一致`
+          : `「${recordName}」修正 ${fixedCount} 项，重新审查仍有 ${badEntries.length} 项不一致`);
+      } else {
+        setError(`重新审查失败: ${result.error || "未知错误"}`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(`修正并重新审查失败: ${msg}`);
+    } finally {
+      setSingleRunning(false);
+      setFixRerunRecordId(null);
+      setFixingFieldKey(null);
+      setBatchMarkCursor(null);
+      window.electronAPI?.viewClearHighlight("left").catch(() => {});
+      window.electronAPI?.viewClearHighlight("right").catch(() => {});
+    }
+  }, [batchRunning, singleRunning, queueRunning, cardPool, records, cardLoopMap, workflowTemplate, applySourceToTarget, executeTemplateForRecord, compareDocBindEntries, rightUrl, setError, setSuccessToast]);
+
+  // ============ 导出 Excel：把内存中（修正后）的数据写回文件（本地路径原地写回，否则下载副本） ============
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const handleExportExcel = useCallback(async () => {
+    if (exportingExcel) return;
+    // 卡片池来源侧：右侧 Excel 生成的卡片导右侧，否则导左侧
+    const side: "left" | "right" = rightCardsGenerated ? "right" : "left";
+    setExportingExcel(true);
+    try {
+      const r = await api.exportExcel(side);
+      if (r.mode === "inplace") {
+        setSuccessToast(`已原地写回原文件：${r.path}`);
+      } else {
+        const a = document.createElement("a");
+        a.href = r.path!;
+        a.download = r.filename!;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(r.path!), 5000);
+        setSuccessToast("已导出 Excel 副本");
+      }
+    } catch (e) {
+      setError(`导出 Excel 失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setExportingExcel(false);
+    }
+  }, [exportingExcel, rightCardsGenerated, setError, setSuccessToast]);
+
   // ============ SKILL 拖拽到人物卡片：加载 SKILL 并在指定记录上单卡执行 ============
   const runSkillOnRecord = useCallback(
     async (skillId: string, recordId: string) => {
@@ -8830,7 +9466,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       const recordIndex = cardPool.findIndex((r) => r.record_id === recordId);
       if (recordIndex < 0) return;
       const record = cardPool[recordIndex];
-      const recordName = record.fields.name || record.fields.fullname || record.fields.passport_no || record.fields.student_id || record.record_id;
+      const recordName = getRecordDisplayName(record);
 
       setSelectedId(recordId);
       setWorkflowTemplate(tpl);
@@ -8862,7 +9498,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         liveStepPrefixRef.current = `[${tpl.icon || "🔍"}${tpl.name}] 步骤 ${mark.order}:`;
         const side: ViewSide = mark.side === "left" ? "left" : "right";
         const selector = mark.action === "input" && mark.inputTarget ? mark.inputTarget : mark.selector;
-        const label = `${mark.order} · ${mark.label || selector}`;
+        const label = `${mark.order} · ${markDisplayLabel(mark)}`;
         window.electronAPI?.viewClearHighlight(side).catch(() => {});
         window.electronAPI?.viewHighlightBoxes(side, [{ selector, status: "pending", label }]).catch(() => {});
         setSteps((prev) => [
@@ -8870,10 +9506,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           {
             step: prev.length + 1,
             action: mark.action || "pick",
-            description: `[${tpl.icon || "🔍"}${tpl.name}] 步骤 ${mark.order}: ${mark.label || selector}`,
+            description: `[${tpl.icon || "🔍"}${tpl.name}] 步骤 ${mark.order}: ${markDisplayLabel(mark)}`,
             success: true,
             detail: mark.action === "input"
-              ? `填入: ${mark.variableField ? `[${mark.variableField}]` : (mark.value || "")}`
+              ? `${mark.workflow === "entry" ? "填入" : "定位"}: ${mark.variableField ? `[${mark.variableField}]` : (mark.value || "")}`
               : undefined,
             timestamp: new Date().toISOString(),
           },
@@ -9316,7 +9952,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 variableField: p.field,
                 excelField: p.field,
                 value: newValue,
-                label: `输入「${newValue.slice(0, 18)}${newValue.length > 18 ? "…" : ""}」← Excel「${p.field}」`,
+                label: `${m.workflow === "entry" ? "录入" : "审查"}「${newValue.slice(0, 18)}${newValue.length > 18 ? "…" : ""}」← Excel「${p.field}」`,
               };
             }
             return m;
@@ -9853,7 +10489,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           side: "right",
           source: "web",
           selector: info.selector,
-          label: `输入 · ${info.label || info.selector} ← Excel「${rightCol}」`,
+          label: `${activePhase === "entry" ? "录入" : "审查"} · ${info.label || info.selector} ← Excel「${rightCol}」`,
           value: info.value,
           workflow: activePhase || "data-source",
           action: "input",
@@ -9963,8 +10599,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         source: "web",
         selector: info.selector,
         label: rightTeachCol
-          ? `输入 · ${info.label || info.selector} ← Excel「${rightTeachCol}」`
-          : `输入 · ${info.label || info.selector} ← 来源字段`,
+          ? `${activePhase === "entry" ? "录入" : "审查"} · ${info.label || info.selector} ← Excel「${rightTeachCol}」`
+          : `${activePhase === "entry" ? "录入" : "审查"} · ${info.label || info.selector} ← 来源字段`,
         value: info.value,
         workflow: activePhase,
         action: "input",
@@ -10274,7 +10910,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           side: "left",
           source: "web",
           selector: info.selector,
-          label: `输入 · ${info.label || info.selector} ← Excel「${currentExcelCol}」`,
+          label: `${activePhase === "entry" ? "录入" : "审查"} · ${info.label || info.selector} ← Excel「${currentExcelCol}」`,
           value: info.value,
           workflow: activePhase || "data-source",
           action: "input",
@@ -10373,7 +11009,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         side: "left",
         source: "web",
         selector: info.selector,
-        label: `输入 · ${info.label || info.selector} ← Excel「${currentExcelCol}」`,
+        label: `${activePhase === "entry" ? "录入" : "审查"} · ${info.label || info.selector} ← Excel「${currentExcelCol}」`,
         value: info.value,
         workflow: activePhase,
         action: "input",
@@ -12006,14 +12642,14 @@ type: info.type,
   useEffect(() => {
     const api = window.electronAPI;
     if (!api) return;
-    const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel || showApplyLoop || executionPanelOpen || !!showCredentialsPanel || !!showBlockPanel;
+    const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel || showApplyLoop || !!showCredentialsPanel || !!showBlockPanel;
     if (anyModalOpen) {
       api.modalOverlayEnter();
       return () => {
         api.modalOverlayExit();
       };
     }
-  }, [showSettings, docFillData, showSaveSkill, showSkillPanel, showApplyLoop, executionPanelOpen, showCredentialsPanel, showBlockPanel]);
+  }, [showSettings, docFillData, showSaveSkill, showSkillPanel, showApplyLoop, showCredentialsPanel, showBlockPanel]);
 
   // ============ 核验 ============
   const start = async () => {
@@ -12410,7 +13046,7 @@ type: info.type,
   }
 
   // 是否有模态/覆盖面板打开（此时需要隐藏 BrowserView，显示毛玻璃背景）
-  const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel || showApplyLoop || executionPanelOpen || !!showCredentialsPanel || !!showBlockPanel;
+  const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel || showApplyLoop || !!showCredentialsPanel || !!showBlockPanel;
 
   return (
     <div className="flex h-full flex-col">
@@ -12884,6 +13520,15 @@ type: info.type,
               batchResults={batchResults}
               onDetach={() => detachPanel("left")}
               aiSphereState={aiSphereState}
+              analysisOpen={analysisOpen}
+              analysisAvailable={analysisAvailable}
+              analysisText={analysisText}
+              analysisLoading={analysisLoading}
+              onToggleAnalysis={(open) => {
+                setAnalysisOpen(open);
+                if (open) setExecutionPanelOpen(false);
+              }}
+              onRegenerateAnalysis={() => void generateLoopAnalysis(loopReports)}
               onRunRecord={runSingleRecord}
               runDisabled={batchRunning || singleRunning}
               runningRecordId={singleRunning ? selectedId : null}
@@ -12908,8 +13553,16 @@ type: info.type,
               execSteps={steps}
               execRunning={isAnyRunning}
               execPanelOpen={executionPanelOpen}
-              execChipVisible={hasRunOnce && edgeButtonVisible && !selectMode && !executionPanelOpen}
-              onOpenExecPanel={() => setExecutionPanelOpen(true)}
+              execChipVisible={hasRunOnce && edgeButtonVisible && !executionPanelOpen}
+              onOpenExecPanel={() => {
+                setAnalysisOpen(false);
+                setExecutionPanelOpen(true);
+              }}
+              onCloseExecPanel={() => {
+                setExecutionPanelOpen(false);
+                if (hasRunOnce && !isAnyRunning) setEdgeButtonVisible(true);
+              }}
+              logEndRef={logEndRef}
               onExecBubblesGone={() => {
                 if (hasRunOnce) setEdgeButtonVisible(true);
               }}
@@ -12953,7 +13606,7 @@ type: info.type,
         >
           {/* 两个浏览器并排（脱离后对应位置留空或单列），可拖拽调整比例 */}
           <div
-            className={`flex min-h-0 min-w-0 flex-1 gap-1 overflow-hidden transition-[padding] duration-500 ${executionPanelOpen ? "pr-[360px]" : ""}`}
+            className="flex min-h-0 min-w-0 flex-1 gap-1 overflow-hidden"
             onMouseMove={(e) => {
               if (!draggingRef.current) return;
               const rect = e.currentTarget.getBoundingClientRect();
@@ -13097,6 +13750,7 @@ type: info.type,
                       activeField={excelActiveField}
                       activeFieldStatus={excelActiveFieldStatus}
                       fieldResults={excelFieldResults}
+                      side="left"
                     />
                   )}
                 </BrowserPane>
@@ -13267,6 +13921,7 @@ type: info.type,
                       onResetCards={resetRightCards}
                       onPickedField={onRightExcelPicked}
                       boundFields={boundExcelFields}
+                      side="right"
                     />
                   )}
                 </BrowserPane>
@@ -13461,8 +14116,15 @@ type: info.type,
                   shots={shots}
                   steps={steps}
                   running={running || singleRunning || batchRunning || queueRunning}
+                  execRunning={batchRunning || queueRunning}
                   livePairs={livePairs}
                   appMode={appMode}
+                  onFixField={handleFixField}
+                  onFixAllAndRerun={handleFixAllAndRerun}
+                  onExportExcel={handleExportExcel}
+                  exportingExcel={exportingExcel}
+                  fixingFieldKey={fixingFieldKey}
+                  fixRerunRecordId={fixRerunRecordId}
                   onDetach={() => detachPanel("bottom")}
                   onClose={selectMode ? undefined : () => setBottomPanelOpen(false)}
                   docExtracts={currentDocExtracts}
@@ -13650,7 +14312,7 @@ type: info.type,
                     const side = mark.side || "right";
                     const selector = mark.selector;
                     if (!selector) return;
-                    const label = mark.label || "";
+                    const label = markDisplayLabel(mark);
                     rlog(`[onPreviewMark] 在${side}侧网页高亮元素: ${selector}`);
                     window.electronAPI?.viewHighlightBoxes(side, [{ selector, status: "pending", label }]).catch(() => {});
                     // 2 秒后自动清除高亮
@@ -13688,7 +14350,8 @@ type: info.type,
                   widgetSetupSignal={widgetExtractMode}
                   splitWidgetRequest={splitWidgetRequest}
                   docSplitView={docExtractSplitView}
-                  records={records}
+                  records={cardPool.length > 0 ? cardPool : records}
+                  fieldColumnMap={fieldColumnMap}
                   onSelectRecord={handleSelectCard}
                   execPhase={execPhase}
                   currentMarkOrder={batchMarkCursor?.markOrder ?? null}
@@ -14121,16 +14784,7 @@ type: info.type,
 
       {/* ============ LOOP 执行气泡已融入左侧 AI 球体（LeftPanel 内渲染） ============ */}
 
-      {/* ============ 右侧独立「执行进度」面板 ============ */}
-      <ExecutionPanel
-        open={executionPanelOpen}
-        steps={steps}
-        logEndRef={logEndRef}
-        onClose={() => {
-          setExecutionPanelOpen(false);
-          if (hasRunOnce && !isAnyRunning) setEdgeButtonVisible(true);
-        }}
-      />
+      {/* ============ 「执行进度」视图已融入 LeftPanel 卡片区域（与执行分析同一位置） ============ */}
 
       {/* ============ 「执行进度」浮动按钮已融入左侧 AI 球体下方（LeftPanel 内渲染） ============ */}
     </div>
