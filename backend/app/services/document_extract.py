@@ -39,8 +39,14 @@ except ImportError:
 
 # 容忍截断的图片文件（网页下载不完整时 Chromium 能显示但 PIL 默认拒解）
 from PIL import ImageFile as _ImageFile
+from PIL import Image as _PILImage
 
 _ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+# 放宽超大图片限制：网页下载的高分辨率 PNG（证件扫描/高清图）常超过 PIL 默认
+# 上限（约 1.79 亿像素），否则解码会抛 DecompressionBombError → 被误判为"PNG 解码失败"。
+# 设一个足够大的上限（10 亿像素），preprocess 后续会降采样，避免真正的大图被误拒。
+_PILImage.MAX_IMAGE_PIXELS = 1_000_000_000
 
 # 支持的图片扩展名（走 Vision OCR + 预处理）
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif", ".avif"}
@@ -52,6 +58,7 @@ PDF_EXTS = {".pdf"}
 _WHITE_THRESH = 245      # 灰度 > 该值视为白边背景
 _BBOX_DETECT_MAX = 512   # bbox 检测缩略图最长边（小图检测极快）
 _MAX_OUTPUT_EDGE = 2560  # 输出图最长边上限（防止上传过大）
+_DRAFT_EDGE = 4096       # 解码前降采样目标最长边：超大图（常见高清 PNG 扫描件）先缩到该边再解码
 _MIN_KEEP_MARGIN = 16    # 裁剪时四周至少保留 16px 边距，避免贴边误裁（保护边缘首字符）
 _BORDER_DIFF_THRESH = 20  # 边缘主色检测：与背景色差值 > 该值视为内容（调低以保护浅色印刷字符不被裁掉）
 _API_MAX_B64_LEN = 9_000_000  # Vision API 上传保护：base64 字符数上限（≈6.7MB 二进制）
@@ -153,6 +160,14 @@ def preprocess_image(content: bytes) -> tuple[bytes, str | None]:
         from PIL import Image, ImageOps
 
         img = Image.open(io.BytesIO(content))
+        # 超大图（如高清 PNG 扫描件）先按目标边降采样再解码：
+        # 避免整幅全尺寸解码导致的慢/内存峰值（LOOP 超时多因此）。draft 只解码所需尺寸。
+        try:
+            w0, h0 = img.size
+            if max(w0, h0) > _DRAFT_EDGE:
+                img.draft("RGB", (_DRAFT_EDGE, _DRAFT_EDGE))
+        except Exception:
+            pass
         img.load()  # 立即解码，尽早暴露截断/损坏问题（LOAD_TRUNCATED_IMAGES 已容忍部分截断）
 
         # 1. EXIF 自动旋转到正面（手机拍摄的照片方向纠正）
@@ -209,15 +224,21 @@ def preprocess_image(content: bytes) -> tuple[bytes, str | None]:
         b64_preview = base64.b64encode(processed).decode()
         return processed, b64_preview
     except Exception as e:
-        # 解码失败：给出明确原因（HEIC 缺解码器 / 文件损坏 / 格式不支持），
+        # 解码失败：给出明确原因（HEIC 缺解码器 / 文件损坏 / 格式不支持 / 超大图），
         # 不再把原始字节透传给 Vision API（无法解码会被拒收：400 invalid image base64 content）
+        head = content[:16].hex() if content else "(empty)"
+        print(f"[preprocess] 图片解码失败: {e} | size={len(content)} | head16={head}", flush=True)
+        if isinstance(e, _PILImage.DecompressionBombError):
+            raise RuntimeError(
+                f"图片像素过大无法解码（{e}）。请改用较小尺寸的 PNG/JPG 再提取"
+            ) from e
         if _looks_like_heic(content):
             raise RuntimeError(
                 "HEIC/HEIF 图片解码失败：请安装 pillow-heif（pip install pillow-heif），"
                 "或先把照片转成 JPG/PNG 再提取"
             ) from e
         raise RuntimeError(
-            f"图片无法解码（文件可能已损坏或格式不受支持）: {e}"
+            f"图片无法解码（文件可能已损坏或格式不受支持，字节头 {head}）: {e}"
         ) from e
 
 
@@ -879,12 +900,13 @@ async def ensure_umi_ocr_running() -> tuple[bool, str]:
             "3. 或切换回「识图AI」引擎（需配置 Vision API Key）"
         )
 
-    # 3. 已启动，等待服务就绪（首次启动加载 PaddleOCR 模型可能较慢）
-    ready = await _wait_for_umi_ocr_ready(max_wait=30.0)
+    # 3. 已启动，等待服务就绪（首次启动加载 PaddleOCR 模型可能较慢，需 1 分钟左右）
+    ready = await _wait_for_umi_ocr_ready(max_wait=60.0)
     if not ready:
         return False, (
-            f"UMI-OCR 已启动但 HTTP 服务在 30 秒内未就绪（{settings.umi_ocr_host}:{settings.umi_ocr_port}）。\n"
-            "请确认 UMI-OCR 设置中已开启「HTTP接口服务」，并检查端口是否为 1224。"
+            f"UMI-OCR 已启动但 HTTP 服务在 60 秒内未就绪（{settings.umi_ocr_host}:{settings.umi_ocr_port}）。\n"
+            "首次启动需要加载识别模型，请稍等片刻后点击「重新检测」；\n"
+            "若仍不行，请打开 UMI-OCR 窗口，在设置中确认已开启「HTTP接口服务」，端口为 1224。"
         )
     return True, "UMI-OCR 服务已启动并就绪"
 
@@ -916,11 +938,13 @@ async def launch_umi_ocr() -> tuple[bool, str]:
     if not launched:
         return False, f"启动 UMI-OCR 失败：{exe_path}"
 
-    ready = await _wait_for_umi_ocr_ready(max_wait=30.0)
+    ready = await _wait_for_umi_ocr_ready(max_wait=120.0)
     if not ready:
         return False, (
-            f"UMI-OCR 已启动但 HTTP 服务在 30 秒内未就绪（{settings.umi_ocr_host}:{settings.umi_ocr_port}）。\n"
-            "请确认 UMI-OCR 设置中已开启「HTTP接口服务」，并检查端口是否为 1224。"
+            f"UMI-OCR 已启动但 HTTP 服务在 120 秒内未就绪（{settings.umi_ocr_host}:{settings.umi_ocr_port}）。\n"
+            "首次启动需加载识别模型（约 1~2 分钟），请稍等片刻后点击「重新检测」。\n"
+            "若仍失败：请切换到 UMI-OCR 窗口，在「设置」中开启「HTTP接口服务」，端口保持 1224；"
+            "或确认 Umi-OCR.exe 路径正确（当前：{exe}）。".format(exe=exe_path)
         )
 
     # 启动成功后，将发现的路径持久化到配置
@@ -949,6 +973,33 @@ def browse_umi_ocr_executable() -> str | None:
     except Exception as e:
         print(f"[OCR] 打开文件选择对话框失败: {e}")
         return None
+
+
+def open_umi_ocr_folder() -> tuple[bool, str, str]:
+    """在系统文件管理器中打开 UMI-OCR 所在文件夹（并选中其可执行文件），便于用户手动双击启动。
+
+    返回 (是否成功找到并打开, 提示信息, exe 路径或空串)。
+    """
+    exe_path = _find_umi_ocr_executable()
+    if not exe_path:
+        return False, "未找到 UMI-OCR 可执行文件，请先下载安装或手动选择程序。", ""
+    folder = os.path.dirname(exe_path)
+    try:
+        if sys.platform == "win32":
+            # explorer /select,<path>：打开文件夹并选中该文件
+            subprocess.Popen(
+                ["explorer", "/select,", exe_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", exe_path])
+        else:
+            subprocess.Popen(["xdg-open", folder])
+        return True, f"已打开 UMI-OCR 所在文件夹：{folder}", exe_path
+    except Exception as e:
+        print(f"[OCR] 打开 UMI-OCR 文件夹失败: {e}")
+        return False, f"打开文件夹失败：{e}，请手动到该位置双击 Umi-OCR.exe：{folder}", exe_path
 
 
 async def _vision_ocr_bytes(content: bytes) -> str:
@@ -1040,8 +1091,33 @@ async def ocr_image_bytes(content: bytes, engine: str | None = None) -> tuple[st
             ) from vision_err
 
     # === vision 引擎 ===
-    text = await _vision_ocr_bytes(content)
-    return text, None
+    try:
+        text = await _vision_ocr_bytes(content)
+        return text, None
+    except RuntimeError as vision_err:
+        # Vision 失败 → 回退 UMI-OCR（双向互兜）
+        umi_reason = ""
+        umi_ok = await _check_umi_ocr_alive()
+        if umi_ok:
+            try:
+                text = await _call_umi_ocr(content)
+                return text, {"from": "vision_ocr", "to": "umi_ocr", "reason": str(vision_err)}
+            except RuntimeError as umi_err:
+                umi_reason = str(umi_err)
+        else:
+            launched = _try_launch_umi_ocr()
+            if launched and await _wait_for_umi_ocr_ready(max_wait=8.0):
+                try:
+                    text = await _call_umi_ocr(content)
+                    return text, {"from": "vision_ocr", "to": "umi_ocr", "reason": str(vision_err)}
+                except RuntimeError as umi_err:
+                    umi_reason = str(umi_err)
+            else:
+                umi_reason = "UMI-OCR 未安装或无法启动"
+        raise RuntimeError(
+            f"AI Vision 失败：{vision_err}\n"
+            f"自动切换 UMI-OCR 也失败：{umi_reason}"
+        ) from vision_err
 
 
 # ============ MRZ 解析（护照机器可读区） ============
@@ -1792,6 +1868,74 @@ def _rescue_segmented_number(text_upper: str, val: str, max_len: int = 20) -> st
     return best
 
 
+# 本地已经显式处理的字段集合（自定义字段才能进入通用标签匹配）
+_KNOWN_FIELDS = {
+    "surname", "given_name", "name", "passport_no", "birth_date", "gender",
+    "nationality", "passport_issue", "passport_expiry", "issue_authority",
+    "issue_place", "birth_place", "email", "phone",
+}
+
+# 通用标签匹配时需要跳过的"过泛"词，避免把 NO/NAME 等当唯一标签到处命中
+_GENERIC_LABEL_STOPS = {
+    "NO", "NUMBER", "NUM", "N", "ID", "SN", "REFERENCE", "REF", "CODE",
+    "NAME", "DATE", "PASSPORT", "NATIO", "SEX", "GENDER", "PLACE", "BIRTH",
+    "ISSUE", "EXPIR", "TYPE", "TEL", "PHONE", "EMAIL", "ADDR", "ADDRESS",
+}
+
+
+def _extract_custom_field(text_upper: str, field_name: str) -> str:
+    """按自定义字段名做本地标签匹配提取（不依赖 LLM）。
+
+    field_name 常同时含中文与英文标签，如 "申请编号 Applicant No."。
+    将字段名拆成多个候选标签（整体 + 各分段），逐个在 OCR 文本中查找，
+    取标签后紧邻的字母数字值。用于用户在步骤设置里保存的非标准字段。
+    """
+    import re as _re
+    if not text_upper or not field_name:
+        return ""
+
+    # 1. 候选标签：整体去空格 + 分段（按空格/斜杠/顿号/逗号切分）
+    labels: list[str] = []
+    whole = _re.sub(r"[\s/，,、:：.。#]+", "", field_name).upper()
+    if whole:
+        labels.append(whole)
+    for part in _re.split(r"[\s/，,、:：]+", field_name):
+        part = part.strip().upper()
+        if part and part not in labels:
+            labels.append(part)
+    # 去掉过泛的短标签（如 NO），避免误命中
+    labels = [lb for lb in labels if lb not in _GENERIC_LABEL_STOPS]
+
+    for label in labels:
+        if len(label) < 2:
+            continue
+        # 标签后跟可选分隔符 + 字母数字值（含 . / - 空格 分段）
+        pattern = _re.escape(label) + r"[\s:：/\\|]*([A-Z0-9][A-Z0-9.\-/ ]{1,40})"
+        m = _re.search(pattern, text_upper)
+        if not m:
+            continue
+        val = m.group(1).strip().rstrip(".").rstrip("<")
+        if not val:
+            continue
+        # 去掉值开头的 NO./NUMBER/SN 等前缀（如 "APPLICANT NO. 123456" 用 APPLICANT 标签时
+        # 抓到 "NO. 123456"，冒号前不含于字符集导致截断，需剥离 "NO." 前缀取真实值）
+        pre = _re.match(r'(?:NO[.]?\s*|NUMBER\s*|NUM\.?\s*|SN[.:]?\s*|ID[.:]?\s*|REF[.:]?\s*)', val)
+        if pre:
+            val = val[pre.end():].strip()
+        # 在下一个字段标签处截断（避免粘连下一字段）
+        for stop in ("DATE", "NUMBER", "PASSPORT", "NAME", "NATION",
+                     "SEX", "GENDER", "PLACE", "BIRTH", "ISSU", "EXPIR",
+                     "TYPE", "CODE", "TEL", "PHONE", "EMAIL"):
+            idx = val.find(stop)
+            if idx > 1:
+                val = val[:idx].strip()
+                break
+        # 校验值合法性：至少 2 位，且不是纯标点/纯空
+        if len(val) >= 2 and any(c.isalnum() for c in val):
+            return val
+    return ""
+
+
 def _extract_local_fields(text: str, target_fields: list[str]) -> dict[str, str]:
     """纯本地正则/关键词字段提取，不依赖任何 API。
 
@@ -1902,6 +2046,17 @@ def _extract_local_fields(text: str, target_fields: list[str]) -> dict[str, str]
         m = _re.search(r'(?:\+?\d[\d\s\-()]{6,}\d)', upper)
         if m:
             result["phone"] = m.group(0).strip()
+
+    # 自定义字段（非标准字段）：按字段名做本地标签匹配兜底，不依赖 LLM
+    for f in target_fields:
+        if f in result or f in _KNOWN_FIELDS:
+            continue
+        try:
+            val = _extract_custom_field(upper, f)
+        except Exception:
+            val = ""
+        if val:
+            result[f] = val
 
     return result
 

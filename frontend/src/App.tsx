@@ -1256,6 +1256,10 @@ type DocWebStatus =
 const [docWebStatus, setDocWebStatus] = useState<DocWebStatus>({ phase: "idle" });
 const docWebStatusRef = useRef<DocWebStatus>(docWebStatus);
 docWebStatusRef.current = docWebStatus;
+// 保底机制跳过时保留下载的文件（按 record_id），供事后在「文件处理」面板人工查看/重新提取
+const [fallbackFilesByRecord, setFallbackFilesByRecord] = useState<Record<string, Array<{ filename: string; dataUrl: string; size: number; mime: string; matched: boolean }>>>({});
+// 本次 LOOP 中因保底自动跳过而需要人工检查的 record_id 集合（跑完标记为需检查/review）
+const needsManualRef = useRef<Set<string>>(new Set());
 // 暂存已下载但尚未触发 OCR 的文件数据（预览后点击「录入提取」才消费）
 const pendingWebFileRef = useRef<{ dataUrl: string; filename: string; size: number; side: "left" | "right" } | null>(null);
 // 后台OCR预提取结果缓存（LOOP模式下下载后立即开OCR，结果缓存供triggerWebExtract复用）
@@ -6883,6 +6887,20 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               const fallbackResult = await runDocExtractFallback(side, record, preClickCount);
               
               if (fallbackResult === "manual-review") {
+                // 判断该文件提取步骤是否设了断点：设了断点 → 停下等人；未设断点 → 自动跳过，跑完标记需人工
+                const hasBreakpoint = mark.breakpoint === "always" || mark.breakpoint === "on-error";
+                if (!hasBreakpoint) {
+                  // 自动跳过：保留保底下载的文件供事后查看，标记该记录需人工，恢复页面继续跑
+                  const reviewStatus = docWebStatusRef.current;
+                  const stashFiles = reviewStatus.phase === "fallback-review" ? reviewStatus.files : [];
+                  if (stashFiles.length) {
+                    setFallbackFilesByRecord((prev) => ({ ...prev, [record.record_id]: stashFiles }));
+                  }
+                  needsManualRef.current.add(record.record_id);
+                  rlog(`[executeMark] 保底自动跳过（该步骤未设断点），保留 ${stashFiles.length} 个文件，本记录标记需人工`);
+                  return false;
+                }
+
                 // 需要人工审查，等待用户选择
                 rlog(`[executeMark] 等待人工选择文件...`);
                 updateLiveStepDetail("⚠️ 自动匹配失败，请在下方「文件处理」面板选择正确文件…");
@@ -6903,6 +6921,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                   return true;
                 } else {
                   rlog(`[executeMark] 人工取消保底，跳过该文件`);
+                  needsManualRef.current.add(record.record_id);
                   return false;
                 }
               } else {
@@ -8456,6 +8475,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         setDocExtractPanel(null);
         // 清空上一任务/教学期残留的文件提取缓存，防止字段对比串行（拿别人的信息检查当前卡）
         setDocExtractsByRecord({});
+        // 清空本次 LOOP 的"保底需人工"标记（跨任务不残留）
+        needsManualRef.current = new Set();
         breakpointTotalRef.current = targets.length;
         let successCount = 0;
         let failCount = 0;
@@ -8541,11 +8562,15 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           }, { wrapWithVerify: hasReviewSteps });
 
           // 三态判定：pass=全部一致 / review=部分对部分错 / fail=执行失败·缺项严重·无一正确
+          // 保底自动跳过需人工的记录：无论执行结果如何都标为 review（需人工检查）
+          const needsManual = needsManualRef.current.has(record.record_id);
           const verifyFailed = hasReviewSteps && result.success && result.verifyOverall === "mismatch";
           const qCmps = result.comparisons || [];
           const qGood = qCmps.filter((c) => c.match === "match").length;
           const qBad = qCmps.length - qGood;
-          const qOverall: Overall = !result.success
+          const qOverall: Overall = needsManual
+            ? "review"
+            : !result.success
             ? "fail"
             : !verifyFailed
             ? "pass"

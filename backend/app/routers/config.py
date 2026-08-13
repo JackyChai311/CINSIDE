@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..config import settings, SETTING_KEYS
-from ..services.document_extract import ensure_umi_ocr_running, launch_umi_ocr, browse_umi_ocr_executable, check_markitdown_available
+from ..services.document_extract import ensure_umi_ocr_running, launch_umi_ocr, browse_umi_ocr_executable, open_umi_ocr_folder, check_markitdown_available
 from ..services.dependency_manager import (
     download_and_install_umi_ocr,
     download_and_install_umi_ocr_stream,
@@ -145,6 +145,13 @@ async def api_launch_umi_ocr():
     """一键启动 UMI-OCR（用户主动点击按钮时调用，允许反复重试）。"""
     ok, msg = await launch_umi_ocr()
     return {"ok": ok, "message": msg, "exe_path": settings.umi_ocr_exe_path}
+
+
+@router.post("/open-umi-ocr-folder")
+async def api_open_umi_ocr_folder():
+    """在系统文件管理器中打开 UMI-OCR 所在文件夹（选中其 exe），便于用户手动双击启动。"""
+    ok, msg, exe_path = open_umi_ocr_folder()
+    return {"ok": ok, "message": msg, "exe_path": exe_path}
 
 
 @router.post("/browse-umi-ocr")

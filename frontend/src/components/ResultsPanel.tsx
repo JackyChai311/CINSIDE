@@ -40,6 +40,7 @@ import {
   Wrench,
   X,
   XCircle,
+  FolderOpen,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -1097,6 +1098,8 @@ function ReportTab({
   const [umiStatus, setUmiStatus] = useState<"idle" | "checking" | "available" | "unavailable">("idle");
   const [umiStatusMsg, setUmiStatusMsg] = useState("");
   const [umiLaunching, setUmiLaunching] = useState(false);
+  /** 已定位到的 Umi-OCR.exe 路径（供显示与「打开所在文件夹」使用） */
+  const [umiExePath, setUmiExePath] = useState("");
 
   // 切换 OCR 引擎时自动检测 UMI-OCR 连通性
   const checkUmiStatus = async () => {
@@ -1141,6 +1144,7 @@ function ReportTab({
     setUmiStatusMsg("正在启动 UMI-OCR…");
     try {
       const res = await api.launchUmiOcr();
+      if (res.exe_path) setUmiExePath(res.exe_path);
       if (res.ok) {
         setUmiStatus("available");
         setUmiStatusMsg(res.message || "UMI-OCR 已启动");
@@ -1153,6 +1157,17 @@ function ReportTab({
       setUmiStatusMsg("启动请求失败，请确认后端已启动");
     } finally {
       setUmiLaunching(false);
+    }
+  };
+
+  // 打开 UMI-OCR 所在文件夹（供用户手动双击启动）
+  const handleOpenUmiFolder = async () => {
+    try {
+      const res = await api.openUmiOcrFolder();
+      if (res.exe_path) setUmiExePath(res.exe_path);
+      setUmiStatusMsg(res.message || "已打开所在文件夹");
+    } catch {
+      setUmiStatusMsg("打开文件夹请求失败，请确认后端已启动");
     }
   };
   /** 提取元素面板模式开关：true=设置（自定义字段），false=结果（提取内容/DEMO） */
@@ -3739,15 +3754,25 @@ function ReportTab({
                     {/* UMI-OCR 状态指示灯 */}
                     {ocrEngine === "umi" && umiStatus !== "idle" && (
                       umiStatus === "unavailable" ? (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleLaunchUmi(); }}
-                          disabled={umiLaunching}
-                          className="flex items-center gap-0.5 rounded bg-rose-600 px-1 py-0.5 text-[8px] font-medium text-white transition-colors hover:bg-rose-700 disabled:opacity-50"
-                          title={umiStatusMsg + "（点击一键启动）"}
-                        >
-                          {umiLaunching ? <Loader2 className="h-2 w-2 animate-spin" /> : <Play className="h-2 w-2" />}
-                          {umiLaunching ? "启动中" : "启动"}
-                        </button>
+                        <span className="flex items-center gap-0.5">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleLaunchUmi(); }}
+                            disabled={umiLaunching}
+                            className="flex items-center gap-0.5 rounded bg-rose-600 px-1 py-0.5 text-[8px] font-medium text-white transition-colors hover:bg-rose-700 disabled:opacity-50"
+                            title={(umiExePath ? "路径：" + umiExePath + "\n" : "") + umiStatusMsg + "（点击一键启动；若无效可点文件夹图标手动打开 Umi-OCR.exe）"}
+                          >
+                            {umiLaunching ? <Loader2 className="h-2 w-2 animate-spin" /> : <Play className="h-2 w-2" />}
+                            {umiLaunching ? "启动中" : "启动"}
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleOpenUmiFolder(); }}
+                            className="flex items-center gap-0.5 rounded border border-rose-300 bg-white px-1 py-0.5 text-[8px] font-medium text-rose-700 transition-colors hover:bg-rose-100"
+                            title="打开 UMI-OCR 所在文件夹，可手动双击 Umi-OCR.exe 启动"
+                          >
+                            <FolderOpen className="h-2 w-2" />
+                            手动打开
+                          </button>
+                        </span>
                       ) : (
                         <span
                           className={[

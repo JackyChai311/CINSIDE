@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Compass, Download, Eye, EyeOff, Film, Loader2, Maximize2, Minus, Moon, Package, Palette, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, Sun, X, XCircle } from "lucide-react";
+import { CheckCircle2, Compass, Download, Eye, EyeOff, Film, FolderOpen, Loader2, Maximize2, Minus, Moon, Package, Palette, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, Sun, X, XCircle } from "lucide-react";
 import { api } from "../api/client";
 import type { AppSettings, DepsStatus } from "../types";
 
@@ -52,6 +52,17 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
   const [pipMessage, setPipMessage] = useState<{ ok: boolean; message: string } | null>(null);
   const [umiDownloading, setUmiDownloading] = useState(false);
   const [umiDownloadMsg, setUmiDownloadMsg] = useState<{ ok: boolean; message: string } | null>(null);
+  const [umiOpenMsg, setUmiOpenMsg] = useState("");
+
+  // 打开 UMI-OCR 所在文件夹（选中 exe，便于手动双击启动）
+  const handleOpenUmiFolder = async () => {
+    try {
+      const res = await api.openUmiOcrFolder();
+      setUmiOpenMsg(res.message || "已打开所在文件夹");
+    } catch {
+      setUmiOpenMsg("打开文件夹请求失败，请确认后端已启动");
+    }
+  };
   const [umiProgress, setUmiProgress] = useState<{
     stage: "fetching" | "downloading" | "extracting" | "done" | "error";
     percent: number;
@@ -870,9 +881,23 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
                 )}
               </div>
               {depsStatus?.umi_ocr.path && (
-                <p className="mb-1.5 truncate text-[9px] text-slate-400" title={depsStatus.umi_ocr.path}>
-                  📁 {depsStatus.umi_ocr.path}
-                </p>
+                <div className="mb-1.5 flex items-center gap-1">
+                  <p className="min-w-0 flex-1 truncate text-[9px] text-slate-400" title={depsStatus.umi_ocr.path}>
+                    📁 {depsStatus.umi_ocr.path}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleOpenUmiFolder}
+                    className="flex shrink-0 items-center gap-0.5 rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[9px] font-medium text-slate-600 transition-colors hover:bg-slate-100"
+                    title="打开 UMI-OCR 所在文件夹，可手动双击 Umi-OCR.exe 启动"
+                  >
+                    <FolderOpen className="h-2.5 w-2.5" />
+                    打开所在文件夹
+                  </button>
+                </div>
+              )}
+              {umiOpenMsg && (
+                <p className="mb-1.5 whitespace-pre-line text-[9px] text-slate-500">{umiOpenMsg}</p>
               )}
               <p className="mb-2 text-[9px] leading-relaxed text-slate-400">
                 UMI-OCR 是免费开源的离线 OCR 软件（基于 PaddleOCR），无需 API Key 即可识别图片文字。

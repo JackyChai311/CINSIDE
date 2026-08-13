@@ -101,6 +101,10 @@ export const api = {
     jsonFetch<{ ok: boolean; message: string; path: string }>(`${BASE}/config/browse-umi-ocr`, {
       method: "POST",
     }),
+  openUmiOcrFolder: () =>
+    jsonFetch<{ ok: boolean; message: string; exe_path: string }>(`${BASE}/config/open-umi-ocr-folder`, {
+      method: "POST",
+    }),
   testMarkitdown: () =>
     jsonFetch<{ ok: boolean; message: string }>(`${BASE}/config/test-markitdown`, {
       method: "POST",

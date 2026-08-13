@@ -926,6 +926,8 @@ export default function DocLocalExtractConfig({
   const [umiStatus, setUmiStatus] = useState<"idle" | "checking" | "available" | "unavailable">("idle");
   const [umiStatusMsg, setUmiStatusMsg] = useState("");
   const [umiLaunching, setUmiLaunching] = useState(false);
+  // 已定位到的 Umi-OCR.exe 路径（供显示与「打开所在文件夹」使用）
+  const [umiExePath, setUmiExePath] = useState("");
 
   // 切换 OCR 引擎时：切到 umi 自动检测连通性；切到 vision 重置状态
   const checkUmiStatus = async () => {
@@ -970,6 +972,7 @@ export default function DocLocalExtractConfig({
     setUmiStatusMsg("正在启动 UMI-OCR…");
     try {
       const res = await api.launchUmiOcr();
+      if (res.exe_path) setUmiExePath(res.exe_path);
       if (res.ok) {
         setUmiStatus("available");
         setUmiStatusMsg(res.message || "UMI-OCR 已启动");
@@ -982,6 +985,17 @@ export default function DocLocalExtractConfig({
       setUmiStatusMsg("启动请求失败，请确认后端已启动");
     } finally {
       setUmiLaunching(false);
+    }
+  };
+
+  // 打开 UMI-OCR 所在文件夹（供用户手动双击启动）
+  const handleOpenUmiFolder = async () => {
+    try {
+      const res = await api.openUmiOcrFolder();
+      if (res.exe_path) setUmiExePath(res.exe_path);
+      setUmiStatusMsg(res.message || "已打开所在文件夹");
+    } catch {
+      setUmiStatusMsg("打开文件夹请求失败，请确认后端已启动");
     }
   };
 
@@ -1133,7 +1147,12 @@ export default function DocLocalExtractConfig({
             <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
             <div className="min-w-0 flex-1">
               <div className="whitespace-pre-line">{umiStatusMsg}</div>
-              <div className="mt-1 flex gap-1">
+              {umiExePath && (
+                <div className="mt-0.5 truncate text-[8px] text-rose-500" title={umiExePath}>
+                  📁 {umiExePath}
+                </div>
+              )}
+              <div className="mt-1 flex flex-wrap gap-1">
                 <button
                   onClick={handleLaunchUmi}
                   disabled={umiLaunching}
@@ -1143,12 +1162,23 @@ export default function DocLocalExtractConfig({
                   {umiLaunching ? "启动中…" : "一键启动"}
                 </button>
                 <button
+                  onClick={handleOpenUmiFolder}
+                  className="flex items-center gap-0.5 rounded border border-rose-300 bg-white px-1.5 py-0.5 text-[9px] font-medium text-rose-700 transition-colors hover:bg-rose-100"
+                  title="打开 UMI-OCR 所在文件夹，可手动双击 Umi-OCR.exe 启动"
+                >
+                  <FolderOpen className="h-2.5 w-2.5" />
+                  打开所在文件夹
+                </button>
+                <button
                   onClick={handleBrowseUmi}
                   className="flex items-center gap-0.5 rounded border border-rose-300 bg-white px-1.5 py-0.5 text-[9px] font-medium text-rose-700 transition-colors hover:bg-rose-100"
                 >
                   <FolderOpen className="h-2.5 w-2.5" />
-                  选择程序
+                  手动选择程序
                 </button>
+              </div>
+              <div className="mt-1 text-[8px] leading-relaxed text-rose-500">
+                若一键启动无效，可直接双击 Umi-OCR.exe 打开，并在其中开启「HTTP接口服务」（默认端口 1224），然后点「重新检测」。
               </div>
             </div>
           </div>
