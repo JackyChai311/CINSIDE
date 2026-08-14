@@ -93,11 +93,21 @@ SETTING_KEYS = {
     "vision_api_base": "VISION_API_BASE",
     "vision_api_key": "VISION_API_KEY",
     "vision_model": "VISION_MODEL",
+    "text_api_base": "TEXT_API_BASE",
+    "text_api_key": "TEXT_API_KEY",
+    "text_model": "TEXT_MODEL",
+    "analysis_api_base": "ANALYSIS_API_BASE",
+    "analysis_api_key": "ANALYSIS_API_KEY",
+    "analysis_model": "ANALYSIS_MODEL",
     "browser_use_llm_base": "BROWSER_USE_LLM_BASE",
     "browser_use_llm_key": "BROWSER_USE_LLM_KEY",
     "browser_use_llm_model": "BROWSER_USE_LLM_MODEL",
+    "sensenova_api_base": "SENSENOVA_API_BASE",
     "sensenova_api_key": "SENSENOVA_API_KEY",
+    "sensenova_model": "SENSENOVA_MODEL",
     "ocr_engine": "OCR_ENGINE",
+    "vision_auto_orient": "VISION_AUTO_ORIENT",
+    "vision_viz_fallback": "VISION_VIZ_FALLBACK",
     "umi_ocr_host": "UMI_OCR_HOST",
     "umi_ocr_port": "UMI_OCR_PORT",
     "umi_ocr_exe_path": "UMI_OCR_EXE_PATH",
@@ -118,6 +128,8 @@ VALID_ACCENTS = {"indigo", "sky", "emerald", "rose", "violet", "amber"}
 _SETTING_TYPES: dict[str, type] = {
     "beginner_mode": bool,
     "prevent_accidental_close": bool,
+    "vision_auto_orient": bool,
+    "vision_viz_fallback": bool,
     "ui_scale": float,
     "browser_brightness": float,
     "umi_ocr_port": int,
@@ -136,18 +148,43 @@ class Settings:
     vision_api_key: str = field(default_factory=lambda: _env("VISION_API_KEY", ""))
     vision_model: str = field(default_factory=lambda: _env("VISION_MODEL", "glm-4v-plus"))
 
+    # === 文本 LLM（OCR 文字排版 / LOOP 执行总结） ===
+    # 用轻量快速文本模型（如 DeepSeek-V4-Flash）做纯文字任务，不占识图模型。
+    # base/key 留空时自动继承 Vision 的地址与密钥（同一把 key 换模型名的场景），
+    # model 留空时全部回退 Vision。
+    text_api_base: str = field(default_factory=lambda: _env("TEXT_API_BASE", ""))
+    text_api_key: str = field(default_factory=lambda: _env("TEXT_API_KEY", ""))
+    text_model: str = field(default_factory=lambda: _env("TEXT_MODEL", ""))
+
+    # === 分析专用 LLM（LOOP 执行分析 / 单卡片即时分析） ===
+    # 独立 key：LOOP 运行中逐卡分析调用密集，与排版/识图分KEY避免限流冲突。
+    # 留空时逐项继承 文本AI → Vision（不配置则与文本AI同源）。
+    analysis_api_base: str = field(default_factory=lambda: _env("ANALYSIS_API_BASE", ""))
+    analysis_api_key: str = field(default_factory=lambda: _env("ANALYSIS_API_KEY", ""))
+    analysis_model: str = field(default_factory=lambda: _env("ANALYSIS_MODEL", ""))
+
     # === Browser Use Agent ===
     browser_use_llm_base: str = field(default_factory=lambda: _env("BROWSER_USE_LLM_BASE", "https://open.bigmodel.cn/api/paas/v4"))
     browser_use_llm_key: str = field(default_factory=lambda: _env("BROWSER_USE_LLM_KEY", ""))
     browser_use_llm_model: str = field(default_factory=lambda: _env("BROWSER_USE_LLM_MODEL", "glm-4-plus"))
 
     # === SenseNova U1 Fast 生图（PPT 配图） ===
+    sensenova_api_base: str = field(default_factory=lambda: _env("SENSENOVA_API_BASE", "https://token.sensenova.cn/v1"))
     sensenova_api_key: str = field(default_factory=lambda: _env("SENSENOVA_API_KEY", ""))
+    sensenova_model: str = field(default_factory=lambda: _env("SENSENOVA_MODEL", "sensenova-u1-fast"))
 
     # === 文档/护照 OCR 引擎 ===
     # vision: 识图AI（Vision LLM，需配置 vision_api_key）
     # umi: 本地 UMI-OCR（离线 PaddleOCR，走 UMI-OCR 的 HTTP 接口）
     ocr_engine: str = field(default_factory=lambda: _env("OCR_ENGINE", "vision"))
+    # AI 自动转正：OCR 前调 Vision 检测文字朝向（0/90/180/270）并转正。
+    # 开启时方向不确定的图片会多一次 Vision 调用（约 2~10 秒）；关闭可提速，
+    # 适合文件基本都是正向的场景（EXIF 旋转不受此开关影响，始终生效）。
+    vision_auto_orient: bool = field(default_factory=lambda: _env_bool("VISION_AUTO_ORIENT", True))
+    # VIZ 看图兜底：OCR 文本 + 文本AI 都读不出签发机关等可视区字段时，
+    # 调识图AI看图补提（慢，视觉模型推理常需数十秒）。默认关闭——
+    # 选了 OCR 引擎就完全用 OCR，读不出的字段标缺失进对比，不偷跑识图AI。
+    vision_viz_fallback: bool = field(default_factory=lambda: _env_bool("VISION_VIZ_FALLBACK", False))
     # UMI-OCR HTTP 接口地址（需在 UMI-OCR 中开启「HTTP接口服务」）
     umi_ocr_host: str = field(default_factory=lambda: _env("UMI_OCR_HOST", "127.0.0.1"))
     umi_ocr_port: int = field(default_factory=lambda: int(_env("UMI_OCR_PORT", "1224")))
@@ -202,11 +239,21 @@ class Settings:
             "vision_api_base": self.vision_api_base,
             "vision_api_key": self.vision_api_key,
             "vision_model": self.vision_model,
+            "text_api_base": self.text_api_base,
+            "text_api_key": self.text_api_key,
+            "text_model": self.text_model,
+            "analysis_api_base": self.analysis_api_base,
+            "analysis_api_key": self.analysis_api_key,
+            "analysis_model": self.analysis_model,
             "browser_use_llm_base": self.browser_use_llm_base,
             "browser_use_llm_key": self.browser_use_llm_key,
             "browser_use_llm_model": self.browser_use_llm_model,
+            "sensenova_api_base": self.sensenova_api_base,
             "sensenova_api_key": self.sensenova_api_key,
+            "sensenova_model": self.sensenova_model,
             "ocr_engine": self.ocr_engine,
+            "vision_auto_orient": self.vision_auto_orient,
+            "vision_viz_fallback": self.vision_viz_fallback,
             "umi_ocr_host": self.umi_ocr_host,
             "umi_ocr_port": self.umi_ocr_port,
             "umi_ocr_exe_path": self.umi_ocr_exe_path,
@@ -217,6 +264,35 @@ class Settings:
             "accent": self.accent,
             "browser_brightness": self.browser_brightness,
         }
+
+    def effective_text_llm(self) -> tuple[str, str, str]:
+        """返回文本任务实际使用的 (base, key, model)。
+
+        回退链：文本 AI 自身配置 → 逐项继承 Vision 配置
+        （base/key 留空即继承，方便同一把 key 只换模型名，如 DeepSeek-V4-Flash）。
+        model 为空则视为未启用文本 AI，整体回退 Vision。
+        """
+        base = self.text_api_base.strip() or self.vision_api_base.strip()
+        key = self.text_api_key.strip() or self.vision_api_key.strip()
+        model = self.text_model.strip() or self.vision_model.strip()
+        base = base.rstrip("/")
+        if not (base.startswith(("http://", "https://")) and key and model):
+            return "", "", ""
+        return base, key, model
+
+    def effective_analysis_llm(self) -> tuple[str, str, str]:
+        """返回 LOOP 执行分析实际使用的 (base, key, model)。
+
+        回退链：分析专用配置 → 逐项继承 文本AI → Vision。
+        独立于排版/识图：分析调用可单独换 key，避免与 OCR 流量限流冲突。
+        """
+        base = self.analysis_api_base.strip() or self.text_api_base.strip() or self.vision_api_base.strip()
+        key = self.analysis_api_key.strip() or self.text_api_key.strip() or self.vision_api_key.strip()
+        model = self.analysis_model.strip() or self.text_model.strip() or self.vision_model.strip()
+        base = base.rstrip("/")
+        if not (base.startswith(("http://", "https://")) and key and model):
+            return "", "", ""
+        return base, key, model
 
     def _coerce_value(self, name: str, raw):
         """将前端传来的值转换为字段对应的 Python 类型。"""

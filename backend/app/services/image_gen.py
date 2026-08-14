@@ -20,6 +20,16 @@ _MODEL = "sensenova-u1-fast"
 _TIMEOUT = 180.0
 
 
+def _api_base() -> str:
+    """生图端点（可在设置面板改 URL，默认 SenseNova）。"""
+    return (settings.sensenova_api_base or _API_BASE).strip().rstrip("/")
+
+
+def _model() -> str:
+    """生图模型（可在设置面板换型号，默认 sensenova-u1-fast）。"""
+    return (settings.sensenova_model or _MODEL).strip()
+
+
 def is_available() -> bool:
     """是否已配置生图 API Key。"""
     return bool(settings.sensenova_api_key.strip())
@@ -35,12 +45,12 @@ async def generate_image(prompt: str, *, prefix: str = "pptimg") -> str | None:
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await client.post(
-                f"{_API_BASE}/images/generations",
+                f"{_api_base()}/images/generations",
                 headers={
                     "Authorization": f"Bearer {settings.sensenova_api_key.strip()}",
                     "Content-Type": "application/json",
                 },
-                json={"model": _MODEL, "prompt": prompt},
+                json={"model": _model(), "prompt": prompt},
             )
             if resp.status_code != 200:
                 print(f"[IMAGE-GEN] 生图失败 HTTP {resp.status_code}: {resp.text[:200]}", flush=True)

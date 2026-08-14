@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type RefObject } from "react";
 import {
   Activity,
+  AlertTriangle,
   Bot,
   Check,
   CheckCircle2,
@@ -20,7 +21,7 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import type { ApplicantRecord, BatchResult, BatchStatus, Overall, VerificationStep } from "../types";
+import type { AnalysisSegment, ApplicantRecord, BatchResult, BatchStatus, Overall, VerificationStep } from "../types";
 import { OVERALL_LABELS } from "../types";
 import AISphere, { type AISphereState } from "./AISphere";
 import ExecutionBubbles from "./ExecutionBubbles";
@@ -108,13 +109,13 @@ interface Props {
   logEndRef?: RefObject<HTMLDivElement>;
   /** 气泡全部消散回调（用于触发药丸按钮显现） */
   onExecBubblesGone?: () => void;
-  /** 执行分析：文本框是否打开（打开时卡片区域变为分析文本框） */
+  /** 执行分析：文本框是否打开（打开时卡片区域变为分析报告视图） */
   analysisOpen?: boolean;
-  /** 是否有可查看的执行分析（首次 LOOP 审查结束后为 true） */
+  /** 是否有可查看的执行分析（LOOP 运行中问题卡片完成 / 审查结束后为 true） */
   analysisAvailable?: boolean;
-  /** 分析文本内容 */
-  analysisText?: string | null;
-  /** 分析生成中（AI 异步工作，球体同步为 processing 动画） */
+  /** 分析分段列表：运行中每张问题卡片一段实时追加，结束补总结段 */
+  analysisSegments?: AnalysisSegment[];
+  /** 任一分段生成中（AI 异步工作，球体同步为 processing 动画） */
   analysisLoading?: boolean;
   /** 切换分析文本框开关 */
   onToggleAnalysis?: (open: boolean) => void;
@@ -164,7 +165,7 @@ export default function LeftPanel({
   onExecBubblesGone,
   analysisOpen = false,
   analysisAvailable = false,
-  analysisText = null,
+  analysisSegments = [],
   analysisLoading = false,
   onToggleAnalysis,
   onRegenerateAnalysis,
@@ -186,6 +187,16 @@ export default function LeftPanel({
   const [pickingAnchorId, setPickingAnchorId] = useState<string | null>(null);
   /** 选择器浮层的锚点位置（相对面板容器） */
   const pickerRef = useRef<HTMLDivElement | null>(null);
+
+  // 执行分析：新分段到达/分段内容更新时自动滚到底部跟随实时报告；
+  // 仅当用户本就停在底部附近时才跟随（手动上翻阅读旧分段时不打扰）
+  const analysisScrollRef = useRef<HTMLDivElement | null>(null);
+  const analysisSig = analysisSegments.map((s) => `${s.key}:${s.loading ? 1 : s.text.length}`).join("|");
+  useEffect(() => {
+    const el = analysisScrollRef.current;
+    if (!el) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 140) el.scrollTop = el.scrollHeight;
+  }, [analysisSig]);
 
   // 计算当前 Excel 可用的所有列（从第一张记录推断），用于列选择浮层
   // 过滤掉后端自动添加的标准别名列（如原始列是"大写"时，name 作为别名应被过滤）
@@ -301,19 +312,11 @@ export default function LeftPanel({
   }, [execPanelOpen]);
 
   return (
-    <div className="panel-solid flex h-full flex-col gap-3 p-3">
+    <div className="panel-solid relative flex h-full flex-col gap-3 p-3">
       {/* AI 助手：黑白方格粒子球（无边框无文字，LOOP 运行/告警/讲解时形态变化）
-          执行气泡融入球体：运行时步骤从球体下方吐出，消散后原地显现「执行进度」药丸 */}
+          执行气泡锚定在左栏左下角（不挡人物卡片），消散后球体下方显现「执行进度」药丸 */}
       <div className="relative flex shrink-0 items-center justify-center py-1">
         <AISphere state={aiSphereState} size={132} />
-        {!execPanelOpen && (
-          <ExecutionBubbles
-            variant="sphere"
-            steps={execSteps}
-            running={execRunning}
-            onAllGone={onExecBubblesGone}
-          />
-        )}
         {execChipVisible && !execPanelOpen && (
           <div className="absolute -bottom-2 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 animate-fade-in">
             <button
@@ -458,7 +461,7 @@ export default function LeftPanel({
                   onClick={onRegenerateAnalysis}
                   disabled={analysisLoading}
                   className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
-                  title="按当前审查结果重新生成分析"
+                  title="按当前审查结果重新生成总结"
                 >
                   <RefreshCw className="h-3 w-3" />
                 </button>
@@ -472,14 +475,59 @@ export default function LeftPanel({
               </button>
             </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-auto px-3 py-2">
-            {analysisLoading && !analysisText ? (
+          <div ref={analysisScrollRef} className="min-h-0 flex-1 overflow-auto px-3 py-2">
+            {analysisSegments.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 text-xs text-slate-400">
-                <Loader2 className="h-5 w-5 animate-spin text-slate-300" />
-                AI 正在分析本次执行结果…
+                {analysisLoading || execRunning ? (
+                  <>
+                    <Loader2 className="h-5 w-5 animate-spin text-slate-300" />
+                    LOOP 运行中，问题卡片完成后 AI 分析会实时追加到这里…
+                  </>
+                ) : (
+                  "暂无分析内容"
+                )}
               </div>
             ) : (
-              <div className="whitespace-pre-wrap text-xs leading-relaxed text-slate-700">{analysisText || "暂无分析内容"}</div>
+              <div className="flex flex-col gap-2.5">
+                {analysisSegments.map((seg) => (
+                  <div
+                    key={seg.key}
+                    className={[
+                      "rounded-lg border px-2.5 py-2",
+                      seg.kind === "summary"
+                        ? "border-indigo-100 bg-indigo-50/40"
+                        : seg.overall === "fail"
+                        ? "border-rose-100 bg-rose-50/40"
+                        : "border-amber-100 bg-amber-50/40",
+                    ].join(" ")}
+                  >
+                    <div className="mb-1 flex items-center gap-1.5">
+                      {seg.kind === "summary" ? (
+                        <Sparkles className="h-3 w-3 shrink-0 text-indigo-500" />
+                      ) : seg.overall === "fail" ? (
+                        <XCircle className="h-3 w-3 shrink-0 text-rose-500" />
+                      ) : (
+                        <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" />
+                      )}
+                      <span className="truncate text-[11px] font-semibold text-slate-700">{seg.title}</span>
+                      {seg.kind === "card" && seg.overall && (
+                        <span className="shrink-0 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
+                          {OVERALL_LABELS[seg.overall]}
+                        </span>
+                      )}
+                      {seg.loading && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-slate-400" />}
+                    </div>
+                    {seg.loading && !seg.text ? (
+                      <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                        <Loader2 className="h-3 w-3 animate-spin text-slate-300" />
+                        AI 正在分析…
+                      </div>
+                    ) : (
+                      <div className="whitespace-pre-wrap text-xs leading-relaxed text-slate-700">{seg.text}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         </div>
@@ -862,6 +910,16 @@ export default function LeftPanel({
           )}
         </div>
       </div>
+      )}
+
+      {/* LOOP 执行气泡：锚定左栏左下角，向上堆叠渐淡（运行中不停弹出但不挡卡片） */}
+      {!execPanelOpen && (
+        <ExecutionBubbles
+          variant="sphere"
+          steps={execSteps}
+          running={execRunning}
+          onAllGone={onExecBubblesGone}
+        />
       )}
     </div>
   );

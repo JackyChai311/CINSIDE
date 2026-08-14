@@ -906,6 +906,16 @@ input[type="range"]::-moz-range-thumb {
   will-change: transform;
 }
 
+/* LOOP 拖拽框选预览：拖拽期间不走 React 渲染，ExcelView 直接给范围内行加此类。
+   颜色与框选态一致（indigo-50/70 行底 + indigo-600 行号）。 */
+tr.loop-drag-preview {
+  background-color: rgba(238, 242, 255, 0.7) !important;
+}
+tr.loop-drag-preview > td:first-child {
+  color: #4f46e5 !important;
+  font-weight: 600 !important;
+}
+
 /* ============ 玻璃质感工具类 ============ */
 /* 玻璃面板：半透明 + 背景模糊 + 细边 + 阴影 */
 @layer components {

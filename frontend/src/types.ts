@@ -126,16 +126,33 @@ export interface AppSettings {
   vision_model: string;
   vision_supports_images?: boolean | null;
 
+  // 文本 AI（OCR 文字排版 / LOOP 执行总结）：base/key 留空自动继承 Vision
+  text_api_base?: string;
+  text_api_key?: string;
+  text_model?: string;
+
+  // 分析专用 AI（LOOP 执行分析 / 单卡片即时分析）：留空自动继承 文本AI → Vision；
+  // 独立填 Key 可与识图/排版流量分开，避免运行中逐卡分析触发限流
+  analysis_api_base?: string;
+  analysis_api_key?: string;
+  analysis_model?: string;
+
   // Browser Use LLM（用于控制浏览器）
   browser_use_llm_base: string;
   browser_use_llm_key: string;
   browser_use_llm_model: string;
 
-  // SenseNova U1 Fast 生图（PPT 配图）
+  // SenseNova U1 Fast 生图（PPT 配图）：URL/模型可改，默认商汤端点 + sensenova-u1-fast
+  sensenova_api_base?: string;
   sensenova_api_key?: string;
+  sensenova_model?: string;
 
   // 文档/护照 OCR 引擎：vision=识图AI（Vision LLM），umi=本地 UMI-OCR
   ocr_engine?: string;
+  // AI 自动转正：OCR 前调 Vision 检测文字朝向并转正（关闭可提速，适合文件基本正向的场景）
+  vision_auto_orient?: boolean;
+  // VIZ 看图兜底：OCR 文本/文本 AI 读不出签发机关等字段时，调识图 AI 看图补提（慢，默认关）
+  vision_viz_fallback?: boolean;
   umi_ocr_host?: string;
   umi_ocr_port?: number;
 
@@ -620,6 +637,20 @@ export interface VerificationReport {
   mrz_warnings?: string[];
   /** 产生该报告的流程类型：entry=录入/提取流（卡片用箭头展示填入值），review=审查流（卡片用✓/✗展示比对） */
   flow?: "entry" | "review";
+}
+
+/** 执行分析报告分段：LOOP 运行中每张问题卡片完成即实时追加一段，整轮结束再补一段总结 */
+export interface AnalysisSegment {
+  /** 分段键：卡片 record_id 或固定 "summary" */
+  key: string;
+  /** 小标题：卡片姓名 / 执行总结 */
+  title: string;
+  kind: "card" | "summary";
+  text: string;
+  /** 该分段 AI 分析生成中（头部小转圈） */
+  loading: boolean;
+  /** 卡片结论（card 分段用于头部状态徽标配色：review=黄 fail=红） */
+  overall?: Overall;
 }
 
 // ========== 文档提取（功能1/2） ==========

@@ -22,11 +22,12 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
 
-from ..config import settings
+from ..config import settings, _USER_DATA_DIR
 
 # HEIC/HEIF（iPhone 拍摄照片）解码支持：注册到 PIL（未安装 pillow-heif 时静默跳过，
 # 遇到 HEIC 文件会在 preprocess_image 给出明确错误提示）
@@ -36,6 +37,22 @@ try:
     register_heif_opener()
 except ImportError:
     pass
+
+
+# 提取/转正日志落盘：终端输出刷太快或用户自启进程拿不到 stdout 时，
+# 事后仍能从日志文件排查（转正为什么没生效、耗时在哪一段）
+_LOG_MAX_BYTES = 2 * 1024 * 1024  # 超过 2MB 自动清空重写，防无限膨胀
+
+
+def _flog(msg: str) -> None:
+    try:
+        p = _USER_DATA_DIR / "extract.log"
+        if p.exists() and p.stat().st_size > _LOG_MAX_BYTES:
+            p.unlink()
+        with p.open("a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except Exception:
+        pass  # 日志失败绝不影响主流程
 
 # 容忍截断的图片文件（网页下载不完整时 Chromium 能显示但 PIL 默认拒解）
 from PIL import ImageFile as _ImageFile
@@ -62,6 +79,16 @@ _DRAFT_EDGE = 4096       # 解码前降采样目标最长边：超大图（常�
 _MIN_KEEP_MARGIN = 16    # 裁剪时四周至少保留 16px 边距，避免贴边误裁（保护边缘首字符）
 _BORDER_DIFF_THRESH = 20  # 边缘主色检测：与背景色差值 > 该值视为内容（调低以保护浅色印刷字符不被裁掉）
 _API_MAX_B64_LEN = 9_000_000  # Vision API 上传保护：base64 字符数上限（≈6.7MB 二进制）
+_VISION_OCR_MAX_EDGE = 1792  # Vision 投喂图最长边上限（CamScanner harness：压缩提速，MRZ 字符仍 15~30px 高足够清晰）
+_VISION_OCR_JPEG_Q = 85      # Vision 投喂 JPEG 质量（85 对 OCR 无损，体积比 92 小很多）
+_UMI_OCR_MAX_EDGE = 1600     # UMI 投喂图最长边上限（Paddle det 内部仅 ~960px 输入，1600px 时 MRZ 字符仍有 ~25-35px 高，识别无损）
+
+# 小字文档放大重试（OCR 前增强）：
+# Vision 首次识别结果过短（很可能是字太小/内容占比小导致识别不清）时，
+# 把图片放大后重试一次，取更完整的结果。对分块式视觉编码器可显著提升小字识别率。
+_ZOOM_RETRY_MIN_CHARS = 40        # 首次识别文本少于该字符数 → 触发放大重试
+_ZOOM_SCALE = 1.6                 # 放大倍数（LANCZOS，最高放大到像素预算以内）
+_ZOOM_PIXEL_BUDGET = 16_000_000   # 放大后像素上限（≈4096×4096），防止 base64 超限
 
 
 def is_image_file(filename: str) -> bool:
@@ -150,6 +177,51 @@ def _looks_like_heic(content: bytes) -> bool:
     )
 
 
+def _crop_content_margin(img):
+    """CamScanner 式裁边：去掉四周空白区域，只保留主要内容。
+
+    双保险检测：白底用灰度阈值；白阈值失效（灰底扫描件/深色桌面拍摄）回退
+    边缘主色检测。检出区域过小（<4%，噪点/阴影误检）则放弃裁剪。
+    大图先缩到 512px 小图检测 bbox 再按比例还原，避免全图 point() 慢。
+    失败/无内容可裁时原样返回。
+    """
+    try:
+        from PIL import Image
+        w, h = img.size
+
+        if w > _BBOX_DETECT_MAX or h > _BBOX_DETECT_MAX:
+            scale = _BBOX_DETECT_MAX / max(w, h)
+            small = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+        else:
+            small = img
+            scale = 1.0
+
+        gray = small.convert("L")
+        # 阈值 _WHITE_THRESH：接近白色视为背景；非白即内容
+        bbox = gray.point(lambda x: 0 if x > _WHITE_THRESH else 255).getbbox()
+
+        # 白边检测失效（几乎整图都是"内容"，说明背景非白色）→ 边缘主色检测
+        sw, sh = small.size
+        if bbox is None or (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) >= 0.97 * sw * sh:
+            bbox = _content_bbox_by_border_color(small)
+        # 检出区域过小（<4%）判定为误检（噪点/阴影），放弃裁剪保护
+        if bbox is not None and (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) < 0.04 * sw * sh:
+            bbox = None
+
+        if bbox:
+            # 把小图 bbox 坐标按比例还原到原图
+            left = max(0, int(bbox[0] / scale) - _MIN_KEEP_MARGIN)
+            upper = max(0, int(bbox[1] / scale) - _MIN_KEEP_MARGIN)
+            right = min(w, int(bbox[2] / scale) + _MIN_KEEP_MARGIN)
+            lower = min(h, int(bbox[3] / scale) + _MIN_KEEP_MARGIN)
+            # 仅当确实裁掉一定边距时才 crop（避免无意义 crop 开销）
+            if (left > 2 or upper > 2 or right < w - 2 or lower < h - 2):
+                img = img.crop((left, upper, right, lower))
+        return img
+    except Exception:
+        return img
+
+
 def preprocess_image(content: bytes) -> tuple[bytes, str | None]:
     """对图片做预处理：EXIF 自动旋转到正面 + 裁剪白边 + 限制最大尺寸。
 
@@ -179,37 +251,8 @@ def preprocess_image(content: bytes) -> tuple[bytes, str | None]:
 
         w, h = img.size
 
-        # 3. 裁剪白边：先缩放到小图快速检测 bbox，再按比例还原到原图坐标
-        #    避免 5000x5000 大图做 point() 极慢
-        if w > _BBOX_DETECT_MAX or h > _BBOX_DETECT_MAX:
-            scale = _BBOX_DETECT_MAX / max(w, h)
-            small = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
-        else:
-            small = img
-            scale = 1.0
-
-        gray = small.convert("L")
-        # 阈值 _WHITE_THRESH：接近白色视为背景；非白即内容
-        bbox = gray.point(lambda x: 0 if x > _WHITE_THRESH else 255).getbbox()
-
-        # 白边检测失效（几乎整图都是"内容"，说明背景非白色，如深色/彩色桌面拍摄）
-        # → 改用边缘主色检测：以四边平均色为背景色，色差超阈值视为内容
-        sw, sh = small.size
-        if bbox is None or (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) >= 0.97 * sw * sh:
-            bbox = _content_bbox_by_border_color(small)
-        # 检出区域过小（<4%）判定为误检（噪点/阴影），放弃裁剪保护
-        if bbox is not None and (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) < 0.04 * sw * sh:
-            bbox = None
-
-        if bbox:
-            # 把小图 bbox 坐标按比例还原到原图
-            left = max(0, int(bbox[0] / scale) - _MIN_KEEP_MARGIN)
-            upper = max(0, int(bbox[1] / scale) - _MIN_KEEP_MARGIN)
-            right = min(w, int(bbox[2] / scale) + _MIN_KEEP_MARGIN)
-            lower = min(h, int(bbox[3] / scale) + _MIN_KEEP_MARGIN)
-            # 仅当确实裁掉一定边距时才 crop（避免无意义 crop 开销）
-            if (left > 2 or upper > 2 or right < w - 2 or lower < h - 2):
-                img = img.crop((left, upper, right, lower))
+        # 3. CamScanner 式裁边：白阈值 + 边缘主色双保险，去掉四周空白
+        img = _crop_content_margin(img)
 
         # 4. 降采样：最长边超过 _MAX_OUTPUT_EDGE 时按比例缩小（节省 OCR 上传带宽）
         w2, h2 = img.size
@@ -250,6 +293,9 @@ _MIN_OCR_EDGE = 1600     # 内容图最长边下限：低于则上采样放大�
 _MAX_UPSCALE = 3.0       # 放大倍数上限（避免过度插值产生伪影）
 _ORIENT_CACHE_MAX = 200  # 朝向检测结果缓存上限（按原始文件 hash，同文件预览/提取只检测一次）
 _orientation_cache: dict[str, int] = {}
+# 同文件 Vision 朝向检测 in-flight 去重：预览与正式提取并行发出时，只调一次 Vision，
+# 后到的一方 await 同一个 Future 拿结果（否则同一张图会并发调两次识图 AI）
+_orientation_inflight: dict[str, asyncio.Future] = {}
 
 
 def _text_row_variance(img) -> float:
@@ -317,67 +363,133 @@ async def _vision_detect_rotation(img) -> int:
         return 0
 
 
-async def ai_orient_and_enhance(content: bytes, cache_key: str | None = None) -> tuple[bytes, str | None]:
+async def _vision_detect_rotation_shared(img, cache_key: str | None) -> int:
+    """Vision 朝向检测（同文件并发去重）。
+
+    预览与正式提取并行到达且缓存都未命中时，第一个请求发起检测并登记 Future，
+    后到的直接 await 同一 Future——整张图只调一次识图 AI，双方拿到同一个角度。
+    """
+    if not cache_key:
+        return await _vision_detect_rotation(img)
+    fut = _orientation_inflight.get(cache_key)
+    if fut is not None:
+        return await fut
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    _orientation_inflight[cache_key] = fut
+    try:
+        angle = await _vision_detect_rotation(img)
+        if not fut.done():
+            fut.set_result(angle)
+        return angle
+    except BaseException as e:
+        # 发起方失败/被取消也要唤醒等待方（否则等待方永久挂起）
+        if not fut.done():
+            fut.set_exception(e)
+        raise
+    finally:
+        _orientation_inflight.pop(cache_key, None)
+
+
+async def ai_orient_and_enhance(content: bytes, cache_key: str | None = None, allow_vision: bool = True) -> tuple[bytes, str | None]:
     """AI 自动转正（文字朝向检测）+ 小图放大，让 OCR 更好识别。
 
     流程：本地投影法粗判横竖 → 非明确水平时调 Vision 精确判断（0/90/180/270）→ PIL 转正
     → 内容图最长边 < _MIN_OCR_EDGE 时上采样放大（≤3x），便于 OCR 识别小字。
 
     cache_key: 原始文件 hash，朝向结果按文件缓存（同文件的预览/正式提取只检测一次）。
+    allow_vision: False 时不调 Vision，只做本地粗判且不写缓存。
+    预览与正式提取默认都传 True：预览先到则发起检测并写缓存，正式提取命中缓存零等待；
+    两者并行时通过 in-flight Future 共享同一次调用——总耗时与只有一方检测相同。
     返回 (处理后 JPEG bytes, base64 预览)；处理失败返回 (原 content, None)。
+
+    注意：解码/旋转/放大/编码等 CPU 重活都放线程池执行，避免阻塞事件循环
+    （否则并发请求——如 Excel 解析——会被卡到超时）。
     """
     try:
-        from PIL import Image
-        img = Image.open(io.BytesIO(content)).convert("RGB")
+        img, (orientation, confident) = await asyncio.to_thread(_orient_decode_and_guess, content)
 
         # 1. 朝向检测（带文件级缓存：预览与正式提取复用同一次判断结果）
+        # 日志升级：本地粗判结果/缓存命中/每条决策路径全部落终端 + extract.log，
+        # 否则"图片没转正"无从排查（比如粗判误报 horizontal 静默跳过）
         rotated = 0
         if cache_key and cache_key in _orientation_cache:
             rotated = _orientation_cache[cache_key]
+            _flog(f"[ORIENT] 命中缓存 cache={cache_key} → rotate={rotated}")
         else:
-            orientation, confident = _local_orientation_guess(img)
+            if not settings.vision_auto_orient or not allow_vision:
+                # AI 转正开关关闭时：跳过 Vision 朝向检测（省 2~10 秒/张）。
+                # 本地投影法仍做粗判：明确竖排时按惯例转 90°，其余保持原方向。
+                if orientation == "vertical" and confident:
+                    rotated = 90
+                _flog(
+                    f"[ORIENT] {'预览模式' if not allow_vision else 'AI转正已关闭'}: "
+                    f"本地粗判={orientation} 高置信={confident} → rotated={rotated}（不调Vision）"
+                )
             # horizontal 高置信时不调 Vision（180° 倒置由 PaddleOCR cls 方向分类器兜底）；
             # vertical / unknown 时需 Vision 给出精确角度（本地无法区分 90/270、0/180）
-            if orientation != "horizontal":
+            elif orientation != "horizontal":
                 if settings.vision_api_key and settings.vision_api_base:
-                    rotated = await _vision_detect_rotation(img)
+                    _t = time.perf_counter()
+                    rotated = await _vision_detect_rotation_shared(img, cache_key)
+                    _flog(f"[ORIENT] 粗判={orientation} → Vision 精判 rotate={rotated}（耗时 {time.perf_counter() - _t:.1f}s）")
                 elif orientation == "vertical" and confident:
                     # 无 Vision 兜底：本地只能确定"文字竖着"，按扫描件常见朝向顺时针转 90°
                     rotated = 90
-                    print("[ORIENT] 本地投影法判定文字竖排，默认顺时针转 90°（配置 Vision API 可精确判断 90/180/270）")
-            if cache_key:
+                    _flog("[ORIENT] 无Vision配置：粗判竖排，默认顺时针转 90°")
+                else:
+                    _flog(f"[ORIENT] 粗判={orientation} 且无Vision配置 → 保持原方向 rotated=0")
+            else:
+                _flog(f"[ORIENT] 粗判=horizontal 高置信={confident} → 认定已正向，不转不调Vision")
+            # 预览模式（allow_vision=False）不写缓存：粗判结果不固化，
+            # 正式提取时仍走 Vision 精判
+            if cache_key and allow_vision:
                 if len(_orientation_cache) >= _ORIENT_CACHE_MAX:
                     _orientation_cache.clear()
                 _orientation_cache[cache_key] = rotated
 
-        if rotated:
-            img = img.rotate(-rotated, expand=True)  # PIL rotate 为逆时针，取负即顺时针
-            print(f"[ORIENT] 已按文字朝向转正：顺时针 {rotated}°，尺寸 {img.size[0]}x{img.size[1]}")
-
-        # 2. 小图放大：最长边不足 _MIN_OCR_EDGE → 上采样（OCR 对过小字识别率差）
-        w, h = img.size
-        if 0 < max(w, h) < _MIN_OCR_EDGE:
-            ratio = min(_MIN_OCR_EDGE / max(w, h), _MAX_UPSCALE)
-            if ratio > 1.05:
-                new_size = (int(w * ratio), int(h * ratio))
-                img = img.resize(new_size, Image.LANCZOS)
-                print(f"[ORIENT] 内容图偏小，已放大 {ratio:.1f}x：{w}x{h} → {new_size[0]}x{new_size[1]}（便于 OCR 识别）")
-
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=92)
-        out = buf.getvalue()
-        return out, base64.b64encode(out).decode()
+        return await asyncio.to_thread(_orient_apply, img, rotated)
     except Exception as e:
         print(f"[ORIENT] 转正/放大失败（使用原图）: {e}")
         return content, None
 
 
+def _orient_decode_and_guess(content: bytes) -> tuple:
+    """解码图片 + 本地投影法粗判文字横竖（同步重活，在线程池中执行）。"""
+    from PIL import Image
+    img = Image.open(io.BytesIO(content)).convert("RGB")
+    return img, _local_orientation_guess(img)
+
+
+def _orient_apply(img, rotated: int) -> tuple[bytes, str | None]:
+    """按朝向转正 + 小图放大 + JPEG 编码（同步重活，在线程池中执行）。"""
+    from PIL import Image
+    if rotated:
+        img = img.rotate(-rotated, expand=True)  # PIL rotate 为逆时针，取负即顺时针
+        print(f"[ORIENT] 已按文字朝向转正：顺时针 {rotated}°，尺寸 {img.size[0]}x{img.size[1]}")
+
+    # 小图放大：最长边不足 _MIN_OCR_EDGE → 上采样（OCR 对过小字识别率差）
+    w, h = img.size
+    if 0 < max(w, h) < _MIN_OCR_EDGE:
+        ratio = min(_MIN_OCR_EDGE / max(w, h), _MAX_UPSCALE)
+        if ratio > 1.05:
+            new_size = (int(w * ratio), int(h * ratio))
+            img = img.resize(new_size, Image.LANCZOS)
+            print(f"[ORIENT] 内容图偏小，已放大 {ratio:.1f}x：{w}x{h} → {new_size[0]}x{new_size[1]}（便于 OCR 识别）")
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=92)
+    out = buf.getvalue()
+    return out, base64.b64encode(out).decode()
+
+
 # ============ PDF 预处理：渲染为高 DPI 图片 → 旋转 + 裁白边 ============
-def render_pdf_to_image(content: bytes, dpi: int = 200) -> tuple[bytes, str] | None:
+def render_pdf_to_image(content: bytes, dpi: int = 200, max_pages: int = 0) -> tuple[bytes, str] | None:
     """用 PyMuPDF 把 PDF 渲染为图片，多页竖向拼接成一张长图。
 
     返回: (JPEG bytes, base64 预览) 或 None（PyMuPDF 不可用或渲染失败）
     dpi: 渲染分辨率，200 DPI 对扫描件足够清晰
+    max_pages: 最多渲染几页（0=全部；预览只传 1 渲染首页，速度大幅提升）
     """
     try:
         import fitz  # PyMuPDF
@@ -394,12 +506,16 @@ def render_pdf_to_image(content: bytes, dpi: int = 200) -> tuple[bytes, str] | N
         mat = fitz.Matrix(zoom, zoom)
 
         page_images = []
-        for page in doc:
+        from PIL import Image as _PILImage
+        for idx, page in enumerate(doc):
+            if max_pages > 0 and idx >= max_pages:
+                break
             # alpha=False 生成 RGB（白底），避免透明背景
             pix = page.get_pixmap(matrix=mat, alpha=False)
-            img_bytes = pix.tobytes("png")
-            from PIL import Image as _PILImage
-            page_img = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+            # 直接从 pixmap 原始像素构建 PIL 图：跳过 PNG 编码→解码往返（每页快数倍）
+            page_img = _PILImage.frombytes(
+                "RGB", (pix.width, pix.height), pix.samples, "raw", "RGB", pix.stride, 1
+            )
             page_images.append(page_img)
         doc.close()
 
@@ -429,17 +545,9 @@ def render_pdf_to_image(content: bytes, dpi: int = 200) -> tuple[bytes, str] | N
                 r, c = divmod(idx, cols)
                 combined.paste(im, (c * (cell_w + gap), r * (cell_h + gap)))
 
-        # 对拼接图应用同样的白边裁剪（PDF 页面常带扫描白边）
-        gray = combined.convert("L")
-        bbox = gray.point(lambda x: 0 if x > _WHITE_THRESH else 255).getbbox()
-        if bbox:
-            left, upper, right, lower = bbox
-            left = max(0, left - _MIN_KEEP_MARGIN)
-            upper = max(0, upper - _MIN_KEEP_MARGIN)
-            right = min(combined.width, right + _MIN_KEEP_MARGIN)
-            lower = min(combined.height, lower + _MIN_KEEP_MARGIN)
-            if (left > 2 or upper > 2 or right < combined.width - 2 or lower < combined.height - 2):
-                combined = combined.crop((left, upper, right, lower))
+        # CamScanner 式裁边（白阈值 + 边缘主色双保险）：扫描 PDF 常带大片白边/灰底纸边，
+        # 裁掉后 Vision/OCR 处理的都是有效内容，识别更快更准
+        combined = _crop_content_margin(combined)
 
         # 限制最大尺寸（多页 PDF 拼接后可能非常大）
         w, h = combined.size
@@ -498,6 +606,26 @@ def _extract_with_markitdown(content: bytes, filename: str) -> str:
     return text
 
 
+def _extract_pdf_text_pymupdf(content: bytes) -> str:
+    """用 PyMuPDF 直接提取 PDF 文字层（比 MarkItDown/pdfminer 快数倍）。
+
+    用于 PDF 文字层快速检测：原生数字 PDF 毫秒级出文本；扫描件无文字层时
+    也几乎瞬间返回空串，不会像 pdfminer 那样在扫描件上空跑十几秒。
+    PyMuPDF 不可用或解析失败返回空串（调用方回退 MarkItDown）。
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        return ""
+    try:
+        doc = fitz.open(stream=content, filetype="pdf")
+        parts = [page.get_text("text") for page in doc]
+        doc.close()
+        return "\n".join(parts).strip()
+    except Exception:
+        return ""
+
+
 # ============ Vision OCR（图片） ============
 def _shrink_for_api(content: bytes) -> bytes:
     """确保图片 base64 后不超过 _API_MAX_B64_LEN：先逐步降 JPEG 质量，再按比例缩小。
@@ -524,6 +652,162 @@ def _shrink_for_api(content: bytes) -> bytes:
             if len(base64.b64encode(data)) <= _API_MAX_B64_LEN:
                 break
         return data
+    except Exception:
+        return content
+
+
+def _shrink_for_vision_ocr(content: bytes) -> bytes:
+    """Vision 投喂前的 CamScanner 式 harness：再裁边 → 最长边 1792px → JPEG q85。
+
+    Vision 模型响应时间随图像尺寸/体积显著上涨，1792px 对证件文字/MRZ 足够
+    （MRZ 字符仍 15~30px 高）。已有图无需变更时原样返回（避免多余重编码损失）。
+    失败返回原内容。
+    """
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(content)).convert("RGB")
+        orig_w, orig_h = img.size
+        orig_bytes = len(content)
+
+        # 1. CamScanner 式裁边（预览/预处理已裁过一次，这里兜底：经转正放大的图可能又带边）
+        cropped = _crop_content_margin(img)
+        changed = cropped.size != img.size
+        img = cropped
+
+        # 2. 最长边压到 _VISION_OCR_MAX_EDGE
+        w, h = img.size
+        if max(w, h) > _VISION_OCR_MAX_EDGE:
+            ratio = _VISION_OCR_MAX_EDGE / max(w, h)
+            img = img.resize((max(1, int(w * ratio)), max(1, int(h * ratio))), Image.LANCZOS)
+            changed = True
+
+        if not changed:
+            return content
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=_VISION_OCR_JPEG_Q)
+        out = buf.getvalue()
+        if len(out) >= len(content):
+            return content
+        print(f"[VISION-HARNESS] 投喂前压缩：{orig_w}x{orig_h} {orig_bytes}B → {img.size[0]}x{img.size[1]} {len(out)}B（裁边+压尺寸）", flush=True)
+        return out
+    except Exception:
+        return content
+
+
+def _shrink_for_umi_ocr(content: bytes) -> bytes:
+    """UMI 投喂前的 CamScanner 式 harness：再裁边 → 最长边 1600px。
+
+    Paddle det 模型内部输入仅 ~960px，投喂 2560px 大图只会让 UMI 内部
+    resize + det/cls/rec 全链路变慢（CPU 上可到数十秒，顶爆 60s 超时
+    → 触发 Vision 保底回退反而更慢）。1600px 时护照 MRZ 字符仍有
+    ~25-35px 高，识别率无损。无需变更时原样返回。失败返回原内容。
+    """
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(content)).convert("RGB")
+        orig_w, orig_h = img.size
+        orig_bytes = len(content)
+
+        cropped = _crop_content_margin(img)
+        changed = cropped.size != img.size
+        img = cropped
+
+        w, h = img.size
+        if max(w, h) > _UMI_OCR_MAX_EDGE:
+            ratio = _UMI_OCR_MAX_EDGE / max(w, h)
+            img = img.resize((max(1, int(w * ratio)), max(1, int(h * ratio))), Image.LANCZOS)
+            changed = True
+
+        if not changed:
+            return content
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=88)
+        out = buf.getvalue()
+        if len(out) >= len(content):
+            return content
+        print(f"[UMI-HARNESS] 投喂前压缩：{orig_w}x{orig_h} {orig_bytes}B → {img.size[0]}x{img.size[1]} {len(out)}B（裁边+压尺寸，Paddle处理更快）", flush=True)
+        return out
+    except Exception:
+        return content
+
+
+def _crop_by_ocr_boxes(content: bytes, boxes: list, ocr_size: tuple[int, int]) -> bytes:
+    """按 OCR 文本框联合区域裁图（CamScanner 内容定位的最可靠方式）。
+
+    边缘/阈值裁边对灰底扫描件、渐变阴影背景会失效（整图被判为内容），
+    而文本框坐标就是"内容在哪"的地面真相。裁出的文本区域用于：
+    ① VIZ 看图（小图 Vision 响应快数倍且更准）；② 预览显示。
+
+    boxes 为 UMI 返回的投喂图坐标系文本框；先按比例还原到 content
+    原坐标再裁。裁掉面积不足 8% 或任何失败时原样返回。
+    """
+    try:
+        if not boxes or not ocr_size or ocr_size[0] <= 0 or ocr_size[1] <= 0:
+            return content
+        from PIL import Image
+        img = Image.open(io.BytesIO(content)).convert("RGB")
+        fw, fh = img.size
+        sx, sy = fw / ocr_size[0], fh / ocr_size[1]
+
+        xs: list[float] = []
+        ys: list[float] = []
+        for b in boxes:
+            if not isinstance(b, (list, tuple)) or not b:
+                continue
+            # 兼容两种格式：[[x,y],[x,y],[x,y],[x,y]] 或 [x1,y1,x2,y2,...]
+            pts = b if isinstance(b[0], (list, tuple)) else [b[i:i + 2] for i in range(0, len(b), 2)]
+            for p in pts:
+                if len(p) >= 2:
+                    xs.append(float(p[0]) * sx)
+                    ys.append(float(p[1]) * sy)
+        if not xs:
+            return content
+
+        m = max(24, int(max(fw, fh) * 0.02))  # 四周留 2% 边距，保护贴边首字符
+        left = max(0, int(min(xs)) - m)
+        upper = max(0, int(min(ys)) - m)
+        right = min(fw, int(max(xs)) + m)
+        lower = min(fh, int(max(ys)) + m)
+        # 裁掉不足 8% 面积时无意义，跳过
+        if (right - left) * (lower - upper) > 0.92 * fw * fh:
+            return content
+
+        img = img.crop((left, upper, right, lower))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        out = buf.getvalue()
+        print(f"[BOX-CROP] 按OCR文本框裁切：{fw}x{fh} → {img.size[0]}x{img.size[1]}（{len(boxes)}个文本框，去除空白背景）", flush=True)
+        return out
+    except Exception:
+        return content
+
+
+def _zoom_image_for_ocr(content: bytes) -> bytes:
+    """小字增强：按比例放大图片（LANCZOS）并重编码为 JPEG。
+    放大目标受 _ZOOM_PIXEL_BUDGET 约束（避免 base64 超限）；无法放大或失败返回原内容。"""
+    try:
+        from PIL import Image as _ZImg
+        img = _ZImg.open(io.BytesIO(content)).convert("RGB")
+        w, h = img.size
+        # 放大倍数 = min(目标倍数, 像素预算允许的倍数)；≤1 说明原图已大到无法再放大
+        budget_factor = (_ZOOM_PIXEL_BUDGET / (w * h)) ** 0.5 if w * h > 0 else 1.0
+        scale = min(_ZOOM_SCALE, budget_factor)
+        if scale <= 1.0:
+            return content
+        nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+        if (nw, nh) == (w, h):
+            return content
+        img = img.resize((nw, nh), _ZImg.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=92)
+        out = buf.getvalue()
+        # 兜底：重编码后仍超 base64 上限则放弃放大
+        if len(base64.b64encode(out)) > _API_MAX_B64_LEN:
+            return content
+        print(f"[OCR] 小字增强：放大 {scale:.2f}x：{w}x{h} → {nw}x{nh}（{len(content)}B → {len(out)}B）")
+        return out
     except Exception:
         return content
 
@@ -813,18 +1097,24 @@ async def _wait_for_umi_ocr_ready(max_wait: float = 8.0) -> bool:
     return False
 
 
-async def _call_umi_ocr(content: bytes) -> str:
+async def _call_umi_ocr(content: bytes, want_boxes: bool = False):
     """调用本地 UMI-OCR 的 HTTP 接口识别图片，返回全部文字。
 
     UMI-OCR 需先在软件内开启「HTTP接口服务」（默认监听 127.0.0.1:1224），
     接口：POST /api/ocr，body {"base64": "<图片base64>"}，
     响应：{"code":100,"data":[{"text":...,"box":[...],"score":...},...]}。
 
-    注意：图片已由 preprocess_image 预处理（EXIF旋转+裁白边+缩到2560px），
-    PaddleOCR 内部检测模型会自行 resize，无需在此二次缩放，避免小字号
-    MRZ 因二次压缩导致识别率下降。
+    注意：投喂前经 _shrink_for_umi_ocr 处理（再裁边 + 最长边 1600px 上限）——
+    2560px 大图在 Paddle CPU 上可跑数十秒顶爆超时；1600px 时 MRZ 字符
+    仍有 ~25-35px 高，识别率无损。
+
+    want_boxes=True 时返回 (text, boxes, ocr_size)：boxes 为文本框坐标
+    （投喂图坐标系，供按文本区域裁图用），ocr_size 为投喂图 (w, h)。
     """
     url = f"http://{settings.umi_ocr_host}:{settings.umi_ocr_port}/api/ocr"
+    # CamScanner harness：投喂前裁边 + 压到 1600px（2560px 大图在 Paddle CPU 上
+    # 可跑数十秒顶爆 60s 超时 → 触发 Vision 保底反而更慢）
+    content = await asyncio.to_thread(_shrink_for_umi_ocr, content)
     b64 = base64.b64encode(content).decode()
     try:
         async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
@@ -849,7 +1139,7 @@ async def _call_umi_ocr(content: bytes) -> str:
     # code 100 = 成功；101 = 图片中未找到文字（非致命错误，返回空串）
     if code == 101:
         print(f"[UMI-DEBUG] code=101 no text found. full response: {str(data)[:500]}")
-        return ""
+        return ("", [], (0, 0)) if want_boxes else ""
     if code != 100:
         print(f"[UMI-DEBUG] unexpected code. full response: {str(data)[:500]}")
         raise RuntimeError(f"UMI-OCR 返回异常: {str(data)[:300]}")
@@ -866,7 +1156,18 @@ async def _call_umi_ocr(content: bytes) -> str:
     lines = [o.get("text", "") for o in outputs if isinstance(o, dict) and o.get("text")]
     text = "\n".join(lines).strip()
     print(f"[UMI-DEBUG] blocks={len(outputs)}, text_len={len(text)}, first200={text[:200]!r}")
-    return text
+    if not want_boxes:
+        return text
+
+    # 文本框坐标（投喂图坐标系）：供按文本区域裁图（CamScanner 内容定位）
+    boxes: list = [o.get("box") for o in outputs if isinstance(o, dict) and o.get("box")]
+    try:
+        from PIL import Image as _BImg
+        with _BImg.open(io.BytesIO(content)) as _bim:
+            ocr_size = (_bim.size[0], _bim.size[1])
+    except Exception:
+        ocr_size = (0, 0)
+    return text, boxes, ocr_size
 
 
 async def _check_umi_ocr_alive() -> bool:
@@ -1003,11 +1304,13 @@ def open_umi_ocr_folder() -> tuple[bool, str, str]:
 
 
 async def _vision_ocr_bytes(content: bytes) -> str:
-    """使用 Vision LLM 识别图片文字（含内容审核拦截重试链）。"""
+    """使用 Vision LLM 识别图片文字（含内容审核拦截重试链 + 小字放大重试）。"""
     if not settings.vision_api_key:
         raise RuntimeError("未配置 Vision API，无法 OCR 图片（请在设置中填写 API Key，或切换到 UMI-OCR）")
 
-    content = _shrink_for_api(content)
+    # CamScanner harness：投喂前裁边 + 压到 1792px/q85（超限保护也在此链上兜底）
+    content = await asyncio.to_thread(_shrink_for_vision_ocr, content)
+    content = await asyncio.to_thread(_shrink_for_api, content)
     prompt = (
         "请识别这张图片中的所有文字，并以纯文本形式返回。"
         "不要添加任何解释、翻译或格式标记，只输出识别到的原始文字内容。"
@@ -1016,37 +1319,58 @@ async def _vision_ocr_bytes(content: bytes) -> str:
         "MRZ行通常以字母'P'开头（护照），格式类似：P<COUNTRY<SURNAME<<GIVEN<NAME<<<<<<..."
     )
 
-    b64_img = base64.b64encode(content).decode()
-    try:
-        return await _call_vision_ocr(b64_img, prompt)
-    except RuntimeError as e:
-        args = e.args
-        extra = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
-        if not extra.get("sensitive"):
-            raise
-        # 内容审核拦截 → 重试链：轻度扰动 → 纯黑白二值化（彻底消除人脸灰阶）
-        for transform in (_jitter_image_for_safety, _binarize_image_for_safety):
-            alt = transform(content)
-            if alt == content:
-                continue
+    async def _try_ocr(img_bytes: bytes) -> str:
+        """对单张图片做一次 OCR 调用（含内容审核拦截重试链）。"""
+        b64_img = base64.b64encode(img_bytes).decode()
+        try:
+            return await _call_vision_ocr(b64_img, prompt)
+        except RuntimeError as e:
+            args = e.args
+            extra = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
+            if not extra.get("sensitive"):
+                raise
+            # 内容审核拦截 → 重试链：轻度扰动 → 纯黑白二值化（彻底消除人脸灰阶）
+            for transform in (_jitter_image_for_safety, _binarize_image_for_safety):
+                alt = await asyncio.to_thread(transform, img_bytes)
+                if alt == img_bytes:
+                    continue
+                try:
+                    return await _call_vision_ocr(base64.b64encode(alt).decode(), prompt)
+                except RuntimeError as e2:
+                    args2 = e2.args
+                    extra2 = args2[1] if len(args2) > 1 and isinstance(args2[1], dict) else {}
+                    if not extra2.get("sensitive"):
+                        raise
+                    continue
+            # 所有重试仍失败，抛出原始错误（含中文提示和模型切换建议）
+            raise e
+
+    text = await _try_ocr(content)
+    # 小字增强：首次识别结果过短（很可能是字太小/内容占比小导致识别不清）
+    # → 放大图片后再识别一次，取更完整的结果
+    if len(text.strip()) < _ZOOM_RETRY_MIN_CHARS:
+        zoomed = await asyncio.to_thread(_zoom_image_for_ocr, content)
+        if zoomed != content:
             try:
-                return await _call_vision_ocr(base64.b64encode(alt).decode(), prompt)
-            except RuntimeError as e2:
-                args2 = e2.args
-                extra2 = args2[1] if len(args2) > 1 and isinstance(args2[1], dict) else {}
-                if not extra2.get("sensitive"):
-                    raise
-                continue
-        # 所有重试仍失败，抛出原始错误（含中文提示和模型切换建议）
-        raise e
+                text2 = await _try_ocr(zoomed)
+                if len(text2.strip()) > len(text.strip()):
+                    print(f"[OCR] 小字放大重试成功：{len(text.strip())}→{len(text2.strip())} 字符")
+                    text = text2
+            except RuntimeError as _zoom_err:
+                print(f"[OCR] 小字放大重试失败（{_zoom_err}），保留原结果（{len(text.strip())} 字符）")
+    return text
 
 
-async def ocr_image_bytes(content: bytes, engine: str | None = None) -> tuple[str, dict | None]:
+async def ocr_image_bytes(
+    content: bytes, engine: str | None = None, boxes_out: dict | None = None
+) -> tuple[str, dict | None]:
     """识别图片中的全部文字，返回 (文本, 回退信息)。
     - umi: 先尝试 UMI-OCR，失败自动回退 Vision；fallback 非 None 时说明发生了回退
     - vision: 直接用 Vision LLM
 
     engine 参数可临时覆盖 settings.ocr_engine（用于前端「用另一引擎重新提取」）。
+    boxes_out: 传入 dict 时，UMI 成功路径会把文本框坐标（boxes）和投喂图尺寸
+    （ocr_size）写进去（供按文本区域裁图），不产生额外 UMI 调用。
     """
     active_engine = engine or settings.ocr_engine
     if active_engine == "umi":
@@ -1054,7 +1378,13 @@ async def ocr_image_bytes(content: bytes, engine: str | None = None) -> tuple[st
         umi_ok = await _check_umi_ocr_alive()
         if umi_ok:
             try:
-                text = await _call_umi_ocr(content)
+                if boxes_out is not None:
+                    text, _boxes, _osize = await _call_umi_ocr(content, want_boxes=True)
+                    if _boxes:
+                        boxes_out["boxes"] = _boxes
+                        boxes_out["ocr_size"] = _osize
+                else:
+                    text = await _call_umi_ocr(content)
                 return text, None
             except RuntimeError as umi_err:
                 # UMI 在线但调用失败 → 回退 Vision
@@ -1066,7 +1396,13 @@ async def ocr_image_bytes(content: bytes, engine: str | None = None) -> tuple[st
                 ready = await _wait_for_umi_ocr_ready(max_wait=8.0)
                 if ready:
                     try:
-                        text = await _call_umi_ocr(content)
+                        if boxes_out is not None:
+                            text, _boxes, _osize = await _call_umi_ocr(content, want_boxes=True)
+                            if _boxes:
+                                boxes_out["boxes"] = _boxes
+                                boxes_out["ocr_size"] = _osize
+                        else:
+                            text = await _call_umi_ocr(content)
                         return text, None
                     except RuntimeError as umi_err:
                         umi_reason = str(umi_err)
@@ -1078,6 +1414,7 @@ async def ocr_image_bytes(content: bytes, engine: str | None = None) -> tuple[st
         # UMI 失败 → 自动回退 Vision
         try:
             text = await _vision_ocr_bytes(content)
+            _flog(f"[OCR-FALLBACK] umi_ocr → vision_ocr：{umi_reason}")
             return text, {
                 "from": "umi_ocr",
                 "to": "vision_ocr",
@@ -1101,6 +1438,7 @@ async def ocr_image_bytes(content: bytes, engine: str | None = None) -> tuple[st
         if umi_ok:
             try:
                 text = await _call_umi_ocr(content)
+                _flog(f"[OCR-FALLBACK] vision_ocr → umi_ocr：{vision_err}")
                 return text, {"from": "vision_ocr", "to": "umi_ocr", "reason": str(vision_err)}
             except RuntimeError as umi_err:
                 umi_reason = str(umi_err)
@@ -1109,6 +1447,7 @@ async def ocr_image_bytes(content: bytes, engine: str | None = None) -> tuple[st
             if launched and await _wait_for_umi_ocr_ready(max_wait=8.0):
                 try:
                     text = await _call_umi_ocr(content)
+                    _flog(f"[OCR-FALLBACK] vision_ocr → umi_ocr：{vision_err}")
                     return text, {"from": "vision_ocr", "to": "umi_ocr", "reason": str(vision_err)}
                 except RuntimeError as umi_err:
                     umi_reason = str(umi_err)
@@ -1127,6 +1466,110 @@ def _normalize_for_compare(s: str) -> str:
     s = s.upper().strip()
     s = _re_norm.sub(r'[\s\-_/]+', '', s)
     return s
+
+
+def _mrz_char_val(ch: str) -> int:
+    """ICAO MRZ 字符值：0-9→0-9，A-Z→10-35，<→0；非法字符返回 -1。"""
+    if ch.isdigit():
+        return int(ch)
+    if ch.isalpha():
+        return ord(ch.upper()) - 55
+    if ch == "<":
+        return 0
+    return -1
+
+
+def _icao_check(s: str) -> int:
+    """ICAO 9303 检查位：字符值按 7,3,1 循环加权求和 mod 10。"""
+    total = 0
+    for i, ch in enumerate(s):
+        v = _mrz_char_val(ch)
+        if v < 0:
+            return -1
+        total += v * (7, 3, 1)[i % 3]
+    return total % 10
+
+
+_MRZ_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ<"
+
+# OCR 视觉易混淆字符表（双向）：替换修复只接受混淆字符，避免把正确字符改错
+_CONFUSABLE: dict[str, str] = {
+    "0": "OQD", "O": "0QD", "Q": "0OD", "D": "0O",
+    "1": "IL", "I": "1L", "L": "1I",
+    "2": "Z", "Z": "2",
+    "5": "S", "S": "5",
+    "8": "B", "B": "8",
+    "6": "G7", "G": "6",
+    "7": "T16", "T": "7",
+    "4": "A", "A": "4",
+    "U": "V", "V": "U",
+    "M": "N", "N": "M",
+    "C": "G", "E": "F", "F": "E",
+}
+
+
+def _repair_mrz_line2(line2: str) -> str:
+    """用 ICAO 检查位修复 MRZ 第二行的单字符 OCR 错误（丢字/错字/多字）。
+
+    第二行前 10 位 = 护照号(9) + 检查位(1)。OCR 认错一位（如 7→6）或丢一位
+    会导致后续所有固定位（国家码/日期/性别）整体错位，级联污染全部字段。
+    尝试单字符 插入/替换/删除 变异，取同时满足以下条件者：
+    检查位通过 + 国家码是合法 ISO 码 + 出生日期段为 6 位数字。
+    无合格变异则原样返回。
+    """
+    if len(line2) < 11:
+        return line2
+
+    def _ok(cand: str) -> bool:
+        # 护照号检查位
+        if _icao_check(cand[:9]) != _mrz_char_val(cand[9]):
+            return False
+        cc = cand[10:13]
+        if not (cc.isalpha() and len(cc) == 3 and cc in _ISO3_COUNTRY_CODES):
+            return False
+        dob = cand[13:19]
+        if not (len(dob) == 6 and dob.isdigit()):
+            return False
+        # 出生日期检查位（位置19）
+        if len(cand) >= 20 and _icao_check(cand[13:19]) != _mrz_char_val(cand[19]):
+            return False
+        # 有效期段（21-26 数字）+ 其检查位（位置27）
+        if len(cand) >= 28:
+            exp = cand[21:27]
+            if not (exp.isdigit() and _icao_check(exp) == _mrz_char_val(cand[27])):
+                return False
+        # 整体检查位（位置43，覆盖 0-9 + 13-19 + 21-27 + 28-41，不含可选数据检查位42）
+        if len(cand) >= 44:
+            overall_src = cand[0:10] + cand[13:20] + cand[21:28] + cand[28:42]
+            if _icao_check(overall_src) != _mrz_char_val(cand[43]):
+                return False
+        return True
+
+    # 已正确则直接返回
+    if _ok(line2):
+        return line2
+
+    # 单字符插入（OCR 丢字，如 763890288 → 63890288）
+    for pos in range(11):
+        for ch in _MRZ_CHARS:
+            cand = line2[:pos] + ch + line2[pos:]
+            if _ok(cand):
+                print(f"[MRZ-REPAIR] 插入修复: 位置{pos} 插入'{ch}' → {cand[:19]}")
+                return cand
+    # 单字符替换（OCR 认错，如 8→B）：只接受视觉易混淆字符，避免把正确字符改错
+    for pos in range(11):
+        for ch in _CONFUSABLE.get(line2[pos], ""):
+            cand = line2[:pos] + ch + line2[pos + 1:]
+            if _ok(cand):
+                print(f"[MRZ-REPAIR] 替换修复: 位置{pos} '{line2[pos]}'→'{ch}' → {cand[:19]}")
+                return cand
+    # 单字符删除（OCR 多字）
+    for pos in range(11):
+        cand = line2[:pos] + line2[pos + 1:]
+        if len(cand) >= 19 and _ok(cand):
+            print(f"[MRZ-REPAIR] 删除修复: 位置{pos} 删除'{line2[pos]}' → {cand[:19]}")
+            return cand
+    return line2
 
 
 def _parse_mrz(text: str) -> dict[str, str]:
@@ -1250,6 +1693,11 @@ def _parse_mrz(text: str) -> dict[str, str]:
         if m:
             mrz_line2 = m.group(0)
 
+    # ICAO 检查位修复：OCR 丢字/错字会让第二行固定位整体错位（国家码/日期全错），
+    # 用检查位+国家码+出生日期三重约束自动纠回单字符错误
+    if mrz_line2:
+        mrz_line2 = _repair_mrz_line2(mrz_line2)
+
     result: dict[str, str] = {}
     if not mrz_line1:
         return result
@@ -1272,7 +1720,7 @@ def _parse_mrz(text: str) -> dict[str, str]:
         if _re.match(r'^[A-Z]{3}$', cc2):
             country_code = cc2
 
-    pre_sep = line1[1:sep_idx]  # 跳过开头P，得到P到<<之间的内容
+    pre_sep = line1[1:sep_idx].lstrip("<")  # 跳过开头P和<，得到国家码+姓氏部分
 
     if country_code:
         # 已知国家码，在pre_sep中找到它的位置，后面的字母就是surname
@@ -1290,6 +1738,18 @@ def _parse_mrz(text: str) -> dict[str, str]:
                 surname_part = sur_match.group(0)
 
     if not surname_part:
+        # HARNESS：无第二行国家码时按第一行固定位拆：P< + 3位ISO国家码 + 姓氏。
+        # 必须在「最后一个<」回退之前执行：单< BUG 时 pre_sep = "国家码+姓<名"
+        # （RUSKULAGIN<GLEB），最后一个<后面是名字 GLEB 而不是姓
+        cc1 = pre_sep[:3]
+        if cc1 in _ISO3_COUNTRY_CODES:
+            sur_match = _re.match(r'[A-Z]{2,}', pre_sep[3:].lstrip("<"))
+            if sur_match:
+                country_code = country_code or cc1
+                surname_part = sur_match.group(0)
+                print(f"[MRZ-HARNESS] 第一行国家码固定位拆分: {pre_sep} → 国家码={cc1}, 姓氏={surname_part}")
+
+    if not surname_part:
         # 回退策略1：在pre_sep中寻找最后一个<，<后面的字母就是surname
         last_lt = pre_sep.rfind("<")
         if last_lt >= 0:
@@ -1297,6 +1757,17 @@ def _parse_mrz(text: str) -> dict[str, str]:
             sur_match = _re.match(r'[A-Z]+', after_lt)
             if sur_match:
                 surname_part = sur_match.group(0)
+
+    if not surname_part:
+        # HARNESS：MRZ 第一行固定格式 = P< + 3位ISO国家码 + 姓氏。
+        # 第二行国家码缺失/损坏时按第一行固定位直接拆
+        # （RUSNIKUSHKINA<<ANNA → RUS + NIKUSHKINA），零成本、不依赖第二行
+        pre_clean = pre_sep.rstrip("<")
+        m1 = _re.match(r'^([A-Z]{3})([A-Z]{4,})$', pre_clean)
+        if m1 and m1.group(1) in _ISO3_COUNTRY_CODES:
+            country_code = country_code or m1.group(1)
+            surname_part = m1.group(2)
+            print(f"[MRZ-HARNESS] 第一行固定位拆分: {pre_clean} → 国家码={m1.group(1)}, 姓氏={m1.group(2)}")
 
     if not surname_part:
         # 回退策略2：找最后一个连续大写字母序列
@@ -1362,6 +1833,24 @@ def _parse_mrz(text: str) -> dict[str, str]:
     given_part = given_part.rstrip("<")
     given_name = given_part.replace("<", " ").strip()
     surname = surname_part.strip()
+
+    # HARNESS：姓/名分隔符 << 被 OCR 读成单个 < 时（如 P<RUSKULAGIN<GLEB<<），
+    # 上面的 sep_idx 会错误定位到名字后面的填充区，名字被并进姓区域 pre_sep
+    # （KULAGIN<GLEB → 只解析出姓 KULAGIN，名 GLEB 丢失）。
+    # 名字为空时从 pre_sep 的 < 分隔段恢复：跳过国家码和已解析的姓，剩余段即名字
+    if not given_name and surname and pre_sep:
+        segs = [s for s in pre_sep.split("<") if s and s.isalpha()]
+        rest = segs[:]
+        # 国家码常与姓粘连无<分隔（RUSKULAGIN）：剥掉前3字符国家码前缀
+        if country_code and rest and rest[0].startswith(country_code) and len(rest[0]) > 3:
+            rest[0] = rest[0][3:]
+        elif country_code and rest and rest[0] == country_code:
+            rest = rest[1:]
+        if surname in rest:
+            rest = rest[rest.index(surname) + 1:]
+        if rest:
+            given_name = " ".join(rest)
+            print(f"[MRZ-HARNESS] 单<分隔恢复名字: {pre_sep} → 名字={given_name}")
 
     if surname:
         result["surname"] = surname
@@ -1721,10 +2210,12 @@ def _extract_after_label(text_upper: str, labels: list[str]) -> str:
     for label in labels:
         # 标签后可能紧跟值（无分隔符），或有空格/冒号/换行
         # 使用宽松匹配：标签本身 + 可选的非字母字符（空格/冒号/斜杠等）+ 捕获值
-        pattern = label + r"[\s:：/\\|]*([A-ZА-ЯЁ][A-ZА-ЯЁ\s\-']{1,40})"
+        # 值字符集含数字/句点/括号/逗号：俄语签发机关如
+        # "ГУ МВД РОССИИ ПО Г. МОСКВЕ" / "ОТДЕЛЕНИЕМ УФМС ... ОБЛ." 需要这些字符
+        pattern = label + r"[\s:：/\\|]*([A-ZА-ЯЁ][A-ZА-ЯЁ0-9.\-,()'\s]{1,60})"
         m = _re.search(pattern, text_upper)
         if m:
-            val = m.group(1).strip().rstrip("<")
+            val = m.group(1).strip().rstrip("<").rstrip(".").rstrip(",")
             # 去掉尾部可能粘连的下一个标签关键词
             for stop in ("NATIONALITY", "DATE", "SEX", "GENDER", "PLACE",
                          "AUTHORITY", "GIVEN", "PASSPORT", "ISSU",
@@ -1733,7 +2224,7 @@ def _extract_after_label(text_upper: str, labels: list[str]) -> str:
                 idx = val.find(stop)
                 if idx > 1:
                     val = val[:idx].strip()
-            val = val.strip()
+            val = val.strip().rstrip(".").rstrip(",")
             if len(val) >= 2 and not val.isdigit():
                 return val
     return ""
@@ -2092,6 +2583,11 @@ def _build_fields_prompt(text: str, target_fields: list[str]) -> str:
    如 "Date of issue" / "签发日期" 对应 passport_issue，
    "Date of expiry" / "Expiry date" / "有效期至" / "Valid until" 对应 passport_expiry，
    请从OCR文本中识别填入。
+7. 姓名类字段（name/surname/given_name）必须取完整单词/完整姓名，严禁只取片段或后缀：
+   - 错误示例：DZHUMANIAZOVA 只取 "OBA"、IVANOVA 只取 "OVA"、PETROV 只取 "OV"
+   - 文档同时存在西里尔文等非拉丁原文（如 ДЖУМАНИЯЗОВА）和拉丁转写（DZHUMANIAZOVA，
+     含MRZ行）时，一律取拉丁字母版本，不要返回非拉丁文字的值
+   - 完整拼写拿不准时优先从 MRZ 行取（P< 开头那行是官方拉丁转写，最可靠）
 """
 
 
@@ -2108,34 +2604,77 @@ def _parse_json_fields(text: str) -> dict[str, str]:
         return {}
 
 
+# 姓名类字段：值必须是完整词，片段（俄语姓转写后缀 -OVA/-OBA 等）自动修复
+_NAME_FIELDS = {"surname", "given_name", "name"}
+
+
+def _heal_name_fragments(fields: dict[str, str], text: str) -> dict[str, str]:
+    """姓名片段自愈：LLM 偶尔只取到姓名的后缀片段（如把 DZHUMANIAZOVA 取成 OBA）。
+    若姓名字段值过短（≤6字符）、本身不是 OCR 文本中的独立完整词、
+    但恰是文本中某个更长拉丁词的后缀，则替换为该完整词。"""
+    if not fields or not text:
+        return fields
+    tokens = set(re.findall(r"[A-Z]{2,}", text.upper()))
+    for f in _NAME_FIELDS:
+        v = (fields.get(f) or "").strip()
+        if not v or len(v) > 6:
+            continue
+        vu = re.sub(r"[^A-Z]", "", v.upper())
+        # <3 字母的短值（LI/WU 等合法拼音姓）不修；俄语姓后缀 OVA/OBA/EVA 均 ≥3
+        if len(vu) < 3 or vu in tokens:
+            continue  # 本身就是文本中的完整词，不动
+        # 西里尔 В 常被 OCR 读成拉丁 B（ДЖУМАНИЯЗОВА → ...OBA），
+        # 后缀匹配同时尝试 V↔B 互换的两种写法
+        variants = {vu, vu.replace("V", "B"), vu.replace("B", "V")}
+        candidates = [t for t in tokens if len(t) > len(vu) + 2 and t.endswith(tuple(variants))]
+        if candidates:
+            best = max(candidates, key=len)
+            msg = f"[EXTRACT-HEAL] {f}: 姓名片段 {v!r} → 完整词 {best!r}"
+            print(msg, flush=True)
+            _flog(msg)
+            fields[f] = best
+    return fields
+
+
 async def extract_fields_from_text(text: str, target_fields: list[str]) -> dict[str, str]:
-    """用 Vision LLM 从文档全文中提取目标字段（结构化 JSON）。"""
+    """用文本 LLM 从文档全文中提取目标字段（结构化 JSON）。
+
+    优先用轻量文本模型（如 DeepSeek-V4-Flash，settings.text_model）做纯文字排版，
+    未单独配置时回退 Vision 模型——纯文字任务文本模型更快更省。
+    """
     if not target_fields:
         return {}
-    if not settings.vision_api_key:
-        print(f"[EXTRACT-DEBUG] 未配置 Vision API Key，跳过 LLM 字段提取（{len(target_fields)} 个字段将走本地关键词兜底）: {target_fields}")
+    base, key, model = settings.effective_text_llm()
+    if not key:
+        print(f"[EXTRACT-DEBUG] 未配置 API Key，跳过 LLM 字段提取（{len(target_fields)} 个字段将走本地关键词兜底）: {target_fields}")
         return {f: "" for f in target_fields}
 
-    url = settings.vision_api_base.rstrip("/") + "/chat/completions"
+    url = base + "/chat/completions"
     headers = {
-        "Authorization": f"Bearer {settings.vision_api_key}",
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
     payload = {
-        "model": settings.vision_model,
+        "model": model,
         "messages": [{"role": "user", "content": _build_fields_prompt(text, target_fields)}],
         "temperature": 0.1,
     }
     try:
         async with httpx.AsyncClient(timeout=240.0, trust_env=False) as client:
             resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code == 404 and model != model.lower():
+                # 端点模型名大小写敏感（SenseNova 对 DeepSeek-V4-Flash 报 "model is not found"）
+                # → 小写重试一次，避免排版静默失败走本地兜底
+                print(f"[EXTRACT-WARN] 模型 {model} 404，改小写 {model.lower()} 重试")
+                payload["model"] = model.lower()
+                resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
             content = data["choices"][0]["message"]["content"] or ""
             parsed = _parse_json_fields(content)
             if not parsed:
                 print(f"[EXTRACT-WARN] LLM 字段提取返回了无法解析的内容: {content[:200]!r}")
-            return parsed
+            return _heal_name_fragments(parsed, text)
     except Exception as e:
         print(f"[EXTRACT-WARN] LLM 字段提取失败（{type(e).__name__}）: {e} —— 这些字段将走本地关键词兜底: {target_fields}")
         return {f: "" for f in target_fields}
@@ -2153,6 +2692,29 @@ _VIZ_FIELD_LABELS = {
 }
 
 
+def _shrink_for_viz(content: bytes, max_side: int = 1280) -> bytes:
+    """VIZ 看图前的主动缩图：最长边压到 max_side（默认1280）。
+
+    与 _shrink_for_api（只在超 base64 上限时被动缩）不同，这里主动缩小——
+    签发日期/机关等大字字段 1280px 足够看清，而 Vision 模型处理 2560px 大图
+    的响应时间往往是 1280px 的数倍。失败返回原内容。
+    """
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(content)).convert("RGB")
+        w, h = img.size
+        if max(w, h) <= max_side:
+            return content
+        ratio = max_side / max(w, h)
+        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=88)
+        print(f"[VIZ] 看图前缩图：{w}x{h} → {img.size[0]}x{img.size[1]}（{len(content)}B → {len(buf.getvalue())}B，Vision响应更快）")
+        return buf.getvalue()
+    except Exception:
+        return content
+
+
 async def _extract_viz_fields_from_image(
     image_content: bytes, viz_fields: list[str]
 ) -> dict[str, str]:
@@ -2165,6 +2727,8 @@ async def _extract_viz_fields_from_image(
     if not settings.vision_api_key:
         print(f"[EXTRACT-DEBUG] VIZ 字段 {viz_fields} 需要 Vision API Key 看图提取，未配置，跳过（将走文本关键词兜底）")
         return {}
+    # 主动缩图：日期/机关字段 1280px 足够，大幅缩短 Vision 响应时间
+    image_content = await asyncio.to_thread(_shrink_for_viz, image_content)
     b64_img = base64.b64encode(image_content).decode()
     field_specs = ",\n".join(
         f'  "{f}": "{_VIZ_FIELD_LABELS.get(f, f)}"' for f in viz_fields
@@ -2199,18 +2763,147 @@ async def _extract_viz_fields_from_image(
         "temperature": 0.1,
     }
     try:
+        _viz_t0 = time.perf_counter()
         async with httpx.AsyncClient(timeout=240.0, trust_env=False) as client:
             resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            content = data["choices"][0]["message"]["content"] or ""
-            parsed = _parse_json_fields(content)
-            if not parsed:
-                print(f"[EXTRACT-WARN] VIZ 看图提取返回了无法解析的内容: {content[:200]!r}")
-            return parsed
+        print(f"[VIZ-TIME] 看图提取 {viz_fields}: {time.perf_counter() - _viz_t0:.2f}s", flush=True)
+        content = data["choices"][0]["message"]["content"] or ""
+        parsed = _parse_json_fields(content)
+        if not parsed:
+            print(f"[EXTRACT-WARN] VIZ 看图提取返回了无法解析的内容: {content[:200]!r}")
+        return parsed
     except Exception as e:
         print(f"[EXTRACT-WARN] VIZ 看图字段提取失败（{type(e).__name__}）: {e} —— 字段: {viz_fields}")
         return {}
+
+
+def _crop_bottom_band(content: bytes) -> bytes:
+    """裁出图片底部 30% 并放大 2 倍（用于 MRZ 补扫），返回 JPEG 字节。
+
+    放大后最长边受 _UMI_OCR_MAX_EDGE 约束：放大的目的只是让 MRZ 小字
+    达到可识别高度，超过全图尺寸的放大对 Paddle 毫无增益、白白变慢。
+    """
+    from PIL import Image
+    img = Image.open(io.BytesIO(content)).convert("RGB")
+    w, h = img.size
+    if w < 100 or h < 100:
+        return b""
+    band = img.crop((0, int(h * 0.70), w, h))
+    band = band.resize((band.width * 2, band.height * 2), Image.LANCZOS)
+    bw, bh = band.size
+    if max(bw, bh) > _UMI_OCR_MAX_EDGE:
+        ratio = _UMI_OCR_MAX_EDGE / max(bw, bh)
+        band = band.resize((max(1, int(bw * ratio)), max(1, int(bh * ratio))), Image.LANCZOS)
+    buf = io.BytesIO()
+    band.save(buf, format="JPEG", quality=92)
+    return buf.getvalue()
+
+
+async def _mrz_bottom_rescan(text: str, content: bytes, active_engine: str) -> str:
+    """全图 OCR 后，裁底部 30% 放大 2 倍再扫一次 UMI-OCR 找 MRZ 机读区。
+
+    护照底部 MRZ 字号小密度高，全图扫描时容易漏行或认错字符
+    （如 7→6、姓氏被截断粘到国籍码）。裁切放大后字符高度翻倍，
+    PaddleOCR 识别率显著提升。仅 umi 引擎且文档像护照时执行；
+    补扫结果含有效 MRZ 行（P<国籍码）才返回，否则返回空串。
+    """
+    if active_engine != "umi" or not text:
+        return ""
+    upper = text.upper()
+    looks_passport = bool(re.search(r"P<[A-Z]{3}", upper)) or any(
+        kw in upper for kw in ("PASSPORT", "PASSEPORT", "PASAPORTE", "REISEPASS", "ПАСПОРТ", "护照")
+    )
+    if not looks_passport:
+        return ""
+    band_bytes = await asyncio.to_thread(_crop_bottom_band, content)
+    if not band_bytes:
+        return ""
+    try:
+        band_text = await _call_umi_ocr(band_bytes)
+    except Exception as e:
+        print(f"[MRZ-RESCAN] 底部补扫失败（忽略）: {e}")
+        return ""
+    if band_text and re.search(r"P<[A-Z]{3}", band_text.upper()):
+        print(f"[MRZ-RESCAN] 补扫命中 MRZ（{len(band_text)} 字符），并入文本")
+        return band_text
+    return ""
+
+
+def _split_stuck_country_prefix(value: str) -> tuple[str, str] | None:
+    """拆分 "RUSNIKITA" 这类粘连值：3 位 ISO 国家码 + 大写姓名。
+
+    PaddleOCR 检测模型常把护照上相邻两列（国籍 RUS 与姓名 NIKITA）
+    框进同一个文本块导致粘连。返回 (国家码, 剩余部分)，不符合粘连特征返回 None。
+    """
+    v = (value or "").strip().upper()
+    if len(v) < 7:  # 3 位国家码 + 至少 4 位姓名
+        return None
+    code, rest = v[:3], v[3:]
+    # 排除国籍形容词（RUSSIAN/INDIAN/MEXICAN/TURKISH/KAZAKHSTANI 等）：
+    # 它们同样呈 "ISO码+大写字母" 形态，但不是粘连值
+    if rest.endswith(("IAN", "ESE", "ISH", "CAN", "ANI")):
+        return None
+    if code in _ISO3_COUNTRY_CODES and rest.isalpha() and len(rest) >= 4:
+        return code, rest
+    return None
+
+
+def _repair_stuck_nationality(fields: dict[str, str]) -> None:
+    """修复 OCR 粘连：国籍码与姓名粘成一格（RUSNIKITA）时拆回两个字段。"""
+    nat = fields.get("nationality", "").strip()
+    if nat:
+        split = _split_stuck_country_prefix(nat)
+        if split:
+            code, rest = split
+            fields["nationality"] = code
+            print(f"[EXTRACT-DEBUG] 拆分粘连国籍值: {nat} → nationality={code}, 剩余={rest}")
+            # 姓名字段为空时，剩余部分填入 surname/name
+            if not fields.get("surname", "").strip() and not fields.get("given_name", "").strip():
+                fields["surname"] = rest
+                fields["name"] = rest
+        return
+    # 国籍为空但姓名带国家码前缀 → 反向拆分
+    for key in ("surname", "name"):
+        val = fields.get(key, "").strip()
+        split = _split_stuck_country_prefix(val) if val else None
+        if split:
+            code, rest = split
+            fields["nationality"] = code
+            if key == "surname":
+                fields["surname"] = rest
+                if not fields.get("name", "").strip():
+                    fields["name"] = rest
+            else:
+                fields["name"] = rest
+            print(f"[EXTRACT-DEBUG] 拆分粘连姓名值: {val} → nationality={code}, {key}={rest}")
+            break
+
+
+# ISO 3166-1 alpha-3 国家/地区代码（用于拆分 "RUSNIKITA" 类粘连值）
+_ISO3_COUNTRY_CODES = {
+    "AFG", "ALB", "DZA", "AND", "AGO", "ATG", "ARG", "ARM", "AUS", "AUT",
+    "AZE", "BHS", "BHR", "BGD", "BRB", "BLR", "BEL", "BLZ", "BEN", "BTN",
+    "BOL", "BIH", "BWA", "BRA", "BRN", "BGR", "BFA", "BDI", "CPV", "KHM",
+    "CMR", "CAN", "CAF", "TCD", "CHL", "CHN", "COL", "COM", "COD", "COG",
+    "CRI", "CIV", "HRV", "CUB", "CYP", "CZE", "DNK", "DJI", "DMA", "DOM",
+    "ECU", "EGY", "SLV", "GNQ", "ERI", "EST", "SWZ", "ETH", "FJI", "FIN",
+    "FRA", "GAB", "GMB", "GEO", "DEU", "GHA", "GRC", "GRD", "GTM", "GIN",
+    "GNB", "GUY", "HTI", "HND", "HUN", "ISL", "IND", "IDN", "IRN", "IRQ",
+    "IRL", "ISR", "ITA", "JAM", "JPN", "JOR", "KAZ", "KEN", "KIR", "PRK",
+    "KOR", "KWT", "KGZ", "LAO", "LVA", "LBN", "LSO", "LBR", "LBY", "LIE",
+    "LTU", "LUX", "MDG", "MWI", "MYS", "MDV", "MLI", "MLT", "MHL", "MRT",
+    "MUS", "MEX", "FSM", "MDA", "MCO", "MNG", "MNE", "MAR", "MOZ", "MMR",
+    "NAM", "NRU", "NPL", "NLD", "NZL", "NIC", "NER", "NGA", "MKD", "NOR",
+    "OMN", "PAK", "PLW", "PAN", "PNG", "PRY", "PER", "PHL", "POL", "PRT",
+    "QAT", "ROU", "RUS", "RWA", "KNA", "LCA", "VCT", "WSM", "SMR", "STP",
+    "SAU", "SEN", "SRB", "SYC", "SLE", "SGP", "SVK", "SVN", "SLB", "SOM",
+    "ZAF", "SSD", "ESP", "LKA", "SDN", "SUR", "SWE", "CHE", "SYR", "TWN",
+    "TJK", "TZA", "THA", "TLS", "TGO", "TON", "TTO", "TUN", "TUR", "TKM",
+    "TUV", "UGA", "UKR", "ARE", "GBR", "USA", "URY", "UZB", "VUT", "VAT",
+    "VEN", "VNM", "YEM", "ZMB", "ZWE",
+}
 
 
 # ============ 统一入口 ============
@@ -2233,33 +2926,53 @@ async def preview_document(content: bytes, filename: str) -> dict:
 
     if kind == "image":
         # 图片：预处理（EXIF 旋转 + 裁白边 + 降采样）→ AI 转正 + 放大，不 OCR
-        processed, processed_image = preprocess_image(content)
-        _, orient_b64 = await ai_orient_and_enhance(processed, cache_key=file_hash)
+        # allow_vision=True：预览也走 Vision 精判转正（与正式提取同一结果），
+        # 检测结果写入缓存 + in-flight 去重——预览先到则发起检测，正式提取
+        # 命中缓存零等待；两者并行时共享同一次调用，总耗时不多加
+        processed, processed_image = await asyncio.to_thread(preprocess_image, content)
+        oriented, orient_b64 = await ai_orient_and_enhance(processed, cache_key=file_hash, allow_vision=True)
         if orient_b64:
             processed_image = orient_b64
+        # umi 引擎：按 OCR 文本框裁切预览（CamScanner 内容定位）——
+        # 边缘裁边对灰底/渐变背景失效时，文本框坐标是内容位置的地面真相。
+        # 代价 ~1-2 秒（UMI 本地识别），换预览直接聚焦文本区
+        if settings.ocr_engine == "umi" and oriented and await _check_umi_ocr_alive():
+            try:
+                _, p_boxes, p_size = await _call_umi_ocr(oriented, want_boxes=True)
+                if p_boxes:
+                    cropped = await asyncio.to_thread(_crop_by_ocr_boxes, oriented, p_boxes, p_size)
+                    if cropped is not oriented:
+                        processed_image = base64.b64encode(cropped).decode()
+            except Exception as _pe:
+                print(f"[PREVIEW] 文本框裁切预览失败（忽略，用整图预览）: {_pe}")
         method = "image"
 
     elif kind == "pdf":
-        # PDF：先尝试 MarkItDown 提取文字层（原生 PDF 可快速得到文本预览）
-        try:
-            text = _extract_with_markitdown(content, filename)
-        except Exception:
-            text = ""
+        # PDF：先用 PyMuPDF 快速提取文字层（原生 PDF 毫秒级；扫描件瞬间返回空）
+        text = await asyncio.to_thread(_extract_pdf_text_pymupdf, content)
+        if not text:
+            # PyMuPDF 取不到（未安装或解析异常）→ 回退 MarkItDown
+            try:
+                text = await asyncio.to_thread(_extract_with_markitdown, content, filename)
+            except Exception:
+                text = ""
         if text and len(text.strip()) >= 10:
             text_preview = text[:2000]  # 仅返回前 2000 字符预览
             method = "markitdown_text"
         # 同时渲染首页为预览图（无论有无文字层，都给用户一个可视化预览）
-        rendered = render_pdf_to_image(content, dpi=150)  # 预览用稍低 DPI 更快
+        # max_pages=1：预览只需首页，多页 PDF 不再全部渲染拼接，速度大幅提升
+        rendered = await asyncio.to_thread(render_pdf_to_image, content, 150, 1)
         if rendered is not None:
             # AI 转正 + 放大后再作为预览（解决扫描件横放/内容过小）
-            _, orient_b64 = await ai_orient_and_enhance(rendered[0], cache_key=file_hash)
+            # allow_vision=True：与正式提取共享朝向检测（缓存 + in-flight 去重），预览也是转正的
+            _, orient_b64 = await ai_orient_and_enhance(rendered[0], cache_key=file_hash, allow_vision=True)
             processed_image = orient_b64 or rendered[1]
         if not method:
             method = "pdf_render"
     else:
         # Office 文档：用 MarkItDown 快速取文本预览，无图像
         try:
-            text = _extract_with_markitdown(content, filename)
+            text = await asyncio.to_thread(_extract_with_markitdown, content, filename)
             if text:
                 text_preview = text[:2000]
                 method = "markitdown_text"
@@ -2291,6 +3004,17 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
     text: str = ""
     method: str = ""
     fallback: dict | None = None
+    # 阶段计时：定位单文件处理慢在哪一段（[EXTRACT-TIME] 日志）
+    _t0 = time.perf_counter()
+    # OCR 文本框坐标（UMI 成功路径回填）：按文本区域裁图（CamScanner 内容定位）用
+    boxes_out: dict = {}
+    # processed_image 是否已按文本框裁切（VIZ 路径会先裁，避免重复裁切）
+    _preview_box_cropped = False
+
+    def _stage_ms(stage: str) -> None:
+        line = f"[EXTRACT-TIME] {filename} {stage}: {time.perf_counter() - _t0:.2f}s (累计)"
+        print(line, flush=True)
+        _flog(line)
     # 朝向检测缓存 key（与 preview_document 共享，同文件只检测一次朝向）
     file_hash = hashlib.sha1(content).hexdigest()[:16]
 
@@ -2300,11 +3024,18 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
     if kind == "image":
         # === 图片：预处理（EXIF 旋转 + 裁白边 + 降采样）→ OCR ===
         orig_len = len(content)
-        content, processed_image = preprocess_image(content)
+        content, processed_image = await asyncio.to_thread(preprocess_image, content)
+        _stage_ms("预处理(EXIF/裁边/降采样)")
         # AI 自动转正 + 小图放大（扫描件常横放/内容占比小，转正放大后 OCR 更准）
-        content, orient_b64 = await ai_orient_and_enhance(content, cache_key=file_hash)
+        # 朝向是否调 Vision 由「AI 自动转正」开关决定（settings.vision_auto_orient）：
+        # 开=Vision 精判 0/90/180/270（本地投影法分不出 180° 倒置和 90/270 方向）；
+        # 关=全本地，仅高置信竖排转 90°，绝不调识图 AI。
+        content, orient_b64 = await ai_orient_and_enhance(
+            content, cache_key=file_hash, allow_vision=True
+        )
         if orient_b64:
             processed_image = orient_b64
+        _stage_ms("AI转正/放大")
         try:
             from PIL import Image as _Img
             with _Img.open(io.BytesIO(content)) as _im:
@@ -2312,22 +3043,29 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
             print(f"[EXTRACT-DEBUG] image preprocess: {orig_len}B -> {len(content)}B, size={_w}x{_h}, engine={active_engine}")
         except Exception as _e:
             print(f"[EXTRACT-DEBUG] image preprocess: {orig_len}B -> {len(content)}B, dim_read_fail={_e}, engine={active_engine}")
-        text, fallback = await ocr_image_bytes(content, engine=engine)
-        # 如果发生了回退，method 反映实际使用的引擎
-        if fallback and fallback["to"] == "vision_ocr":
-            method = "vision_ocr"
+        # boxes_out：UMI 成功时带回文本框坐标（不产生额外调用），供按文本区域裁图
+        text, fallback = await ocr_image_bytes(content, engine=engine, boxes_out=boxes_out)
+        _stage_ms(f"OCR({active_engine})")
+        if fallback:
+            print(f"[EXTRACT-DEBUG] OCR 回退: {fallback['from']}→{fallback['to']} ({fallback['reason']})")
+        # 如果发生了回退，method 反映实际使用的引擎（面板徽章如实显示，不撒谎）
+        if fallback:
+            method = fallback["to"]  # "umi_ocr" | "vision_ocr"
         else:
             method = "umi_ocr" if active_engine == "umi" else "vision_ocr"
 
     elif kind == "pdf":
-        # === PDF：先试 MarkItDown 提取文字层（原生数字 PDF 最快） ===
+        # === PDF：先用 PyMuPDF 快速提取文字层（原生数字 PDF 毫秒级） ===
         # === 文字层过短（扫描件/垃圾文字层）→ PyMuPDF 渲染为图片 → 预处理 → OCR ===
         md_error = ""
-        try:
-            text = _extract_with_markitdown(content, filename)
-        except Exception as md_exc:
-            text = ""
-            md_error = str(md_exc)
+        text = await asyncio.to_thread(_extract_pdf_text_pymupdf, content)
+        if not text:
+            # PyMuPDF 取不到（未安装/解析异常）→ 回退 MarkItDown
+            try:
+                text = await asyncio.to_thread(_extract_with_markitdown, content, filename)
+            except Exception as md_exc:
+                text = ""
+                md_error = str(md_exc)
         # 垃圾文字层守卫：扫描件 PDF 常带几个~几十个字符的噪声文字层（页眉/水印/乱码），
         # 不足以构成有效内容，必须走 OCR（护照等正常文字层通常有数百字符）
         _PDF_TEXT_LAYER_MIN = 50
@@ -2338,7 +3076,7 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
         else:
             # 文字层为空或为垃圾 → 渲染为图片走 OCR
             print(f"[EXTRACT-DEBUG] PDF 文字层过短（{len(text.strip()) if text else 0} 字符 < {_PDF_TEXT_LAYER_MIN}），渲染为图片走OCR: {filename}, engine={active_engine}")
-            rendered = render_pdf_to_image(content, dpi=200)
+            rendered = await asyncio.to_thread(render_pdf_to_image, content, 200)
             if rendered is None:
                 # PyMuPDF 不可用，回退提示
                 if not text:
@@ -2349,12 +3087,15 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
             else:
                 content, processed_image = rendered
                 # AI 自动转正 + 小图放大（扫描件常横放/内容占比小，转正放大后 OCR 更准）
-                content, orient_b64 = await ai_orient_and_enhance(content, cache_key=file_hash)
+                # 朝向是否调 Vision 由「AI 自动转正」开关统一决定（与图片路径一致）
+                content, orient_b64 = await ai_orient_and_enhance(
+                    content, cache_key=file_hash, allow_vision=True
+                )
                 if orient_b64:
                     processed_image = orient_b64
                 ocr_text = ""
                 try:
-                    ocr_text, fallback = await ocr_image_bytes(content, engine=engine)
+                    ocr_text, fallback = await ocr_image_bytes(content, engine=engine, boxes_out=boxes_out)
                 except RuntimeError:
                     if text and text.strip():
                         # OCR 双引擎都失败，但文字层尚有内容 → 用文字层兜底，不让整个提取失败
@@ -2371,8 +3112,9 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
                         fallback = None
                     else:
                         text = ocr_text
-                        if fallback and fallback["to"] == "vision_ocr":
-                            method = "pdf_ocr"
+                        # 回退时 method 反映实际使用的引擎（徽章如实显示）
+                        if fallback:
+                            method = "pdf_ocr" if fallback["to"] == "vision_ocr" else "pdf_umi_ocr"
                         else:
                             method = "pdf_umi_ocr" if active_engine == "umi" else "pdf_ocr"
                         print(f"[EXTRACT-DEBUG] PDF OCR完成: {filename}, method={method}, {len(text)} 字符"
@@ -2383,7 +3125,7 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
     else:
         # === 其他文档（docx/pptx/xlsx/html）→ MarkItDown ===
         try:
-            text = _extract_with_markitdown(content, filename)
+            text = await asyncio.to_thread(_extract_with_markitdown, content, filename)
             method = "markitdown"
         except Exception as md_exc:
             # MarkItDown 失败：尝试用 LibreOffice 转 PDF 再 OCR（如果可用）
@@ -2398,6 +3140,12 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
     # 策略：MRZ优先（护照）。先尝试MRZ解析，覆盖到的字段直接用MRZ值，
     # 仅对MRZ未覆盖的目标字段才调用LLM字段提取，减少LLM调用次数、提升速度。
     _OCR_METHODS = ("vision_ocr", "pdf_ocr", "umi_ocr", "pdf_umi_ocr")
+    # UMI-OCR MRZ 底部补扫：全图扫描漏行/认错时，裁底部 30% 放大 2 倍重扫并入文本
+    if method in _OCR_METHODS and text:
+        band_text = await _mrz_bottom_rescan(text, content, active_engine)
+        if band_text:
+            text = text + "\n" + band_text
+        _stage_ms("MRZ底部补扫")
     # MRZ解析是纯本地正则、零成本，对任何路径的文本都尝试
     # （含 markitdown 文字层——原生护照 PDF 的文字层里同样带 MRZ 两行）
     if text:
@@ -2420,7 +3168,11 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
                 fields[k] = mrz_fields[k]
 
         # MRZ姓名清理：OCR常把MRZ两行之间的噪声粘连到名字中（如 "EKATERINAMBA78036"），
-        # 当名字包含数字或异常长且无空格/<分隔时，从VIZ标签关键词重新提取干净姓名
+        # 当名字包含数字或异常长且无空格/<分隔时，从VIZ标签关键词重新提取干净姓名。
+        # 原则：MRZ 是 ICAO 官方拉丁转写，姓名以此为准——VIZ 可视区只用来清洗粘连，
+        # 其候选值若是 MRZ 值的片段（如 OBA ← DZHUMANIAZOVA）一律拒绝。
+        # 阈值18：俄语姓拉丁转写常达13~17字母（DZHUMANIAZOVA/KRZHIZHANOVSKY），
+        # >10 会把正常长姓误判成噪声，再从可视区抓个后缀片段反过来污染正确值
         for name_field, label_list in (
             ("surname", _LABEL_SURNAME),
             ("given_name", _LABEL_GIVEN),
@@ -2428,19 +3180,34 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
             if name_field not in target_fields:
                 continue
             cur = fields.get(name_field, "")
-            looks_noisy = (
-                bool(cur) and (
-                    any(c.isdigit() for c in cur)
-                    or (len(cur) > 10 and " " not in cur and "<" not in cur)
-                )
-            )
-            if looks_noisy:
+            has_digit = bool(cur) and any(c.isdigit() for c in cur)
+            overlong = bool(cur) and len(cur) > 18 and " " not in cur and "<" not in cur
+            if has_digit or overlong:
                 upper_text = text.upper()
                 clean = _extract_latin_name_after_label(upper_text, label_list)
                 if not clean:
                     clean = _extract_after_label(upper_text, label_list)
-                if clean and len(clean) < len(cur) and not any(c.isdigit() for c in clean):
-                    fields[name_field] = clean
+                if not (clean and len(clean) < len(cur) and not any(c.isdigit() for c in clean)):
+                    continue
+                # 片段自检：候选值是原值的子串片段（如把 DZHUMANIAZOVA 换成其后缀 OBA）
+                cand_alpha = re.sub(r"[^A-Z]", "", clean.upper())
+                cur_alpha = re.sub(r"[^A-Z]", "", cur.upper())
+                is_fragment = bool(
+                    cand_alpha
+                    and len(cur_alpha) - len(cand_alpha) >= 4
+                    and cand_alpha in cur_alpha
+                )
+                if is_fragment:
+                    if overlong and not has_digit:
+                        # 原值无数字：它本来就是完整长姓，不是噪声，保留原值
+                        print(f"[MRZ-NAME] {name_field}: 候选 {clean!r} 是原值 {cur!r} 的片段，保留原值", flush=True)
+                        continue
+                    # 原值带数字（第二行粘连）：取原值的纯字母前缀（即 MRZ 官方转写），
+                    # 不接受来自可视区的片段
+                    print(f"[MRZ-NAME] {name_field}: 行2粘连，取MRZ字母前缀 {cur_alpha!r}（拒绝片段 {clean!r}）", flush=True)
+                    fields[name_field] = cur_alpha
+                    continue
+                fields[name_field] = clean
         # 重新拼接 name
         if "name" in target_fields and (fields.get("surname") or fields.get("given_name")):
             fields["name"] = f"{fields.get('surname','')} {fields.get('given_name','')}".strip()
@@ -2459,39 +3226,10 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
                 "识别到护照特征但 MRZ 机读区解析失败（底部两行可能被裁切/模糊），"
                 "以下字段全部来自可视区兜底提取，请核对"
             )
-        viz_targets = [
-            k for k in target_fields
-            if k in _VIZ_FIELDS and not fields.get(k, "").strip()
-        ]
-        if is_passport and viz_targets:
-            viz_image: bytes | None = None
-            if method in _OCR_METHODS:
-                viz_image = content  # OCR 路径：content 已是预处理后的图片字节
-            elif method == "markitdown" and kind == "pdf":
-                # 原生 PDF 文字层路径：渲染页面为图片再看图提取
-                rendered = render_pdf_to_image(content, dpi=200)
-                if rendered is not None:
-                    viz_image = rendered[0]
-                    if processed_image is None:
-                        processed_image = rendered[1]
-            if viz_image is not None:
-                viz_fields = await _extract_viz_fields_from_image(viz_image, viz_targets)
-                for k, v in viz_fields.items():
-                    if v.strip():
-                        fields[k] = v
 
-        # 仍未覆盖的字段交给文本 LLM 提取
-        already_filled = set(k for k in target_fields if fields.get(k, "").strip())
-        fields_for_llm = [k for k in target_fields if k not in mrz_covered and k not in already_filled]
-        if fields_for_llm:
-            llm_fields = await extract_fields_from_text(text, fields_for_llm)
-            for k, v in llm_fields.items():
-                if v.strip():
-                    fields[k] = v
-
-        # 本地正则/关键词兜底：对 MRZ/VIZ/LLM 都没提取到的字段，
-        # 用多语言标签关键词从 OCR 文本中直接提取，不依赖任何 API。
-        # 这保证了即使没有 Vision API key，UMI-OCR 也能提取护照字段。
+        # 本地正则/关键词提取前置（毫秒级、零 API 调用）：
+        # 标准证件/表单（标签清晰）本地就能填满全部字段 → 后面的 VIZ 看图与
+        # 文本 LLM 完全不调用，OCR 出文字后结果立即返回，不再白等 AI。
         still_empty = [k for k in target_fields if not fields.get(k, "").strip()]
         if still_empty:
             local_fields = _extract_local_fields(text, still_empty)
@@ -2499,7 +3237,7 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
                 if v.strip() and not fields.get(k, "").strip():
                     fields[k] = v
 
-        # 正则回退：对日期类字段（有效期至/签发日期），如果 MRZ/VIZ/LLM 都没提取到，
+        # 正则回退：对日期类字段（有效期至/签发日期），如果 MRZ/本地没提取到，
         # 直接从 OCR 文本中按关键词搜索日期，不依赖 LLM
         for k in target_fields:
             if fields.get(k, "").strip():
@@ -2513,8 +3251,21 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
                 if date_val:
                     fields[k] = date_val
 
-        # 互补推断：签发日/有效期只提到一个时，从全文日期中排除法推断另一个
-        # （护照可视区通常两个日期紧挨印刷，OCR 全文里都有，只是关键词定位可能漏一个）
+        # 仍未覆盖的字段：文本优先，VIZ 看图只兜底
+        # （SENSENOVA 看图推理常需 1~2 分钟，而 OCR 文本里通常已有签发日期/地点——
+        #   DeepSeek 文本排版几秒即回，先文本后看图，看图只在文本真没有时触发）
+        already_filled = set(k for k in target_fields if fields.get(k, "").strip())
+        fields_for_llm = [k for k in target_fields if k not in mrz_covered and k not in already_filled]
+
+        # 1) DeepSeek 文本排版（快）：先把 OCR 文本里的字段抓出来
+        llm_fields: dict[str, str] = {}
+        if fields_for_llm:
+            llm_fields = await extract_fields_from_text(text, fields_for_llm)
+        for k, v in llm_fields.items():
+            if v.strip() and not fields.get(k, "").strip():
+                fields[k] = v
+
+        # 2) 互补推断（本地毫秒级）：签发日/有效期只提到一个时，从全文日期中排除法推断另一个
         if "passport_issue" in target_fields or "passport_expiry" in target_fields:
             cur_issue = fields.get("passport_issue", "").strip()
             cur_expiry = fields.get("passport_expiry", "").strip()
@@ -2528,9 +3279,70 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
                 if "passport_expiry" in target_fields and not cur_expiry and new_expiry:
                     fields["passport_expiry"] = new_expiry
 
-        # MRZ非主字段（如passport_expiry等扩展字段）补充
+        # 3) VIZ 看图兜底（分级触发）：
+        #   - 默认（开关关）：仅「单字段补提」——所选引擎是 UMI-OCR 且其他字段都齐、
+        #     只缺 1 项时，调识图AI只补这一项（一次调用几秒~几十秒，不拖整批；
+        #     引擎设置不变，下一张卡片仍走 UMI-OCR）
+        #   - 开关开：所有缺失的 VIZ 字段都看图补提（极致准确率模式，多字段慢）
+        viz_targets = [
+            k for k in target_fields
+            if k in _VIZ_FIELDS and not fields.get(k, "").strip()
+        ]
+        viz_fields: dict[str, str] = {}
+        if viz_targets and is_passport and not settings.vision_viz_fallback:
+            if len(viz_targets) == 1 and active_engine == "umi":
+                msg = f"[VIZ] UMI-OCR 其他字段齐全，仅缺「{viz_targets[0]}」→ 识图AI 单字段补提（下一张卡片仍为 UMI-OCR）"
+                print(msg, flush=True)
+                _flog(msg)
+            else:
+                msg = f"[VIZ] 看图兜底已关闭，跳过识图AI看图（缺失 {len(viz_targets)} 项: {viz_targets}）"
+                print(msg, flush=True)
+                _flog(msg)
+                viz_targets = []
+
+        viz_image: bytes | None = None
+        if is_passport and viz_targets:
+            if method in _OCR_METHODS:
+                viz_image = content  # OCR 路径：content 已是预处理后的图片字节
+                # CamScanner 内容定位：按 OCR 文本框联合区域裁切后再给 VIZ 看图——
+                # 大图小字时 Vision 只看文本区（响应快数倍且更准），
+                # 同时提取预览也换成裁切图（用户在面板里看到的就是去空白版本）
+                if boxes_out.get("boxes"):
+                    cropped = await asyncio.to_thread(
+                        _crop_by_ocr_boxes, content, boxes_out["boxes"], boxes_out["ocr_size"]
+                    )
+                    if cropped is not content:
+                        viz_image = cropped
+                        processed_image = base64.b64encode(cropped).decode()
+                        _preview_box_cropped = True
+            elif method == "markitdown" and kind == "pdf":
+                # 原生 PDF 文字层路径：渲染页面为图片再看图提取
+                rendered = await asyncio.to_thread(render_pdf_to_image, content, 200)
+                if rendered is not None:
+                    viz_image = rendered[0]
+                    if processed_image is None:
+                        processed_image = rendered[1]
+
+        if viz_image is not None:
+            # 60 秒上限：VIZ 是兜底手段，超时跳过（字段留空 → 对比时标缺失），
+            # 不让单个字段拖死整批 LOOP。SENSENOVA 正常时几秒~几十秒返回
+            try:
+                viz_fields = await asyncio.wait_for(
+                    _extract_viz_fields_from_image(viz_image, viz_targets), timeout=60.0
+                )
+            except asyncio.TimeoutError:
+                print(f"[VIZ-TIME] 看图兜底超时（60s），跳过字段: {viz_targets}", flush=True)
+                viz_fields = {}
+            for k, v in viz_fields.items():
+                if v.strip() and not fields.get(k, "").strip():
+                    fields[k] = v
+        _stage_ms(f"文本LLM+VIZ兜底(viz={sorted(viz_fields.keys())})")
+
+        # MRZ非主字段（如passport_expiry等扩展字段）补充——
+        # 只补 target_fields 内请求的字段：调用方（LOOP 执行期）只传绑定元素，
+        # 未请求的字段（如已删除的国籍/签发地）不能从 MRZ 悄悄塞回来
         for k, v in mrz_fields.items():
-            if v.strip() and not fields.get(k, "").strip():
+            if k in target_fields and v.strip() and not fields.get(k, "").strip():
                 fields[k] = v
 
     elif not target_fields and (method in _OCR_METHODS or mrz_fields):
@@ -2549,6 +3361,24 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
             for k, v in local_fields.items():
                 if v.strip() and not fields.get(k, "").strip():
                     fields[k] = v
+
+    # 统一按 OCR 文本框裁切提取预览（与 preview_document 行为一致）：
+    # 跑动中预览是按文本框裁好的紧凑图，正式提取若不裁，卡片完成后面板
+    # 会「放回」裁切前的大图。VIZ 路径上面已裁过（_preview_box_cropped），此处只补其余路径。
+    if boxes_out.get("boxes") and method in _OCR_METHODS and not _preview_box_cropped:
+        try:
+            cropped = await asyncio.to_thread(
+                _crop_by_ocr_boxes, content, boxes_out["boxes"], boxes_out["ocr_size"]
+            )
+            if cropped is not content:
+                processed_image = base64.b64encode(cropped).decode()
+        except Exception as _ce:
+            print(f"[EXTRACT] 文本框裁切预览失败（忽略，用整图）: {_ce}", flush=True)
+
+    # OCR 粘连修复：PaddleOCR 常把相邻两列框进同一文本块（如国籍 RUS 与姓名粘成 RUSNIKITA），
+    # 在返回前统一拆分回两个字段
+    _repair_stuck_nationality(fields)
+    _stage_ms(f"完成(method={method})")
 
     return {
         "filename": filename,

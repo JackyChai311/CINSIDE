@@ -27,10 +27,21 @@ class AppSettings(BaseModel):
     vision_api_base: str = ""
     vision_api_key: str = ""
     vision_model: str = ""
+    text_api_base: str = ""
+    text_api_key: str = ""
+    text_model: str = ""
+    analysis_api_base: str = ""
+    analysis_api_key: str = ""
+    analysis_model: str = ""
+    sensenova_api_base: str = "https://token.sensenova.cn/v1"
+    sensenova_api_key: str = ""
+    sensenova_model: str = "sensenova-u1-fast"
     browser_use_llm_base: str = ""
     browser_use_llm_key: str = ""
     browser_use_llm_model: str = ""
     ocr_engine: str = "vision"
+    vision_auto_orient: bool = True
+    vision_viz_fallback: bool = False
     umi_ocr_host: str = "127.0.0.1"
     umi_ocr_port: int = 1224
     umi_ocr_exe_path: str = ""
@@ -56,7 +67,10 @@ def get_settings():
 def save_settings(body: AppSettings):
     """保存设置到内存并持久化到 .env。"""
     import time
-    data = body.model_dump()
+    # exclude_unset：只取请求体里真正出现的字段。
+    # 否则 Pydantic 会给未传字段填模型默认值 → 部分更新请求把
+    # API Key 等其他设置整体覆盖成空（前端全量保存不受影响）。
+    data = body.model_dump(exclude_unset=True)
     # 备份当前内存值，persist 失败时回滚，避免"当前会话生效但重启丢失"的假象
     backup = {name: getattr(settings, name) for name in SETTING_KEYS}
 
@@ -133,11 +147,128 @@ async def test_vision():
         return {"supports_images": False, "message": f"检测失败: {e}"}
 
 
+class ListModelsRequest(BaseModel):
+    api_base: str = ""
+    api_key: str = ""
+
+
+@router.post("/list-models")
+async def list_models(body: ListModelsRequest):
+    """识别端点可用模型：填好 API Base URL + Key 后调 {base}/models 拉取模型列表。
+
+    设置面板不再手输模型名——点「识别」由程序查该端点有哪些可用 AI 选项。
+    兼容 base 不带 /v1 的写法（自动补试 {base}/v1/models）。
+    """
+    base = (body.api_base or "").strip().rstrip("/")
+    key = (body.api_key or "").strip()
+    if not base.startswith(("http://", "https://")):
+        return {"ok": False, "error": "请先填写正确的 API Base URL（以 http:// 或 https:// 开头）"}
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    candidates = [base + "/models"]
+    if not base.endswith("/v1"):
+        candidates.append(base.rstrip("/") + "/v1/models")
+    last_err = ""
+    async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
+        for url in candidates:
+            try:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 404:
+                    last_err = "端点无 /models 路由"
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                # OpenAI 兼容格式 {"data": [{"id": ...}]}；个别服务直接返回数组
+                items = data.get("data") if isinstance(data, dict) else data
+                if not isinstance(items, list):
+                    last_err = "端点返回格式不认识"
+                    continue
+                ids = sorted({str(m.get("id")) for m in items if isinstance(m, dict) and m.get("id")})
+                if ids:
+                    return {"ok": True, "models": ids}
+                last_err = "端点未返回任何模型"
+            except Exception as e:
+                last_err = str(e)
+    return {"ok": False, "error": f"识别失败：{last_err[:200]}"}
+
+
 @router.post("/test-umi-ocr")
 async def test_umi_ocr():
     """检测 UMI-OCR 服务是否可用（未运行时尝试自动启动）。"""
     ok, msg = await ensure_umi_ocr_running()
     return {"ok": ok, "message": msg, "host": settings.umi_ocr_host, "port": settings.umi_ocr_port}
+
+
+class TestLLMRequest(BaseModel):
+    """手写模型测试：三个字段留空时按已保存配置继承（分析→文本→识图 / 生图默认值）。"""
+    api_base: str | None = None
+    api_key: str | None = None
+    model: str | None = None
+
+
+@router.post("/test-analysis")
+async def test_analysis(body: TestLLMRequest):
+    """测试全局分析模型：按面板当前填写发一次极小 chat 请求，验证手写型号真实可用。"""
+    base = (body.api_base or "").strip()
+    key = (body.api_key or "").strip()
+    model = (body.model or "").strip()
+    eb, ek, em = settings.effective_analysis_llm()
+    base = base or eb
+    key = key or ek
+    model = model or em
+    if not (base and key and model):
+        return {"ok": False, "message": "地址 / 密钥 / 模型不完整：请填写，或保存继承配置后再测"}
+    base = base.rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        return {"ok": False, "message": "API Base URL 格式错误（应以 http:// 或 https:// 开头）"}
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    # 端点模型名大小写敏感：404 时自动小写重试一次
+    for m in dict.fromkeys(filter(None, (model, model.lower() if model != model.lower() else None))):
+        try:
+            async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+                resp = await client.post(
+                    base + "/chat/completions",
+                    headers=headers,
+                    json={"model": m, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 8, "temperature": 0.1},
+                )
+                if resp.status_code == 404 and m != m.lower():
+                    continue
+                resp.raise_for_status()
+                if resp.json().get("choices"):
+                    return {"ok": True, "message": f"模型 {m} 可用，分析任务就绪"}
+                return {"ok": False, "message": "接口返回异常（无 choices），请检查地址与模型"}
+        except httpx.HTTPStatusError as e:
+            return {"ok": False, "message": f"HTTP {e.response.status_code}：{(e.response.text or str(e))[:160]}"}
+        except Exception as e:
+            return {"ok": False, "message": f"连接失败：{e}"}
+    return {"ok": False, "message": f"端点无模型 {model}（404），请核对型号拼写"}
+
+
+@router.post("/test-imagegen")
+async def test_imagegen(body: TestLLMRequest):
+    """测试生图模型：拉取端点 /models 核对手写型号是否存在（不实际生图，省时省配额）。"""
+    base = (body.api_base or "").strip() or settings.sensenova_api_base or "https://token.sensenova.cn/v1"
+    key = (body.api_key or "").strip() or settings.sensenova_api_key
+    model = (body.model or "").strip() or settings.sensenova_model or "sensenova-u1-fast"
+    if not key:
+        return {"ok": False, "message": "未填写 API Key"}
+    base = base.rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        return {"ok": False, "message": "API Base URL 格式错误（应以 http:// 或 https:// 开头）"}
+    try:
+        async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
+            resp = await client.get(base + "/models", headers={"Authorization": f"Bearer {key}"})
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("data") if isinstance(data, dict) else data
+            if not isinstance(items, list) or not items:
+                return {"ok": False, "message": "端点未返回模型列表，无法预检；配置将在生成 PPT 时实际验证"}
+            ids = {str(m.get("id")) for m in items if isinstance(m, dict) and m.get("id")}
+            if any(i.lower() == model.lower() for i in ids):
+                return {"ok": True, "message": f"模型 {model} 在端点可用（共 {len(ids)} 个模型）"}
+            sample = "、".join(sorted(ids)[:6])
+            return {"ok": False, "message": f"端点无 {model}，可用模型示例：{sample or '（列表为空）'}"}
+    except Exception as e:
+        return {"ok": False, "message": f"预检失败（端点可能不支持 /models）：{str(e)[:120]}；生成 PPT 时会实际验证"}
 
 
 @router.post("/launch-umi-ocr")

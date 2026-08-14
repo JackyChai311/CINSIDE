@@ -16,7 +16,7 @@ interface Props {
   steps: VerificationStep[];
   running: boolean;
   onAllGone?: () => void;
-  /** edge=屏幕右边缘（默认）；sphere=融入 AI 球体：气泡从球体下方吐出，旧的向下堆叠渐淡，消散时收回球体 */
+  /** edge=屏幕右边缘（默认）；sphere=左栏左下角：气泡从角落向上吐出堆叠，旧的渐淡，消散时下沉淡出（不挡卡片） */
   variant?: "edge" | "sphere";
 }
 
@@ -144,14 +144,14 @@ export default function ExecutionBubbles({ steps, running, onAllGone, variant = 
 
   const now = Date.now();
   const isSphere = variant === "sphere";
-  const bubbleGap = isSphere ? 46 : 48;
+  const bubbleGap = isSphere ? 44 : 48;
 
   return (
     <div
       className={isSphere
-        ? "pointer-events-none absolute left-1/2 top-full z-30 -translate-x-1/2"
+        ? "pointer-events-none absolute bottom-3 left-3 z-30"
         : "fixed right-3 bottom-20 z-[9997] pointer-events-none"}
-      style={{ width: isSphere ? 210 : 270, height: bubbleGap * MAX_STACK + 80 }}
+      style={{ width: isSphere ? 206 : 270, height: bubbleGap * MAX_STACK + 80 }}
     >
       {bubbles.map((b) => {
         const s = b.step;
@@ -176,10 +176,10 @@ export default function ExecutionBubbles({ steps, running, onAllGone, variant = 
             opacity = pos === 0 ? 1 : pos === 1 ? 0.6 : 0.3;
             scale = pos === 0 ? 1 : pos === 1 ? 0.93 : 0.86;
           } else if (isSphere) {
-            // 球体变体：消散时向上收回球体
-            translateY = -30 * eased;
+            // 左下角变体：消散时下沉淡出（安静退场，不回卷）
+            translateY = 14 * eased;
             opacity = Math.max(0, (pos === 0 ? 1 : pos === 1 ? 0.55 : 0.26) * (1 - eased));
-            scale = (pos === 0 ? 1 : pos === 1 ? 0.94 : 0.88) * (1 - 0.25 * eased);
+            scale = (pos === 0 ? 1 : pos === 1 ? 0.94 : 0.88) * (1 - 0.15 * eased);
           } else {
             translateX = 80 * eased;
             translateY = -40 * eased;
@@ -188,10 +188,10 @@ export default function ExecutionBubbles({ steps, running, onAllGone, variant = 
           }
         } else if (pos === 0) {
           if (isSphere) {
-            // 新气泡从球体内吐出：从上方(-22px)浮现下落到位
-            translateY = (1 - enterP) * -22;
-            opacity = enterP;
-            scale = 0.72 + enterP * 0.28;
+            // 新气泡从角落下方悄悄浮上来
+            translateY = (1 - enterP) * 16;
+            opacity = enterP * 0.98;
+            scale = 0.9 + enterP * 0.1;
           } else {
             translateX = (1 - enterP) * 60;
             opacity = enterP;
@@ -206,9 +206,10 @@ export default function ExecutionBubbles({ steps, running, onAllGone, variant = 
         } else {
           const extraP = Math.min(1, (pos - 2) * 0.5);
           if (isSphere) {
-            translateY = 18 * extraP;
+            // 超出堆叠层数：继续向上渐淡消失
+            translateY = -14 * extraP;
             opacity = Math.max(0, 0.26 - extraP * 0.26);
-            scale = 0.88 - extraP * 0.08;
+            scale = 0.88 - extraP * 0.06;
           } else {
             translateY = -20 * extraP;
             translateX = 60 * extraP;
@@ -238,19 +239,17 @@ export default function ExecutionBubbles({ steps, running, onAllGone, variant = 
           icon = <XCircle className={`${isSphere ? "h-3.5 w-3.5" : "h-4 w-4"} text-rose-500`} />;
         }
 
-        // 球体变体：水平居中、top 锚定向下堆叠；边缘变体：right/bottom 锚定向上堆叠
-        const posStyle = isSphere
-          ? { top: Math.min(pos, MAX_STACK) * bubbleGap + translateY }
-          : { bottom: Math.min(pos, MAX_STACK) * bubbleGap + translateY };
+        // 两种变体统一 bottom 锚定向上堆叠（最新在最底部）
+        const posStyle = { bottom: Math.min(pos, MAX_STACK) * bubbleGap + translateY };
 
         return (
           <div
             key={b.id}
             className={[
-              "absolute flex items-start rounded-xl border shadow-lg backdrop-blur-sm",
+              "absolute flex items-start rounded-xl border backdrop-blur-sm",
               isSphere
-                ? "left-1/2 w-[204px] gap-1.5 px-2 py-1.5 pointer-events-none"
-                : "right-0 w-[260px] gap-2 px-3 py-2 pointer-events-auto",
+                ? "left-0 w-[200px] gap-1.5 px-2 py-1.5 shadow-md pointer-events-none"
+                : "right-0 w-[260px] gap-2 px-3 py-2 shadow-lg pointer-events-auto",
               borderClass,
               bgClass,
             ].join(" ")}
@@ -258,9 +257,9 @@ export default function ExecutionBubbles({ steps, running, onAllGone, variant = 
               ...posStyle,
               opacity,
               transform: isSphere
-                ? `translateX(-50%) scale(${scale})`
+                ? `scale(${scale})`
                 : `translateX(${translateX}px) scale(${scale})`,
-              transformOrigin: isSphere ? "center top" : "right bottom",
+              transformOrigin: isSphere ? "left bottom" : "right bottom",
               transition: b.exiting ? "none" : "all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1)",
             }}
           >

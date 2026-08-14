@@ -12,8 +12,16 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 from ..config import settings
+
+# AI 列映射识别的熔断：LLM 接口慢/不可达时，单次调用最多等 _AI_TIMEOUT 秒，
+# 失败后 _CIRCUIT_COOLDOWN 秒内的后续调用（多 sheet 场景）直接跳过回退别名表，
+# 避免 Excel 解析被 AI 调用拖到前端超时。
+_AI_TIMEOUT = 8.0
+_CIRCUIT_COOLDOWN = 60.0
+_last_fail_ts: float = 0.0
 
 # 标准字段列表 + 描述（给 LLM 看）
 _STANDARD_FIELDS = {
@@ -113,6 +121,11 @@ async def ai_detect_column_mapping(
     if not settings.browser_use_llm_key:
         return {}
 
+    # 熔断：上次失败后冷却期内直接跳过（多 sheet 不重复白等）
+    global _last_fail_ts
+    if _last_fail_ts and (time.time() - _last_fail_ts) < _CIRCUIT_COOLDOWN:
+        return {}
+
     try:
         import httpx
     except ImportError:
@@ -131,12 +144,14 @@ async def ai_detect_column_mapping(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
             resp = await client.post(url, headers=headers_dict, json=payload)
             resp.raise_for_status()
             data = resp.json()
             text = data["choices"][0]["message"]["content"]
+            _last_fail_ts = 0.0  # 成功则解除熔断
             return _parse_mapping(text, headers)
     except Exception as e:
-        print(f"[excel_ai_parser] AI 识别失败，回退到硬编码别名: {e}")
+        _last_fail_ts = time.time()
+        print(f"[excel_ai_parser] AI 识别失败（{_AI_TIMEOUT}s 超时或接口错误），回退到硬编码别名: {e}")
         return {}

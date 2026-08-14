@@ -155,10 +155,16 @@ export default function ExcelView({
     y: number;
   } | null>(null);
 
-  // LOOP 列拖拽选择状态
+  // LOOP 列选择状态（点击两格框选 与 拖拽框选 并存）
   const [dragSelecting, setDragSelecting] = useState(false);
-  const dragStartRef = useRef<number | null>(null);
+  const dragStartRef = useRef<number | null>(null);            // 按下时的起始行（records 索引）
+  const dragStartYRef = useRef<number | null>(null);           // 按下时的 clientY，用于区分"点击"与"拖拽"
+  const didDragRef = useRef(false);                            // 本次手势是否已超过阈值成为拖拽
+  const suppressClickRef = useRef(false);                      // 拖拽结束后抑制紧随的 click（避免误触发两格框选）
   const tbodyRef = useRef<HTMLTableSectionElement | null>(null);
+  // 父级 rowRange 镜像：拖拽开始时判断是否需要清旧高亮（避免 effect 闭包过期）
+  const rowRangeRef = useRef(rowRange);
+  rowRangeRef.current = rowRange;
 
   // ===== LOOP 审查期：平滑滚动定位到当前执行行/比对单元格（与网页侧高亮一致的直观对比） =====
   // 记录切换时：平滑滚动到该行（垂直居中）
@@ -254,6 +260,18 @@ export default function ExcelView({
     });
   }, [records, filter]);
 
+  // 拾取标记索引：recordId+字段名 → mark。避免每个单元格渲染都做 O(marks) 的
+  // find 线性扫描——大表（千行×二十列）+ 多标记时，单次全表渲染就是数万次扫描。
+  const markByKey = useMemo(() => {
+    const m = new Map<string, PickedMark>();
+    for (const mk of pickedMarks) {
+      if (mk.source === "excel" && mk.excelRecordId && mk.excelField) {
+        m.set(`${mk.excelRecordId}	${mk.excelField}`, mk);
+      }
+    }
+    return m;
+  }, [pickedMarks]);
+
   // 表头右键菜单：阻止默认菜单，弹出自定义菜单
   const handleHeaderContextMenu = (e: React.MouseEvent, column: string) => {
     if (!onFieldColumnMapChange) return;
@@ -298,18 +316,26 @@ export default function ExcelView({
     setCtxMenu(null);
   };
 
-  // ===== LOOP 列拖拽选择（长按/按下鼠标往下拖即选择范围） =====
+  // ===== LOOP 列选择：点击两格定起止行 与 拖拽框选 并存 =====
+  // 按下：只记录起点与坐标，不立即提交范围、不设置锚点——
+  // 松开时没有明显位移 → 当作一次点击（交给 click 走两格框选）；
+  // 位移超过阈值 → 进入拖拽连续框选。
   const handleLoopCellMouseDown = (e: React.MouseEvent, realIdx: number) => {
     if (!rangeSelecting || !onRowRangeChange) return;
     if (e.button !== 0) return; // 仅左键
     e.preventDefault();
     setDragSelecting(true);
     dragStartRef.current = realIdx;
-    setRangeAnchor(realIdx);
-    onRowRangeChange({ start: realIdx, end: realIdx });
+    dragStartYRef.current = e.clientY;
+    didDragRef.current = false;
+    suppressClickRef.current = false;
   };
 
-  // 在 tbody 上监听 mousemove/mouseup，避免快速拖拽漏事件
+  // 在 document 上监听 mousemove/mouseup：位移超过阈值视为拖拽。
+  // 拖拽期间零 React 渲染——onRowRangeChange 是 App 根组件 setState，之前每帧提交
+  // 一次范围会全树重渲染（含整张 Excel 表所有单元格重算），这就是拖拽卡顿的根源。
+  // 现在拖拽高亮直接操作 DOM class（loop-drag-preview），松手时才一次性提交最终范围：
+  // 整场拖拽最多 2 次渲染（成为拖拽时清旧高亮 + 松手提交）。
   useEffect(() => {
     if (!dragSelecting) return;
     const tbody = tbodyRef.current;
@@ -324,19 +350,52 @@ export default function ExcelView({
       return idx != null ? parseInt(idx, 10) : null;
     };
 
+    let lastRange: { start: number; end: number } | null = null;
+    // 直接 DOM 预览：范围内行加类（已带类的行是 no-op，不触发样式重算）
+    const applyPreview = (start: number, end: number) => {
+      tbody.querySelectorAll("tr").forEach((tr) => {
+        const idxAttr = tr.querySelector("td[data-real-idx]")?.getAttribute("data-real-idx");
+        if (idxAttr == null) return;
+        const idx = parseInt(idxAttr, 10);
+        if (idx >= start && idx <= end) tr.classList.add("loop-drag-preview");
+        else tr.classList.remove("loop-drag-preview");
+      });
+    };
+    const clearPreview = () => {
+      tbody.querySelectorAll("tr.loop-drag-preview").forEach((tr) => tr.classList.remove("loop-drag-preview"));
+    };
+
     const onMove = (e: MouseEvent) => {
       const start = dragStartRef.current;
       if (start == null || !onRowRangeChange) return;
+      // 位移未超过阈值 → 仍视为点击，不进入拖拽
+      if (!didDragRef.current) {
+        const dy = Math.abs(e.clientY - (dragStartYRef.current ?? e.clientY));
+        if (dy < 4) return;
+        didDragRef.current = true;
+        // 成为真拖拽：清掉旧范围高亮（一次渲染），新范围由 DOM 预览接管
+        if (rowRangeRef.current) onRowRangeChange(null);
+      }
       const cur = getRealIdxFromEvent(e);
       if (cur == null) return;
-      onRowRangeChange({ start: Math.min(start, cur), end: Math.max(start, cur) });
+      lastRange = { start: Math.min(start, cur), end: Math.max(start, cur) };
+      applyPreview(lastRange.start, lastRange.end);
     };
     const onUp = () => {
       setDragSelecting(false);
+      clearPreview();
+      const wasDrag = didDragRef.current;
       dragStartRef.current = null;
-      // 注意：不清除 rangeAnchor——保持锚点状态和点击选择一致；
-      // 但是拖拽完成相当于已经选定了一个范围，所以清除锚点允许下次重新开始
-      setRangeAnchor(null);
+      dragStartYRef.current = null;
+      didDragRef.current = false;
+      if (wasDrag) {
+        // 拖拽是一次完整手势：抑制随后的 click，并清空锚点允许下次重新开始
+        suppressClickRef.current = true;
+        setRangeAnchor(null);
+        // 松手一次性提交最终范围（拖拽期间唯一一次范围提交）
+        if (lastRange) onRowRangeChange?.(lastRange);
+      }
+      // 未成为拖拽（纯点击）：保持锚点，交给 click 做两格框选
     };
 
     document.addEventListener("mousemove", onMove);
@@ -344,6 +403,7 @@ export default function ExcelView({
     return () => {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
+      clearPreview();
     };
   }, [dragSelecting, onRowRangeChange]);
 
@@ -377,7 +437,7 @@ export default function ExcelView({
                 ? `已选 第${rowRange.start + 1}–${rowRange.end + 1}行 (${rowRange.end - rowRange.start + 1}行)`
                 : rangeAnchor != null
                 ? "再点/拖一行定结束行"
-                : "点行号/拖LOOP列框选"}
+                : "点行号/LOOP列两格框选，或拖拽"}
             </span>
             {rowRange && onGenerateCards && (
               <button
@@ -523,9 +583,7 @@ export default function ExcelView({
                     {columns.map((c) => {
                       const v = r.fields[c] || "";
                       const display = v || "—";
-                      const mark = pickedMarks.find(
-                        (m) => m.source === "excel" && m.excelRecordId === r.record_id && m.excelField === c
-                      );
+                      const mark = markByKey.get(`${r.record_id}	${c}`);
                       const justPicked = !!mark && Date.now() - mark.createdAt < 2500;
                       const colSelected = selectedColumn === c;
                       // 框选模式下，点击 LOOP 列单元格也能选择范围
@@ -555,6 +613,11 @@ export default function ExcelView({
                           data-field={c}
                           onClick={() => {
                             if (isLoopCol) {
+                              // 刚结束一次拖拽：忽略紧随其后的 click，避免误触发两格框选
+                              if (suppressClickRef.current) {
+                                suppressClickRef.current = false;
+                                return;
+                              }
                               handleRowNumClick(realIdx);
                               return;
                             }
@@ -583,7 +646,7 @@ export default function ExcelView({
                           ].join(" ")}
                           title={
                             isLoopCol
-                              ? "按下鼠标向下拖拽即可框选多行；点击可设置起止行"
+                              ? "点击两格设定起止行（中间行自动框选）；按下鼠标拖拽可连续框选多行"
                               : (picking ? `点击拾取字段「${c}」` : (mark ? `第 ${mark.order} 个拾取 · ${mark.label}` : display))
                           }
                         >

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowLeft,
   ArrowLeftRight,
   Bot,
@@ -67,6 +68,7 @@ function LogoWordmark({ className }: { className?: string }) {
   );
 }
 import type {
+  AnalysisSegment,
   AppConfig,
   AppMode,
   AppSettings,
@@ -307,10 +309,14 @@ const DEFAULT_SETTINGS: AppSettings = {
   vision_api_base: "",
   vision_api_key: "",
   vision_model: "",
+  text_api_base: "",
+  text_api_key: "",
+  text_model: "",
   browser_use_llm_base: "",
   browser_use_llm_key: "",
   browser_use_llm_model: "",
   ocr_engine: "vision",
+  vision_auto_orient: true,
   umi_ocr_host: "127.0.0.1",
   umi_ocr_port: 1224,
   prevent_accidental_close: false,
@@ -1277,6 +1283,18 @@ const docFallbackActive = docWebStatus.phase === "fallback-scanning"
 const liveStepPrefixRef = useRef<string | null>(null);
 // LOOP 运行期逐对填入卡片的字段对比/录入数据（一对一对填入效果）
 const [livePairs, setLivePairs] = useState<{ recordId: string; pairs: LivePair[] }>({ recordId: "", pairs: [] });
+  // 逐人比对历史：LOOP 运行中已完成的卡片可随时展开查看对比结果（livePairs 只保留当前人）
+  const [livePairsHistory, setLivePairsHistory] = useState<Record<string, LivePair[]>>({});
+  const livePairsRef = useRef(livePairs);
+  const loopReportsRef = useRef<VerificationReport[]>([]);
+  useEffect(() => { livePairsRef.current = livePairs; }, [livePairs]);
+  // 把当前人的逐对对比归档进历史（切人/重置时调用，保证已完成卡片可随时回看）
+  const archiveLivePairs = useCallback(() => {
+    const cur = livePairsRef.current;
+    if (cur.recordId && cur.pairs.length > 0) {
+      setLivePairsHistory((prev) => ({ ...prev, [cur.recordId]: cur.pairs }));
+    }
+  }, []);
 // 本地文件提取：已上传的文件列表
 const [docLocalFiles, setDocLocalFiles] = useState<File[]>([]);
 // 本地文件提取：用于匹配文件名的字段（绑定的 Excel 字段）
@@ -2200,6 +2218,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const [report, setReport] = useState<VerificationReport | null>(null);
   // LOOP 批量执行时按人物拆分的报告（每人一个），用于验证报告 Tab 的卡片化展示
   const [loopReports, setLoopReports] = useState<VerificationReport[]>([]);
+  useEffect(() => { loopReportsRef.current = loopReports; }, [loopReports]);
   const [error, setError] = useState<string | null>(null);
   // 成功提示：绿色 toast，2.5 秒后自动收回
   const [success, setSuccess] = useState<string | null>(null);
@@ -2217,6 +2236,35 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       if (successTimerRef.current != null) window.clearTimeout(successTimerRef.current);
     };
   }, []);
+  // 警告提示：琥珀色 toast，5 秒后自动收回（OCR 引擎回退等需要用户知晓的事件）
+  const [warn, setWarn] = useState<string | null>(null);
+  const warnTimerRef = useRef<number | null>(null);
+  const setWarnToast = useCallback((msg: string) => {
+    if (warnTimerRef.current != null) window.clearTimeout(warnTimerRef.current);
+    setWarn(msg);
+    warnTimerRef.current = window.setTimeout(() => {
+      setWarn(null);
+      warnTimerRef.current = null;
+    }, 5000);
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (warnTimerRef.current != null) window.clearTimeout(warnTimerRef.current);
+    };
+  }, []);
+  // OCR 引擎回退提示：所选引擎识别失败自动切换到另一引擎时，弹警告让用户知晓。
+  // 监听 client.ts 派发的全局事件——所有提取入口（本地/网页下载/LOOP/备用引擎）统一覆盖
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const f = (e as CustomEvent<{ from: string; to: string; reason: string }>).detail;
+      if (!f) return;
+      setWarnToast(
+        `${extractMethodLabel(f.from)} 识别失败，已自动切换 ${extractMethodLabel(f.to)}：${f.reason || "未知错误"}`
+      );
+    };
+    window.addEventListener("cinside:ocr-fallback", handler);
+    return () => window.removeEventListener("cinside:ocr-fallback", handler);
+  }, [setWarnToast]);
 
   // 监听模态覆盖层退出事件，触发 resize 让 BrowserPane 重新同步显示 BrowserView
   useEffect(() => {
@@ -2232,12 +2280,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const [verifyStatus, setVerifyStatus] = useState<VerifyStatus>("idle");
   // 每条记录的核验结论：record_id -> overall（pass/fail/review）
   const [recordResults, setRecordResults] = useState<Record<string, Overall>>({});
-  // ---- 执行分析：LOOP 执行结束后 AI 异步总结（哪张卡错了什么、高频错误字段、可能原因），文本框可开关 ----
+  // ---- 执行分析：LOOP 运行中每张问题卡片完成即实时追加一段 AI 分析，整轮结束再补总结段 ----
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [analysisAvailable, setAnalysisAvailable] = useState(false);
-  const [analysisText, setAnalysisText] = useState<string | null>(null);
-  const [analysisLoading, setAnalysisLoading] = useState(false);
-  /** 分析请求序号：防止旧响应覆盖新结果 */
+  const [analysisSegments, setAnalysisSegments] = useState<AnalysisSegment[]>([]);
+  /** 任一分段在生成中（球体同步为 processing 动画） */
+  const analysisLoading = analysisSegments.some((s) => s.loading);
+  /** 批量总结请求序号：防止旧响应覆盖新总结段 */
   const analysisSeqRef = useRef(0);
   // ---- AI 球体（左侧面板 AI 角色）：手动讲解态（点击卡片触发）优先于自动状态 ----
   const [aiManual, setAiManual] = useState<AISphereState | null>(null);
@@ -3660,6 +3709,36 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setSuccessToast(`已送 ${entries.length} 个字段到「提取元素」面板，请逐个拾取关联网页元素后保存为步骤`);
   }, [setSuccessToast, recordFileOp]);
 
+  /** 解析文件提取条目对应的 OCR 字段 key：
+   *  docField 属性 → id 尾段（FIELD_LABELS 命中）→ FIELD_LABELS 按名称反查 → name 原样 */
+  const resolveDocFieldKey = useCallback((e: CustomTextEntry): string => {
+    let fk = e.docField || "";
+    if (!fk) {
+      const tail = e.id.split("-").pop() || "";
+      if (FIELD_LABELS[tail]) fk = tail;
+    }
+    if (!fk) {
+      const hit = Object.entries(FIELD_LABELS).find(([, lbl]) => lbl === e.name);
+      if (hit) fk = hit[0];
+    }
+    return fk || e.name;
+  }, []);
+
+  /** LOOP/执行期文件提取的目标字段：
+   *  优先取「提取元素」面板中绑定 Excel 列的 doc 条目——用户配置 LOOP 时真正关联的元素，
+   *  未绑定的条目不提取（提取面板只显示绑定元素，后端 LLM/VIZ 兜底字段更少也省时间）；
+   *  没有绑定条目时回退 mappings.left_field；都没有才用默认证件字段全集 */
+  const computeDocTargetFields = useCallback((maps: FieldMapping[], entries?: CustomTextEntry[]): string[] => {
+    const DEFAULTS = ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender", "passport_issue", "issue_authority"];
+    const list = entries || customTextEntriesRef.current;
+    const bound = Array.from(new Set(
+      list.filter((e) => e.source === "doc" && e.excelField).map((e) => resolveDocFieldKey(e)).filter(Boolean)
+    ));
+    if (bound.length > 0) return bound;
+    const mapped = Array.from(new Set(maps.map((m) => m.left_field).filter(Boolean)));
+    return mapped.length > 0 ? mapped : DEFAULTS;
+  }, [resolveDocFieldKey]);
+
   /** 网页模式：预览就绪后用户点击「录入提取」触发 OCR 识别（若后台已预提取则直接复用）
    *  overrideRecordId：批量执行时显式传入当前记录 id（避免闭包中 selected 过期导致字段提交到错误记录） */
   const triggerWebExtract = useCallback((overrideRecordId?: string) => {
@@ -3669,11 +3748,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 进入 OCR 阶段
     setDocWebStatus({ phase: "ocr", filename: pending.filename });
 
-    // 计算目标字段列表（缓存路径和非缓存路径都需要）
-    const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
-    const targetFields = mappedFields.length > 0
-      ? mappedFields
-      : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender", "passport_issue", "issue_authority"];
+    // 计算目标字段列表（缓存路径和非缓存路径都需要）：优先只提取「提取元素」面板绑定 Excel 列的元素
+    const targetFields = computeDocTargetFields(mappings);
 
     // 检查是否有后台预提取的OCR结果可以直接复用（引擎必须一致，否则视为缓存失效）
     const cached = bgOcrResultRef.current;
@@ -3771,7 +3847,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         setDocWebStatus({ phase: "error", message: msg, filename: pending.filename });
         setError(`文件提取失败: ${msg}`);
       });
-  }, [mappings, selected, setSuccessToast, setError]);
+  }, [mappings, selected, setSuccessToast, setError, computeDocTargetFields]);
 
   /** 双引擎对比：当前激活的 Tab（primary=主结果，alt=备用引擎结果） */
   const [docExtractActiveTab, setDocExtractActiveTab] = useState<"primary" | "alt">("primary");
@@ -5090,11 +5166,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       docSource: "web",
       docUrl: url,
     });
-    // 目标字段：优先 mappings 的 left_field，否则用默认证件字段
-    const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
-    const targetFields = mappedFields.length > 0
-      ? mappedFields
-      : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender", "passport_issue", "issue_authority"];
+    // 目标字段：优先只提取「提取元素」面板绑定 Excel 列的元素，否则回退 mappings / 默认证件字段
+    const targetFields = computeDocTargetFields(mappings);
     // 调后端提取并弹审查面板（异步，不阻塞继续拾取）
     api.extractDocumentUrl(url, targetFields)
       .then((result) => {
@@ -5166,7 +5239,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         window.electronAPI?.viewStartPicking("right");
       }
     }, 200);
-  }, [mappings, selected, addPickedMark, setError]);
+  }, [mappings, selected, addPickedMark, setError, computeDocTargetFields]);
 
   // ============ 查找同名图片：按当前记录姓名在左右网页查找匹配图片，左右对比 ============
   const [sameNameImages, setSameNameImages] = useState<{ left: string[]; right: string[] } | null>(null);
@@ -6374,76 +6447,18 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     return fileData;
   }, []);
 
-  // ============ LOOP 执行期 OCR：UMI-OCR 提取不到保存步骤所需字段时，自动转 AI Vision 重试 ============
-  // 仍以 UMI 结果为主，Vision 仅补齐缺失字段；两引擎都提取不到则提示步骤设置可能有问题
+  // ============ LOOP 执行期 OCR：单次调用后端提取 ============
+  // 后端 extract_document 内部已含完整回退链（MRZ → 本地正则 → VIZ 看图 + 文本 LLM 并行），
+  // 前端不再二次重跑 Vision（之前"UMI 缺字段自动转 Vision 重试"会把整条 Vision 管线
+  // 重跑一遍，白等 20~240 秒且命中率极低，是 LOOP 变慢的主因）。
   const extractFileWithVisionFallback = useCallback(async (file: File, targetFields: string[]) => {
-    const result = await api.extractDocumentFile(file, targetFields);
-    if ((settings.ocr_engine || "vision") !== "umi") return result;
-    const fields = (result.fields || {}) as Record<string, string>;
-    const missing = targetFields.filter((f) => !String(fields[f] ?? "").trim());
-    if (missing.length === 0) return result;
-    rlog(`[OCR] UMI-OCR 未提取到 ${missing.length} 个保存步骤的目标字段（${missing.join("、")}），自动转 AI Vision 重试…`);
-    try {
-      const alt = await api.extractDocumentFile(file, targetFields, "vision");
-      const altFields = (alt.fields || {}) as Record<string, string>;
-      const merged: Record<string, string> = { ...fields };
-      for (const f of missing) {
-        const v = String(altFields[f] ?? "").trim();
-        if (v) merged[f] = altFields[f];
-      }
-      const stillMissing = missing.filter((f) => !String(merged[f] ?? "").trim());
-      if (stillMissing.length === 0) {
-        rlog(`[OCR] AI Vision 补齐成功（${missing.join("、")}）`);
-      } else {
-        rlog(`[OCR] AI Vision 仍未提取到：${stillMissing.join("、")} —— 步骤设置可能有问题，请检查保存的提取字段`);
-      }
-      return {
-        ...alt,
-        fields: merged,
-        text: `${result.text || ""}\n${alt.text || ""}`.trim(),
-        processed_image: alt.processed_image || result.processed_image,
-        fallback: { from: result.method || "umi_ocr", to: alt.method || "vision_ocr", reason: "UMI-OCR 缺目标字段，自动转 AI Vision 补齐" },
-      };
-    } catch (e) {
-      rlog(`[OCR] AI Vision 重试失败: ${e instanceof Error ? e.message : String(e)} —— 步骤设置可能有问题，请检查保存的提取字段`);
-      return result;
-    }
-  }, [settings.ocr_engine]);
+    return api.extractDocumentFile(file, targetFields);
+  }, []);
 
-  /** URL 版：同上逻辑，用于网页直提 */
+  /** URL 版：同上，单次调用 */
   const extractUrlWithVisionFallback = useCallback(async (url: string, targetFields: string[], filename: string) => {
-    const result = await api.extractDocumentUrl(url, targetFields, filename);
-    if ((settings.ocr_engine || "vision") !== "umi") return result;
-    const fields = (result.fields || {}) as Record<string, string>;
-    const missing = targetFields.filter((f) => !String(fields[f] ?? "").trim());
-    if (missing.length === 0) return result;
-    rlog(`[OCR] UMI-OCR 未提取到 ${missing.length} 个保存步骤的目标字段（${missing.join("、")}），自动转 AI Vision 重试…`);
-    try {
-      const alt = await api.extractDocumentUrl(url, targetFields, filename, "vision");
-      const altFields = (alt.fields || {}) as Record<string, string>;
-      const merged: Record<string, string> = { ...fields };
-      for (const f of missing) {
-        const v = String(altFields[f] ?? "").trim();
-        if (v) merged[f] = altFields[f];
-      }
-      const stillMissing = missing.filter((f) => !String(merged[f] ?? "").trim());
-      if (stillMissing.length > 0) {
-        rlog(`[OCR] AI Vision 仍未提取到：${stillMissing.join("、")} —— 步骤设置可能有问题，请检查保存的提取字段`);
-      } else {
-        rlog(`[OCR] AI Vision 补齐成功（${missing.join("、")}）`);
-      }
-      return {
-        ...alt,
-        fields: merged,
-        text: `${result.text || ""}\n${alt.text || ""}`.trim(),
-        processed_image: alt.processed_image || result.processed_image,
-        fallback: { from: result.method || "umi_ocr", to: alt.method || "vision_ocr", reason: "UMI-OCR 缺目标字段，自动转 AI Vision 补齐" },
-      };
-    } catch (e) {
-      rlog(`[OCR] AI Vision 重试失败: ${e instanceof Error ? e.message : String(e)} —— 步骤设置可能有问题，请检查保存的提取字段`);
-      return result;
-    }
-  }, [settings.ocr_engine]);
+    return api.extractDocumentUrl(url, targetFields, filename);
+  }, []);
 
   // ============ 在单个 view 上执行一个 mark（带变量替换） ============
   const executeMark = useCallback(async (
@@ -6707,10 +6722,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           lastDocRuntimeFileRef.current = { dataUrl: readResult.dataUrl, filename: readResult.filename || "local-doc", markId: mark.id };
           // 4. 调 OCR 提取（后端会自动做图像预处理：EXIF 旋转 + 裁白边 + AI 转正放大）
           const file = dataUrlToFile(readResult.dataUrl, readResult.filename || "local-doc");
-          const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
-          const targetFields = mappedFields.length > 0
-            ? mappedFields
-            : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender", "passport_issue", "issue_authority"];
+          // 目标字段：优先只提取「提取元素」面板绑定 Excel 列的元素（未绑定的不提取，省 LLM/VIZ 时间）
+          const targetFields = computeDocTargetFields(mappings);
           try {
             const result = await extractFileWithVisionFallback(file, targetFields);
             // 同步写入 docExtractsByRecord：LOOP 运行时字段对比（提取值 vs Excel 绑定列）与提取元素面板都按当前记录从这里读取
@@ -6796,10 +6809,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             const file = dataUrlToFile(fileData.dataUrl, fileData.filename);
 
             // 1. 轻量预览 + 完整OCR 同时启动（并行，互不阻塞）
-            const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
-            const targetFields = mappedFields.length > 0
-              ? mappedFields
-              : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender", "passport_issue", "issue_authority"];
+            // 目标字段：优先只提取「提取元素」面板绑定 Excel 列的元素（未绑定的不提取，省 LLM/VIZ 时间）
+            const targetFields = computeDocTargetFields(mappings);
 
             // 先启动轻量预览（快速显示文件内容给用户看）
             setDocWebStatus({ phase: "preview", filename: fileData.filename, size: fileData.size });
@@ -7008,10 +7019,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         docRuntimeFileSlotsRef.current[mark.id] = { url: docUrl, filename: urlName };
         lastDocRuntimeFileRef.current = { url: docUrl, filename: urlName, markId: mark.id };
         // 调后端提取并弹审查面板（异步不阻塞批量循环，面板自动覆盖上一条）
-        const mappedFields = Array.from(new Set(mappings.map((m) => m.left_field).filter(Boolean)));
-        const targetFields = mappedFields.length > 0
-          ? mappedFields
-          : ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender", "passport_issue", "issue_authority"];
+        // 目标字段：优先只提取「提取元素」面板绑定 Excel 列的元素（未绑定的不提取，省 LLM/VIZ 时间）
+        const targetFields = computeDocTargetFields(mappings);
         extractUrlWithVisionFallback(docUrl, targetFields, urlName)
           .then((result) => {
             // LOOP 运行期不设置浮动审查面板状态（否则停止后面板会残留飘出）
@@ -7077,7 +7086,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       })();
     `;
     await window.electronAPI.viewExecuteJS(side, script);
-  }, [performInputValue, performRealClick, mappings, waitElementAppear, getRecordDocFields, waitForDownload, triggerWebExtract, grabDirectPreviewFile, runDocExtractFallback, updateLiveStepDetail]);
+  }, [performInputValue, performRealClick, mappings, waitElementAppear, getRecordDocFields, waitForDownload, triggerWebExtract, grabDirectPreviewFile, runDocExtractFallback, updateLiveStepDetail, computeDocTargetFields]);
 
   // ============ 前端字段比对：执行完workflow后，直接从右侧BrowserView读取字段值与期望比对 ============
   // 不调用后端 startConfigurableVerify（它会通过Playwright重新导航页面，破坏LOOP当前状态）
@@ -7095,16 +7104,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     for (const e of entries) {
       if (e.source !== "doc" || !e.excelField) continue;
       // 解析 OCR 字段 key：docField 属性 → id 尾段（ct-ts-rand-field 格式）→ FIELD_LABELS 反查 name → name 原样
-      let fk = e.docField || "";
-      if (!fk) {
-        const tail = e.id.split("-").pop() || "";
-        if (FIELD_LABELS[tail]) fk = tail;
-      }
-      if (!fk) {
-        const hit = Object.entries(FIELD_LABELS).find(([, lbl]) => lbl === e.name);
-        if (hit) fk = hit[0];
-      }
-      if (!fk) fk = e.name;
+      const fk = resolveDocFieldKey(e);
       let ocrVal = "";
       for (const d of extracts) {
         const v = d.fields?.[fk];
@@ -7118,7 +7118,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       rows.push({ label: e.name || FIELD_LABELS[fk] || fk, fieldKey: fk, excelField: e.excelField, ocrVal, excelVal, match });
     }
     return rows;
-  }, []);
+  }, [resolveDocFieldKey]);
 
   const compareFieldsForRecord = useCallback(async (
     record: ApplicantRecord,
@@ -7490,7 +7490,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setExecPhase("marks");
     setVerifyFieldIdx(-1);
     setReviewFieldResults({});
-    // 重置本记录的逐对填卡数据（一对一对填入卡片对比效果）
+    // 重置本记录的逐对填卡数据（一对一对填入卡片对比效果）；上一人的对比归档进历史
+    archiveLivePairs();
     setLivePairs({ recordId: record.record_id, pairs: [] });
 
     // 本记录实际填入的值（供录入流报告卡片展示一左一右内容，不再空白）
@@ -7608,7 +7609,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             if (latest) {
               const warnings: string[] = [];
               if (latest.mrz_warnings?.length) warnings.push(...latest.mrz_warnings);
-              if (latest.fallback) warnings.push(`使用了降级引擎: ${latest.fallback}`);
+              if (latest.fallback) warnings.push(`所选引擎 ${extractMethodLabel(latest.fallback.from)} 失败，已自动切换 ${extractMethodLabel(latest.fallback.to)}：${latest.fallback.reason || "未知错误"}`);
               if (warnings.length > 0) docWarn = warnings.join("; ");
             }
           }
@@ -7696,44 +7697,101 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     return { success: true, comparisons, verifyOverall, skippedErrors, fills };
   }, [executeMark, compareFieldsForRecord, checkViewOnline, waitNetworkRestore, waitPageSettled, getRecordDocFields]);
 
-  // ============ 批量执行：对所有卡片按模板执行，从当前选中卡片开始 ============
-  // ============ 执行分析：LOOP 结束后 AI 异步总结结果（球体进入处理态表明 AI 正在工作） ============
+  // ============ 执行分析：LOOP 运行中问题卡片实时追加 + 结束后总结段（球体进入处理态表明 AI 正在工作） ============
+  /** 分段 upsert：card 分段已存在则原位更新（重新生成），不存在时插到总结段之前，总结段始终沉底 */
+  const upsertAnalysisSegment = useCallback((seg: AnalysisSegment) => {
+    setAnalysisSegments((prev) => {
+      const idx = prev.findIndex((s) => s.key === seg.key);
+      if (idx >= 0) {
+        const next = prev.slice();
+        next[idx] = seg;
+        return next;
+      }
+      if (seg.kind === "card") {
+        const sIdx = prev.findIndex((s) => s.kind === "summary");
+        if (sIdx >= 0) {
+          const next = prev.slice();
+          next.splice(sIdx, 0, seg);
+          return next;
+        }
+      }
+      return [...prev, seg];
+    });
+  }, []);
+
+  /** 报告 → 分析 API 的 cards 载荷（与后端 LoopAnalysisCard 对齐） */
+  const buildAnalysisCardPayload = useCallback((r: VerificationReport) => ({
+    name: r.record_name || r.record_id,
+    overall: r.overall,
+    summary: r.summary || "",
+    mismatches: r.entries
+      .filter((e) => e.match === "mismatch" || e.match === "error" || e.match === "missing")
+      .slice(0, 10)
+      .map((e) => ({
+        label: e.right_label || e.left_field || "字段",
+        source_value: (e.left_value || "").slice(0, 60),
+        target_value: (e.right_value || "").slice(0, 60),
+        match: e.match,
+        reasoning: (e.reasoning || "").slice(0, 120),
+      })),
+    mrz_warnings: r.mrz_warnings || [],
+  }), []);
+
+  /** 单卡即时分析：LOOP 运行中问题卡片完成即调用，结果实时追加为独立分段（不阻塞主循环） */
+  const appendCardAnalysis = useCallback(async (report: VerificationReport) => {
+    const key = report.record_id;
+    const title = report.record_name || report.record_id;
+    setAnalysisAvailable(true);
+    upsertAnalysisSegment({ key, title, kind: "card", text: "", loading: true, overall: report.overall });
+    try {
+      const res = await api.loopAnalysis({ cards: [buildAnalysisCardPayload(report)], mode: "card" });
+      upsertAnalysisSegment({ key, title, kind: "card", text: res.text, loading: false, overall: report.overall });
+    } catch (e) {
+      upsertAnalysisSegment({
+        key, title, kind: "card", loading: false, overall: report.overall,
+        text: `分析生成失败：${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+  }, [upsertAnalysisSegment, buildAnalysisCardPayload]);
+
+  /** 整轮总结：LOOP 全部结束后（或手动重新生成）写入「执行总结」分段，始终排在最后 */
   const generateLoopAnalysis = useCallback(async (reports: VerificationReport[]) => {
     // 审查与录入提取流程的报告都纳入分析（录入流程同样有 提取值 vs Excel 的不一致项）
     const reviewReports = reports;
     if (reviewReports.length === 0) return;
     const seq = ++analysisSeqRef.current;
     setAnalysisAvailable(true);
-    setAnalysisLoading(true);
     setAnalysisOpen(true); // 自动把卡片区域切换为分析文本框
+    upsertAnalysisSegment({ key: "summary", title: "执行总结", kind: "summary", text: "", loading: true });
     try {
       const res = await api.loopAnalysis({
-        cards: reviewReports.map((r) => ({
-          name: r.record_name || r.record_id,
-          overall: r.overall,
-          summary: r.summary || "",
-          mismatches: r.entries
-            .filter((e) => e.match === "mismatch" || e.match === "error" || e.match === "missing")
-            .slice(0, 10)
-            .map((e) => ({
-              label: e.right_label || e.left_field || "字段",
-              source_value: (e.left_value || "").slice(0, 60),
-              target_value: (e.right_value || "").slice(0, 60),
-              match: e.match,
-              reasoning: (e.reasoning || "").slice(0, 120),
-            })),
-          mrz_warnings: r.mrz_warnings || [],
-        })),
+        cards: reviewReports.map((r) => buildAnalysisCardPayload(r)),
       });
-      if (seq !== analysisSeqRef.current) return; // 已有更新的分析请求在跑
-      setAnalysisText(res.text);
+      if (seq !== analysisSeqRef.current) return; // 已有更新的总结请求在跑
+      upsertAnalysisSegment({ key: "summary", title: "执行总结", kind: "summary", text: res.text, loading: false });
     } catch (e) {
       if (seq !== analysisSeqRef.current) return;
-      setAnalysisText(`分析生成失败：${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      if (seq === analysisSeqRef.current) setAnalysisLoading(false);
+      upsertAnalysisSegment({
+        key: "summary", title: "执行总结", kind: "summary", loading: false,
+        text: `分析生成失败：${e instanceof Error ? e.message : String(e)}`,
+      });
     }
-  }, []);
+  }, [upsertAnalysisSegment, buildAnalysisCardPayload]);
+
+  // ============ 单人即时分析：点击已完成卡片的「查看」→ 更新/追加该卡的独立分析分段 ============
+  const generateSingleCardAnalysis = useCallback(async (recordId: string, recordName: string) => {
+    const rep = loopReportsRef.current.find((r) => r.record_id === recordId);
+    if (!rep) return;
+    setAnalysisOpen(true);
+    void appendCardAnalysis(rep);
+  }, [appendCardAnalysis]);
+
+  // 点击已完成卡片的「查看」：定位该记录 + AI 即时指出该人哪些字段不对
+  const handleViewLiveCard = useCallback((recordId: string) => {
+    handleSelectCard(recordId);
+    const rec = records.find((r) => r.record_id === recordId);
+    generateSingleCardAnalysis(recordId, rec?.fields?.name || "");
+  }, [handleSelectCard, records, generateSingleCardAnalysis]);
 
   const runBatch = useCallback(async (tplOverride?: WorkflowTemplate, targetIds?: string[]) => {
     // 防重入：已有 LOOP 在执行时忽略重复触发（双击/effect 重放/IPC 重复投递），杜绝"结束后自己又跑一遍"
@@ -7783,6 +7841,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setDocExtractPanel(null);
     // 清空上一轮/教学期残留的文件提取缓存：每张卡片的字段对比只许用本次新鲜提取，杜绝串行（列对行错、拿别人的信息检查当前卡）
     setDocExtractsByRecord({});
+    setLivePairsHistory({}); // 清上一轮历史（不归档旧数据）
     setLivePairs({ recordId: "", pairs: [] });
     // 重置执行阶段状态
     setExecPhase("idle");
@@ -7858,8 +7917,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const allComparisons: FieldComparison[] = [];
     // 本次执行的人物报告累积：供结束后 AI 执行分析使用（state 异步，finally 里读不到最新值）
     const collectedReports: VerificationReport[] = [];
-    // 新一轮执行：清空上一轮分析文本（分析面板保留开关状态，结束后自动生成新分析并自动展开）
-    setAnalysisText(null);
+    // 新一轮执行：清空上一轮分析分段，运行中即切换到执行分析视图——
+    // 问题卡片完成后 AI 分析实时逐段追加，不等全部跑完
+    setAnalysisSegments([]);
+    setAnalysisAvailable(true);
+    setAnalysisOpen(true);
 
     // 首条日志同步写入，让用户点击后立刻看到 LOOP 已启动
     rlog(`[batch] 开始LOOP执行，共 ${targets.length} 条${skipFirst ? "（已跳过示范卡，从第二张开始）" : "（勾选模式）"}`);
@@ -8260,6 +8322,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         };
         setLoopReports((prev) => [...prev, personReport]);
         collectedReports.push(personReport);
+        // 实时分析：问题卡片（review/fail）一完成就触发 AI 即时分析并追加到执行分析面板，
+        // 运行中即可看到每张卡哪里有问题（void 不阻塞主循环，AI 慢不影响下一张卡执行）
+        if (effectiveOverall !== "pass") {
+          void appendCardAnalysis(personReport);
+        }
         // 同步到卡片三态着色（通过=绿 / 有问题=黄 / 需检查=红）
         setRecordResults((prev) => ({ ...prev, [record.record_id]: effectiveOverall }));
 
@@ -8336,6 +8403,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       setBatchCursor(-1);
       setBatchMarkCursor(null);
       liveStepPrefixRef.current = null;
+      // 最后一人的对比归档进历史（运行结束后卡片仍可回看）
+      archiveLivePairs();
       // 保持execPhase="done"让用户看到最终结果，不重置verifyFieldIdx/reviewFieldResults（方便查看最终状态）
 
       const total = successCount + failCount;
@@ -8387,12 +8456,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       window.electronAPI?.viewClearHighlight("left").catch(() => {});
       rlog("[batch] LOOP 执行结束:", summary);
 
-      // 执行结束：AI 异步介入分析执行结果（审查/录入提取流程都分析；分析期间球体保持 processing 动画，左侧卡片区域自动切换为分析文本框）
+      // 执行结束：追加「执行总结」分段（总体结论/高频字段，排在所有单卡分析之后）
       if (collectedReports.length > 0) {
         void generateLoopAnalysis(collectedReports);
       }
     }
-  }, [workflowTemplate, records, cardRecords, selectedId, executeTemplateForRecord, selectMode, avatarMode, exitSelectMode, exitAvatarMode, rightUrl, leftUrl, waitViewReady, generateLoopAnalysis]);
+  }, [workflowTemplate, records, cardRecords, selectedId, executeTemplateForRecord, selectMode, avatarMode, exitSelectMode, exitAvatarMode, rightUrl, leftUrl, waitViewReady, generateLoopAnalysis, appendCardAnalysis]);
   // 始终把最新版本的 runBatch 写入 ref，供 finishTeachingAndRunBatch 直接调用
   runBatchRef.current = runBatch;
 
@@ -13283,6 +13352,21 @@ type: info.type,
               </button>
             </div>
           )}
+          {warn && (
+            <div className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800 ring-1 ring-amber-200 animate-slide-up">
+              <AlertTriangle className="h-3 w-3 shrink-0" />
+              <span className="truncate" title={warn}>{warn}</span>
+              <button
+                onClick={() => {
+                  if (warnTimerRef.current != null) window.clearTimeout(warnTimerRef.current);
+                  setWarn(null);
+                }}
+                className="ml-0.5 shrink-0 text-amber-400 hover:text-amber-600"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          )}
           {success && (
             <div className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-700 ring-1 ring-emerald-200 animate-slide-up">
               <CheckCircle2 className="h-3 w-3 shrink-0" />
@@ -13609,7 +13693,7 @@ type: info.type,
               aiSphereState={aiSphereState}
               analysisOpen={analysisOpen}
               analysisAvailable={analysisAvailable}
-              analysisText={analysisText}
+              analysisSegments={analysisSegments}
               analysisLoading={analysisLoading}
               onToggleAnalysis={(open) => {
                 setAnalysisOpen(open);
@@ -14205,6 +14289,8 @@ type: info.type,
                   running={running || singleRunning || batchRunning || queueRunning}
                   execRunning={batchRunning || queueRunning}
                   livePairs={livePairs}
+                  livePairsHistory={livePairsHistory}
+                  onViewLiveCard={handleViewLiveCard}
                   appMode={appMode}
                   onFixField={handleFixField}
                   onFixAllAndRerun={handleFixAllAndRerun}
@@ -14869,7 +14955,7 @@ type: info.type,
         </div>
       )}
 
-      {/* ============ LOOP 执行气泡已融入左侧 AI 球体（LeftPanel 内渲染） ============ */}
+      {/* ============ LOOP 执行气泡锚定左栏左下角（LeftPanel 内渲染，不挡卡片） ============ */}
 
       {/* ============ 「执行进度」视图已融入 LeftPanel 卡片区域（与执行分析同一位置） ============ */}
 

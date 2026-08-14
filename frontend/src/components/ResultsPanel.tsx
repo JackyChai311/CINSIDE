@@ -260,6 +260,10 @@ interface Props {
   fieldColumnMap?: Record<string, string>;
   /** 点击人物卡片跳转到该记录 */
   onSelectRecord?: (recordId: string) => void;
+  /** 逐人比对历史：已完成的实时卡片展开时回看对比结果（livePairs 只保留当前人） */
+  livePairsHistory?: Record<string, LivePair[]>;
+  /** 点击已完成卡片的「查看」：定位记录 + AI 即时指出该人哪些字段不对 */
+  onViewLiveCard?: (recordId: string) => void;
   /** 审查修正：把来源值写入被审查字段（网页填值/Excel列更新），返回是否成功 */
   onFixField?: (recordId: string, entry: VerificationReportEntry, rowKey: string) => Promise<boolean>;
   /** 审查修正：一键修正全部不一致字段并重新审查该卡片 */
@@ -372,6 +376,8 @@ export default function ResultsPanel({
   records = [],
   fieldColumnMap = {},
   onSelectRecord,
+  livePairsHistory = {},
+  onViewLiveCard,
   onFixField,
   onFixAllAndRerun,
   onExportExcel,
@@ -495,6 +501,8 @@ export default function ResultsPanel({
           records={records}
           fieldColumnMap={fieldColumnMap}
           onSelectRecord={onSelectRecord}
+          livePairsHistory={livePairsHistory}
+          onViewLiveCard={onViewLiveCard}
           onFixField={onFixField}
           onFixAllAndRerun={onFixAllAndRerun}
           onExportExcel={onExportExcel}
@@ -870,6 +878,8 @@ function ReportTab({
   records = [],
   fieldColumnMap = {},
   onSelectRecord,
+  livePairsHistory = {},
+  onViewLiveCard,
   onFixField,
   onFixAllAndRerun,
   onExportExcel,
@@ -1035,6 +1045,10 @@ function ReportTab({
   fieldColumnMap?: Record<string, string>;
   /** 点击人物卡片跳转到该记录 */
   onSelectRecord?: (recordId: string) => void;
+  /** 逐人比对历史：已完成的实时卡片展开时回看对比结果（livePairs 只保留当前人） */
+  livePairsHistory?: Record<string, LivePair[]>;
+  /** 点击已完成卡片的「查看」：定位记录 + AI 即时指出该人哪些字段不对 */
+  onViewLiveCard?: (recordId: string) => void;
   /** 审查修正：把来源值写入被审查字段（网页填值/Excel列更新），返回是否成功 */
   onFixField?: (recordId: string, entry: VerificationReportEntry, rowKey: string) => Promise<boolean>;
   /** 审查修正：一键修正全部不一致字段并重新审查该卡片 */
@@ -1737,33 +1751,47 @@ function ReportTab({
     const isRunning = rec.status === "running";
     const isFailed = rec.status === "failed";
     const [expanded, setExpanded] = useState(isRunning);
+    // 用户手动展开/收起过后，不再自动折叠——跑批途中回看已完成卡片不被强制关上
+    const userToggledRef = useRef(false);
+    const toggleExpanded = () => {
+      userToggledRef.current = true;
+      // 手动展开时右侧文件处理面板跟着切到该人物（自动展开不触发，避免跑批途中抢焦点）
+      if (!expanded && onSelectRecord && rec.recordId) onSelectRecord(rec.recordId);
+      setExpanded((v) => !v);
+    };
     // 运行中自动展开当前卡片
     useEffect(() => {
       if (isRunning) setExpanded(true);
     }, [isRunning]);
-    // 完成后延迟1秒自动折叠
+    // 刚完成时延迟1秒自动折叠（有问题的卡片保持展开；用户点开过的不动它）
     useEffect(() => {
-      if (!isRunning) {
-        const t = setTimeout(() => setExpanded(false), 1200);
+      if (!isRunning && !isFailed && !userToggledRef.current) {
+        const t = setTimeout(() => {
+          if (!userToggledRef.current) setExpanded(false);
+        }, 1200);
         return () => clearTimeout(t);
       }
-    }, [isRunning, rec.fieldSteps.length]);
+    }, [isRunning, isFailed, rec.fieldSteps.length]);
 
     const doneCount = rec.fieldSteps.filter((f) => f.done).length;
-    // 逐对填卡数据：当前记录有 livePairs 时，卡片切换到「字段对比态」（一对一对填入）
-    const cardPairs = livePairs && livePairs.recordId === rec.recordId ? livePairs.pairs : [];
-    // 状态色系：执行中=无色系（中性灰），已完成=绿，需检查=红
+    // 逐对填卡数据：当前记录有 livePairs 时用实时数据；已完成的卡片回退到历史对比（随时可回看）
+    const cardPairs = livePairs && livePairs.recordId === rec.recordId
+      ? livePairs.pairs
+      : (livePairsHistory[rec.recordId] || []);
+    // 状态色系：执行中=无色系（中性灰），已完成=天蓝（只代表跑完，不代表通过——
+    // 通过与否要看字段明细，绿色留给最终报告的"通过"判定，避免误会），需检查=红
+    // 状态用散发的颜色区分（无文字徽标）：glow=卡片外圈柔光，dotGlow=圆点光晕
     const accent = isFailed
-      ? { head: "bg-rose-50/80 border-rose-200", text: "text-rose-700", badge: "bg-rose-500", badgeSoft: "bg-rose-100 text-rose-700", spin: "text-rose-500" }
+      ? { head: "bg-rose-50/80 border-rose-200", text: "text-rose-700", badge: "bg-rose-500", badgeSoft: "bg-rose-100 text-rose-700", spin: "text-rose-500", glow: "shadow-[0_2px_14px_-4px_rgba(244,63,94,0.35)]", dotGlow: "shadow-[0_0_10px_2px_rgba(244,63,94,0.55)]", ping: true }
       : isRunning
-      ? { head: "bg-white border-slate-200", text: "text-slate-700", badge: "bg-slate-400", badgeSoft: "bg-slate-100 text-slate-600", spin: "text-slate-400" }
-      : { head: "bg-emerald-50/80 border-emerald-200", text: "text-emerald-700", badge: "bg-emerald-500", badgeSoft: "bg-emerald-100 text-emerald-700", spin: "text-emerald-500" };
+      ? { head: "bg-white border-slate-200", text: "text-slate-700", badge: "bg-slate-400", badgeSoft: "bg-slate-100 text-slate-600", spin: "text-slate-400", glow: "shadow-sm", dotGlow: "shadow-[0_0_8px_1px_rgba(148,163,184,0.5)]", ping: true }
+      : { head: "bg-sky-50/80 border-sky-200", text: "text-sky-700", badge: "bg-sky-500", badgeSoft: "bg-sky-100 text-sky-700", spin: "text-sky-500", glow: "shadow-[0_2px_14px_-4px_rgba(14,165,233,0.3)]", dotGlow: "shadow-[0_0_10px_2px_rgba(14,165,233,0.5)]", ping: false };
 
     return (
-      <div data-running={isRunning} className={`overflow-hidden rounded-md border shadow-sm transition-all ${accent.head}`}>
+      <div data-running={isRunning} className={`overflow-hidden rounded-md border transition-all ${accent.glow} ${accent.head}`}>
         <div className="flex w-full items-center gap-2 px-3 py-1.5">
           <button
-            onClick={() => setExpanded((v) => !v)}
+            onClick={toggleExpanded}
             className="flex flex-1 items-center gap-2 text-left transition-colors hover:brightness-[0.97]"
           >
             {isRunning ? (
@@ -1782,18 +1810,33 @@ function ReportTab({
           </button>
           {onSelectRecord && rec.recordId && (
             <button
-              onClick={(e) => { e.stopPropagation(); onSelectRecord(rec.recordId); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                userToggledRef.current = true; // 手动查看后保持展开，不被自动折叠关上
+                setExpanded(true); // 点击后保持展开，回看该人对比结果
+                (onViewLiveCard || onSelectRecord)(rec.recordId);
+              }}
               className="shrink-0 rounded px-1.5 py-0.5 text-[9px] text-slate-400 transition-colors hover:bg-slate-200/60 hover:text-slate-600"
-              title="跳转到该记录"
+              title="查看该人对比结果，AI 指出哪些字段不对"
             >
               查看
             </button>
           )}
-          <span className={`inline-flex shrink-0 items-center rounded-full ${accent.badge} px-2 py-0.5 text-[10px] font-semibold text-white`}>
-            {isRunning ? `执行中 ${doneCount}步` : isFailed ? "需检查" : "已完成"}
+          {/* 状态用散发的颜色区分（无文字徽标）：发光圆点；执行中带步数进度小字 */}
+          <span
+            className="relative inline-flex h-2.5 w-2.5 shrink-0"
+            title={isRunning ? `执行中 ${doneCount}步` : isFailed ? "需检查" : "已完成"}
+          >
+            {accent.ping && (
+              <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${accent.badge} opacity-60`} />
+            )}
+            <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${accent.badge} ${accent.dotGlow}`} />
           </span>
+          {isRunning && (
+            <span className="shrink-0 font-mono text-[10px] text-slate-400">{doneCount}步</span>
+          )}
           <button
-            onClick={() => setExpanded((v) => !v)}
+            onClick={toggleExpanded}
             className="shrink-0 rounded p-0.5 transition-colors hover:bg-slate-200/50"
           >
             <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
@@ -1934,6 +1977,11 @@ function ReportTab({
       });
     };
     const expanded = expandedState;
+    // 展开/收起切换：展开的同时让右侧文件处理面板自动切到该人物那一套，无需再点「查看」
+    const toggleExpanded = () => {
+      if (!expanded && onSelectRecord && r.record_id) onSelectRecord(r.record_id);
+      setExpanded((v) => !v);
+    };
     /** 已修正的字段行 key（修正成功后标记，重新审查生成新报告后自动重置） */
     const [fixedKeys, setFixedKeys] = useState<Set<string>>(new Set());
     /** 人工确认打勾的字段行 key：人类检查后确认该字段无需修正/已核对（随卡片组件生命周期保留） */
@@ -1975,12 +2023,13 @@ function ReportTab({
     const isReview = r.overall === "review" || hasMrzWarning;
 
     // 状态色系（MRZ警告时强制amber黄色系）
-    // 通过=emerald绿 / 有问题=amber黄 / 需检查=rose红
+    // 通过=emerald绿 / 有问题=amber黄 / 需检查=rose红——只靠颜色散发区分，不放文字徽标
+    // glow=卡片外圈柔光（颜色从卡片边缘散发），dotGlow=状态圆点光晕，ping=圆点是否脉冲（异常态吸引视线）
     const accent = isPass
-      ? { headerBg: "bg-emerald-50/60", badge: "bg-emerald-500", badgeSoft: "bg-emerald-100 text-emerald-700", footer: "bg-slate-50 text-emerald-700", border: "border-emerald-300/70 ring-1 ring-emerald-200/50", stripe: "bg-emerald-400", text: "text-emerald-600" }
+      ? { headerBg: "bg-emerald-50/60", badge: "bg-emerald-500", badgeSoft: "bg-emerald-100 text-emerald-700", footer: "bg-slate-50 text-emerald-700", border: "border-emerald-300/70 ring-1 ring-emerald-200/50", stripe: "bg-emerald-400", text: "text-emerald-600", glow: "shadow-[0_2px_16px_-4px_rgba(16,185,129,0.35)]", dotGlow: "shadow-[0_0_10px_2px_rgba(16,185,129,0.55)]", ping: false }
       : isReview
-      ? { headerBg: "bg-amber-50/50", badge: "bg-amber-500", badgeSoft: "bg-amber-100 text-amber-700", footer: "bg-slate-50 text-amber-700", border: "border-amber-300/70 ring-1 ring-amber-200/50", stripe: "bg-amber-400", text: "text-amber-600" }
-      : { headerBg: "bg-rose-50/60", badge: "bg-rose-500", badgeSoft: "bg-rose-100 text-rose-700", footer: "bg-slate-50 text-rose-700", border: "border-rose-300/70 ring-1 ring-rose-200/50", stripe: "bg-rose-400", text: "text-rose-600" };
+      ? { headerBg: "bg-amber-50/50", badge: "bg-amber-500", badgeSoft: "bg-amber-100 text-amber-700", footer: "bg-slate-50 text-amber-700", border: "border-amber-300/70 ring-1 ring-amber-200/50", stripe: "bg-amber-400", text: "text-amber-600", glow: "shadow-[0_2px_16px_-4px_rgba(245,158,11,0.35)]", dotGlow: "shadow-[0_0_10px_2px_rgba(245,158,11,0.55)]", ping: true }
+      : { headerBg: "bg-rose-50/60", badge: "bg-rose-500", badgeSoft: "bg-rose-100 text-rose-700", footer: "bg-slate-50 text-rose-700", border: "border-rose-300/70 ring-1 ring-rose-200/50", stripe: "bg-rose-400", text: "text-rose-600", glow: "shadow-[0_2px_16px_-4px_rgba(244,63,94,0.35)]", dotGlow: "shadow-[0_0_10px_2px_rgba(244,63,94,0.55)]", ping: true };
     const OverallIcon = isPass ? CheckCircle2 : isReview ? AlertTriangle : XCircle;
 
     // 中间状态图标 —— 录入=箭头，审查=✓/✗/−
@@ -2010,13 +2059,13 @@ function ReportTab({
     const studentId = r.student_id || getStudentId(srcRec);
 
     return (
-      <div className={`relative overflow-hidden rounded-xl border bg-white shadow-sm transition-all hover:shadow-md ${accent.border}`}>
+      <div className={`relative overflow-hidden rounded-xl border bg-white transition-all hover:shadow-md ${accent.glow} ${accent.border}`}>
         {/* 左侧状态色条 */}
         <div className={`absolute inset-y-0 left-0 w-1 ${accent.stripe}`} />
         {/* 头部 */}
         <div className={`flex items-center gap-2 py-2.5 pl-5 pr-4 ${accent.headerBg}`}>
           <button
-            onClick={() => setExpanded((v) => !v)}
+            onClick={toggleExpanded}
             className="flex flex-1 items-center gap-2 text-left transition-colors hover:brightness-[0.97]"
           >
             <OverallIcon className={`h-4 w-4 shrink-0 ${accent.text}`} />
@@ -2048,12 +2097,18 @@ function ReportTab({
               查看
             </button>
           )}
-          <span className={`inline-flex shrink-0 items-center gap-1 rounded-full ${accent.badge} px-2.5 py-0.5 text-[11px] font-semibold text-white shadow-sm`}>
-            <OverallIcon className="h-3 w-3" />
-            {OVERALL_LABELS[r.overall]}
+          {/* 状态用散发的颜色区分（无文字徽标）：发光圆点，异常态脉冲提醒，悬浮可看状态名 */}
+          <span
+            className="relative inline-flex h-2.5 w-2.5 shrink-0"
+            title={OVERALL_LABELS[r.overall]}
+          >
+            {accent.ping && (
+              <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${accent.badge} opacity-60`} />
+            )}
+            <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${accent.badge} ${accent.dotGlow}`} />
           </span>
           <button
-            onClick={() => setExpanded((v) => !v)}
+            onClick={toggleExpanded}
             className="shrink-0 rounded p-0.5 transition-colors hover:bg-slate-200/50"
           >
             <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
@@ -2257,7 +2312,8 @@ function ReportTab({
         <span className="rounded-full bg-slate-800 px-2.5 py-0.5 text-[10px] font-medium text-white">
           {running ? "执行中" : "执行完成"}
         </span>
-        {passCount > 0 && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">✓ {passCount}</span>}
+        {/* 跑完≠通过：天蓝只代表执行完毕，字段对没对要看卡片明细（绿色留给最终报告"通过"） */}
+        {passCount > 0 && <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-medium text-sky-700">完成 {passCount}</span>}
         {failCount > 0 && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-medium text-rose-700">✗ {failCount}</span>}
         {runCount > 0 && <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-medium text-slate-600">
           <Loader2 className="mr-0.5 inline h-2.5 w-2.5 animate-spin" />{runCount}

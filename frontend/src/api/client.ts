@@ -71,6 +71,19 @@ function docTimeout(_filename?: string): number {
   return 240000;
 }
 
+/** OCR 引擎回退通知：提取结果带 fallback（所选引擎失败自动切换另一引擎）时
+ * 派发全局事件，App 层监听后弹琥珀色警告提示（引擎选择必须让用户知晓） */
+function notifyEngineFallback<T extends { fallback?: { from: string; to: string; reason: string } | null }>(res: T): T {
+  if (res?.fallback) {
+    try {
+      window.dispatchEvent(new CustomEvent("cinside:ocr-fallback", { detail: res.fallback }));
+    } catch {
+      /* 非浏览器环境忽略 */
+    }
+  }
+  return res;
+}
+
 export const api = {
   getConfig: () => jsonFetch<AppConfig>(`${BASE}/config`),
 
@@ -94,6 +107,43 @@ export const api = {
         method: "POST",
       },
       30000
+    ),
+
+  /** 识别端点可用模型：填好 Base URL + Key 后调 {base}/models 拉取模型列表，
+   *  设置面板据此展示可选项，不再手输模型名 */
+  listModels: (payload: { api_base: string; api_key: string }) =>
+    jsonFetch<{ ok: boolean; models?: string[]; error?: string }>(
+      `${BASE}/config/list-models`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+      20000
+    ),
+
+  /** 测试全局分析模型：按面板填写（留空项按已保存配置继承）发极小 chat 请求验证可用 */
+  testAnalysis: (payload: { api_base?: string; api_key?: string; model?: string }) =>
+    jsonFetch<{ ok: boolean; message: string }>(
+      `${BASE}/config/test-analysis`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+      30000
+    ),
+
+  /** 测试生图模型：核对型号在端点 /models 中是否存在（不实际生图） */
+  testImagegen: (payload: { api_base?: string; api_key?: string; model?: string }) =>
+    jsonFetch<{ ok: boolean; message: string }>(
+      `${BASE}/config/test-imagegen`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+      20000
     ),
 
   testUmiOcr: () =>
@@ -150,7 +200,8 @@ export const api = {
     fd.append("file", file);
     return jsonFetch<{ count: number; records: ApplicantRecord[]; detected_column_map: Record<string, string> }>(
       `${BASE}/upload/excel`,
-      { method: "POST", body: fd }
+      { method: "POST", body: fd },
+      60000
     );
   },
 
@@ -159,7 +210,8 @@ export const api = {
     fd.append("file", file);
     return jsonFetch<{ count: number; records: ApplicantRecord[]; detected_column_map: Record<string, string> }>(
       `${BASE}/upload/excel-right`,
-      { method: "POST", body: fd }
+      { method: "POST", body: fd },
+      60000
     );
   },
 
@@ -204,7 +256,8 @@ export const api = {
       }
     ),
 
-  /** LOOP 执行分析：AI 总结各卡片错误、高频错误字段与可能原因（LLM 未配置时后端返回本地统计摘要） */
+  /** LOOP 执行分析：AI 总结各卡片错误、高频错误字段与可能原因（LLM 未配置时后端返回本地统计摘要）
+   *  mode=card：运行中单张问题卡片完成后的即时分析（实时追加），cards 只放 1 张 */
   loopAnalysis: (payload: {
     cards: Array<{
       name: string;
@@ -219,6 +272,7 @@ export const api = {
       }>;
       mrz_warnings: string[];
     }>;
+    mode?: "batch" | "card";
   }) =>
     jsonFetch<{ text: string; source: "ai" | "local" }>(`${BASE}/verify/analysis/loop`, {
       method: "POST",
@@ -312,7 +366,7 @@ export const api = {
     return jsonFetch<DocumentExtractResult>(`${BASE}/document/extract`, {
       method: "POST",
       body: fd,
-    }, docTimeout(file.name));
+    }, docTimeout(file.name)).then(notifyEngineFallback);
   },
 
   /** 从网页 URL 下载 PDF/图片并提取文字 + 字段；engine 可临时指定 "umi" 或 "vision" */
@@ -326,7 +380,7 @@ export const api = {
         fields: fields && fields.length > 0 ? fields.join(",") : null,
         engine: engine || null,
       }),
-    }, docTimeout(filename)),
+    }, docTimeout(filename)).then(notifyEngineFallback),
 
   /** 文件格式转换 + 压缩到目标大小（文件处理面板「导出」用）；sourceUrl 为远端文件时后端先下载再转换 */
   convertDocument: (dataB64: string, filename: string, targetFormat: string, targetKb: number, sourceUrl?: string) =>

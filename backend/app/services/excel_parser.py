@@ -28,6 +28,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import os
@@ -424,7 +425,7 @@ async def parse_bytes(content: bytes, filename: str) -> tuple[list[ApplicantReco
     ext = os.path.splitext(filename)[1].lower()
 
     if ext == ".csv":
-        header_keys, row_dicts = _read_csv_rows(content)
+        header_keys, row_dicts = await asyncio.to_thread(_read_csv_rows, content)
         if not row_dicts:
             return [], {}
         # 准备样例数据给 AI（前 3 行）
@@ -433,10 +434,11 @@ async def parse_bytes(content: bytes, filename: str) -> tuple[list[ApplicantReco
         return _rowdicts_to_records(row_dicts, ai_mapping or None)
 
     # xls 或 xlsx：读取所有 sheet（包括隐藏的、被分组折叠的）
+    # openpyxl/xlrd 读取是同步 CPU/IO 重活，放线程池避免阻塞事件循环
     if ext == ".xls":
-        sheets = _read_xls_all_sheets(content)
+        sheets = await asyncio.to_thread(_read_xls_all_sheets, content)
     else:
-        sheets = _read_xlsx_all_sheets(content)
+        sheets = await asyncio.to_thread(_read_xlsx_all_sheets, content)
     if not sheets:
         return [], {}
 
