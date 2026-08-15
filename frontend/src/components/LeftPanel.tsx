@@ -523,7 +523,28 @@ export default function LeftPanel({
                         AI 正在分析…
                       </div>
                     ) : (
-                      <div className="whitespace-pre-wrap text-xs leading-relaxed text-slate-700">{seg.text}</div>
+                      <>
+                        {seg.kind === "summary" && seg.stats && (
+                          <div className="mb-1.5 flex flex-wrap items-center gap-1">
+                            <span className="rounded-full bg-white/80 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">
+                              共处理 {seg.stats.total} 张
+                            </span>
+                            <span className="rounded-full bg-white/80 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">
+                              用时 {seg.stats.duration}
+                            </span>
+                            <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
+                              通过 {seg.stats.pass}
+                            </span>
+                            <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                              有问题 {seg.stats.review}
+                            </span>
+                            <span className="rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] font-medium text-rose-700">
+                              需检查（缺件）{seg.stats.fail}
+                            </span>
+                          </div>
+                        )}
+                        <div className="whitespace-pre-wrap text-xs leading-relaxed text-slate-700">{seg.text}</div>
+                      </>
                     )}
                   </div>
                 ))}

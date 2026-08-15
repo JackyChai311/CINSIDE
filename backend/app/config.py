@@ -113,6 +113,9 @@ SETTING_KEYS = {
     "umi_ocr_exe_path": "UMI_OCR_EXE_PATH",
     "beginner_mode": "BEGINNER_MODE",
     "prevent_accidental_close": "PREVENT_ACCIDENTAL_CLOSE",
+    "loop_keep_awake": "LOOP_KEEP_AWAKE",
+    "high_speed_mode": "HIGH_SPEED_MODE",
+    "igpu_acceleration": "IGPU_ACCELERATION",
     "ui_scale": "UI_SCALE",
     "theme": "THEME",
     "accent": "ACCENT",
@@ -128,6 +131,9 @@ VALID_ACCENTS = {"indigo", "sky", "emerald", "rose", "violet", "amber"}
 _SETTING_TYPES: dict[str, type] = {
     "beginner_mode": bool,
     "prevent_accidental_close": bool,
+    "loop_keep_awake": bool,
+    "high_speed_mode": bool,
+    "igpu_acceleration": bool,
     "vision_auto_orient": bool,
     "vision_viz_fallback": bool,
     "ui_scale": float,
@@ -219,6 +225,14 @@ class Settings:
     beginner_mode: bool = field(default_factory=lambda: _env_bool("BEGINNER_MODE", False))
     # 防误关：true=关闭按钮最小化到托盘
     prevent_accidental_close: bool = field(default_factory=lambda: _env_bool("PREVENT_ACCIDENTAL_CLOSE", False))
+    # LOOP 运行不息屏：true=执行 LOOP 期间阻止电脑息屏/休眠，结束后恢复
+    loop_keep_awake: bool = field(default_factory=lambda: _env_bool("LOOP_KEEP_AWAKE", False))
+    # 高速模式：true=LOOP 运行时 OCR 提取与浏览器步骤并行处理（字段对比前统一等待结果）
+    high_speed_mode: bool = field(default_factory=lambda: _env_bool("HIGH_SPEED_MODE", False))
+    # 核显加速：true=本地 OCR 改走内置 RapidOCR 引擎（自动适配 DirectML GPU，
+    # Intel/AMD/NVIDIA 通用；自检乱码或更慢则锁 CPU），失败回退 UMI-OCR。
+    # UMI-OCR 自身不支持 GPU 识别（官方开发计划中），此为绕开它的独立通路。
+    igpu_acceleration: bool = field(default_factory=lambda: _env_bool("IGPU_ACCELERATION", False))
     # 整体 UI 缩放比例（0.6~1.6）
     ui_scale: float = field(default_factory=lambda: _env_float("UI_SCALE", 1.0))
     # 主题：light=浅色 / dark=深色
@@ -259,6 +273,9 @@ class Settings:
             "umi_ocr_exe_path": self.umi_ocr_exe_path,
             "beginner_mode": self.beginner_mode,
             "prevent_accidental_close": self.prevent_accidental_close,
+            "loop_keep_awake": self.loop_keep_awake,
+            "high_speed_mode": self.high_speed_mode,
+            "igpu_acceleration": self.igpu_acceleration,
             "ui_scale": self.ui_scale,
             "theme": self.theme,
             "accent": self.accent,

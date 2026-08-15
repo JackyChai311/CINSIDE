@@ -1,6 +1,6 @@
 "use strict";
 
-const { app, BrowserWindow, BrowserView, ipcMain, shell, Tray, Menu, nativeImage, session } = require("electron");
+const { app, BrowserWindow, BrowserView, ipcMain, shell, Tray, Menu, nativeImage, session, powerSaveBlocker } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const http = require("http");
@@ -8,12 +8,34 @@ const https = require("https");
 const { spawn, execFile } = require("child_process");
 const { autoUpdater } = require("electron-updater");
 
-// 统一日志文件，供调试用
-const LOG_FILE = path.join(app ? app.getPath("userData") : ".", "cinside-debug.log");
+// 统一日志文件，供调试用。
+// 注意：部分环境的安全软件会拦截 electron.exe 对 AppData 目录的写入（open EPERM/EBADF），
+// 导致日志静默丢失。这里做 fallback 链——userData 不可写时轮流退回 LOCALAPPDATA、项目目录。
+function resolveLogFile() {
+  const candidates = [
+    app ? path.join(app.getPath("userData"), "cinside-debug.log") : null,
+    path.join(process.env.LOCALAPPDATA || ".", "cinside-debug.log"),
+    path.join(process.cwd(), "cinside-debug.log"),
+  ];
+  for (const c of candidates) {
+    if (!c) continue;
+    try {
+      fs.appendFileSync(c, ""); // 探测可写
+      return c;
+    } catch (e) { console.log(`[debugLog] candidate rejected: ${c} err=${e.message}`); }
+  }
+  return candidates[0]; // 全不可写时退回默认，写失败由 debugLog 兜底留痕
+}
+const LOG_FILE = (typeof global.__CINSIDE_LOG_FILE === "string")
+  ? global.__CINSIDE_LOG_FILE
+  : resolveLogFile();
 function debugLog(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
   console.log(msg);
-  try { fs.appendFileSync(LOG_FILE, line); } catch (e) {}
+  try { fs.appendFileSync(LOG_FILE, line); } catch (e) {
+    // 写盘失败必须留痕（异常静默吞会导致「日志莫名消失」难排查）
+    console.log(`[debugLog] WRITE FAILED -> LOG_FILE=${LOG_FILE} err=${e && e.message}`);
+  }
 }
 
 // 资源路径解析：开发环境和打包环境路径不同
@@ -2509,6 +2531,22 @@ app.whenReady().then(async () => {
     downloadCapture[side] = !!enabled;
     debugLog(`[download] set-download-capture side=${side}, enabled=${enabled}`);
     return { ok: true };
+  });
+
+  // ============ LOOP 运行时阻止息屏 ============
+  // powerSaveBlocker：prevent-display-sleep 同时阻止息屏与系统休眠
+  let powerSaveBlockerId = null;
+  ipcMain.handle("set-power-save", (_event, enabled) => {
+    const active = powerSaveBlockerId != null && powerSaveBlocker.isStarted(powerSaveBlockerId);
+    if (enabled && !active) {
+      powerSaveBlockerId = powerSaveBlocker.start("prevent-display-sleep");
+      debugLog(`[power-save] 已阻止息屏 (id=${powerSaveBlockerId})`);
+    } else if (!enabled && active) {
+      powerSaveBlocker.stop(powerSaveBlockerId);
+      powerSaveBlockerId = null;
+      debugLog(`[power-save] 已恢复息屏`);
+    }
+    return { ok: true, active: enabled ? (powerSaveBlockerId != null) : false };
   });
 
   // ============ 文件提取保底机制 ============

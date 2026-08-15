@@ -49,6 +49,13 @@ PYTHON_DEPS = [
     ("pillow_heif", "pillow-heif", "pillow-heif（HEIC/iPhone 照片解码）"),
 ]
 
+# OCR 加速引擎依赖：「核显加速」开关的内置引擎组件（未装时前端可一键下载）
+OCR_ENGINE_DEPS = [
+    ("rapidocr", "rapidocr", "RapidOCR（内置 OCR 引擎核心）"),
+    ("onnxruntime", "onnxruntime-directml", "DirectML（Intel/AMD/NVIDIA 显卡加速）"),
+    ("openvino", "openvino", "OpenVINO（Intel/AMD CPU 加速）"),
+]
+
 # 工具安装目录（用户数据目录下）
 TOOLS_DIR = _USER_DATA_DIR / "tools"
 UMI_OCR_INSTALL_DIR = TOOLS_DIR / "Umi-OCR"
@@ -103,6 +110,65 @@ def check_all_python_deps() -> list[dict]:
             "installed": installed,
         })
     return results
+
+
+def check_ocr_engine_deps() -> list[dict]:
+    """检测 OCR 加速引擎依赖状态（供「核显加速」卡片展示与一键安装）。"""
+    results = []
+    for import_name, pip_name, display_name in OCR_ENGINE_DEPS:
+        installed = check_python_dep(import_name)
+        results.append({
+            "key": import_name,
+            "name": display_name,
+            "pip_name": pip_name,
+            "installed": installed,
+        })
+    return results
+
+
+def install_ocr_engine_deps() -> tuple[bool, str]:
+    """一键安装 OCR 加速引擎依赖（逐包安装，单个失败不影响其他）。
+
+    包较大（合计下载约 200MB），每包每源 10 分钟超时；
+    官方源失败自动换清华镜像重试（国内网络友好）。返回 (ok, message)。
+    """
+    mirror = ["-i", "https://pypi.tuna.tsinghua.edu.cn/simple"]
+    missing = [(i, p, d) for i, p, d in OCR_ENGINE_DEPS if not check_python_dep(i)]
+    if not missing:
+        return True, "OCR 加速引擎已全部安装。"
+
+    ok_pkgs, fail_pkgs = [], []
+    for import_name, pip_name, display_name in missing:
+        base_cmd = [sys.executable, "-m", "pip", "install", "--upgrade"]
+        installed_ok = False
+        last_err = ""
+        for extra in ([], mirror):  # 先官方源，失败换清华镜像
+            if installed_ok:
+                break
+            try:
+                result = subprocess.run(
+                    [*base_cmd, pip_name, *extra], capture_output=True, text=True, timeout=600,
+                    encoding="utf-8", errors="ignore",
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if result.returncode == 0 and check_python_dep(import_name):
+                    installed_ok = True
+                    break
+                last_err = (result.stderr or result.stdout or "")[-300:]
+            except subprocess.TimeoutExpired:
+                last_err = "下载超时（10分钟）"
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e}"
+        if installed_ok:
+            ok_pkgs.append(display_name)
+        else:
+            fail_pkgs.append(f"{display_name}：{last_err}")
+
+    if fail_pkgs:
+        return False, "以下组件安装失败：\n" + "\n".join(fail_pkgs) + (
+            f"\n已成功安装：{', '.join(ok_pkgs)}" if ok_pkgs else ""
+        )
+    return True, f"安装完成：{', '.join(ok_pkgs)}。正在自动适配最快的推理后端…"
 
 
 def install_python_deps(packages: list[str] | None = None) -> tuple[bool, str]:
@@ -914,6 +980,7 @@ def install_officecli() -> tuple[bool, str]:
 def get_all_deps_status() -> dict:
     """返回所有依赖和工具的综合状态（供前端一次请求获取）。"""
     python_deps = check_all_python_deps()
+    ocr_engine_deps = check_ocr_engine_deps()
     umi_ocr = check_umi_ocr_installed()
     remotion = check_remotion_installed()
     officecli = check_officecli_installed()
@@ -942,6 +1009,8 @@ def get_all_deps_status() -> dict:
     return {
         "python_deps": python_deps,
         "python_all_installed": python_all_installed,
+        "ocr_engine_deps": ocr_engine_deps,
+        "ocr_engine_all_installed": all(d["installed"] for d in ocr_engine_deps),
         "umi_ocr": {
             **umi_ocr,
             "service_online": umi_online,

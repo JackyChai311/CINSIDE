@@ -141,10 +141,12 @@ interface Props {
   onConfirm?: () => void;
 
   // ===== OCR 引擎切换 =====
-  /** 当前 OCR 引擎：vision=识图AI（在线Vision LLM），umi=UMI-OCR（本地离线） */
+  /** 当前 OCR 引擎：vision=识图AI（在线Vision LLM），umi=本地 OCR（内置加速引擎/UMI） */
   ocrEngine?: "vision" | "umi";
   /** 切换 OCR 引擎 */
   onChangeOcrEngine?: (engine: "vision" | "umi") => void;
+  /** 核显加速开关（本地 OCR 走内置加速引擎，不依赖 UMI 在线） */
+  igpuAcceleration?: boolean;
 
   /** 隐藏自带标题栏（choose 模式下由外层"文件处理"头部替代） */
   hideHeader?: boolean;
@@ -205,6 +207,7 @@ export default function DocLocalExtractConfig({
   onConfirm,
   ocrEngine = "vision",
   onChangeOcrEngine,
+  igpuAcceleration = false,
   hideHeader = false,
 }: Props) {
   const isChoose = mode === "choose";
@@ -1086,14 +1089,14 @@ export default function DocLocalExtractConfig({
         <span className="text-[10px] font-bold text-teal-800">
           {isChoose ? "选择文件提取来源" : isWeb ? "文件提取配置（网页模式）" : "文件提取配置（目录模式）"}
         </span>
-        {/* OCR 识别引擎切换：识图AI（Vision LLM） ↔ UMI-OCR（本地离线） */}
+        {/* OCR 识别引擎切换：识图AI（Vision LLM） ↔ 本地 OCR（内置加速引擎/UMI） */}
         {onChangeOcrEngine && !isChoose && (
           <div className="ml-auto flex shrink-0 items-center gap-1">
             <div
               className="flex items-center gap-0 rounded-md bg-slate-100/80 p-0.5 ring-1 ring-slate-200"
-              title="护照/图片识别引擎：识图AI（在线Vision）或 UMI-OCR（本地离线）"
+              title="护照/图片识别引擎：识图AI（在线Vision）或本地 OCR（核显加速开=内置加速引擎，关=UMI-OCR）"
             >
-              {([["vision", "识图AI"], ["umi", "UMI-OCR"]] as const).map(([val, label]) => (
+              {([["vision", "识图AI"], ["umi", "OCR"]] as const).map(([val, label]) => (
                 <button
                   key={val}
                   onClick={(e) => { e.stopPropagation(); if (ocrEngine !== val) handleOcrEngineSwitch(val); }}
@@ -1109,8 +1112,9 @@ export default function DocLocalExtractConfig({
                 </button>
               ))}
             </div>
-            {/* UMI-OCR 状态指示灯 */}
-            {ocrEngine === "umi" && umiStatus !== "idle" && (
+            {/* UMI 状态指示灯：核显加速开启 = 内置引擎真跑（与 UMI 无关，灯隐藏）；
+                关闭 = 纯 UMI（灯照常显示） */}
+            {ocrEngine === "umi" && !igpuAcceleration && umiStatus !== "idle" && (
               <span
                 className={[
                   "flex items-center gap-0.5 rounded px-1 py-0.5 text-[8px] font-medium",
@@ -1140,8 +1144,8 @@ export default function DocLocalExtractConfig({
       </div>
       )}
 
-      {/* UMI-OCR 不可用时的警告横幅 */}
-      {ocrEngine === "umi" && umiStatus === "unavailable" && (
+      {/* UMI 不可用时的警告横幅（核显加速开启时内置引擎不依赖 UMI，无需告警） */}
+      {ocrEngine === "umi" && !igpuAcceleration && umiStatus === "unavailable" && (
         <div className="shrink-0 border-b border-rose-200 bg-rose-50 px-2 py-1.5 text-[9px] leading-relaxed text-rose-700">
           <div className="flex items-start gap-1">
             <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
@@ -1633,7 +1637,7 @@ export default function DocLocalExtractConfig({
                   >
                     {webStatus.phase === "downloading" && "正在下载文件…"}
                     {webStatus.phase === "preview" && "预览就绪"}
-                    {webStatus.phase === "ocr" && `正在使用 ${ocrEngine === "umi" ? "UMI-OCR" : "AI Vision"} 识别文字…`}
+                    {webStatus.phase === "ocr" && `正在使用 ${ocrEngine === "umi" ? (igpuAcceleration ? "GPU" : "UMI") : "AI Vision"} 识别文字…`}
                     {webStatus.phase === "error" && "提取失败"}
                     {webStatus.phase === "fallback-scanning" && (webStatus.message || "保底机制：回退页面扫描中…")}
                     {webStatus.phase === "fallback-downloading" && `保底下载：${webStatus.current || 0}/${webStatus.total || 0}${webStatus.currentFile ? ` · ${webStatus.currentFile}` : ""}`}
@@ -2087,7 +2091,7 @@ export default function DocLocalExtractConfig({
                 : webStatus?.phase === "preview"
                 ? "预览就绪，点击「录入提取」开始识别"
                 : webStatus?.phase === "ocr"
-                ? `${ocrEngine === "umi" ? "UMI-OCR" : "AI Vision"} 识别中…`
+                ? `${ocrEngine === "umi" ? (igpuAcceleration ? "GPU" : "UMI") : "AI Vision"} 识别中…`
                 : webStatus?.phase === "success"
                 ? `✓ 已提取 ${webStatus.filename || ""}${webPostStepCount > 0 ? ` · 过程${webPostStepCount}步` : ""}`
                 : webStatus?.phase === "post-click"
@@ -2217,6 +2221,8 @@ function WebExtractResultView({
     imageUrl: string;
     filename: string;
     method: string;
+    /** umi 通道实际引擎：gpu=内置加速引擎，umi=UMI-OCR（含 GPU 兜底） */
+    ocr_backend?: string;
     text: string;
     fields: Record<string, string>;
     side: "left" | "right";
@@ -2227,6 +2233,8 @@ function WebExtractResultView({
     imageUrl: string;
     filename: string;
     method: string;
+    /** umi 通道实际引擎：gpu=内置加速引擎，umi=UMI-OCR（含 GPU 兜底） */
+    ocr_backend?: string;
     text: string;
     fields: Record<string, string>;
     fallback?: { from: string; to: string; reason: string } | null;
@@ -2273,7 +2281,7 @@ function WebExtractResultView({
 
   // 判断当前主结果使用的引擎，决定备用引擎名称
   const primaryIsUmi = isUmiMethod(result.method);
-  const altEngineLabel = primaryIsUmi ? "AI Vision" : "UMI-OCR";
+  const altEngineLabel = primaryIsUmi ? "AI Vision" : "OCR";
   const altEngineIcon = primaryIsUmi
     ? <Sparkles className="h-2.5 w-2.5" />
     : <ScanLine className="h-2.5 w-2.5" />;
@@ -2345,7 +2353,7 @@ function WebExtractResultView({
               ? "bg-emerald-100 text-emerald-700"
               : "bg-slate-100 text-slate-600",
           ].join(" ")}>
-            {extractMethodLabel(cur.method)}
+            {extractMethodLabel(cur.method, cur.ocr_backend)}
           </span>
         )}
 

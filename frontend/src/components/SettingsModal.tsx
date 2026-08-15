@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Compass, Download, Eye, EyeOff, Film, FolderOpen, Loader2, Maximize2, Minus, Moon, Package, Palette, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, Sparkles, Sun, X, XCircle } from "lucide-react";
+import { CheckCircle2, Compass, Cpu, Download, Eye, EyeOff, Film, FolderOpen, Loader2, Maximize2, Minus, MonitorCheck, MonitorOff, Moon, Package, Palette, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, Sparkles, Sun, Target, X, XCircle, Zap } from "lucide-react";
 import { api } from "../api/client";
-import type { AppSettings, DepsStatus } from "../types";
+import type { AppSettings, DepsStatus, GpuInfo } from "../types";
 
 interface Props {
   initial: AppSettings;
@@ -30,6 +30,9 @@ const DEFAULTS: AppSettings = {
   browser_use_llm_key: "",
   browser_use_llm_model: "sensenova-6.7-flash-lite",
   prevent_accidental_close: false,
+  loop_keep_awake: false,
+  high_speed_mode: false,
+  igpu_acceleration: false,
   ui_scale: 1.0,
   beginner_mode: false,
   theme: "light",
@@ -47,6 +50,35 @@ const ACCENTS: { key: string; label: string; color: string }[] = [
   { key: "amber", label: "琥珀", color: "#f59e0b" },
 ];
 
+// 文件识别 5 档调节杆（准确→速度）：一杆联动 识别引擎 × VIZ兜底 × 自动转正 × 高速模式
+const RECOG_GEARS = [
+  {
+    title: "AI识图\nVIZ·转正",
+    desc: "第1档（最准确）：识图 AI 读文件 + 朝向转正 + VIZ 看图兜底——OCR/排版都读不出的字段由视觉模型看图补提。极致准确率，慢（兜底常需 30~90 秒/字段）。",
+    patch: { ocr_engine: "vision", vision_auto_orient: true, vision_viz_fallback: true, high_speed_mode: false },
+  },
+  {
+    title: "AI识图\n自动转正",
+    desc: "第2档：识图 AI 读文件，朝向自动转正（每张 2~10 秒朝向检测）。方向乱的扫描件首选，VIZ 兜底不启用。",
+    patch: { ocr_engine: "vision", vision_auto_orient: true, vision_viz_fallback: false, high_speed_mode: false },
+  },
+  {
+    title: "AI识图\n无自动转正",
+    desc: "第3档：识图 AI 读文件，跳过朝向检测。文件基本都是正向时省时提速，识别精度同第2档。",
+    patch: { ocr_engine: "vision", vision_auto_orient: false, vision_viz_fallback: false, high_speed_mode: false },
+  },
+  {
+    title: "OCR\n自动转正",
+    desc: "第4档：UMI-OCR 本地识别（不耗识图 AI 调用），保留朝向转正。清晰印刷件的速度与准确平衡点。",
+    patch: { ocr_engine: "umi", vision_auto_orient: true, vision_viz_fallback: false, high_speed_mode: false },
+  },
+  {
+    title: "OCR\n无转正·高速",
+    desc: "第5档（最快）：UMI-OCR + 跳过转正 + OCR 与浏览器步骤并行 + 压缩步骤间等待。批量跑正向清晰文件时每张约省 8~20 秒。",
+    patch: { ocr_engine: "umi", vision_auto_orient: false, vision_viz_fallback: false, high_speed_mode: true },
+  },
+];
+
 export default function SettingsModal({ initial, onClose, onSaved, onScaleChange, onBrightnessChange, onAppearanceChange }: Props) {
   const [settings, setSettings] = useState<AppSettings>({ ...DEFAULTS, ...initial });
   const [showKey, setShowKey] = useState(false);
@@ -59,9 +91,36 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
   const [depsStatus, setDepsStatus] = useState<DepsStatus | null>(null);
   const [pipInstalling, setPipInstalling] = useState(false);
   const [pipMessage, setPipMessage] = useState<{ ok: boolean; message: string } | null>(null);
+  const [ocrInstalling, setOcrInstalling] = useState(false);
+  const [ocrInstallMsg, setOcrInstallMsg] = useState<{ ok: boolean; message: string } | null>(null);
   const [umiDownloading, setUmiDownloading] = useState(false);
   const [umiDownloadMsg, setUmiDownloadMsg] = useState<{ ok: boolean; message: string } | null>(null);
   const [umiOpenMsg, setUmiOpenMsg] = useState("");
+
+  // 核显加速：显卡检测结果
+  const [gpuInfo, setGpuInfo] = useState<GpuInfo | null>(null);
+  const [gpuDetecting, setGpuDetecting] = useState(false);
+  const detectGpuInfo = async (refresh = false) => {
+    setGpuDetecting(true);
+    try {
+      if (refresh) {
+        // 手动重检：先重跑 GPU 自检（子进程探测，最长约 1 分钟），再取硬件+引擎状态
+        try { await api.runGpuSelftest(); } catch { /* 自检失败也继续取状态 */ }
+      }
+      const info = await api.getGpuInfo(refresh);
+      setGpuInfo(info);
+    } catch {
+      setGpuInfo({
+        ok: false, error: "检测请求失败，请确认后端已启动",
+        gpus: [], igpu: null, has_igpu: false,
+        cpu: { name: "", physical_cores: 0, logical_cores: 0 },
+        local_engine: { installed: false, backend: "", tested: false, testing: false, detail: "", gpu_name: "", last_ms: 0, install_error: "" },
+        gpu_ocr_supported: false,
+      });
+    } finally {
+      setGpuDetecting(false);
+    }
+  };
 
   // 打开 UMI-OCR 所在文件夹（选中 exe，便于手动双击启动）
   const handleOpenUmiFolder = async () => {
@@ -89,6 +148,8 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
       .catch(() => {});
     // 获取依赖状态
     refreshDepsStatus();
+    // 检测显卡（后端有会话级缓存，重复打开面板不重查硬件）
+    detectGpuInfo();
   }, []);
 
   const refreshDepsStatus = async () => {
@@ -113,6 +174,23 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
       setPipMessage({ ok: false, message: e.message || "安装失败" });
     } finally {
       setPipInstalling(false);
+    }
+  };
+
+  const handleInstallOcrEngine = async () => {
+    setOcrInstalling(true);
+    setOcrInstallMsg(null);
+    try {
+      const r = await api.installOcrEngineDeps();
+      setOcrInstallMsg({ ok: r.ok, message: r.message });
+      if (r.ok) {
+        // 安装+自动自检已在后端完成，这里刷新依赖与引擎状态展示
+        await Promise.all([refreshDepsStatus(), detectGpuInfo(true)]);
+      }
+    } catch (e: any) {
+      setOcrInstallMsg({ ok: false, message: e.message || "安装失败" });
+    } finally {
+      setOcrInstalling(false);
     }
   };
 
@@ -306,6 +384,11 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
     }
   };
 
+  // 当前档位：由 引擎 × VIZ兜底 × 自动转正 反推（高速模式只随第5档打开）
+  const recogGearPos = (settings.ocr_engine || "vision") === "vision"
+    ? (settings.vision_viz_fallback === true ? 0 : settings.vision_auto_orient !== false ? 1 : 2)
+    : (settings.vision_auto_orient !== false ? 3 : 4);
+
   const handleTest = async () => {
     const base = (settings.vision_api_base || "").trim();
     // 本地先校验 URL 协议，填错（如 hhttps://）直接提示，不发起请求干等
@@ -487,64 +570,7 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
                     : `✗ ${testResult.message || "该模型不支持图片输入，OCR / 视觉比对将不可用。"}`}
                 </div>
               )}
-              {/* AI 自动转正开关：关闭可省去 OCR 前的朝向检测 Vision 调用，提升处理速度 */}
-              <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-slate-200 bg-white px-3 py-2.5">
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={settings.vision_auto_orient !== false}
-                  onClick={() => update({ vision_auto_orient: settings.vision_auto_orient === false })}
-                  className={[
-                    "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors",
-                    settings.vision_auto_orient !== false ? "bg-emerald-500" : "bg-slate-300",
-                  ].join(" ")}
-                >
-                  <span
-                    className={[
-                      "inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform",
-                      settings.vision_auto_orient !== false ? "translate-x-[18px]" : "translate-x-0.5",
-                    ].join(" ")}
-                  />
-                </button>
-                <div className="text-xs text-slate-500">
-                  <div className="font-medium text-slate-700">
-                    AI 自动转正{settings.vision_auto_orient !== false ? "（已开启）" : "（已关闭）"}
-                  </div>
-                  <p className="mt-0.5 text-[10px] leading-relaxed text-slate-400">
-                    识别前自动检测文字朝向并转正（横放/倒置的扫描件）。关闭后每张方向不确定的图可省一次
-                    AI 调用（约 2~10 秒），文件基本都是正向时建议关闭提速；手机照片的 EXIF 方向纠正不受影响。
-                  </p>
-                </div>
-              </label>
-              {/* VIZ 看图兜底开关：默认关闭——OCR 读不出的字段标缺失，不调识图AI */}
-              <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-slate-200 bg-white px-3 py-2.5">
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={settings.vision_viz_fallback === true}
-                  onClick={() => update({ vision_viz_fallback: settings.vision_viz_fallback !== true })}
-                  className={[
-                    "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors",
-                    settings.vision_viz_fallback === true ? "bg-emerald-500" : "bg-slate-300",
-                  ].join(" ")}
-                >
-                  <span
-                    className={[
-                      "inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform",
-                      settings.vision_viz_fallback === true ? "translate-x-[18px]" : "translate-x-0.5",
-                    ].join(" ")}
-                  />
-                </button>
-                <div className="text-xs text-slate-500">
-                  <div className="font-medium text-slate-700">
-                    VIZ 看图兜底{settings.vision_viz_fallback === true ? "（已开启）" : "（已关闭）"}
-                  </div>
-                  <p className="mt-0.5 text-[10px] leading-relaxed text-slate-400">
-                    OCR 文字和文本 AI 都读不出签发机关等字段时，调识图 AI 看图补提（视觉模型推理慢，常需
-                    30~90 秒）。默认关闭：读不出的字段直接标缺失进对比，绝不偷跑识图 AI；需要极致准确率时再开。
-                  </p>
-                </div>
-              </label>
+              {/* AI 自动转正 / VIZ 看图兜底均已并入下方「文件识别档位」5档调节杆 */}
               {/* 文本 AI：识图之外的纯文字任务（UMI-OCR 结果排版 / LOOP 执行总结）用轻量文本模型 */}
               <div className="rounded-lg border border-slate-200 bg-white px-3 py-2.5">
                 <div className="text-xs font-medium text-slate-700">文本 AI（OCR 文字排版 / 执行总结）</div>
@@ -727,6 +753,75 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
           </div>
           </div>
 
+          {/* 文件识别档位：准确⇄速度 5档调节杆（引擎 × VIZ兜底 × 自动转正 × 高速模式 一杆定档） */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+            {/* 两端语义标签：紧贴轨道最左/最右端（与轨道同宽对齐） */}
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="flex items-center gap-1 text-[10px] font-semibold text-emerald-600">
+                <Target className="h-3 w-3" />准确
+              </span>
+              <span className="flex items-center gap-1 text-[10px] font-semibold text-amber-500">
+                速度<Zap className="h-3 w-3" />
+              </span>
+            </div>
+
+            {/* 轨道 + 滑块 + 5 个透明点击区（点轨道任意处即可换档） */}
+            <div className="relative pt-1 pb-0.5">
+              <div className="relative h-2.5 rounded-full bg-gradient-to-r from-emerald-400 via-teal-200 to-amber-400 shadow-inner">
+                {/* 档位分隔刻度（等分 5 段的 4 条内刻线） */}
+                {[20, 40, 60, 80].map((p) => (
+                  <span key={p} className="absolute top-1/2 h-1.5 w-px -translate-y-1/2 bg-white/70" style={{ left: `${p}%` }} />
+                ))}
+              </div>
+              {/* 滑块：当前档中心，白圈+主题色描边+光晕 */}
+              <div
+                className="pointer-events-none absolute top-1/2 -translate-x-1/2 -translate-y-1/2 transition-[left] duration-200"
+                style={{ left: `${recogGearPos * 20 + 10}%` }}
+              >
+                <span className="block h-5 w-5 rounded-full border-[3px] border-white bg-slate-700 shadow-[0_1px_6px_rgba(15,23,42,0.35)] ring-1 ring-slate-300" />
+              </div>
+              <div className="absolute inset-0 grid grid-cols-5">
+                {RECOG_GEARS.map((g, i) => (
+                  <button
+                    key={g.title}
+                    type="button"
+                    onClick={() => update({ ...g.patch })}
+                    aria-label={`第${i + 1}档：${g.title.replace("\n", "")}`}
+                    title={`第${i + 1}档：${g.title.replace("\n", "")}`}
+                    className="cursor-pointer"
+                  />
+                ))}
+              </div>
+            </div>
+
+            {/* 5 档标签（紧贴轨道下方，左缘与轨道最左端对齐、右缘与最右端对齐） */}
+            <div className="mt-2 grid grid-cols-5 gap-1">
+              {RECOG_GEARS.map((g, i) => (
+                <button
+                  key={g.title}
+                  type="button"
+                  onClick={() => update({ ...g.patch })}
+                  className={[
+                    "whitespace-pre-line rounded-lg px-0.5 py-1.5 text-center text-[9px] leading-tight transition-all",
+                    i === recogGearPos
+                      ? "bg-slate-700 font-semibold text-white shadow-md ring-1 ring-slate-500/40"
+                      : "bg-white/70 font-medium text-slate-500 ring-1 ring-slate-200/70 hover:bg-white hover:text-slate-700",
+                  ].join(" ")}
+                >
+                  {g.title}
+                </button>
+              ))}
+            </div>
+
+            {/* 当前档说明：档位小徽标 + 描述文字 */}
+            <div className="mt-2.5 flex items-start gap-1.5 rounded-lg bg-white/70 px-2 py-1.5 ring-1 ring-slate-200/70">
+              <span className="mt-px shrink-0 rounded bg-slate-700 px-1 py-0.5 text-[9px] font-bold text-white">
+                {recogGearPos + 1}档
+              </span>
+              <p className="text-[10px] leading-relaxed text-slate-500">{RECOG_GEARS[recogGearPos].desc}</p>
+            </div>
+          </div>
+
           {/* 防误关：挂后台到系统托盘 */}
           <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
             <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-700">
@@ -767,7 +862,48 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
             </label>
           </div>
 
-          {/* 进入新手村 */}
+          {/* LOOP 运行时不息屏 */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-700">
+              {settings.loop_keep_awake ? (
+                <MonitorCheck className="h-3.5 w-3.5 text-emerald-600" />
+              ) : (
+                <MonitorOff className="h-3.5 w-3.5 text-slate-400" />
+              )}
+              LOOP 运行不息屏
+            </div>
+            <label className="flex cursor-pointer items-start gap-2.5">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={!!settings.loop_keep_awake}
+                onClick={() => update({ loop_keep_awake: !settings.loop_keep_awake })}
+                className={[
+                  "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors",
+                  settings.loop_keep_awake ? "bg-emerald-500" : "bg-slate-300",
+                ].join(" ")}
+              >
+                <span
+                  className={[
+                    "inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform",
+                    settings.loop_keep_awake ? "translate-x-[18px]" : "translate-x-0.5",
+                  ].join(" ")}
+                />
+              </button>
+              <div className="text-xs text-slate-500">
+                <div className="font-medium text-slate-700">
+                  {settings.loop_keep_awake ? "已开启" : "已关闭"}
+                </div>
+                <p className="mt-0.5 leading-relaxed">
+                  开启后，运行 LOOP 任务期间电脑不会息屏或休眠，任务结束后自动恢复系统默认的息屏策略。适合长时间批量执行时离开电脑。
+                </p>
+              </div>
+            </label>
+          </div>
+
+          {/* 高速模式已并入上方「文件识别档位」第4档（OCR+无转正·高速） */}
+
+        {/* 进入新手村 */}
           <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
             <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-700">
               <Compass className="h-3.5 w-3.5 text-brand-600" />
@@ -1201,6 +1337,136 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
                 </a>
                 下载解压后，在文件处理设置中选择 Umi-OCR.exe。
               </p>
+            </div>
+
+            {/* 核显加速：硬件检测 + 偏好开关 */}
+            <div className="rounded-lg border border-slate-200 bg-white p-2.5">
+              <div className="mb-1.5 flex items-center justify-between">
+                <span className="flex items-center gap-1 text-[10px] font-semibold text-slate-600">
+                  <Cpu className="h-3 w-3" />
+                  核显加速（硬件检测）
+                </span>
+                <button
+                  type="button"
+                  onClick={() => detectGpuInfo(true)}
+                  disabled={gpuDetecting}
+                  className="flex shrink-0 items-center gap-0.5 rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[9px] font-medium text-slate-600 transition-colors hover:bg-slate-100 disabled:opacity-60"
+                  title="重新查询本机显卡与 CPU 信息"
+                >
+                  {gpuDetecting ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <RefreshCw className="h-2.5 w-2.5" />}
+                  重新检测
+                </button>
+              </div>
+
+              {/* 检测结果 */}
+              {gpuDetecting && !gpuInfo ? (
+                <p className="mb-1.5 flex items-center gap-1 text-[9px] text-slate-400">
+                  <Loader2 className="h-2.5 w-2.5 animate-spin" /> 正在检测显卡…
+                </p>
+              ) : gpuInfo?.ok ? (
+                <div className="mb-1.5 space-y-1">
+                  {(gpuInfo.gpus || []).map((g) => (
+                    <div
+                      key={g.name}
+                      className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                        g.integrated ? "bg-emerald-50 text-emerald-700" : "bg-sky-50 text-sky-700"
+                      }`}
+                      title={`${g.name}${g.driver_version ? `（驱动 ${g.driver_version}）` : ""}`}
+                    >
+                      <span className="shrink-0">{g.integrated ? "核显" : "独显"}</span>
+                      <span className="min-w-0 flex-1 truncate">{g.name}</span>
+                      {g.status === "OK" && <CheckCircle2 className="h-2.5 w-2.5 shrink-0" />}
+                    </div>
+                  ))}
+                  {(!gpuInfo.gpus || gpuInfo.gpus.length === 0) && (
+                    <p className="text-[9px] text-slate-400">未发现显卡设备</p>
+                  )}
+                  {gpuInfo.cpu?.name && (
+                    <p className="truncate text-[9px] text-slate-400" title={gpuInfo.cpu.name}>
+                      🖥 {gpuInfo.cpu.name}（{gpuInfo.cpu.physical_cores}核{gpuInfo.cpu.logical_cores}线程）
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <p className="mb-1.5 text-[9px] text-rose-500">{gpuInfo?.error || "未检测到显卡信息"}</p>
+              )}
+
+              {/* 偏好开关 */}
+              <label className="flex cursor-pointer items-start gap-2.5">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={!!settings.igpu_acceleration}
+                  onClick={() => update({ igpu_acceleration: !settings.igpu_acceleration })}
+                  className={[
+                    "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors",
+                    settings.igpu_acceleration ? "bg-emerald-500" : "bg-slate-300",
+                  ].join(" ")}
+                >
+                  <span
+                    className={[
+                      "inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform",
+                      settings.igpu_acceleration ? "translate-x-[18px]" : "translate-x-0.5",
+                    ].join(" ")}
+                  />
+                </button>
+                <div className="text-[10px] leading-relaxed text-slate-500">
+                  <div className="font-medium text-slate-700">
+                    {settings.igpu_acceleration
+                      ? gpuInfo?.local_engine?.backend === "directml"
+                        ? `内置引擎已就绪（DirectML${gpuInfo.local_engine.gpu_name ? ` · ${gpuInfo.local_engine.gpu_name}` : ""}）`
+                        : gpuInfo?.local_engine?.backend === "openvino"
+                          ? "内置引擎已就绪（OpenVINO）"
+                          : gpuInfo?.local_engine?.backend === "cpu"
+                            ? "内置引擎已就绪（CPU）"
+                            : "内置引擎初始化中"
+                      : "已关闭（纯 UMI-OCR）"}
+                  </div>
+                  <p className="mt-0.5">
+                    引擎切换：开启 = 所有 OCR 走内置 PP-OCRv6 引擎（单张 ~0.3-1s，不依赖 UMI 开机，失败自动回退
+                    UMI）；关闭 = 纯 UMI-OCR（真实证件上识别量比内置引擎多 ~40%，精度更高）。内置引擎自动适配最快推理后端：显卡
+                    DirectML（Intel / AMD / NVIDIA 通用）→ OpenVINO CPU（对 Intel CPU 指令级优化）→
+                    onnxruntime CPU 兜底。首次启用逐档自检：输出乱码或反而更慢就自动落下一档。
+                  </p>
+                  {gpuInfo?.local_engine?.detail && settings.igpu_acceleration && (
+                    <p className="mt-0.5 text-emerald-600">{gpuInfo.local_engine.detail}</p>
+                  )}
+                </div>
+              </label>
+
+              {/* 加速引擎组件（别人电脑没装时一键下载） */}
+              {depsStatus && !depsStatus.ocr_engine_all_installed && (
+                <div className="mt-2 border-t border-slate-100 pt-2">
+                  <div className="mb-1 flex items-center gap-0.5 text-[9px] font-medium text-amber-600">
+                    <Download className="h-2.5 w-2.5" />
+                    加速引擎组件未安装（约 200MB，不装则走 UMI-OCR）
+                  </div>
+                  {depsStatus.ocr_engine_deps.map((dep) => (
+                    <div key={dep.key} className="flex items-center gap-1.5 py-0.5 text-[9px]">
+                      {dep.installed ? (
+                        <CheckCircle2 className="h-2.5 w-2.5 shrink-0 text-emerald-500" />
+                      ) : (
+                        <XCircle className="h-2.5 w-2.5 shrink-0 text-rose-400" />
+                      )}
+                      <span className={dep.installed ? "text-slate-400" : "font-medium text-rose-600"}>{dep.name}</span>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={handleInstallOcrEngine}
+                    disabled={ocrInstalling}
+                    className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                  >
+                    {ocrInstalling ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                    {ocrInstalling ? "下载安装中（数分钟）…" : "一键下载加速引擎"}
+                  </button>
+                </div>
+              )}
+              {ocrInstallMsg && (
+                <div className={`mt-1.5 whitespace-pre-line rounded px-2 py-1 text-[10px] ${ocrInstallMsg.ok ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
+                  {ocrInstallMsg.message}
+                </div>
+              )}
             </div>
           </div>
 

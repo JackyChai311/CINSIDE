@@ -43,6 +43,12 @@ _FIELD_ALIASES: dict[str, str] = {
     "student": "name", "studentname": "name", "studentname": "name", "full name": "name",
     "applicant name": "name", "chinese name": "name", "english name": "name",
     "大写": "name", "英文名": "name", "英文姓名": "name", "姓名大写": "name", "拼音": "name",
+    # 护照细分姓名字段（OCR 提取的规范名）：姓/名列也要能归一化命中
+    "surname": "surname", "姓": "surname", "姓氏": "surname", "last name": "surname",
+    "family name": "surname", "фамилия": "surname",
+    "given_name": "given_name", "名": "given_name", "名字": "given_name", "given name": "given_name",
+    "given names": "given_name", "first name": "given_name", "forename": "given_name",
+    "имя": "given_name",
     "passport_no": "passport_no", "护照号": "passport_no", "护照": "passport_no",
     "passport_number": "passport_no",
     "passport no": "passport_no", "passport number": "passport_no", "passportno": "passport_no",

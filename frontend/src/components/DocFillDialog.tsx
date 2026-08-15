@@ -14,6 +14,8 @@ interface Props {
   data: {
     filename: string;
     method: string;
+    /** umi 通道实际引擎：gpu=内置加速引擎，umi=UMI-OCR（含 GPU 兜底） */
+    ocr_backend?: string;
     text: string;
     fields: Record<string, string>;
     fallback?: { from: string; to: string; reason: string } | null;
@@ -58,7 +60,7 @@ export default function DocFillDialog({ data, mappings, filling, onConfirm, onCa
     .filter((r) => r.fillable && checked[r.field] && (values[r.field] || "").trim())
     .map((r) => ({ field: r.field, value: (values[r.field] || "").trim(), selector: r.selector }));
 
-  const methodLabel = extractMethodLabel(data.method);
+  const methodLabel = extractMethodLabel(data.method, data.ocr_backend);
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm">

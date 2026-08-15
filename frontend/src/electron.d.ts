@@ -132,6 +132,8 @@ export interface ElectronAPI {
 
   // === 下载捕获（文件提取模式） ===
   setDownloadCapture: (side: ViewSide, enabled: boolean) => Promise<{ ok: boolean }>;
+  // === LOOP 运行时阻止息屏 ===
+  setPowerSave: (enabled: boolean) => Promise<{ ok: boolean; active: boolean }>;
   onDownloadCaptured: (callback: (data: { side: string; filename: string; dataUrl: string; size: number; mime: string; path: string }) => void) => () => void;
   onDownloadStarted: (callback: (data: { side: string; filename: string }) => void) => () => void;
   onDownloadProgress: (callback: (data: { side: string; filename: string; received: number; total: number; percent: number }) => void) => () => void;

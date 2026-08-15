@@ -10,10 +10,13 @@ from pydantic import BaseModel
 
 from ..config import settings, SETTING_KEYS
 from ..services.document_extract import ensure_umi_ocr_running, launch_umi_ocr, browse_umi_ocr_executable, open_umi_ocr_folder, check_markitdown_available
+from ..services import gpu_detect
+from ..services import gpu_ocr
 from ..services.dependency_manager import (
     download_and_install_umi_ocr,
     download_and_install_umi_ocr_stream,
     get_all_deps_status,
+    install_ocr_engine_deps,
     install_officecli,
     install_python_deps,
     install_remotion,
@@ -47,6 +50,9 @@ class AppSettings(BaseModel):
     umi_ocr_exe_path: str = ""
     beginner_mode: bool = False
     prevent_accidental_close: bool = False
+    loop_keep_awake: bool = False
+    high_speed_mode: bool = False
+    igpu_acceleration: bool = False
     ui_scale: float = 1.0
     theme: str = "light"
     accent: str = "indigo"
@@ -304,6 +310,36 @@ async def test_markitdown():
     return {"ok": ok, "message": msg}
 
 
+# ============ 显卡 / 核显检测 ============
+
+
+@router.get("/gpu-info")
+def gpu_info(refresh: bool = False):
+    """检测显卡（含核显）与 CPU 信息 + 内置 OCR 引擎自检状态。
+
+    local_engine：内置 RapidOCR 引擎（「核显加速」开关的实际执行者）。
+    开关开启时本地识别改走内置引擎，自动适配 DirectML GPU（Intel/AMD/NVIDIA
+    通用）；自检发现显卡乱码或更慢则锁定 CPU，绝不"开了加速反而变慢"。
+    UMI-OCR 本身不支持 GPU 识别（官方开发计划中），此为绕开它的独立通路。
+    """
+    hw = gpu_detect.detect(refresh)
+    engine = gpu_ocr.get_status()
+    return {
+        **hw,
+        "gpu_ocr_supported": engine["backend"] == "directml",
+        "local_engine": engine,
+        "ocr_engine": settings.ocr_engine,
+        "igpu_acceleration": settings.igpu_acceleration,
+    }
+
+
+@router.post("/gpu-selftest")
+def gpu_selftest():
+    """手动触发内置引擎 GPU 自检（设置面板「重新检测」用）。"""
+    result = gpu_ocr.run_selftest()
+    return {"ok": result["tested"], "engine": result}
+
+
 # ============ 依赖与外部工具管理 ============
 
 @router.get("/deps-status")
@@ -317,6 +353,27 @@ def install_python_deps_endpoint():
     """一键安装/修复所有缺失的 Python 依赖（markitdown、PyMuPDF、pillow-heif）。"""
     ok, msg = install_python_deps()
     return {"ok": ok, "message": msg}
+
+
+@router.post("/install-ocr-engine-deps")
+def install_ocr_engine_deps_endpoint():
+    """一键安装 OCR 加速引擎（rapidocr + DirectML + OpenVINO，约 200MB，耗时数分钟）。
+
+    安装成功后重置引擎缓存并重跑三选一自检（DirectML → OpenVINO → CPU），
+    前端拿到的 message 即为最终自检状态。
+    """
+    from ..services import gpu_ocr
+
+    ok, msg = install_ocr_engine_deps()
+    selftest_detail = ""
+    if ok and gpu_ocr._try_import():
+        gpu_ocr.reset_for_reinstall()
+        try:
+            st = gpu_ocr.run_selftest()
+            selftest_detail = st.get("detail", "")
+        except Exception as e:
+            selftest_detail = f"自检异常（{type(e).__name__}）"
+    return {"ok": ok, "message": msg + (f"\n{selftest_detail}" if selftest_detail else "")}
 
 
 @router.post("/download-umi-ocr")

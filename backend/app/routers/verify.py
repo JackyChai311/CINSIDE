@@ -123,6 +123,8 @@ class LoopAnalysisRequest(BaseModel):
     # batch=整轮结束后的总体总结（默认，兼容旧调用）
     # card=LOOP 运行中单张问题卡片完成后的即时分析（实时追加到执行分析面板）
     mode: str = "batch"
+    # 整轮总用时（毫秒，batch 模式可选）：AI 总结与本地兜底都会提到总用时/平均用时
+    duration_ms: int | None = None
 
 
 @router.post("/analysis/loop")
@@ -153,8 +155,20 @@ async def loop_analysis(body: LoopAnalysisRequest):
                 seen.add(key)
     top_fields = field_counter.most_common(5)
 
+    # 用时格式化（秒 → "X分Y秒" / "X秒"）；平均用时 = 总用时 / 卡片数
+    def _fmt_sec(sec: float) -> str:
+        sec = max(1, round(sec))
+        return f"{sec // 60} 分 {sec % 60} 秒" if sec >= 60 else f"{sec} 秒"
+
+    duration_text = ""
+    avg_text = ""
+    if body.duration_ms is not None and body.duration_ms >= 0 and total > 0:
+        total_sec = body.duration_ms / 1000
+        duration_text = f"，总用时 {_fmt_sec(total_sec)}"
+        avg_text = f"，平均每张 {_fmt_sec(total_sec / total)}"
+
     def local_summary() -> str:
-        lines = [f"本次共审查 {total} 张卡片：{passed} 张全部一致，{review} 张需复核，{failed} 张失败。"]
+        lines = [f"本次共处理 {total} 张卡片：{passed} 张通过，{review} 张有问题，{failed} 张需检查（缺件）{duration_text}{avg_text}。"]
         problem_cards = [c for c in cards if c.overall != "pass"]
         if problem_cards:
             lines += ["", "问题卡片："]
@@ -227,7 +241,9 @@ async def loop_analysis(body: LoopAnalysisRequest):
     else:
         # ---- 整轮总体总结（结束后 / 手动重新生成）----
         stats = (
-            f"共{total}张卡片，{passed}张通过，{review}张需复核，{failed}张失败。高频问题字段："
+            f"共处理{total}张卡片，{passed}张通过，{review}张有问题，{failed}张需检查（缺件）"
+            + duration_text + avg_text
+            + "。高频问题字段："
             + ("、".join(f"{k}({v}张卡片)" for k, v in top_fields) if top_fields else "无")
         )
         card_lines = []
@@ -244,7 +260,7 @@ async def loop_analysis(body: LoopAnalysisRequest):
             card_lines.append(entry)
         prompt = (
             "以下是一次 LOOP 批量审查的结果数据。请用简洁中文输出一段执行分析（150~250字），包含：\n"
-            "1. 一句话总体结论；\n"
+            "1. 一句话总体结论（必须包含处理张数、总用时与平均每张用时，数据在下方统计里）；\n"
             "2. 哪几张卡片出了什么错（点名卡片和字段）；\n"
             "3. 高频错误字段；\n"
             "4. 最可能的原因（例如：网页未加载完成、映射选择器偏移、源数据本身有误）。\n"

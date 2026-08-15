@@ -162,6 +162,16 @@ export interface AppSettings {
   // 防误关：开启后点关闭按钮会最小化到系统托盘，而非真正退出
   prevent_accidental_close?: boolean;
 
+  // LOOP 运行时不息屏：开启后执行 LOOP 期间阻止电脑息屏/休眠，结束后自动恢复
+  loop_keep_awake?: boolean;
+
+  // 高速模式：开启后 LOOP 运行时 OCR 提取与浏览器步骤并行处理（字段对比前统一等待结果）
+  high_speed_mode?: boolean;
+
+  // 核显加速偏好：持久化开关；当前 UMI-OCR 引擎尚不支持 GPU 推理（官方开发计划中），
+  // 引擎支持后按此开关自动启用
+  igpu_acceleration?: boolean;
+
   // 整体UI缩放比例（0.6~1.6）
   ui_scale?: number;
 
@@ -175,6 +185,37 @@ export interface AppSettings {
 
   // BrowserPane 网页亮度（0.3~2.0，1.0=原始）
   browser_brightness?: number;
+}
+
+// 显卡 / 核显检测结果（GET /api/config/gpu-info）
+export interface GpuInfo {
+  ok: boolean;
+  error?: string;
+  gpus: {
+    name: string;
+    vendor: string; // intel | nvidia | amd | unknown
+    integrated: boolean; // true=核显
+    driver_version: string;
+    status: string;
+  }[];
+  igpu: { name: string; vendor: string } | null;
+  has_igpu: boolean;
+  cpu: { name: string; physical_cores: number; logical_cores: number };
+  // 内置 OCR 引擎（RapidOCR）自检状态
+  local_engine: {
+    installed: boolean;
+    backend: string; // directml | openvino | cpu | ""（不可用）
+    tested: boolean;
+    testing: boolean;
+    detail: string;
+    gpu_name: string;
+    last_ms: number;
+    install_error: string;
+  };
+  // GPU 后端自检是否通过（true=识别真正跑在显卡上）
+  gpu_ocr_supported: boolean;
+  ocr_engine?: string;
+  igpu_acceleration?: boolean;
 }
 
 // ========== 依赖与工具状态 ==========
@@ -208,6 +249,8 @@ export interface OfficecliStatus {
 export interface DepsStatus {
   python_deps: PythonDepStatus[];
   python_all_installed: boolean;
+  ocr_engine_deps: PythonDepStatus[];
+  ocr_engine_all_installed: boolean;
   umi_ocr: UmiOcrStatus;
   remotion: RemotionStatus;
   officecli: OfficecliStatus;
@@ -651,6 +694,22 @@ export interface AnalysisSegment {
   loading: boolean;
   /** 卡片结论（card 分段用于头部状态徽标配色：review=黄 fail=红） */
   overall?: Overall;
+  /** summary 分段的执行统计：处理卡片数 / 用时 / 三态计数 */
+  stats?: LoopRunStats;
+}
+
+/** LOOP 整轮执行统计（执行总结分段头部展示） */
+export interface LoopRunStats {
+  /** 处理卡片总数 */
+  total: number;
+  /** 用时（已格式化，如 "3 分 42 秒"；无法计算时 "—"） */
+  duration: string;
+  /** 通过（pass）卡片数 */
+  pass: number;
+  /** 有问题（review）卡片数 */
+  review: number;
+  /** 需检查（fail，含缺件）卡片数 */
+  fail: number;
 }
 
 // ========== 文档提取（功能1/2） ==========
@@ -675,6 +734,8 @@ export interface DocumentExtractResult {
   filename: string;
   /** 提取方式 */
   method: ExtractMethod;
+  /** umi 通道实际引擎：gpu=内置加速引擎（核显加速），umi=UMI-OCR（含 GPU 兜底） */
+  ocr_backend?: string;
   /** 提取出的全文 */
   text: string;
   /** 结构化字段（请求了 fields 时返回） */
@@ -727,6 +788,8 @@ export interface DocCompareEntry {
 export interface DocExtractState {
   filename: string;
   method: string;
+  /** umi 通道实际引擎：gpu=内置加速引擎（核显加速），umi=UMI-OCR（含 GPU 兜底） */
+  ocr_backend?: string;
   text: string;
   fields: Record<string, string>;
   entries: DocCompareEntry[];
@@ -740,6 +803,8 @@ export interface DocExtractState {
   mrz_warnings?: string[];
   /** 引擎回退信息（如 UMI-OCR 失败后自动切换 AI Vision） */
   fallback?: ExtractFallback | null;
+  /** 识别中占位：裁切预览先行回填面板，正式提取完成后按 file_url 覆盖为完整结果 */
+  pending?: boolean;
 }
 
 // ============ 外挂插件（体外循环） ============

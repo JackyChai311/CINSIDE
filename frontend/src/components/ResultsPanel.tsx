@@ -123,10 +123,12 @@ interface Props {
   activeDocIndex?: number;
   onSelectDocIndex?: (i: number) => void;
   docExtracting?: boolean;
-  /** 文件/护照 OCR 引擎：vision=识图AI，umi=本地UMI-OCR */
+  /** 文件/护照 OCR 引擎：vision=识图AI，umi=本地 OCR */
   ocrEngine?: string;
-  /** 切换 OCR 引擎（识图AI ↔ UMI-OCR） */
+  /** 切换 OCR 引擎（识图AI ↔ 本地 OCR） */
   onChangeOcrEngine?: (engine: "vision" | "umi") => void;
+  /** 核显加速开关（本地 OCR 走内置加速引擎，不依赖 UMI 在线） */
+  igpuAcceleration?: boolean;
   /** 文件提取步骤的断点状态：undefined=无断点，"always"=强制断点，"on-error"=条件断点 */
   docBreakpoint?: "always" | "on-error";
   /** 循环切换文件提取步骤的断点：无→强制→条件→无 */
@@ -310,6 +312,7 @@ export default function ResultsPanel({
   docExtracting = false,
   ocrEngine = "vision",
   onChangeOcrEngine,
+  igpuAcceleration = false,
   docBreakpoint,
   onToggleDocBreakpoint,
   addingStepMode = null,
@@ -429,6 +432,7 @@ export default function ResultsPanel({
           docExtracting={docExtracting}
           ocrEngine={ocrEngine}
           onChangeOcrEngine={onChangeOcrEngine}
+          igpuAcceleration={igpuAcceleration}
           docBreakpoint={docBreakpoint}
           onToggleDocBreakpoint={onToggleDocBreakpoint}
           shots={shots}
@@ -697,7 +701,7 @@ function DocCompareTab({
   ocrEngine?: string;
 }) {
   const [showFullText, setShowFullText] = useState(false);
-  const engineLabel = ocrEngine === "umi" ? "UMI-OCR" : "AI Vision";
+  const engineLabel = ocrEngine === "umi" ? "OCR" : "AI Vision";
 
   if (extracting) {
     return (
@@ -806,6 +810,7 @@ function ReportTab({
   docExtracting,
   ocrEngine = "vision",
   onChangeOcrEngine,
+  igpuAcceleration = false,
   docBreakpoint,
   onToggleDocBreakpoint,
   shots,
@@ -903,10 +908,12 @@ function ReportTab({
   activeDocIndex: number;
   onSelectDocIndex?: (i: number) => void;
   docExtracting: boolean;
-  /** 文件/护照 OCR 引擎：vision=识图AI，umi=本地UMI-OCR */
+  /** 文件/护照 OCR 引擎：vision=识图AI，umi=本地 OCR */
   ocrEngine?: string;
-  /** 切换 OCR 引擎（识图AI ↔ UMI-OCR） */
+  /** 切换 OCR 引擎（识图AI ↔ 本地 OCR） */
   onChangeOcrEngine?: (engine: "vision" | "umi") => void;
+  /** 核显加速开关（本地 OCR 走内置加速引擎，不依赖 UMI 在线） */
+  igpuAcceleration?: boolean;
   /** 文件提取步骤的断点状态 */
   docBreakpoint?: "always" | "on-error";
   /** 循环切换文件提取步骤的断点 */
@@ -1780,12 +1787,12 @@ function ReportTab({
       : (livePairsHistory[rec.recordId] || []);
     // 状态色系：执行中=无色系（中性灰），已完成=天蓝（只代表跑完，不代表通过——
     // 通过与否要看字段明细，绿色留给最终报告的"通过"判定，避免误会），需检查=红
-    // 状态用散发的颜色区分（无文字徽标）：glow=卡片外圈柔光，dotGlow=圆点光晕
+    // 状态用散发的颜色区分（无文字徽标/圆点）：glow=卡片外圈柔光
     const accent = isFailed
-      ? { head: "bg-rose-50/80 border-rose-200", text: "text-rose-700", badge: "bg-rose-500", badgeSoft: "bg-rose-100 text-rose-700", spin: "text-rose-500", glow: "shadow-[0_2px_14px_-4px_rgba(244,63,94,0.35)]", dotGlow: "shadow-[0_0_10px_2px_rgba(244,63,94,0.55)]", ping: true }
+      ? { head: "bg-rose-50/80 border-rose-200", text: "text-rose-700", spin: "text-rose-500", glow: "shadow-[0_2px_14px_-4px_rgba(244,63,94,0.35)]" }
       : isRunning
-      ? { head: "bg-white border-slate-200", text: "text-slate-700", badge: "bg-slate-400", badgeSoft: "bg-slate-100 text-slate-600", spin: "text-slate-400", glow: "shadow-sm", dotGlow: "shadow-[0_0_8px_1px_rgba(148,163,184,0.5)]", ping: true }
-      : { head: "bg-sky-50/80 border-sky-200", text: "text-sky-700", badge: "bg-sky-500", badgeSoft: "bg-sky-100 text-sky-700", spin: "text-sky-500", glow: "shadow-[0_2px_14px_-4px_rgba(14,165,233,0.3)]", dotGlow: "shadow-[0_0_10px_2px_rgba(14,165,233,0.5)]", ping: false };
+      ? { head: "bg-white border-slate-200", text: "text-slate-700", spin: "text-slate-400", glow: "shadow-sm" }
+      : { head: "bg-sky-50/80 border-sky-200", text: "text-sky-700", spin: "text-sky-500", glow: "shadow-[0_2px_14px_-4px_rgba(14,165,233,0.3)]" };
 
     return (
       <div data-running={isRunning} className={`overflow-hidden rounded-md border transition-all ${accent.glow} ${accent.head}`}>
@@ -1801,12 +1808,12 @@ function ReportTab({
             ) : (
               <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${accent.spin}`} />
             )}
-            <span className={`text-[12px] font-semibold ${accent.text}`}>{rec.name || "未命名"}</span>
-            {rec.studentId && (
-              <span className="rounded bg-slate-200/70 px-1.5 py-0.5 font-mono text-[9px] text-slate-500">
-                {rec.studentId}
-              </span>
-            )}
+            <div className="min-w-0 flex-1">
+              <span className={`block truncate text-[12px] font-semibold leading-tight ${accent.text}`}>{rec.name || "未命名"}</span>
+              {rec.studentId && (
+                <span className="block truncate font-mono text-[9px] leading-tight text-slate-400">{rec.studentId}</span>
+              )}
+            </div>
           </button>
           {onSelectRecord && rec.recordId && (
             <button
@@ -1822,16 +1829,6 @@ function ReportTab({
               查看
             </button>
           )}
-          {/* 状态用散发的颜色区分（无文字徽标）：发光圆点；执行中带步数进度小字 */}
-          <span
-            className="relative inline-flex h-2.5 w-2.5 shrink-0"
-            title={isRunning ? `执行中 ${doneCount}步` : isFailed ? "需检查" : "已完成"}
-          >
-            {accent.ping && (
-              <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${accent.badge} opacity-60`} />
-            )}
-            <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${accent.badge} ${accent.dotGlow}`} />
-          </span>
           {isRunning && (
             <span className="shrink-0 font-mono text-[10px] text-slate-400">{doneCount}步</span>
           )}
@@ -2022,31 +2019,14 @@ function ReportTab({
     const isPass = r.overall === "pass" && !hasMrzWarning;
     const isReview = r.overall === "review" || hasMrzWarning;
 
-    // 状态色系（MRZ警告时强制amber黄色系）
-    // 通过=emerald绿 / 有问题=amber黄 / 需检查=rose红——只靠颜色散发区分，不放文字徽标
-    // glow=卡片外圈柔光（颜色从卡片边缘散发），dotGlow=状态圆点光晕，ping=圆点是否脉冲（异常态吸引视线）
+    // 状态色系（MRZ警告时强制amber黄色系）——沿用运行时卡片的紧凑设计：
+    // 通过=emerald绿 / 需检查=amber黄 / 有问题=rose红，只靠头部底色+外圈柔光散发区分，无文字徽标
     const accent = isPass
-      ? { headerBg: "bg-emerald-50/60", badge: "bg-emerald-500", badgeSoft: "bg-emerald-100 text-emerald-700", footer: "bg-slate-50 text-emerald-700", border: "border-emerald-300/70 ring-1 ring-emerald-200/50", stripe: "bg-emerald-400", text: "text-emerald-600", glow: "shadow-[0_2px_16px_-4px_rgba(16,185,129,0.35)]", dotGlow: "shadow-[0_0_10px_2px_rgba(16,185,129,0.55)]", ping: false }
+      ? { head: "bg-emerald-50/80 border-emerald-200", badgeSoft: "bg-emerald-100 text-emerald-700", footer: "text-emerald-700", text: "text-emerald-700", icon: "text-emerald-500", glow: "shadow-[0_2px_14px_-4px_rgba(16,185,129,0.35)]" }
       : isReview
-      ? { headerBg: "bg-amber-50/50", badge: "bg-amber-500", badgeSoft: "bg-amber-100 text-amber-700", footer: "bg-slate-50 text-amber-700", border: "border-amber-300/70 ring-1 ring-amber-200/50", stripe: "bg-amber-400", text: "text-amber-600", glow: "shadow-[0_2px_16px_-4px_rgba(245,158,11,0.35)]", dotGlow: "shadow-[0_0_10px_2px_rgba(245,158,11,0.55)]", ping: true }
-      : { headerBg: "bg-rose-50/60", badge: "bg-rose-500", badgeSoft: "bg-rose-100 text-rose-700", footer: "bg-slate-50 text-rose-700", border: "border-rose-300/70 ring-1 ring-rose-200/50", stripe: "bg-rose-400", text: "text-rose-600", glow: "shadow-[0_2px_16px_-4px_rgba(244,63,94,0.35)]", dotGlow: "shadow-[0_0_10px_2px_rgba(244,63,94,0.55)]", ping: true };
+      ? { head: "bg-amber-50/80 border-amber-200", badgeSoft: "bg-amber-100 text-amber-700", footer: "text-amber-700", text: "text-amber-700", icon: "text-amber-500", glow: "shadow-[0_2px_14px_-4px_rgba(245,158,11,0.35)]" }
+      : { head: "bg-rose-50/80 border-rose-200", badgeSoft: "bg-rose-100 text-rose-700", footer: "text-rose-700", text: "text-rose-700", icon: "text-rose-500", glow: "shadow-[0_2px_14px_-4px_rgba(244,63,94,0.35)]" };
     const OverallIcon = isPass ? CheckCircle2 : isReview ? AlertTriangle : XCircle;
-
-    // 中间状态图标 —— 录入=箭头，审查=✓/✗/−
-    const StatusIcon = ({ match }: { match: FieldMatch }) => {
-      if (isEntry) {
-        return (
-          <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-100 ring-1 ring-indigo-200">
-            <MoveRight className="h-4 w-4 text-indigo-600" />
-          </div>
-        );
-      }
-      if (match === "match")
-        return <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-100 ring-1 ring-emerald-200"><CheckCircle2 className="h-5 w-5 text-emerald-600" /></div>;
-      if (match === "mismatch" || match === "error")
-        return <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-rose-100 ring-1 ring-rose-200"><XCircle className="h-5 w-5 text-rose-600" /></div>;
-      return <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-amber-100 ring-1 ring-amber-200"><MinusCircle className="h-5 w-5 text-amber-600" /></div>;
-    };
 
     // 从 records 中补充学号信息（如果后端没返回 student_id）
     const srcRec = findRecord(r.record_id);
@@ -2059,179 +2039,181 @@ function ReportTab({
     const studentId = r.student_id || getStudentId(srcRec);
 
     return (
-      <div className={`relative overflow-hidden rounded-xl border bg-white transition-all hover:shadow-md ${accent.glow} ${accent.border}`}>
-        {/* 左侧状态色条 */}
-        <div className={`absolute inset-y-0 left-0 w-1 ${accent.stripe}`} />
-        {/* 头部 */}
-        <div className={`flex items-center gap-2 py-2.5 pl-5 pr-4 ${accent.headerBg}`}>
+      <div className={`overflow-hidden rounded-md border transition-all ${accent.glow} ${accent.head}`}>
+        {/* 头部（沿用运行时卡片：紧凑单行——状态图标+姓名+学号+统计徽标+查看+折叠） */}
+        <div className="flex w-full items-center gap-2 px-3 py-1.5">
           <button
             onClick={toggleExpanded}
             className="flex flex-1 items-center gap-2 text-left transition-colors hover:brightness-[0.97]"
           >
-            <OverallIcon className={`h-4 w-4 shrink-0 ${accent.text}`} />
-            <span className="text-sm font-semibold text-slate-800">{displayName}</span>
-            {studentId && (
-              <span className="rounded bg-slate-200/70 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">
-                {studentId}
-              </span>
-            )}
-            {hasMrzWarning && (
-              <span
-                className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-700"
-                title="护照MRZ交叉验证发现不一致，已以MRZ为准，请人工复核"
-              >
-                <AlertTriangle className="h-3 w-3" />
-                MRZ
-              </span>
-            )}
-            <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${accent.badgeSoft}`}>
-              {mc}/{rows.length}
-            </span>
+            <OverallIcon className={`h-3.5 w-3.5 shrink-0 ${accent.icon}`} />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                <span className={`truncate text-[12px] font-semibold leading-tight ${accent.text}`}>{displayName}</span>
+                {hasMrzWarning && (
+                  <span
+                    className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold text-amber-700"
+                    title="护照MRZ交叉验证发现不一致，已以MRZ为准，请人工复核"
+                  >
+                    <AlertTriangle className="h-2.5 w-2.5" />
+                    MRZ
+                  </span>
+                )}
+                <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold ${accent.badgeSoft}`}>
+                  {mc}/{rows.length}
+                </span>
+              </div>
+              {studentId && (
+                <span className="block truncate font-mono text-[9px] leading-tight text-slate-400">{studentId}</span>
+              )}
+            </div>
           </button>
           {onSelectRecord && r.record_id && (
             <button
               onClick={(e) => { e.stopPropagation(); onSelectRecord(r.record_id); }}
-              className="shrink-0 rounded px-2 py-0.5 text-[10px] text-slate-400 transition-colors hover:bg-slate-200/60 hover:text-slate-600"
+              className="shrink-0 rounded px-1.5 py-0.5 text-[9px] text-slate-400 transition-colors hover:bg-slate-200/60 hover:text-slate-600"
               title="跳转到该记录"
             >
               查看
             </button>
           )}
-          {/* 状态用散发的颜色区分（无文字徽标）：发光圆点，异常态脉冲提醒，悬浮可看状态名 */}
-          <span
-            className="relative inline-flex h-2.5 w-2.5 shrink-0"
-            title={OVERALL_LABELS[r.overall]}
-          >
-            {accent.ping && (
-              <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${accent.badge} opacity-60`} />
-            )}
-            <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${accent.badge} ${accent.dotGlow}`} />
-          </span>
           <button
             onClick={toggleExpanded}
             className="shrink-0 rounded p-0.5 transition-colors hover:bg-slate-200/50"
           >
-            <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
+            <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
           </button>
         </div>
 
         {/* 展开内容 */}
         {expanded && (
           <>
-            {/* MRZ交叉验证警告 */}
+            {/* MRZ交叉验证警告（紧凑版） */}
             {hasMrzWarning && (
-              <div className="border-b border-amber-200/70 bg-amber-50/80 px-4 py-2.5">
-                <div className="flex items-start gap-2">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-                  <div className="flex-1">
-                    <div className="text-xs font-semibold text-amber-800">MRZ交叉验证提示</div>
-                    <div className="mt-1 space-y-0.5">
+              <div className="border-t border-amber-200/70 bg-amber-50/80 px-3 py-1.5">
+                <div className="flex items-start gap-1.5">
+                  <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-amber-600" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[10px] font-semibold text-amber-800">MRZ交叉验证提示（已以MRZ为准修正，请人工复核）</div>
+                    <div className="mt-0.5 space-y-0.5">
                       {r.mrz_warnings?.map((w, wi) => (
-                        <div key={wi} className="text-[11px] leading-relaxed text-amber-700">• {w}</div>
+                        <div key={wi} className="text-[10px] leading-relaxed text-amber-700">• {w}</div>
                       ))}
                     </div>
-                    <div className="mt-1 text-[10px] text-amber-600/80">以上字段已以护照底部MRZ机器可读区为准修正，请点击「查看」按钮进入文件面板核对</div>
                   </div>
                 </div>
               </div>
             )}
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                {/* 表头 */}
-                <thead>
-                  <tr className="border-b border-slate-100">
-                    <th className="w-[42%] bg-slate-50/60 px-4 py-2 text-left text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                      {isEntry ? "EXCEL / 来源" : "左侧 / EXCEL"}
-                    </th>
-                    <th className="w-[16%] px-0 py-2"></th>
-                    <th className="w-[42%] bg-slate-50/60 px-4 py-2 text-left text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                      {isEntry ? "右侧网页（填入）" : "右侧网页"}
-                    </th>
-                  </tr>
-                </thead>
-                {/* 数据行 */}
-                <tbody>
-                  {rows.map((row) => {
-                    const isMismatch = row.match === "mismatch" || row.match === "error";
-                    const isMatch = row.match === "match";
-                    return (
-                      <tr key={row.key} className={`border-b border-slate-50 last:border-0 ${isMismatch && !isEntry ? "bg-rose-50/30" : isMatch && !isEntry ? "bg-emerald-50/20" : ""}`}>
-                        {/* 左侧值 */}
-                        <td className="px-4 py-2.5 align-top">
-                          <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-400">{row.leftLabel}</div>
-                          <div className={`mt-1 text-[13px] leading-relaxed ${isMismatch && !isEntry ? "font-semibold text-rose-600" : isMatch && !isEntry ? "text-emerald-700" : "text-slate-700"}`}>
-                            {row.leftValue || <span className="text-slate-300">—</span>}
-                          </div>
-                        </td>
-                        {/* 中间状态图标 */}
-                        <td className="px-0 py-2.5 text-center align-middle">
-                          <StatusIcon match={row.match} />
-                        </td>
-                        {/* 右侧值 */}
-                        <td className="px-4 py-2.5 align-top">
-                          <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-400">{row.rightLabel}</div>
-                          <div className={`mt-1 text-[13px] leading-relaxed ${isMismatch && !isEntry ? "font-semibold text-rose-600" : isMatch && !isEntry ? "text-emerald-700" : "text-slate-700"}`}>
-                            {row.rightValue || <span className="text-slate-300">—</span>}
-                          </div>
-                          {/* 一键修正：确认来源正确后，把来源值写入被审查字段 */}
-                          {canFixRow(row) && r.record_id && (
-                            <div className="mt-1.5 flex items-center gap-1.5">
-                              {fixedKeys.has(row.key) ? (
-                                <span className="inline-flex items-center gap-1 rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500 ring-1 ring-slate-200">
-                                  <CheckCircle2 className="h-3 w-3" />
-                                  已修正
-                                </span>
-                              ) : (
-                                <button
-                                  onClick={async () => {
-                                    if (!row.entry || !onFixField || !r.record_id) return;
-                                    const ok = await onFixField(r.record_id, row.entry, row.key);
-                                    if (ok) setFixedKeys((prev) => new Set(prev).add(row.key));
-                                  }}
-                                  disabled={running || fixingFieldKey !== null || fixRerunRecordId !== null}
-                                  className="inline-flex items-center gap-1 rounded-md bg-white px-2 py-0.5 text-[10px] font-medium text-slate-600 ring-1 ring-slate-300 transition-colors hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-                                  title="确认来源正确？点击把来源值写入被审查字段（网页填值/Excel列更新）"
-                                >
-                                  {fixingFieldKey === row.key ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wrench className="h-3 w-3" />}
-                                  以来源为准修正
-                                </button>
-                              )}
-                              {/* 人工确认打勾：人类检查后认为该字段没问题，勾选标记（再点取消） */}
-                              <button
-                                onClick={() => toggleConfirmed(row.key)}
-                                className={`inline-flex items-center gap-0.5 rounded-md px-1 py-0.5 text-[10px] transition-colors ${confirmedKeys.has(row.key) ? "text-emerald-600" : "text-slate-300 hover:text-slate-500"}`}
-                                title={confirmedKeys.has(row.key) ? "已人工确认无误（点击取消）" : "人工检查后确认该字段没问题，打勾标记"}
-                              >
-                                {confirmedKeys.has(row.key) ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Circle className="h-3.5 w-3.5" />}
-                                {confirmedKeys.has(row.key) ? "已确认" : "确认"}
-                              </button>
-                            </div>
+            {/* 字段对比行（沿用运行时的一对一填卡：状态图标+标签+左chip→右chip） */}
+            <div className="border-t border-slate-200/60 bg-white/70 px-3 py-1.5">
+              <ul className="space-y-1">
+                {rows.map((row) => {
+                  const isMismatch = row.match === "mismatch" || row.match === "error";
+                  const isMatch = row.match === "match";
+                  return (
+                    <li
+                      key={row.key}
+                      className={[
+                        "animate-pair-in flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px]",
+                        isMismatch ? "bg-rose-50/80" : row.match === "missing" ? "bg-amber-50/80" : "",
+                      ].join(" ")}
+                    >
+                      {/* 行首状态图标：录入=箭头（填入语义），审查=✓/✗/⚠ */}
+                      {isEntry ? (
+                        <MoveRight className="h-3 w-3 shrink-0 text-indigo-500" />
+                      ) : isMatch ? (
+                        <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-500" />
+                      ) : isMismatch ? (
+                        <XCircle className="h-3 w-3 shrink-0 text-rose-500" />
+                      ) : (
+                        <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" />
+                      )}
+                      <span
+                        className="shrink-0 font-medium text-slate-700"
+                        title={row.leftLabel === row.rightLabel ? row.leftLabel : `${row.leftLabel} → ${row.rightLabel}`}
+                      >
+                        {row.leftLabel}
+                      </span>
+                      <span className="flex min-w-0 flex-1 items-center gap-1 font-mono text-[10px]">
+                        <span
+                          className="truncate rounded bg-indigo-50/80 px-1 py-0.5 text-indigo-700"
+                          title={row.leftValue}
+                        >
+                          {row.leftValue || "—"}
+                        </span>
+                        <MoveRight className="h-3 w-3 shrink-0 text-slate-400" />
+                        <span
+                          className={[
+                            "truncate rounded px-1 py-0.5",
+                            isEntry
+                              ? "bg-sky-50/80 text-sky-700"
+                              : isMatch
+                              ? "bg-emerald-50/80 text-emerald-700"
+                              : isMismatch
+                              ? "bg-rose-100/80 font-semibold text-rose-700"
+                              : "bg-amber-100/80 text-amber-700",
+                          ].join(" ")}
+                          title={row.rightValue}
+                        >
+                          {row.rightValue || "—"}
+                        </span>
+                      </span>
+                      {/* 一键修正 + 人工确认（仅可修正行，紧凑小按钮） */}
+                      {canFixRow(row) && r.record_id && (
+                        <span className="flex shrink-0 items-center gap-1">
+                          {fixedKeys.has(row.key) ? (
+                            <span className="inline-flex items-center gap-0.5 rounded bg-slate-100 px-1 py-0.5 text-[9px] font-medium text-slate-500 ring-1 ring-slate-200">
+                              <CheckCircle2 className="h-2.5 w-2.5" />
+                              已修正
+                            </span>
+                          ) : (
+                            <button
+                              onClick={async () => {
+                                if (!row.entry || !onFixField || !r.record_id) return;
+                                const ok = await onFixField(r.record_id, row.entry, row.key);
+                                if (ok) setFixedKeys((prev) => new Set(prev).add(row.key));
+                              }}
+                              disabled={running || fixingFieldKey !== null || fixRerunRecordId !== null}
+                              className="inline-flex items-center gap-0.5 rounded bg-white px-1 py-0.5 text-[9px] font-medium text-slate-600 ring-1 ring-slate-300 transition-colors hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                              title="确认来源正确？点击把来源值写入被审查字段（网页填值/Excel列更新）"
+                            >
+                              {fixingFieldKey === row.key ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Wrench className="h-2.5 w-2.5" />}
+                              修正
+                            </button>
                           )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                          {/* 人工确认打勾：人类检查后认为该字段没问题，勾选标记（再点取消） */}
+                          <button
+                            onClick={() => toggleConfirmed(row.key)}
+                            className={`inline-flex items-center rounded p-0.5 transition-colors ${confirmedKeys.has(row.key) ? "text-emerald-600" : "text-slate-300 hover:text-slate-500"}`}
+                            title={confirmedKeys.has(row.key) ? "已人工确认无误（点击取消）" : "人工检查后确认该字段没问题，打勾标记"}
+                          >
+                            {confirmedKeys.has(row.key) ? <CheckCircle2 className="h-3 w-3" /> : <Circle className="h-3 w-3" />}
+                          </button>
+                        </span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
 
-            {/* 底部统计条 */}
-            <div className={`flex items-center justify-between gap-2 border-t border-slate-100 px-4 py-2 text-xs font-medium ${accent.footer}`}>
-              <span>
-                {mc}/{rows.length} 项{isEntry ? "已填入" : "一致"}{mmc === 0 ? (isEntry ? " · 全部完成" : " · 全部一致") : (isEntry ? ` · ${mmc} 项待处理` : ` · ${mmc} 处不一致`)}
-              </span>
-              {/* 一键修正全部不一致字段并重新审查该卡片 */}
-              {fixableRows.length > 0 && onFixAllAndRerun && r.record_id && (
-                <button
-                  onClick={() => onFixAllAndRerun(r.record_id!, r.entries)}
-                  disabled={running || fixingFieldKey !== null || fixRerunRecordId !== null}
-                  className="inline-flex shrink-0 items-center gap-1 rounded-md bg-white px-2 py-0.5 text-[10px] font-medium text-slate-600 ring-1 ring-slate-300 transition-colors hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-                  title="把全部不一致字段以来源值覆盖被审查字段，然后重新审查该卡片"
-                >
-                  {isFixRerunning ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wrench className="h-3 w-3" />}
-                  {isFixRerunning ? "修正并重新审查中…" : `以来源为准修正并重新审查（${fixableRows.length}）`}
-                </button>
-              )}
+              {/* 底部统计条（紧凑单行：统计 + 修正全部并重新审查） */}
+              <div className={`mt-1.5 flex items-center justify-between gap-2 border-t border-slate-200/60 px-1 pt-1.5 text-[10px] font-medium ${accent.footer}`}>
+                <span>
+                  {mc}/{rows.length} 项{isEntry ? "已填入" : "一致"}{mmc === 0 ? (isEntry ? " · 全部完成" : " · 全部一致") : (isEntry ? ` · ${mmc} 项待处理` : ` · ${mmc} 处不一致`)}
+                </span>
+                {/* 一键修正全部不一致字段并重新审查该卡片 */}
+                {fixableRows.length > 0 && onFixAllAndRerun && r.record_id && (
+                  <button
+                    onClick={() => onFixAllAndRerun(r.record_id!, r.entries)}
+                    disabled={running || fixingFieldKey !== null || fixRerunRecordId !== null}
+                    className="inline-flex shrink-0 items-center gap-1 rounded bg-white px-1.5 py-0.5 text-[9px] font-medium text-slate-600 ring-1 ring-slate-300 transition-colors hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    title="把全部不一致字段以来源值覆盖被审查字段，然后重新审查该卡片"
+                  >
+                    {isFixRerunning ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Wrench className="h-2.5 w-2.5" />}
+                    {isFixRerunning ? "修正并重新审查中…" : `修正并重新审查（${fixableRows.length}）`}
+                  </button>
+                )}
+              </div>
             </div>
           </>
         )}
@@ -2342,7 +2324,7 @@ function ReportTab({
         {failCount > 0 && <FilterChip target="fail" label={`需检查 ${failCount}`} activeBg="bg-rose-500" inactiveBg="bg-rose-100" activeText="text-white" inactiveText="text-rose-700" activeRing="ring-rose-300" />}
       </>
     );
-    fieldContent = <div className="space-y-3">{filtered.map((r) => <PersonReportCard key={r.task_id || r.record_id} r={r} />)}</div>;
+    fieldContent = <div className="space-y-1.5">{filtered.map((r) => <PersonReportCard key={r.task_id || r.record_id} r={r} />)}</div>;
   } else if (showSample) {
     const passCount = sampleReports.filter((r) => r.overall === "pass").length;
     const failCount = sampleReports.filter((r) => r.overall === "fail").length;
@@ -2367,7 +2349,7 @@ function ReportTab({
         </button>
       </div>
     );
-    fieldContent = <div className="space-y-3">{filtered.map((r) => <PersonReportCard key={r.task_id} r={r} />)}</div>;
+    fieldContent = <div className="space-y-1.5">{filtered.map((r) => <PersonReportCard key={r.task_id} r={r} />)}</div>;
   } else if (report && report.entries.length > 0) {
     const rows: SideCompareRow[] = report.entries.map((e, i) => ({
       key: `${e.left_field || e.right_label || "field"}-${i}`,
@@ -2456,7 +2438,7 @@ function ReportTab({
     && (docLiveStatus.phase === "downloading" || docLiveStatus.phase === "preview" || docLiveStatus.phase === "ocr");
   if (docLiveActive) {
     const isOcr = docLiveStatus!.phase === "ocr";
-    const engineLabel = ocrEngine === "umi" ? "UMI-OCR" : "AI Vision";
+    const engineLabel = ocrEngine === "umi" ? "OCR" : "AI Vision";
     // 预览图仅在与当前处理文件同名时显示，避免短暂展示上一条记录的旧图
     const liveImg = docLivePreview && docLivePreview.filename === docLiveStatus!.filename
       ? docLivePreview.imageUrl : null;
@@ -2475,7 +2457,7 @@ function ReportTab({
       </div>
     );
   } else if (docExtracting) {
-    const engineLabel = ocrEngine === "umi" ? "UMI-OCR" : "AI Vision";
+    const engineLabel = ocrEngine === "umi" ? "OCR" : "AI Vision";
     fileProcessContent = (
       <div className="flex h-full min-h-[100px] flex-col items-center justify-center gap-2 text-[11px] text-slate-400">
         <div className="h-6 w-6 animate-spin rounded-full border-2 border-brand-200 border-t-brand-600" />
@@ -2707,8 +2689,14 @@ function ReportTab({
               ? "bg-emerald-100 text-emerald-700"
               : "bg-sky-100 text-sky-700",
           ].join(" ")}>
-            {extractMethodLabel(docExtract.method)}
+            {extractMethodLabel(docExtract.method, docExtract.ocr_backend)}
           </span>
+          {docExtract.pending && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-indigo-100 px-1.5 py-0.5 text-[9px] font-medium text-indigo-700">
+              <Loader2 className="h-2.5 w-2.5 animate-spin" />
+              识别中
+            </span>
+          )}
         </div>
         {docExtract.fallback && (
           <div className="mt-1 flex items-start gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[9px] leading-relaxed text-amber-800">
@@ -2962,7 +2950,7 @@ function ReportTab({
   let extractedContent: React.ReactNode;
   // LOOP 执行期实时进度：OCR 进行中显示等待态，字段一出即切换到字段卡片
   if (docLiveActive) {
-    const engineLabel = ocrEngine === "umi" ? "UMI-OCR" : "AI Vision";
+    const engineLabel = ocrEngine === "umi" ? "OCR" : "AI Vision";
     extractedContent = (
       <div className="flex h-full min-h-[100px] flex-col items-center justify-center gap-2 text-[11px] text-slate-400">
         <div className="h-4 w-4 animate-spin rounded-full border-2 border-brand-200 border-t-brand-600" />
@@ -2970,7 +2958,7 @@ function ReportTab({
       </div>
     );
   } else if (docExtracting) {
-    const engineLabel = ocrEngine === "umi" ? "UMI-OCR" : "AI Vision";
+    const engineLabel = ocrEngine === "umi" ? "OCR" : "AI Vision";
     extractedContent = (
       <div className="flex h-full min-h-[100px] items-center justify-center gap-2 text-[11px] text-slate-400">
         <div className="h-4 w-4 animate-spin rounded-full border-2 border-brand-200 border-t-brand-600" />
@@ -3784,14 +3772,14 @@ function ReportTab({
                     {docExtracts.length} 个文件
                   </span>
                 )}
-                {/* OCR 识别引擎切换：识图AI（Vision LLM） ↔ UMI-OCR（本地离线） */}
+                {/* OCR 识别引擎切换：识图AI（Vision LLM） ↔ 本地 OCR（内置加速引擎/UMI） */}
                 {onChangeOcrEngine && (
                   <div className="ml-1 flex shrink-0 items-center gap-1">
                     <div
                       className="flex items-center gap-0 rounded-md bg-slate-100/80 p-0.5 ring-1 ring-slate-200"
-                      title="护照/图片识别引擎：识图AI（在线Vision）或 UMI-OCR（本地离线）"
+                      title="护照/图片识别引擎：识图AI（在线Vision）或本地 OCR（核显加速开=内置加速引擎，关=UMI-OCR）"
                     >
-                      {([["vision", "识图AI"], ["umi", "UMI-OCR"]] as const).map(([val, label]) => (
+                      {([["vision", "识图AI"], ["umi", "OCR"]] as const).map(([val, label]) => (
                         <button
                           key={val}
                           onClick={(e) => { e.stopPropagation(); if (ocrEngine !== val) handleOcrEngineSwitch(val); }}
@@ -3807,8 +3795,8 @@ function ReportTab({
                         </button>
                       ))}
                     </div>
-                    {/* UMI-OCR 状态指示灯 */}
-                    {ocrEngine === "umi" && umiStatus !== "idle" && (
+                    {/* UMI 状态指示灯（核显加速开启时内置引擎不依赖 UMI，不显示） */}
+                    {ocrEngine === "umi" && !igpuAcceleration && umiStatus !== "idle" && (
                       umiStatus === "unavailable" ? (
                         <span className="flex items-center gap-0.5">
                           <button
@@ -3926,7 +3914,7 @@ function ReportTab({
                       ].join(" ")}
                       title={ext.filename}
                     >
-                      {ext.method === "vision_ocr" ? <Eye className="h-2.5 w-2.5" /> : <FileText className="h-2.5 w-2.5" />}
+                      {ext.pending ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : ext.method === "vision_ocr" ? <Eye className="h-2.5 w-2.5" /> : <FileText className="h-2.5 w-2.5" />}
                       <span className="max-w-[80px] truncate">{ext.filename}</span>
                     </button>
                   ))}

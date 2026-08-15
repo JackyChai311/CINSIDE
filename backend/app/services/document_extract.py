@@ -22,7 +22,9 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 import httpx
@@ -291,11 +293,43 @@ def preprocess_image(content: bytes) -> tuple[bytes, str | None]:
 # 内容图最长边不足 _MIN_OCR_EDGE 时上采样放大，让 OCR 能识别小字。
 _MIN_OCR_EDGE = 1600     # 内容图最长边下限：低于则上采样放大，提升小字 OCR 识别率
 _MAX_UPSCALE = 3.0       # 放大倍数上限（避免过度插值产生伪影）
-_ORIENT_CACHE_MAX = 200  # 朝向检测结果缓存上限（按原始文件 hash，同文件预览/提取只检测一次）
+_ORIENT_CACHE_MAX = 1000  # 朝向缓存上限（内存与落盘同限；按原始文件 hash，同文件预览/提取只检测一次）
 _orientation_cache: dict[str, int] = {}
 # 同文件 Vision 朝向检测 in-flight 去重：预览与正式提取并行发出时，只调一次 Vision，
 # 后到的一方 await 同一个 Future 拿结果（否则同一张图会并发调两次识图 AI）
 _orientation_inflight: dict[str, asyncio.Future] = {}
+
+# Vision 朝向结果落盘（重启不丢）：后端重启后内存缓存清零，GEAR 4（转正开）每轮对
+# 同一批文件重新调 Vision（2~10s/张，API 抖动时超时重试可达 60~120s）——
+# 「GEAR 4 裁剪预览等半天」的元凶。转正角度对同一文件永远相同，属稳定判定，
+# 固化复用与「粗判猜测值不固化」约束不冲突（这里只存 Vision 精判结果）。
+_ORIENT_CACHE_FILE = _USER_DATA_DIR / "orient_cache.json"
+
+
+def _orient_cache_load() -> dict[str, int]:
+    try:
+        if _ORIENT_CACHE_FILE.exists():
+            data = json.loads(_ORIENT_CACHE_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {str(k): int(v) for k, v in data.items() if str(v) in ("0", "90", "180", "270")}
+    except Exception:
+        pass
+    return {}
+
+
+def _orient_cache_save() -> None:
+    try:
+        items = list(_orientation_cache.items())
+        if len(items) > _ORIENT_CACHE_MAX:
+            items = items[-_ORIENT_CACHE_MAX:]
+        _ORIENT_CACHE_FILE.write_text(
+            json.dumps(dict(items), ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        pass  # 落盘失败不影响主流程
+
+
+_orientation_cache.update(_orient_cache_load())
 
 
 def _text_row_variance(img) -> float:
@@ -413,12 +447,17 @@ async def ai_orient_and_enhance(content: bytes, cache_key: str | None = None, al
         # 日志升级：本地粗判结果/缓存命中/每条决策路径全部落终端 + extract.log，
         # 否则"图片没转正"无从排查（比如粗判误报 horizontal 静默跳过）
         rotated = 0
-        if cache_key and cache_key in _orientation_cache:
+        # 缓存读取守卫：与写入守卫对称——只有「AI 自动转正」开着时才允许命中缓存。
+        # 否则跨档串档：第2档（转正开）跑完缓存了 Vision 的 rotate=90，换第3/5档
+        # （转正关）重跑同文件 → 命中旧缓存照样转 90°，关掉的开关形同虚设。
+        if cache_key and settings.vision_auto_orient and allow_vision and cache_key in _orientation_cache:
             rotated = _orientation_cache[cache_key]
             _flog(f"[ORIENT] 命中缓存 cache={cache_key} → rotate={rotated}")
         else:
+            # 朝向是否调 Vision 只由「AI 自动转正」开关决定（开关是唯一权威）：
+            # 高速模式开启时前端会自动把开关关掉提速；用户手动重新打开 = 明确要转正，必须照办
             if not settings.vision_auto_orient or not allow_vision:
-                # AI 转正开关关闭时：跳过 Vision 朝向检测（省 2~10 秒/张）。
+                # 开关关闭（或预览模式）时：跳过 Vision 朝向检测（省 2~10 秒/张）。
                 # 本地投影法仍做粗判：明确竖排时按惯例转 90°，其余保持原方向。
                 if orientation == "vertical" and confident:
                     rotated = 90
@@ -426,27 +465,29 @@ async def ai_orient_and_enhance(content: bytes, cache_key: str | None = None, al
                     f"[ORIENT] {'预览模式' if not allow_vision else 'AI转正已关闭'}: "
                     f"本地粗判={orientation} 高置信={confident} → rotated={rotated}（不调Vision）"
                 )
-            # horizontal 高置信时不调 Vision（180° 倒置由 PaddleOCR cls 方向分类器兜底）；
-            # vertical / unknown 时需 Vision 给出精确角度（本地无法区分 90/270、0/180）
-            elif orientation != "horizontal":
-                if settings.vision_api_key and settings.vision_api_base:
-                    _t = time.perf_counter()
-                    rotated = await _vision_detect_rotation_shared(img, cache_key)
-                    _flog(f"[ORIENT] 粗判={orientation} → Vision 精判 rotate={rotated}（耗时 {time.perf_counter() - _t:.1f}s）")
-                elif orientation == "vertical" and confident:
-                    # 无 Vision 兜底：本地只能确定"文字竖着"，按扫描件常见朝向顺时针转 90°
-                    rotated = 90
-                    _flog("[ORIENT] 无Vision配置：粗判竖排，默认顺时针转 90°")
-                else:
-                    _flog(f"[ORIENT] 粗判={orientation} 且无Vision配置 → 保持原方向 rotated=0")
+            elif settings.vision_api_key and settings.vision_api_base:
+                # 开关开 → 一律 Vision 精判 0/90/180/270。粗判 horizontal 也必须调：
+                # 投影法分不出 180° 倒置（倒置后文字行仍水平），低置信 horizontal 连
+                # "行是横的"都不确定。之前对 coarse=horizontal 跳过 Vision 正是
+                # 「开着转正却不转」的元凶（第1/2/4档全部受害）。
+                _t = time.perf_counter()
+                rotated = await _vision_detect_rotation_shared(img, cache_key)
+                _flog(f"[ORIENT] AI转正开启: 粗判={orientation} 高置信={confident} → Vision 精判 rotate={rotated}（耗时 {time.perf_counter() - _t:.1f}s）")
+            elif orientation == "vertical" and confident:
+                # 开关开但未配置 Vision API：本地只能确定"文字竖着"，按扫描件常见朝向顺时针转 90°
+                rotated = 90
+                _flog("[ORIENT] 无Vision配置：粗判竖排，默认顺时针转 90°")
             else:
-                _flog(f"[ORIENT] 粗判=horizontal 高置信={confident} → 认定已正向，不转不调Vision")
-            # 预览模式（allow_vision=False）不写缓存：粗判结果不固化，
-            # 正式提取时仍走 Vision 精判
-            if cache_key and allow_vision:
-                if len(_orientation_cache) >= _ORIENT_CACHE_MAX:
-                    _orientation_cache.clear()
+                _flog(f"[ORIENT] 粗判={orientation} 且无Vision配置 → 保持原方向 rotated=0")
+            # 缓存写入守卫：只固化 Vision 精判结果（开关开 + 已配置 Vision API + 正式提取）。
+            # 开关关闭/未配置 Vision 时的本地粗判（如 vertical→90 是猜测，Vision 可能判 0）绝不写缓存——
+            # 否则用户重新打开转正（或补配 API）后，同文件命中脏缓存永远不再精判。
+            # 预览模式（allow_vision=False）同样不写：粗判结果不固化，正式提取时仍走 Vision 精判。
+            if cache_key and allow_vision and settings.vision_auto_orient and settings.vision_api_key and settings.vision_api_base:
+                while len(_orientation_cache) >= _ORIENT_CACHE_MAX:
+                    _orientation_cache.pop(next(iter(_orientation_cache)))
                 _orientation_cache[cache_key] = rotated
+                _orient_cache_save()
 
         return await asyncio.to_thread(_orient_apply, img, rotated)
     except Exception as e:
@@ -1097,6 +1138,39 @@ async def _wait_for_umi_ocr_ready(max_wait: float = 8.0) -> bool:
     return False
 
 
+# ============ OCR 结果 LRU 缓存 ============
+# key = sha1(缩放后的投喂字节)。预览裁切与正式提取、重跑/换挡前的重复识别
+# 都命中同一 key，省一次全图 OCR（内置引擎 2~5s、UMI 更慢）。
+# 字节哈希做 key 无失效问题；LRU 上限 64 张（文本+框坐标约几百 KB 量级）。
+# 条目第 4 位记录产出该结果的引擎（gpu/umi）——命中时如实还原，GPU 兜底成
+# UMI 的缓存结果仍标 umi。
+_OCR_CACHE_MAX = 64
+_ocr_cache: OrderedDict[str, tuple[str, list, tuple[int, int], str]] = OrderedDict()
+_ocr_cache_lock = threading.Lock()
+
+# 最近一次 umi 通道识别实际使用的引擎："gpu"（内置加速引擎）| "umi"（UMI-OCR HTTP）。
+# 提取完成后由 extract_document 捕获进响应（前端显示 GPU/UMI 用）。
+_last_ocr_backend: str = ""
+
+
+def _ocr_cache_put(key: str, text: str, boxes: list, ocr_size: tuple[int, int], backend: str) -> None:
+    with _ocr_cache_lock:
+        _ocr_cache[key] = (text, boxes, ocr_size, backend)
+        _ocr_cache.move_to_end(key)
+        while len(_ocr_cache) > _OCR_CACHE_MAX:
+            _ocr_cache.popitem(last=False)
+
+
+# 进行中的识别（in-flight 去重）：key 与 LRU 相同，value 为结果 Future。
+# 预览裁切与正式提取对同一张图并发首发时（LOOP 开始的标准场景），两个请求
+# 各跑一遍全图 OCR 且在推理锁/UMI 单任务上排队——等待时间直接翻倍。
+# 后到者 await 同一个 Future，整图只识别一次。
+_ocr_inflight: "dict[str, asyncio.Future]" = {}
+# UMI 在线状态节流缓存（_check_umi_ocr_alive 用，30s TTL）
+_umi_alive_at: float | None = None
+_umi_alive_val: bool = True
+
+
 async def _call_umi_ocr(content: bytes, want_boxes: bool = False):
     """调用本地 UMI-OCR 的 HTTP 接口识别图片，返回全部文字。
 
@@ -1110,12 +1184,85 @@ async def _call_umi_ocr(content: bytes, want_boxes: bool = False):
 
     want_boxes=True 时返回 (text, boxes, ocr_size)：boxes 为文本框坐标
     （投喂图坐标系，供按文本区域裁图用），ocr_size 为投喂图 (w, h)。
+
+    结果缓存：LRU（完成后写入）+ in-flight Future（进行中共享）——
+    同一投喂字节无论串行重跑还是并发首发，都只识别一次。
     """
-    url = f"http://{settings.umi_ocr_host}:{settings.umi_ocr_port}/api/ocr"
+    global _last_ocr_backend
     # CamScanner harness：投喂前裁边 + 压到 1600px（2560px 大图在 Paddle CPU 上
     # 可跑数十秒顶爆 60s 超时 → 触发 Vision 保底反而更慢）
     content = await asyncio.to_thread(_shrink_for_umi_ocr, content)
+
+    cache_key = hashlib.sha1(content).hexdigest()
+    with _ocr_cache_lock:
+        hit = _ocr_cache.get(cache_key)
+        if hit is not None:
+            _ocr_cache.move_to_end(cache_key)
+            _flog(f"[OCR-CACHE] 命中：省一次全图识别（{len(hit[0])} 字符）")
+            _last_ocr_backend = hit[3]
+            return (hit[0], hit[1], hit[2]) if want_boxes else hit[0]
+
+    # in-flight 去重：同图识别正在进行 → 共享同一次调用（超时语义与直接调用一致）
+    inflight = _ocr_inflight.get(cache_key)
+    if inflight is not None:
+        text, boxes, ocr_size, backend = await inflight
+        _last_ocr_backend = backend
+        _flog(f"[OCR-INFLIGHT] 并发命中：复用进行中的识别（{len(text)} 字符）")
+        return (text, boxes, ocr_size) if want_boxes else text
+
+    fut: asyncio.Future = asyncio.get_running_loop().create_future()
+    _ocr_inflight[cache_key] = fut
+    try:
+        text, boxes, ocr_size, backend = await _ocr_run(content, cache_key)
+        fut.set_result((text, boxes, ocr_size, backend))
+        _last_ocr_backend = backend
+        return (text, boxes, ocr_size) if want_boxes else text
+    except BaseException as e:
+        if not fut.done():
+            # Future 语义上不接收 CancelledError，统一转 RuntimeError；无并发等待者
+            # 时立刻消费一次异常，避免 "exception was never retrieved" 警告
+            fut.set_exception(e if isinstance(e, Exception) else RuntimeError(f"OCR 进行中被中断: {type(e).__name__}"))
+            fut.exception()
+        raise
+    finally:
+        _ocr_inflight.pop(cache_key, None)
+
+
+async def _ocr_run(content: bytes, cache_key: str) -> tuple[str, list, tuple[int, int], str]:
+    """执行一次识别（核显加速→内置引擎，否则 UMI-OCR HTTP），写 LRU。
+
+    返回 (text, boxes, ocr_size, backend)：backend 为 "gpu"（内置加速引擎）
+    或 "umi"（UMI-OCR，含 GPU 失败兜底），由调用方如实携带到响应。
+    """
+    # 「核显加速」= 引擎切换开关（十期定稿）：开 = 内置 RapidOCR 引擎
+    # （DirectML/OpenVINO 自检择优）真跑；关 = 纯 UMI-OCR（此路径不动）。
+    # 内置引擎失败时仍回退 UMI 保命（依赖未装/自检不过/推理异常）。
+    # 精度参考（真实证件图 A/B 实测，2026-08-15，1600px 投喂）：
+    #   内置 PP-OCRv6 small：34 块 / 369 字符 / 1.3s
+    #   UMI（Paddle v4）：42 块 / 631 字符 / 2.9s
+    # 内置漏检 ~20% 文本行、字符量少 40%——开关打开前用户已知晓精度取舍。
+    # 空结果不落缓存（与 UMI code=101 同策略）：空往往是暂时性识别异常
+    # （引擎半初始化/极端图），缓存了会让该图永远提取失败、裁切无坐标。
+    if settings.igpu_acceleration:
+        try:
+            from .gpu_ocr import ocr_bytes
+
+            text, boxes, ocr_size = await asyncio.to_thread(ocr_bytes, content)
+            if text.strip():
+                _ocr_cache_put(cache_key, text, boxes, ocr_size, "gpu")
+            return text, boxes, ocr_size, "gpu"
+        except Exception as e:
+            print(f"[GPU-OCR] 内置引擎失败，回退 UMI-OCR: {type(e).__name__}: {e}", flush=True)
+            _flog(f"[GPU-OCR] 内置引擎失败，回退 UMI-OCR: {type(e).__name__}: {e}")
+
+    url = f"http://{settings.umi_ocr_host}:{settings.umi_ocr_port}/api/ocr"
     b64 = base64.b64encode(content).decode()
+    # 裸 base64（与 v0.6.8 一致）：不传 options.limit_side_len。
+    # 曾试过 {"ocr.limit_side_len": 999999} 强制 UMI 用完整 1600px 识别——理论是
+    # 防 UMI 内部 960px 压缩丢小字框，实测适得其反：UMI 在 1600px 全图跑 det
+    # 每张慢 2~3 倍（批量 LOOP 明显劣化），且 det 框变碎导致裁切退化。
+    # UMI 流水线本就是 det（缩放图找框）→ 坐标映射回原图 → rec 从原图裁块识别，
+    # 小字识别率不受 det 缩放影响；960 默认值是 UMI 多年调好的均衡档。
     try:
         async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
             resp = await client.post(url, json={"base64": b64})
@@ -1136,10 +1283,10 @@ async def _call_umi_ocr(content: bytes, want_boxes: bool = False):
 
     code = data.get("code")
     print(f"[UMI-DEBUG] response code={code}, img_bytes={len(content)}, raw_data_type={type(data.get('data')).__name__}")
-    # code 100 = 成功；101 = 图片中未找到文字（非致命错误，返回空串）
+    # code 100 = 成功；101 = 图片中未找到文字（非致命错误，返回空串；不落缓存）
     if code == 101:
         print(f"[UMI-DEBUG] code=101 no text found. full response: {str(data)[:500]}")
-        return ("", [], (0, 0)) if want_boxes else ""
+        return "", [], (0, 0), "umi"
     if code != 100:
         print(f"[UMI-DEBUG] unexpected code. full response: {str(data)[:500]}")
         raise RuntimeError(f"UMI-OCR 返回异常: {str(data)[:300]}")
@@ -1156,10 +1303,9 @@ async def _call_umi_ocr(content: bytes, want_boxes: bool = False):
     lines = [o.get("text", "") for o in outputs if isinstance(o, dict) and o.get("text")]
     text = "\n".join(lines).strip()
     print(f"[UMI-DEBUG] blocks={len(outputs)}, text_len={len(text)}, first200={text[:200]!r}")
-    if not want_boxes:
-        return text
 
-    # 文本框坐标（投喂图坐标系）：供按文本区域裁图（CamScanner 内容定位）
+    # 文本框坐标（投喂图坐标系）：供按文本区域裁图（CamScanner 内容定位）。
+    # 无论 want_boxes 都解析（纯内存操作零成本），保证缓存条目完整。
     boxes: list = [o.get("box") for o in outputs if isinstance(o, dict) and o.get("box")]
     try:
         from PIL import Image as _BImg
@@ -1167,18 +1313,29 @@ async def _call_umi_ocr(content: bytes, want_boxes: bool = False):
             ocr_size = (_bim.size[0], _bim.size[1])
     except Exception:
         ocr_size = (0, 0)
-    return text, boxes, ocr_size
+    _ocr_cache_put(cache_key, text, boxes, ocr_size, "umi")
+    return text, boxes, ocr_size, "umi"
 
 
 async def _check_umi_ocr_alive() -> bool:
-    """快速检测 UMI-OCR HTTP 服务是否在线（2秒超时）。"""
+    """快速检测 UMI-OCR HTTP 服务是否在线（2秒超时，结果缓存 30s 节流）。
+
+    _ocr_run 每张图都要判断 UMI 在线与否来选引擎，不节流的话 UMI 离线时
+    每张图都要白等一次 2s 超时才落内置引擎。
+    """
+    global _umi_alive_at, _umi_alive_val
+    now = time.monotonic()
+    if _umi_alive_at is not None and now - _umi_alive_at < 30.0:
+        return _umi_alive_val
     url = f"http://{settings.umi_ocr_host}:{settings.umi_ocr_port}/api/ocr"
     try:
         async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
             await client.post(url, json={"base64": ""})
-            return True
+            _umi_alive_val = True
     except Exception:
-        return False
+        _umi_alive_val = False
+    _umi_alive_at = now
+    return _umi_alive_val
 
 
 async def ensure_umi_ocr_running() -> tuple[bool, str]:
@@ -1459,6 +1616,69 @@ async def ocr_image_bytes(
         ) from vision_err
 
 
+# 整页横躺自愈触发线：页型图（宽高比 0.35~2.8）OCR 文本少于该字符数时怀疑文字横躺。
+# 护照/证件整页正常识别通常 250+ 字符；横躺误识只余噪声（实测 DARIA 案 85 字符）。
+_SIDWAYS_RESCUE_MIN_CHARS = 120
+
+
+async def _ocr_sideways_rescue(
+    content: bytes, engine: str | None = None, boxes_out: dict | None = None
+) -> tuple[bytes, str, dict | None]:
+    """整页 OCR 出口兜底：结果可疑过短时按 90/270/180 度重识别，取显著更优者。
+
+    背景：第5档（高速·无转正）关闭 Vision 转正后，本地投影粗判对部分竖排
+    扫描页失手（投影法分不清护照页的行结构），横躺图直接喂 OCR 产出乱码，
+    乱码再进 LRU 缓存 → 后续轮次秒级复用垃圾、字段全空（DARIA 卡片案）。
+    此处在 OCR 调用点自愈：页型图且文本 < 120 字符 → 逐角度重试，
+    转正后文本 ≥ 1.4 倍且过 120 字符线才采纳，并同步回写 boxes_out
+    （坐标与旋转后图片一致，下游 BOX-CROP / MRZ 补扫直接可用）。
+
+    正向稀疏页无副作用：转角度只会更短，原结果保留；重复投喂经 LRU 秒回，
+    自愈本身只在首次多 1~3 次识别（每次 2~3 秒）。
+    """
+    boxes_out = boxes_out if boxes_out is not None else {}
+    text, fallback = await ocr_image_bytes(content, engine=engine, boxes_out=boxes_out)
+    try:
+        from PIL import Image as _Img
+
+        with _Img.open(io.BytesIO(content)) as _im:
+            w, h = _im.size
+    except Exception:
+        return content, text, fallback
+    aspect = w / max(h, 1)
+    if not (0.35 <= aspect <= 2.8):
+        return content, text, fallback  # 条幅/长图（如 MRZ 底条）不适用
+    if len((text or "").strip()) >= _SIDWAYS_RESCUE_MIN_CHARS:
+        return content, text, fallback  # 文本量正常，无需自愈
+
+    base_len = len((text or "").strip())
+    for deg in (90, 270, 180):
+        try:
+            from PIL import Image as _Img
+
+            with _Img.open(io.BytesIO(content)) as _im:
+                rot = _im.rotate(-deg, expand=True)  # 负角=顺时针，与转正逻辑同约定
+            buf = io.BytesIO()
+            rot.save(buf, format="JPEG", quality=92)
+            rot_bytes = buf.getvalue()
+        except Exception:
+            continue
+        tmp: dict = {}
+        try:
+            t, fb = await ocr_image_bytes(rot_bytes, engine=engine, boxes_out=tmp)
+        except Exception:
+            continue
+        t_len = len((t or "").strip())
+        if t_len >= _SIDWAYS_RESCUE_MIN_CHARS and t_len > base_len * 1.4:
+            msg = f"[OCR-RESCUE] 检出横躺文本：顺时针转 {deg}° 重识别 {t_len} 字符（原 {base_len}）"
+            print(msg, flush=True)
+            _flog(msg)
+            boxes_out.clear()
+            boxes_out.update(tmp)
+            return rot_bytes, t, (fb or fallback)
+    return content, text, fallback
+
+
 # ============ MRZ 解析（护照机器可读区） ============
 def _normalize_for_compare(s: str) -> str:
     """归一化字符串用于比较：去空格、转大写、去除多余符号。"""
@@ -1588,8 +1808,9 @@ def _parse_mrz(text: str) -> dict[str, str]:
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n").upper()
     # 去除OCR可能产生的空格
     cleaned = _re.sub(r'[ \t]+', '', cleaned)
-    # PaddleOCR 常把 MRZ 填充符 < 识别为 unicode 变体（«/‹/〈/全角＜等），统一归一
-    for _lt_variant in ("«", "‹", "〈", "＜", "≪", "⋘"):
+    # PaddleOCR 常把 MRZ 填充符 < 识别为 unicode 变体（«/‹/〈/全角＜等），统一归一。
+    # く/ク：PP-OCRv6 中文模型对连续填充符的高发误识（实测一整段<<<<<<<读成くくく…）
+    for _lt_variant in ("«", "‹", "〈", "＜", "≪", "⋘", "く", "ク"):
         cleaned = cleaned.replace(_lt_variant, "<")
 
     # 把所有连续的非字母数字<的字符作为行分隔
@@ -2636,6 +2857,11 @@ def _heal_name_fragments(fields: dict[str, str], text: str) -> dict[str, str]:
     return fields
 
 
+# 文本 LLM 并发上限：两遍式流水线下多人文件的 DeepSeek 排版在后台并行堆积，
+# 不限流会集中打到 API 触发限速（429 重试反而更慢）。3 并发实测兼顾吞吐与稳定
+_llm_semaphore = asyncio.Semaphore(3)
+
+
 async def extract_fields_from_text(text: str, target_fields: list[str]) -> dict[str, str]:
     """用文本 LLM 从文档全文中提取目标字段（结构化 JSON）。
 
@@ -2648,6 +2874,13 @@ async def extract_fields_from_text(text: str, target_fields: list[str]) -> dict[
     if not key:
         print(f"[EXTRACT-DEBUG] 未配置 API Key，跳过 LLM 字段提取（{len(target_fields)} 个字段将走本地关键词兜底）: {target_fields}")
         return {f: "" for f in target_fields}
+
+    async with _llm_semaphore:
+        return await _extract_fields_from_text_inner(text, target_fields, base, key, model)
+
+
+async def _extract_fields_from_text_inner(text: str, target_fields: list[str], base: str, key: str, model: str) -> dict[str, str]:
+    """实际 LLM 调用（已过并发闸门）。"""
 
     url = base + "/chat/completions"
     headers = {
@@ -2801,6 +3034,64 @@ def _crop_bottom_band(content: bytes) -> bytes:
     return buf.getvalue()
 
 
+def _crop_top_band(content: bytes) -> bytes:
+    """裁出图片顶部 40% 并放大 2 倍（用于 VIZ 可视区姓名补扫），返回 JPEG 字节。
+
+    与 _crop_bottom_band 对称：护照上半部是 VIZ 可视区（姓名/标签），
+    底部 MRZ 被裁出画面时，姓名仍可从这里放大重扫读出。
+    """
+    from PIL import Image
+    img = Image.open(io.BytesIO(content)).convert("RGB")
+    w, h = img.size
+    if w < 100 or h < 100:
+        return b""
+    band = img.crop((0, 0, w, int(h * 0.40)))
+    band = band.resize((band.width * 2, band.height * 2), Image.LANCZOS)
+    bw, bh = band.size
+    if max(bw, bh) > _UMI_OCR_MAX_EDGE:
+        ratio = _UMI_OCR_MAX_EDGE / max(bw, bh)
+        band = band.resize((max(1, int(bw * ratio)), max(1, int(bh * ratio))), Image.LANCZOS)
+    buf = io.BytesIO()
+    band.save(buf, format="JPEG", quality=92)
+    return buf.getvalue()
+
+
+async def _viz_top_rescan(text: str, content: bytes, active_engine: str) -> str:
+    """MRZ 机读区不在画面/未识别时，裁顶部 40% 放大 2 倍重扫 VIZ 可视区姓名。
+
+    常见场景：护照照片底部被裁（MRZ 出画），上半部仍有 SURNAME/GIVEN NAMES
+    标签和姓名。补扫文本并入后，本地标签提取和文本 LLM 即可从中取到姓名。
+    仅 umi 引擎且文档像护照（或原文已含姓名标签）时执行；补扫结果含
+    姓名标签或成串拉丁词才返回，否则返回空串（不污染原文本）。
+    """
+    if active_engine != "umi" or not text:
+        return ""
+    upper = text.upper()
+    looks_passport = bool(re.search(r"P<[A-Z]{3}", upper)) or any(
+        kw in upper for kw in ("PASSPORT", "PASSEPORT", "PASAPORTE", "REISEPASS", "ПАСПОРТ", "护照")
+    )
+    has_name_label = any(re.search(p, upper) for p in (*_LABEL_SURNAME, *_LABEL_GIVEN))
+    if not (looks_passport or has_name_label):
+        return ""
+    band_bytes = await asyncio.to_thread(_crop_top_band, content)
+    if not band_bytes:
+        return ""
+    try:
+        band_text = await _call_umi_ocr(band_bytes)
+    except Exception as e:
+        print(f"[VIZ-RESCAN] 上半部姓名补扫失败（忽略）: {e}")
+        return ""
+    if not band_text:
+        return ""
+    bu = band_text.upper()
+    hit_label = any(re.search(p, bu) for p in (*_LABEL_SURNAME, *_LABEL_GIVEN))
+    hit_latin_run = bool(re.search(r"[A-Z]{3,}(?:\s+[A-Z]{2,}){1,}", bu))
+    if hit_label or hit_latin_run:
+        print(f"[VIZ-RESCAN] 上半部补扫命中姓名区（{len(band_text)} 字符），并入文本")
+        return band_text
+    return ""
+
+
 async def _mrz_bottom_rescan(text: str, content: bytes, active_engine: str) -> str:
     """全图 OCR 后，裁底部 30% 放大 2 倍再扫一次 UMI-OCR 找 MRZ 机读区。
 
@@ -2935,8 +3226,11 @@ async def preview_document(content: bytes, filename: str) -> dict:
             processed_image = orient_b64
         # umi 引擎：按 OCR 文本框裁切预览（CamScanner 内容定位）——
         # 边缘裁边对灰底/渐变背景失效时，文本框坐标是内容位置的地面真相。
-        # 代价 ~1-2 秒（UMI 本地识别），换预览直接聚焦文本区
-        if settings.ocr_engine == "umi" and oriented and await _check_umi_ocr_alive():
+        # 代价一次全图识别（内置引擎 ~0.5s、UMI ~2s；结果进 LRU，正式提取直接复用）
+        # 核显加速开启时无需 UMI 在线（内置引擎不依赖 UMI 进程）
+        if settings.ocr_engine == "umi" and oriented and (
+            settings.igpu_acceleration or await _check_umi_ocr_alive()
+        ):
             try:
                 _, p_boxes, p_size = await _call_umi_ocr(oriented, want_boxes=True)
                 if p_boxes:
@@ -3004,6 +3298,8 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
     text: str = ""
     method: str = ""
     fallback: dict | None = None
+    # umi 通道实际使用的引擎（"gpu"=内置加速引擎 / "umi"=UMI-OCR），响应携带供前端显示
+    ocr_backend = ""
     # 阶段计时：定位单文件处理慢在哪一段（[EXTRACT-TIME] 日志）
     _t0 = time.perf_counter()
     # OCR 文本框坐标（UMI 成功路径回填）：按文本区域裁图（CamScanner 内容定位）用
@@ -3044,7 +3340,9 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
         except Exception as _e:
             print(f"[EXTRACT-DEBUG] image preprocess: {orig_len}B -> {len(content)}B, dim_read_fail={_e}, engine={active_engine}")
         # boxes_out：UMI 成功时带回文本框坐标（不产生额外调用），供按文本区域裁图
-        text, fallback = await ocr_image_bytes(content, engine=engine, boxes_out=boxes_out)
+        # 横躺自愈：无转正档位下粗判失手的整页图，在此兜底转角重识别（DARIA 案）
+        content, text, fallback = await _ocr_sideways_rescue(content, engine, boxes_out)
+        ocr_backend = _last_ocr_backend  # 实际引擎：gpu（内置加速）| umi（UMI-OCR/兜底）
         _stage_ms(f"OCR({active_engine})")
         if fallback:
             print(f"[EXTRACT-DEBUG] OCR 回退: {fallback['from']}→{fallback['to']} ({fallback['reason']})")
@@ -3095,7 +3393,9 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
                     processed_image = orient_b64
                 ocr_text = ""
                 try:
-                    ocr_text, fallback = await ocr_image_bytes(content, engine=engine, boxes_out=boxes_out)
+                    # 横躺自愈：无转正档位下粗判失手的整页图，在此兜底转角重识别（DARIA 案）
+                    content, ocr_text, fallback = await _ocr_sideways_rescue(content, engine, boxes_out)
+                    ocr_backend = _last_ocr_backend  # 实际引擎：gpu（内置加速）| umi（UMI-OCR/兜底）
                 except RuntimeError:
                     if text and text.strip():
                         # OCR 双引擎都失败，但文字层尚有内容 → 用文字层兜底，不让整个提取失败
@@ -3146,6 +3446,19 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
         if band_text:
             text = text + "\n" + band_text
         _stage_ms("MRZ底部补扫")
+        # MRZ 未入画/未识别（解析不出姓名字段）→ VIZ 可视区姓名兜底：
+        # 裁顶部 40% 放大重扫上半部姓名区（护照照片常被裁掉底部，姓名仍在画面上部），
+        # 补扫文本并入后由本地标签提取/文本 LLM 从中取姓名
+        if active_engine == "umi":
+            try:
+                _probe = _parse_mrz(text)
+            except Exception:
+                _probe = {}
+            if not (_probe.get("surname") or _probe.get("given_name")):
+                top_text = await _viz_top_rescan(text, content, active_engine)
+                if top_text:
+                    text = text + "\n" + top_text
+                    _stage_ms("VIZ上半部姓名补扫")
     # MRZ解析是纯本地正则、零成本，对任何路径的文本都尝试
     # （含 markitdown 文字层——原生护照 PDF 的文字层里同样带 MRZ 两行）
     if text:
@@ -3383,6 +3696,7 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
     return {
         "filename": filename,
         "method": method,
+        "ocr_backend": ocr_backend,
         "text": text,
         "fields": fields,
         "mrz_warnings": mrz_warnings,

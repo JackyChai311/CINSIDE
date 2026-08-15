@@ -11,6 +11,12 @@ PyMuPDF>=1.24
 Pillow>=10.0
 pillow-heif>=0.16  # HEIC/HEIF（iPhone 拍摄照片）解码，供文件提取 OCR
 
+# 内置本地 OCR 引擎（「核显加速」开关）：RapidOCR PP-OCRv6 + DirectML
+# （Intel/AMD/NVIDIA 通用 GPU 推理；自检不过自动锁 CPU，无需 UMI-OCR）
+rapidocr>=3.9
+onnxruntime-directml>=1.20
+openvino>=2024.3  # CPU 推理加速候选：Intel CPU 指令级优化，AMD 亦可用（自检择优）
+
 # 真实跑 Browser Use 时再装（依赖较重）
 # browser-use>=0.1.30
 # langchain-openai>=0.1.0

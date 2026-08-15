@@ -68,6 +68,44 @@ frontend/patch-main.js
 tools/
 backend/tools/
 
+# Release automation temp files (may contain tokens / build artifacts)
+.gh*_tmp.json
+.gh*_resp.json
+.gh_token_tmp
+.cred_*
+.curl*_tmp*
+.curlresp_*.json
+.curlstate_*.cfg
+.diff_tmp*
+.ghtag*_tmp.json
+.lastlocal_*.txt
+.newcommit_tmp.txt
+.release_body*.md
+.releasebody_tmp.json
+.releaseid_tmp.txt
+.relid_*.txt
+.remotetagsha_tmp.txt
+.tagbody_tmp.json
+.up_resp_tmp.json
+.up_tmp.json
+.upload_resp_tmp.json
+_tmp_*.ps1
+_tmp_assets*.ps1
+push-to-github.ps1
+
+# Local diagnostics / build artifacts
+diag*.cjs
+shot*.cjs
+shot*.png
+backend/_ab_test.py
+backend/gleb_test_result*.json
+backend/probe_*.json
+backend/orient_cache.json
+backend/ocr-models/
+dist-electron-*/
+release-assets-*/
+sensenova_ok.json
+
 # Backend test scripts
 backend/test_browser_use.py
 backend/test_screenshot_stream.py

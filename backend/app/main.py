@@ -77,6 +77,27 @@ app.include_router(cowork.router)
 async def _log_loop():
     loop = asyncio.get_running_loop()
     print(f"[startup] event loop type: {type(loop).__name__}", flush=True)
+    # 后台预热内置 OCR 引擎 GPU 自检（「核显加速」开关用，不阻塞启动）
+    from .services.gpu_ocr import start_background_selftest
+
+    start_background_selftest()
+
+
+# 全局异常兜底：未捕获异常默认返回纯文本 500 "Internal Server Error"，
+# 前端 json 解析失败只能显示裸"导出失败"这类无信息提示。统一转 JSON，
+# 把真实异常类型/信息带给前端（如 PermissionError：文件被 Excel/WPS 占用）。
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    import traceback
+    print(f"[UNHANDLED] {request.method} {request.url.path}: {type(exc).__name__}: {exc}\n{traceback.format_exc()}", flush=True)
+    msg = str(exc) or type(exc).__name__
+    if isinstance(exc, PermissionError):
+        msg = f"文件被占用，没有写入权限（请关闭正在打开该文件的 Excel/WPS 后重试）：{msg}"
+    return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {msg}"})
 
 
 # mock 大学页面挂在 /mock 路径，用 StaticFiles 提供

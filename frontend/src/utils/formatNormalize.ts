@@ -156,17 +156,20 @@ export function valuesEquivalent(field: string, a: string, b: string): boolean {
 
 // ============ 文档提取方式标签 ============
 
-/** 提取方式 → 用户可见的中文标签 */
-export function extractMethodLabel(method: string): string {
+/** 提取方式 → 用户可见的中文标签。
+ *  ocrBackend：umi 通道实际引擎（"gpu"=内置加速引擎，"umi"=UMI-OCR），
+ *  有值时标签如实显示 OCR（GPU）/ OCR（UMI）——GPU 兜底成 UMI 也标 UMI。 */
+export function extractMethodLabel(method: string, ocrBackend?: string): string {
+  const be = ocrBackend === "gpu" ? "GPU" : ocrBackend === "umi" ? "UMI" : "";
   switch (method) {
     case "vision_ocr":
       return "AI Vision";
     case "umi_ocr":
-      return "UMI-OCR";
+      return be ? `OCR（${be}）` : "OCR";
     case "pdf_ocr":
       return "AI Vision（PDF扫描件）";
     case "pdf_umi_ocr":
-      return "UMI-OCR（PDF扫描件）";
+      return be ? `OCR（${be}·扫描件）` : "OCR（PDF扫描件）";
     case "markitdown":
       return "文档解析";
     default:

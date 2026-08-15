@@ -9,6 +9,7 @@ import type {
   DocumentConvertResult,
   DocumentExtractResult,
   DocumentPreviewResult,
+  GpuInfo,
   PPTFileSlides,
   PPTOutlineSlide,
   PPTProgressEvent,
@@ -84,12 +85,31 @@ function notifyEngineFallback<T extends { fallback?: { from: string; to: string;
   return res;
 }
 
+/** Excel 导出响应解析：JSON=inplace 原地写回（返回路径），blob=副本下载 */
+async function _parseExcelExportResp(resp: Response): Promise<{ mode: "inplace" | "download"; path?: string; filename?: string; note?: string }> {
+  if (!resp.ok) {
+    let msg = "导出失败";
+    try { const j = await resp.json(); msg = j.detail || msg; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  const ct = resp.headers.get("content-type") || "";
+  if (ct.includes("application/json")) {
+    const j = await resp.json();
+    return { mode: "inplace", path: j.path, note: j.note };
+  }
+  const blob = await resp.blob();
+  const cd = resp.headers.get("content-disposition") || "";
+  const m = /filename=([^;]+)/.exec(cd);
+  const filename = m ? m[1].trim().replace(/^"|"$/g, "") : "data_updated.xlsx";
+  return { mode: "download", filename, path: URL.createObjectURL(blob) };
+}
+
 export const api = {
   getConfig: () => jsonFetch<AppConfig>(`${BASE}/config`),
 
   getSettings: () => jsonFetch<AppSettings>(`${BASE}/config/settings`, undefined, 10000),
 
-  saveSettings: (settings: AppSettings) =>
+  saveSettings: (settings: Partial<AppSettings>) =>
     jsonFetch<{ ok: boolean; error?: string }>(
       `${BASE}/config/settings`,
       {
@@ -170,11 +190,23 @@ export const api = {
   // ===== 依赖与工具管理 =====
   getDepsStatus: () =>
     jsonFetch<DepsStatus>(`${BASE}/config/deps-status`),
+  /** 显卡/核显检测（refresh=true 强制重新查询硬件） */
+  getGpuInfo: (refresh = false) =>
+    jsonFetch<GpuInfo>(`${BASE}/config/gpu-info${refresh ? "?refresh=true" : ""}`, undefined, 30000),
+  /** 手动触发内置 OCR 引擎 GPU 自检（返回最新引擎状态） */
+  runGpuSelftest: () =>
+    jsonFetch<{ ok: boolean; engine: GpuInfo["local_engine"] }>(`${BASE}/config/gpu-selftest`, { method: "POST" }, 120000),
   installPythonDeps: () =>
     jsonFetch<{ ok: boolean; message: string }>(
       `${BASE}/config/install-python-deps`,
       { method: "POST" },
       300000
+    ),
+  installOcrEngineDeps: () =>
+    jsonFetch<{ ok: boolean; message: string }>(
+      `${BASE}/config/install-ocr-engine-deps`,
+      { method: "POST" },
+      1900000
     ),
   downloadUmiOcr: () =>
     jsonFetch<{ ok: boolean; message: string; exe_path: string }>(
@@ -273,6 +305,8 @@ export const api = {
       mrz_warnings: string[];
     }>;
     mode?: "batch" | "card";
+    /** 整轮总用时（毫秒）：batch 模式下 AI 总结与本地兜底会包含总用时/平均用时 */
+    duration_ms?: number;
   }) =>
     jsonFetch<{ text: string; source: "ai" | "local" }>(`${BASE}/verify/analysis/loop`, {
       method: "POST",
@@ -320,23 +354,23 @@ export const api = {
     }),
 
   /** 导出 Excel：把内存中（修正后）的字段值写回文件；本地路径=原地写回，否则下载副本 */
-  exportExcel: async (side: "left" | "right"): Promise<{ mode: "inplace" | "download"; path?: string; filename?: string }> => {
+  exportExcel: async (side: "left" | "right"): Promise<{ mode: "inplace" | "download"; path?: string; filename?: string; note?: string }> => {
     const resp = await fetch(`${BASE}/upload/excel-export?side=${side}`);
-    if (!resp.ok) {
-      let msg = "导出失败";
-      try { const j = await resp.json(); msg = j.detail || msg; } catch { /* ignore */ }
-      throw new Error(msg);
-    }
-    const ct = resp.headers.get("content-type") || "";
-    if (ct.includes("application/json")) {
-      const j = await resp.json();
-      return { mode: "inplace", path: j.path };
-    }
-    const blob = await resp.blob();
-    const cd = resp.headers.get("content-disposition") || "";
-    const m = /filename=([^;]+)/.exec(cd);
-    const filename = m ? m[1].trim().replace(/^"|"$/g, "") : "data_updated.xlsx";
-    return { mode: "download", filename, path: URL.createObjectURL(blob) };
+    return _parseExcelExportResp(resp);
+  },
+
+  /** 导出 Excel（带问题高亮）：运行结束后把字段对比状态一起传上，
+   *  有问题的单元格在导出文件里填色——mismatch/error=红底深红字，missing/partial=琥珀 */
+  exportExcelHighlighted: async (
+    side: "left" | "right",
+    highlights: Array<{ record_id: string; fields: Record<string, string> }>
+  ): Promise<{ mode: "inplace" | "download"; path?: string; filename?: string; note?: string }> => {
+    const resp = await fetch(`${BASE}/upload/excel-export-hl`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ side, highlights }),
+    });
+    return _parseExcelExportResp(resp);
   },
 
   continueManualStep: (taskId: string) =>

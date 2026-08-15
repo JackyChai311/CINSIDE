@@ -109,6 +109,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // === 下载捕获（文件提取模式） ===
   setDownloadCapture: (side, enabled) => ipcRenderer.invoke("set-download-capture", side, enabled),
 
+  // === LOOP 运行时阻止息屏 ===
+  setPowerSave: (enabled) => ipcRenderer.invoke("set-power-save", enabled),
+
   // === 文件提取保底机制 ===
   viewGetDownloadableLinks: (side) => ipcRenderer.invoke("view-get-downloadable-links", side),
   viewBatchDownloadUrls: (side, urls, timeoutMs) => ipcRenderer.invoke("view-batch-download-urls", side, urls, timeoutMs),

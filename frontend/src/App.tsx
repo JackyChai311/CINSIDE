@@ -320,6 +320,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   umi_ocr_host: "127.0.0.1",
   umi_ocr_port: 1224,
   prevent_accidental_close: false,
+  loop_keep_awake: false,
+  high_speed_mode: false,
   ui_scale: 1.0,
   beginner_mode: false,
   theme: "light",
@@ -939,6 +941,9 @@ export default function App() {
   const [cardsGenerated, setCardsGenerated] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  // 设置的最新快照：供 executeMark 等不依赖 settings 的 useCallback 闭包读取（避免闭包过期拿到旧开关值）
+  const settingsRef = useRef(settings);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   // 切换文档/护照 OCR 识别引擎（识图AI ↔ UMI-OCR），即时保存到后端
   const handleChangeOcrEngine = useCallback(async (engine: "vision" | "umi") => {
@@ -948,7 +953,9 @@ export default function App() {
     // 切换引擎后清除后台OCR缓存，避免复用到旧引擎的结果
     bgOcrResultRef.current = null;
     try {
-      await api.saveSettings(next);
+      // 只发增量：全量 settings 是本组件启动时加载的快照，可能滞后于后端
+      // （如别处刚改过转正/加速开关），全量回存会把旧值覆盖回去
+      await api.saveSettings({ ocr_engine: engine });
     } catch (e) {
       console.error("[ocrEngine] 保存失败", e);
     }
@@ -1270,7 +1277,20 @@ const needsManualRef = useRef<Set<string>>(new Set());
 const pendingWebFileRef = useRef<{ dataUrl: string; filename: string; size: number; side: "left" | "right" } | null>(null);
 // 后台OCR预提取结果缓存（LOOP模式下下载后立即开OCR，结果缓存供triggerWebExtract复用）
 // engine 字段记录缓存结果使用的 OCR 引擎，切换引擎后缓存自动失效
-const bgOcrResultRef = useRef<{ dataUrl: string; engine: string; result: Awaited<ReturnType<typeof api.extractDocumentFile>> } | null>(null);
+// promise 字段：高速模式下 OCR 在后台跑，promise 尚未落定时 triggerWebExtract/join 等 await 它
+const bgOcrResultRef = useRef<{
+  dataUrl: string; engine: string;
+  result?: Awaited<ReturnType<typeof api.extractDocumentFile>>;
+  promise?: Promise<Awaited<ReturnType<typeof api.extractDocumentFile>>>;
+} | null>(null);
+// 高速模式：各记录后台 OCR 的落定 Promise（含状态写入），按 record_id 分组——
+// 两遍式流水线下 pass1 连续下载多人，join 移到 pass2 逐人执行，必须按人隔离防串
+const bgOcrPromisesRef = useRef<Map<string, Array<Promise<unknown>>>>(new Map());
+// 高速模式：延后执行的文件一致性校验（下错文件时才触发保底，捕获当时的回退步数），同样按 record_id 分组
+const pendingFileVerifyRef = useRef<Map<string, () => Promise<void>>>(new Map());
+// 两遍式 pass1（deferCompare）进行中标记：文件提取的 OCR+DeepSeek 无条件后台化，
+// 不依赖高速模式开关——两遍式流水线本身的并行语义，任何档位下 pass1 都不许内联等 AI
+const passDeferActiveRef = useRef(false);
 // 保底机制：等待人工确认文件的 Promise resolve
 const fallbackWaitResolveRef = useRef<((file: { filename: string; dataUrl: string; size: number; mime: string } | null) => void) | null>(null);
 // LOOP执行时当前记录的开头点击步骤数（供保底机制回退页面用）
@@ -1398,6 +1418,8 @@ type DocPanelResult = {
   imageUrl: string;
   filename: string;
   method: string;
+  /** umi 通道实际引擎：gpu=内置加速引擎，umi=UMI-OCR（含 GPU 兜底） */
+  ocr_backend?: string;
   text: string;
   fields: Record<string, string>;
   fallback?: { from: string; to: string; reason: string } | null;
@@ -2211,6 +2233,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setDocExtractPanel(null);
     setSameNameImages(null);
   }, [isAnyRunning]);
+
+  // LOOP 运行不息屏：设置开启时，执行期间阻止电脑息屏/休眠，结束后自动恢复
+  useEffect(() => {
+    if (!window.electronAPI?.setPowerSave) return;
+    window.electronAPI.setPowerSave(isAnyRunning && settings.loop_keep_awake === true).catch(() => {});
+  }, [isAnyRunning, settings.loop_keep_awake]);
 
   const [steps, setSteps] = useState<VerificationStep[]>([]);
   const [shots, setShots] = useState<ScreenshotEvent[]>([]);
@@ -3740,8 +3768,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   }, [resolveDocFieldKey]);
 
   /** 网页模式：预览就绪后用户点击「录入提取」触发 OCR 识别（若后台已预提取则直接复用）
-   *  overrideRecordId：批量执行时显式传入当前记录 id（避免闭包中 selected 过期导致字段提交到错误记录） */
-  const triggerWebExtract = useCallback((overrideRecordId?: string) => {
+   *  overrideRecordId：批量执行时显式传入当前记录 id（避免闭包中 selected 过期导致字段提交到错误记录）
+   *  高速模式下后台 OCR 可能仍在跑：缓存命中时 await 其 promise 复用结果，不重复发起请求 */
+  const triggerWebExtract = useCallback(async (overrideRecordId?: string) => {
     const pending = pendingWebFileRef.current;
     if (!pending) return;
     const rid = overrideRecordId || selected?.record_id || "_default";
@@ -3754,8 +3783,17 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 检查是否有后台预提取的OCR结果可以直接复用（引擎必须一致，否则视为缓存失效）
     const cached = bgOcrResultRef.current;
     if (cached && cached.dataUrl === pending.dataUrl && cached.engine === (settings.ocr_engine || "vision")) {
+      // 高速模式缓存可能尚未落定：等同一个 promise（含 docExtractsByRecord 写入）完成后复用
+      let result: Awaited<ReturnType<typeof api.extractDocumentFile>>;
+      if (cached.result) {
+        result = cached.result;
+      } else if (cached.promise) {
+        rlog(`[triggerWebExtract] 复用后台OCR进行中任务: ${pending.filename} (engine=${cached.engine})`);
+        result = await cached.promise;
+      } else {
+        return;
+      }
       rlog(`[triggerWebExtract] 复用后台OCR缓存结果: ${pending.filename} (engine=${cached.engine})`);
-      const result = cached.result;
       const newExtract: DocExtractState = {
         filename: result.filename,
         method: result.method,
@@ -3800,7 +3838,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
     // 没有缓存，正常执行OCR
     const file = dataUrlToFile(pending.dataUrl, pending.filename);
-    api.extractDocumentFile(file, targetFields)
+    const extractP = api.extractDocumentFile(file, targetFields)
       .then((result) => {
         const newExtract: DocExtractState = {
           filename: result.filename,
@@ -3826,6 +3864,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             imageUrl: toPreviewImageUrl(pending.dataUrl, result.processed_image),
             filename: result.filename,
             method: result.method,
+            ocr_backend: result.ocr_backend,
             text: result.text,
             fields: result.fields,
             side: pending.side,
@@ -3847,6 +3886,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         setDocWebStatus({ phase: "error", message: msg, filename: pending.filename });
         setError(`文件提取失败: ${msg}`);
       });
+    // LOOP 运行期（高速模式）：录入提取自发的 OCR 也纳入本记录 join 队列，字段对比前等它落定
+    if (isAnyRunningRef.current) {
+      const arr = bgOcrPromisesRef.current.get(rid) || [];
+      arr.push(extractP.catch(() => {}));
+      bgOcrPromisesRef.current.set(rid, arr);
+    }
   }, [mappings, selected, setSuccessToast, setError, computeDocTargetFields]);
 
   /** 双引擎对比：当前激活的 Tab（primary=主结果，alt=备用引擎结果） */
@@ -5921,6 +5966,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
   // 停止批量执行
   const stopBatch = useCallback(() => {
+    rlog("[batch] 用户请求停止 LOOP");
     batchStopRef.current = true;
     // 如果正在断点暂停中，resolve Promise 让执行循环能检测到 batchStopRef 并退出
     breakpointResolveRef.current?.();
@@ -6451,13 +6497,14 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // 后端 extract_document 内部已含完整回退链（MRZ → 本地正则 → VIZ 看图 + 文本 LLM 并行），
   // 前端不再二次重跑 Vision（之前"UMI 缺字段自动转 Vision 重试"会把整条 Vision 管线
   // 重跑一遍，白等 20~240 秒且命中率极低，是 LOOP 变慢的主因）。
-  const extractFileWithVisionFallback = useCallback(async (file: File, targetFields: string[]) => {
-    return api.extractDocumentFile(file, targetFields);
+  const extractFileWithVisionFallback = useCallback(async (file: File, targetFields: string[], engine?: string) => {
+    // engine 显式传参：档位切换后重跑，用点击档位时快照的引擎，不依赖后端全局设置同步
+    return api.extractDocumentFile(file, targetFields, engine);
   }, []);
 
   /** URL 版：同上，单次调用 */
-  const extractUrlWithVisionFallback = useCallback(async (url: string, targetFields: string[], filename: string) => {
-    return api.extractDocumentUrl(url, targetFields, filename);
+  const extractUrlWithVisionFallback = useCallback(async (url: string, targetFields: string[], filename: string, engine?: string) => {
+    return api.extractDocumentUrl(url, targetFields, filename, engine);
   }, []);
 
   // ============ 在单个 view 上执行一个 mark（带变量替换） ============
@@ -6730,6 +6777,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             const localExtract: DocExtractState = {
               filename: result.filename,
               method: result.method,
+            ocr_backend: result.ocr_backend,
               text: result.text,
               fields: result.fields,
               entries: [],
@@ -6753,6 +6801,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 imageUrl: toPreviewImageUrl(readResult.dataUrl, result.processed_image),
                 filename: result.filename,
                 method: result.method,
+                ocr_backend: result.ocr_backend,
                 text: result.text,
                 fields: result.fields,
                 side,
@@ -6798,7 +6847,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           
           // 下载完成后：先开预览，后台同时OCR提取
           // showPreviewAndBgOcr: 立即开预览（轻量）+ 后台启动OCR（重量），返回OCR文字供校验
-          const showPreviewAndBgOcr = async (fileData: { filename: string; dataUrl: string; size: number }): Promise<string> => {
+          // 高速模式下不等待 OCR：返回 null，OCR 在后台落定并写入缓存/面板，浏览器步骤继续跑；
+          // 文件一致性校验由调用方延后到记录末尾 join 点执行
+          const showPreviewAndBgOcr = async (fileData: { filename: string; dataUrl: string; size: number }): Promise<string | null> => {
             // 存入运行时文件槽位
             docRuntimeFileSlotsRef.current[mark.id] = { dataUrl: fileData.dataUrl, filename: fileData.filename };
             lastDocRuntimeFileRef.current = { dataUrl: fileData.dataUrl, filename: fileData.filename, markId: mark.id };
@@ -6822,6 +6873,36 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                   filename: previewResult.filename,
                   method: previewResult.method,
                 });
+                // 裁切图先行：不等 OCR+LLM 完整管线，preview 返回即把裁切预览回填
+                // 文件处理面板（带 pending 标记，正式提取完成后按 file_url 覆盖
+                // 为完整结果）——LOOP 开始时面板不用干等整条提取管线跑完才见到图
+                if (previewResult.processed_image) {
+                  const rid0 = record?.record_id || selected?.record_id || "_default";
+                  setDocExtractsByRecord((prev) => {
+                    const arr = prev[rid0] || [];
+                    // 已有完整结果（缓存热/跑得快）时不降级回 pending 占位
+                    if (arr.some((e) => e.file_url === fileData.dataUrl && !e.pending)) return prev;
+                    const filtered = arr.filter((e) => e.file_url !== fileData.dataUrl);
+                    return {
+                      ...prev,
+                      [rid0]: [
+                        ...filtered,
+                        {
+                          filename: previewResult.filename || fileData.filename,
+                          method: previewResult.method || "image",
+                          text: "",
+                          fields: {},
+                          entries: [],
+                          source: fileData.dataUrl,
+                          file_url: fileData.dataUrl,
+                          processed_image: previewResult.processed_image,
+                          pending: true,
+                        },
+                      ],
+                    };
+                  });
+                  setActiveDocIndex(999);
+                }
               })
               .catch((e) => {
                 rlog(`[executeMark] 轻量预览失败（不影响OCR）: ${e instanceof Error ? e.message : String(e)}`);
@@ -6831,53 +6912,90 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             setDocWebStatus({ phase: "ocr", filename: fileData.filename });
             updateLiveStepDetail(`OCR 识别中：${fileData.filename}`);
             rlog(`[executeMark] 预览已开启，后台开始OCR: ${fileData.filename}`);
-            const result = await extractFileWithVisionFallback(file, targetFields);
+            // 用 ref 快照读引擎，避免 useCallback 闭包里的 settings 过期（引擎中途切换后缓存标记错会导致复用错引擎的结果）
+            const ocrEngineNow = settingsRef.current.ocr_engine || "vision";
+            const ocrPromise = extractFileWithVisionFallback(file, targetFields, ocrEngineNow);
 
-            // 3. 缓存OCR结果（供triggerWebExtract复用，避免重复提取；记录引擎以便切换引擎后缓存失效）
-            bgOcrResultRef.current = { dataUrl: fileData.dataUrl, engine: settings.ocr_engine || "vision", result };
+            // OCR 落定后的统一处理：同步缓存结果 + 写 docExtractsByRecord + 更新面板/状态
+            const settledPromise = ocrPromise.then((result) => {
+              // 3. 缓存OCR结果（供triggerWebExtract复用，避免重复提取；记录引擎以便切换引擎后缓存失效）
+              if (bgOcrResultRef.current && bgOcrResultRef.current.promise === settledPromise) {
+                bgOcrResultRef.current.result = result;
+              }
 
-            // 3.5 同步写入 docExtractsByRecord，让文件处理面板和提取元素面板实时显示
-            //（LOOP运行期间不弹浮动审查面板，但下方面板要能看到内容）
-            const newExtract: DocExtractState = {
-              filename: result.filename,
-              method: result.method,
-              text: result.text,
-              fields: result.fields,
-              entries: [],
-              source: fileData.dataUrl,
-              file_url: fileData.dataUrl,
-              processed_image: result.processed_image,
-              mrz_warnings: result.mrz_warnings,
-              fallback: result.fallback,
-            };
-            const rid = record?.record_id || selected?.record_id || "_default";
-            setDocExtractsByRecord((prev) => {
-              const arr = prev[rid] || [];
-              const filtered = arr.filter((e) => e.file_url !== newExtract.file_url);
-              return { ...prev, [rid]: [...filtered, newExtract] };
-            });
-            setActiveDocIndex(999);
-            setDocSignal((s) => s + 1);
-
-            // 4. 设置提取面板（OCR结果就绪，非运行期才弹浮动审查面板）
-            if (!isAnyRunningRef.current) {
-              setDocExtractPanel({
-                imageUrl: toPreviewImageUrl(fileData.dataUrl, result.processed_image),
+              // 3.5 同步写入 docExtractsByRecord，让文件处理面板和提取元素面板实时显示
+              //（LOOP运行期间不弹浮动审查面板，但下方面板要能看到内容）
+              const newExtract: DocExtractState = {
                 filename: result.filename,
                 method: result.method,
+                ocr_backend: result.ocr_backend,
                 text: result.text,
                 fields: result.fields,
-                side,
-                workflow: side === "left" ? "entry" : "review",
+                entries: [],
+                source: fileData.dataUrl,
+                file_url: fileData.dataUrl,
+                processed_image: result.processed_image,
+                mrz_warnings: result.mrz_warnings,
                 fallback: result.fallback,
-                sourceDataUrl: fileData.dataUrl,
-                targetFields,
-                altResult: null,
+              };
+              const rid = record?.record_id || selected?.record_id || "_default";
+              setDocExtractsByRecord((prev) => {
+                const arr = prev[rid] || [];
+                const filtered = arr.filter((e) => e.file_url !== newExtract.file_url);
+                return { ...prev, [rid]: [...filtered, newExtract] };
               });
-              setDocExtractActiveTab("primary");
+              setActiveDocIndex(999);
+              setDocSignal((s) => s + 1);
+
+              // 4. 设置提取面板（OCR结果就绪，非运行期才弹浮动审查面板）
+              if (!isAnyRunningRef.current) {
+                setDocExtractPanel({
+                  imageUrl: toPreviewImageUrl(fileData.dataUrl, result.processed_image),
+                  filename: result.filename,
+                  method: result.method,
+                  ocr_backend: result.ocr_backend,
+                  text: result.text,
+                  fields: result.fields,
+                  side,
+                  workflow: side === "left" ? "entry" : "review",
+                  fallback: result.fallback,
+                  sourceDataUrl: fileData.dataUrl,
+                  targetFields,
+                  altResult: null,
+                });
+                setDocExtractActiveTab("primary");
+              }
+              setDocWebStatus({ phase: "success", filename: result.filename, size: fileData.size });
+              updateLiveStepDetail(`文件提取完成：${result.filename}`);
+              return result;
+            });
+            // 静默兜底拒绝（高速模式不 await 该 promise 时，避免未处理拒绝警告；join 时会再拿到错误）
+            settledPromise.catch(() => {
+              // OCR 失败：清掉 preview 先行回填的 pending 占位（避免面板永远显示「识别中」）
+              const ridFail = record?.record_id || selected?.record_id || "_default";
+              setDocExtractsByRecord((prev) => {
+                const arr = prev[ridFail];
+                if (!arr || !arr.some((e) => e.file_url === fileData.dataUrl && e.pending)) return prev;
+                return { ...prev, [ridFail]: arr.filter((e) => !(e.file_url === fileData.dataUrl && e.pending)) };
+              });
+            });
+
+            // 立即登记缓存（result 待落定后回填），高速/普通模式都登记：triggerWebExtract 复用 + join 等待
+            bgOcrResultRef.current = { dataUrl: fileData.dataUrl, engine: ocrEngineNow, promise: settledPromise };
+
+            // 高速模式 或 两遍式 pass1：OCR 完全后台化，浏览器步骤不等它——
+            // pass1 的并行语义不依赖高速开关（任何档位下 AI 管线都必须与浏览器步骤并行）
+            if ((settingsRef.current.high_speed_mode === true || passDeferActiveRef.current) && isAnyRunningRef.current) {
+              const ocrRid = record?.record_id || selected?.record_id || "_default";
+              const arr = bgOcrPromisesRef.current.get(ocrRid) || [];
+              arr.push(settledPromise);
+              bgOcrPromisesRef.current.set(ocrRid, arr);
+              rlog(`[executeMark] ${passDeferActiveRef.current ? "两遍式pass1" : "高速模式"}：OCR 后台并行，浏览器步骤继续`);
+              return null;
             }
-            setDocWebStatus({ phase: "success", filename: result.filename, size: fileData.size });
-            updateLiveStepDetail(`文件提取完成：${result.filename}`);
+
+            // 普通模式：保持原有同步语义（等 OCR 完成返回全文供立即校验）
+            const result = await settledPromise;
             return result.text || "";
           };
 
@@ -6948,6 +7066,40 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             }
           };
 
+          // 高速模式：文件一致性校验延后到记录末尾（join 点）执行——
+          // OCR 在后台跑，浏览器步骤不等它；下错文件（罕见）的保底此时才触发，
+          // 回退步数用提取时刻捕获的值（记录末尾时 ref 已被后续步骤覆盖）
+          const deferFileVerifyToJoin = (
+            record: ApplicantRecord,
+            ocrPromise: Promise<Awaited<ReturnType<typeof api.extractDocumentFile>>> | undefined
+          ) => {
+            const preClicksAtExtract = currentPreClickCountRef.current;
+            // 按 record_id 暂存：两遍式流水线下 pass1 连续跑多人，join 在 pass2 逐人执行
+            pendingFileVerifyRef.current.set(record.record_id, async () => {
+              pendingFileVerifyRef.current.delete(record.record_id);
+              if (!ocrPromise) return;
+              let ocrText = "";
+              try {
+                const result = await ocrPromise;
+                ocrText = result?.text || "";
+              } catch {
+                return; // OCR 已失败：保底扫描同样靠关键词匹配，OCR 文本缺失时不重复触发
+              }
+              if (!verifyFileMatchesRecord(ocrText, record)) {
+                rlog(`[executeMark] 高速模式延后校验：文件与该记录不匹配，触发保底机制`);
+                setDocWebStatus({ phase: "fallback-scanning", message: "下载的文件与该学生不匹配，启动保底机制..." });
+                // 保底回退需要"提取时刻"的步数；临时换入再恢复，复用整段保底逻辑
+                const saved = currentPreClickCountRef.current;
+                currentPreClickCountRef.current = preClicksAtExtract;
+                try {
+                  await runFallbackAndWait();
+                } finally {
+                  currentPreClickCountRef.current = saved;
+                }
+              }
+            });
+          };
+
           // 3. 等待下载完成（先检测图片直览页：点击后直接预览图片、无下载按钮的场景）
           let downloadData: { filename: string; dataUrl: string; size: number; mime: string } | null = null;
           try {
@@ -6955,7 +7107,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             if (directFile) {
               rlog(`[executeMark] 检测到图片预览页，直接抓取下载: ${directFile.filename}`);
               const directOcrText = await showPreviewAndBgOcr(directFile);
-              if (!verifyFileMatchesRecord(directOcrText, record)) {
+              if (directOcrText === null) {
+                // 高速模式：OCR 后台跑，一致性校验延后到记录末尾 join 点
+                deferFileVerifyToJoin(record, bgOcrResultRef.current?.promise);
+              } else if (!verifyFileMatchesRecord(directOcrText, record)) {
                 rlog(`[executeMark] 抓取的图片与该记录不匹配，触发保底机制`);
                 setDocWebStatus({ phase: "fallback-scanning", message: "抓取的图片与该学生不匹配，启动保底机制..." });
                 await runFallbackAndWait();
@@ -6968,9 +7123,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             updateLiveStepDetail(`下载完成：${downloadData.filename}`);
             // 4. 立即开预览 + 后台OCR提取
             const ocrText = await showPreviewAndBgOcr(downloadData);
-            
+
             // 5. 校验：下载的文件是否真的是该学生的（防止下错文件）
-            if (!verifyFileMatchesRecord(ocrText, record)) {
+            if (ocrText === null) {
+              // 高速模式：OCR 后台跑，一致性校验延后到记录末尾 join 点
+              deferFileVerifyToJoin(record, bgOcrResultRef.current?.promise);
+            } else if (!verifyFileMatchesRecord(ocrText, record)) {
               rlog(`[executeMark] 文件内容与该记录不匹配，触发保底机制`);
               setDocWebStatus({ phase: "fallback-scanning", message: "下载的文件与该学生不匹配，启动保底机制..." });
               await runFallbackAndWait();
@@ -7021,7 +7179,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         // 调后端提取并弹审查面板（异步不阻塞批量循环，面板自动覆盖上一条）
         // 目标字段：优先只提取「提取元素」面板绑定 Excel 列的元素（未绑定的不提取，省 LLM/VIZ 时间）
         const targetFields = computeDocTargetFields(mappings);
-        extractUrlWithVisionFallback(docUrl, targetFields, urlName)
+        extractUrlWithVisionFallback(docUrl, targetFields, urlName, settingsRef.current.ocr_engine || "vision")
           .then((result) => {
             // LOOP 运行期不设置浮动审查面板状态（否则停止后面板会残留飘出）
             if (isAnyRunningRef.current) return;
@@ -7029,6 +7187,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               imageUrl: toPreviewImageUrl(docUrl, result.processed_image),
               filename: result.filename,
               method: result.method,
+            ocr_backend: result.ocr_backend,
               text: result.text,
               fields: result.fields,
               side,
@@ -7047,14 +7206,17 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       }
       console.log(`[executeMark] CLICK side=${side}, selector=${mark.selector}, label=${mark.label}`);
       let result = await performRealClick(side, mark.selector, inPopup);
+      // 收尾点击（clickPhase=post）是清理动作，目标常不存在（弹窗已关/本就无需关），
+      // 长等待纯浪费（实测每行白等 ~7s）→ 压缩到 1.5s 且不做兜底重试；失败由上层"视为已闭环跳过"
+      const isPostClick = mark.clickPhase === "post" || !!mark.docExtractClick;
       // 页面慢渲染/弹窗延迟加载时元素可能还没出现，轮询等待最多 6s
       if (result && typeof result === "object" && "ok" in result && result.ok === false) {
         rlog(`[executeMark] 元素未出现，等待加载: ${mark.selector}`);
-        await waitElementAppear(side, mark.selector, 6000, inPopup);
+        await waitElementAppear(side, mark.selector, isPostClick ? 1500 : 6000, inPopup);
         result = await performRealClick(side, mark.selector, inPopup);
       }
-      // 再兜底重试一次
-      if (result && typeof result === "object" && "ok" in result && result.ok === false) {
+      // 再兜底重试一次（收尾点击不重试，直接走上层跳过逻辑）
+      if (!isPostClick && result && typeof result === "object" && "ok" in result && result.ok === false) {
         await new Promise((r) => setTimeout(r, 800));
         result = await performRealClick(side, mark.selector, inPopup);
       }
@@ -7152,8 +7314,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setExecPhase("verify");
     setReviewFieldResults({});
 
-    // 等待页面稳定，让数据渲染出来
-    await new Promise((r) => setTimeout(r, 1200));
+    // 等待页面稳定，让数据渲染出来（仅网页映射需要读页面；纯文件提取对比是
+    // 内存字符串比较，无需等页面。高速模式缩短——点击步已各自等过页面加载）
+    const hs = settingsRef.current.high_speed_mode === true;
+    if (effectiveMappings.length > 0) {
+      await new Promise((r) => setTimeout(r, hs ? 500 : 1200));
+    }
 
     let allMatch = true;
 
@@ -7210,8 +7376,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         }]).catch(() => {});
       }
 
-      // 给用户视觉感知时间，再读取值（避免闪烁太快）
-      await new Promise((r) => setTimeout(r, 350));
+      // 给用户视觉感知时间，再读取值（避免闪烁太快；高速模式只留高亮渲染一帧的量）
+      await new Promise((r) => setTimeout(r, hs ? 80 : 350));
 
       let leftValue = "";
       let leftFound = true;
@@ -7328,8 +7494,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         return { ...prev, pairs };
       });
 
-      // 字段间短暂停留
-      await new Promise((r) => setTimeout(r, 400));
+      // 字段间短暂停留（高速模式压缩到光标可感知的间隔）
+      await new Promise((r) => setTimeout(r, hs ? 120 : 400));
     }
 
     // 文件提取字段 ↔ Excel 绑定列：左=「提取元素」面板运行时 OCR 值，右=绑定 Excel 列当前行值（一对一对填入卡片）
@@ -7341,7 +7507,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       setLivePairs((prev) => prev.recordId === record.record_id
         ? { ...prev, pairs: [...prev.pairs, { label: pairLabel, leftValue: "", rightValue: "", status: "pending", kind: "compare" }] }
         : prev);
-      await new Promise((r) => setTimeout(r, 350));
+      // 纯内存比较（提取值↔Excel 值都在内存，无页面交互）：只需留给卡片逐对
+      // 填入动画可感知的间隔，不再长等
+      await new Promise((r) => setTimeout(r, hs ? 40 : 150));
       comparisons.push({
         field: row.label,
         excel_value: row.excelVal,
@@ -7361,7 +7529,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         if (idx >= 0) pairs[idx] = { ...pairs[idx], leftValue: row.ocrVal || "（未找到）", rightValue: row.excelVal || "（未找到）", status: pairStatus };
         return { ...prev, pairs };
       });
-      await new Promise((r) => setTimeout(r, 250));
+      await new Promise((r) => setTimeout(r, hs ? 40 : 100));
     }
 
     // 审查阶段结束
@@ -7389,13 +7557,40 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // ============ 对单张卡片执行整个模板 ============
   // 执行流程：先按顺序执行所有 marks（填入搜索词→点搜索→点人物→点附加按钮），
   // 所有步骤完成后再做一次字段比对（compareFieldsForRecord），形成完整闭环。
+  /** 高速模式 join：等待记录所有后台 OCR 落定（含状态写入），并执行延后的文件一致性校验。
+   *  传 record_id 只等该人（两遍式 pass2 逐人）；不传等全部并清空（兼容旧调用点）。
+   *  在字段对比/断点检查前调用，保证并行执行的数据就绪且不会串到下一张卡片 */
+  const joinBgOcrForRecord = useCallback(async (recordId?: string) => {
+    let ps: Array<Promise<unknown>> = [];
+    if (recordId) {
+      ps = bgOcrPromisesRef.current.get(recordId) || [];
+      bgOcrPromisesRef.current.delete(recordId);
+    } else {
+      ps = Array.from(bgOcrPromisesRef.current.values()).flat();
+      bgOcrPromisesRef.current.clear();
+    }
+    if (ps.length > 0) {
+      rlog(`[high-speed] join：等待 ${ps.length} 个后台 OCR 完成（字段对比前）`);
+      await Promise.allSettled(ps);
+    }
+    if (recordId) {
+      const verify = pendingFileVerifyRef.current.get(recordId);
+      pendingFileVerifyRef.current.delete(recordId);
+      if (verify) await verify();
+    } else {
+      const verifies = Array.from(pendingFileVerifyRef.current.values());
+      pendingFileVerifyRef.current.clear();
+      for (const v of verifies) await v();
+    }
+  }, []);
+
   const executeTemplateForRecord = useCallback(async (
     tpl: WorkflowTemplate,
     record: ApplicantRecord,
     recordIndex: number,
     onStepStart?: (recordIndex: number, mark: PickedMark) => void,
-    options?: { wrapWithVerify?: boolean; skipSubmit?: boolean; preOnly?: boolean; postThenPre?: boolean; entryReview?: boolean; onStepFail?: (recordIndex: number, mark: PickedMark, error: string) => void; onStepSkip?: (recordIndex: number, mark: PickedMark, note: string) => void }
-  ): Promise<{ success: boolean; failedOrder?: number; error?: string; comparisons?: FieldComparison[]; verifyOverall?: "match" | "mismatch"; skippedErrors?: string[]; fills?: { label: string; field: string; value: string }[] }> => {
+    options?: { wrapWithVerify?: boolean; skipSubmit?: boolean; preOnly?: boolean; postThenPre?: boolean; entryReview?: boolean; deferCompare?: boolean; onStepFail?: (recordIndex: number, mark: PickedMark, error: string) => void; onStepSkip?: (recordIndex: number, mark: PickedMark, note: string) => void }
+  ): Promise<{ success: boolean; failedOrder?: number; error?: string; comparisons?: FieldComparison[]; verifyOverall?: "match" | "mismatch"; skippedErrors?: string[]; fills?: { label: string; field: string; value: string }[]; hasOnErrorBreakpoint?: boolean }> => {
     // 根据模板模式选择执行哪一段 marks
     // - entry 模式：只执行录入流（填表+提交）
     // - review 模式：只执行审查流（搜索+对比）
@@ -7485,6 +7680,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 每张卡片执行前清空文件运行时槽位（避免跨卡片串文件）
     docRuntimeFileSlotsRef.current = {};
     lastDocRuntimeFileRef.current = null;
+    // 高速模式：清掉本卡片自己可能残留的后台 OCR 队列与延后校验（正常路径 join 后已为空，双保险防串行）。
+    // 只清当前人：两遍式流水线下前一人后台 OCR 可能还在途，全清会让 pass2 join 误判已就绪
+    bgOcrPromisesRef.current.delete(record.record_id);
+    pendingFileVerifyRef.current.delete(record.record_id);
+    // 两遍式 pass1 标记：marks 执行期间文件提取 OCR 无条件后台化（每次进入都重置，
+    // 非 defer 调用自动置回 false，防止上一轮 pass1 中途停止后残留在 true）
+    passDeferActiveRef.current = options?.deferCompare === true;
 
     // 进入marks执行阶段（触发UI光标动画）
     setExecPhase("marks");
@@ -7570,17 +7772,18 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             ? { ...prev, pairs: [...prev.pairs, fillPair] }
             : prev);
         }
-        // 根据动作类型等待页面响应
+        // 根据动作类型等待页面响应（高速模式压缩固定等待，页面稳定检测照常兜底）
         if (mark.action === "click") {
           // 点击按钮/链接后等待页面加载/跳转（智能等待页面稳定，替代纯固定延时）
           const isSubmitOrSearch = /搜索|查询|submit|search|确认|进入|查看|登录|提交|保存/i.test(mark.label);
-          const maxWait = isSubmitOrSearch ? 2500 : 1500;
+          const hsClick = settingsRef.current.high_speed_mode === true;
+          const maxWait = isSubmitOrSearch ? (hsClick ? 1800 : 2500) : (hsClick ? 900 : 1500);
           await Promise.race([waitPageSettled(markSide, maxWait + 1000), sleep(maxWait)]);
         } else if (mark.action === "input") {
           // 输入后等待较短时间让框架感知
-          await sleep(600);
+          await sleep(settingsRef.current.high_speed_mode === true ? 300 : 600);
         } else {
-          await sleep(400);
+          await sleep(settingsRef.current.high_speed_mode === true ? 200 : 400);
         }
         // postThenPre模式：post段结束后额外等待页面稳定（收尾点击后页面跳转回搜索页）
         if (postThenPreBoundary > 0 && mi === postThenPreBoundary - 1) {
@@ -7589,6 +7792,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         }
 
         // ---- 断点检查（步骤成功执行后） ----
+        // 高速模式：文件提取步骤设了断点 → 先等后台 OCR 落定再检查（停下时文件内容已可见、警告已产生）
+        if (mark.docExtract && mark.breakpoint && settingsRef.current.high_speed_mode === true) {
+          await joinBgOcrForRecord();
+        }
         const markLabel = mark.label
           ? markDisplayLabel(mark)
           : mark.action === "click" ? "点击" : mark.action === "input" ? (mark.workflow === "entry" ? "录入" : "审查") : "提取";
@@ -7667,8 +7874,25 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         };
       }
     }
-    // 每条记录workflow步骤执行完后等待，让页面稳定
-    await sleep(800);
+    // === 两遍式流水线：pass1 只跑浏览器步骤（deferCompare），join+比对延到 pass2 统一做 ===
+    // AI 管线（OCR+DeepSeek）在后台按人堆积并行，pass2 逐人 join 时大概率零等待
+    if (options?.deferCompare) {
+      return {
+        success: true,
+        comparisons: [],
+        verifyOverall: "match",
+        skippedErrors,
+        fills,
+        hasOnErrorBreakpoint: allMarks.some((m) => m.breakpoint === "on-error"),
+      };
+    }
+
+    // === 高速模式 join：等待本记录后台 OCR 全部落定（浏览器步骤已并行执行完毕）===
+    // 字段对比/报告依赖 OCR 结果，此处统一收口；正常情况下浏览器步骤耗时已覆盖大半 OCR 时长
+    await joinBgOcrForRecord(record.record_id);
+
+    // 每条记录workflow步骤执行完后等待，让页面稳定（高速模式减半）
+    await sleep(settingsRef.current.high_speed_mode === true ? 400 : 800);
 
     // 所有 marks 执行完毕，进行字段比对（审查机制）
     let comparisons: FieldComparison[] = [];
@@ -7695,7 +7919,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     }
 
     return { success: true, comparisons, verifyOverall, skippedErrors, fills };
-  }, [executeMark, compareFieldsForRecord, checkViewOnline, waitNetworkRestore, waitPageSettled, getRecordDocFields]);
+  }, [executeMark, compareFieldsForRecord, checkViewOnline, waitNetworkRestore, waitPageSettled, getRecordDocFields, joinBgOcrForRecord]);
 
   // ============ 执行分析：LOOP 运行中问题卡片实时追加 + 结束后总结段（球体进入处理态表明 AI 正在工作） ============
   /** 分段 upsert：card 分段已存在则原位更新（重新生成），不存在时插到总结段之前，总结段始终沉底 */
@@ -7755,24 +7979,44 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   }, [upsertAnalysisSegment, buildAnalysisCardPayload]);
 
   /** 整轮总结：LOOP 全部结束后（或手动重新生成）写入「执行总结」分段，始终排在最后 */
-  const generateLoopAnalysis = useCallback(async (reports: VerificationReport[]) => {
+  const generateLoopAnalysis = useCallback(async (reports: VerificationReport[], elapsedMs?: number) => {
     // 审查与录入提取流程的报告都纳入分析（录入流程同样有 提取值 vs Excel 的不一致项）
     const reviewReports = reports;
     if (reviewReports.length === 0) return;
     const seq = ++analysisSeqRef.current;
     setAnalysisAvailable(true);
     setAnalysisOpen(true); // 自动把卡片区域切换为分析文本框
-    upsertAnalysisSegment({ key: "summary", title: "执行总结", kind: "summary", text: "", loading: true });
+
+    // 执行统计：处理卡片数 / 用时 / 通过 / 有问题 / 需检查（缺件）
+    const pass = reviewReports.filter((r) => r.overall === "pass").length;
+    const review = reviewReports.filter((r) => r.overall === "review").length;
+    const fail = reviewReports.filter((r) => r.overall === "fail").length;
+    let ms = elapsedMs;
+    if (ms == null) {
+      // 手动重新生成等场景：从各报告的起止时间推导整轮用时
+      const starts = reviewReports.map((r) => (r.started_at ? Date.parse(r.started_at) : NaN)).filter((t) => !Number.isNaN(t));
+      const ends = reviewReports.map((r) => (r.finished_at ? Date.parse(r.finished_at) : NaN)).filter((t) => !Number.isNaN(t));
+      if (starts.length && ends.length) ms = Math.max(...ends) - Math.min(...starts);
+    }
+    let duration = "—";
+    if (ms != null && ms >= 0) {
+      const s = Math.max(1, Math.round(ms / 1000));
+      duration = s >= 60 ? `${Math.floor(s / 60)} 分 ${s % 60} 秒` : `${s} 秒`;
+    }
+    const stats = { total: reviewReports.length, duration, pass, review, fail };
+
+    upsertAnalysisSegment({ key: "summary", title: "执行总结", kind: "summary", text: "", loading: true, stats });
     try {
       const res = await api.loopAnalysis({
         cards: reviewReports.map((r) => buildAnalysisCardPayload(r)),
+        duration_ms: ms != null && ms >= 0 ? Math.round(ms) : undefined,
       });
       if (seq !== analysisSeqRef.current) return; // 已有更新的总结请求在跑
-      upsertAnalysisSegment({ key: "summary", title: "执行总结", kind: "summary", text: res.text, loading: false });
+      upsertAnalysisSegment({ key: "summary", title: "执行总结", kind: "summary", text: res.text, loading: false, stats });
     } catch (e) {
       if (seq !== analysisSeqRef.current) return;
       upsertAnalysisSegment({
-        key: "summary", title: "执行总结", kind: "summary", loading: false,
+        key: "summary", title: "执行总结", kind: "summary", loading: false, stats,
         text: `分析生成失败：${e instanceof Error ? e.message : String(e)}`,
       });
     }
@@ -7841,6 +8085,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setDocExtractPanel(null);
     // 清空上一轮/教学期残留的文件提取缓存：每张卡片的字段对比只许用本次新鲜提取，杜绝串行（列对行错、拿别人的信息检查当前卡）
     setDocExtractsByRecord({});
+    // 高速模式：同步清掉上一轮残留的后台 OCR 队列/缓存/延后校验，防止上一轮的 OCR 写进新一轮的卡片
+    bgOcrResultRef.current = null;
+    bgOcrPromisesRef.current.clear();
+    pendingFileVerifyRef.current.clear();
     setLivePairsHistory({}); // 清上一轮历史（不归档旧数据）
     setLivePairs({ recordId: "", pairs: [] });
     // 重置执行阶段状态
@@ -7994,6 +8242,81 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     };
 
     try {
+      // ============ 两遍式流水线 pass1：先跑完所有人的浏览器步骤，AI 管线后台堆积并行 ============
+      // 必须保持旧逐人时序的只有「审查步骤+网页字段映射」的 LOOP——compareFieldsForRecord
+      // 用 viewExecuteJS 实时读当前页，浏览器翻页后读到的是别人的页面。
+      // 注意不能用 getTemplateMappings(tpl).length>0 单独判断：它对任何带步骤的模板都会
+      // 从 marks 反推出非空映射（恒 true）。录入+文件提取型 LOOP（hasReviewSteps=false）
+      // 的比对是纯内存（fills+提取值vsExcel），延后安全。
+      const tplHasWebMappings = hasReviewSteps && getTemplateMappings(tpl).length > 0;
+      const passResults: Array<{ record: ApplicantRecord; i: number; result: Awaited<ReturnType<typeof executeTemplateForRecord>> }> = [];
+      if (!tplHasWebMappings) {
+        for (let i = 0; i < targets.length; i++) {
+          if (batchStopRef.current) break;
+          const record = targets[i];
+          setBatchCursor(i);
+          setSelectedId(record.record_id);
+          setExecRecordId(record.record_id);
+          setBatchResults((prev) => ({
+            ...prev,
+            [record.record_id]: { recordId: record.record_id, status: "running", startedAt: Date.now() },
+          }));
+          setSteps((prev) => [
+            ...prev,
+            {
+              step: prev.length + 1,
+              action: "record",
+              description: `处理记录：${record.fields.name || record.record_id}`,
+              success: true,
+              timestamp: new Date().toISOString(),
+              isRecordStart: true,
+              recordName: record.fields.name || record.record_id,
+              recordId: record.record_id,
+              recordIndex: i + 1,
+              recordTotal: targets.length,
+            },
+          ]);
+          window.electronAPI?.viewClearHighlight("left").catch(() => {});
+          window.electronAPI?.viewClearHighlight("right").catch(() => {});
+          for (const side of usedSides) {
+            const baseUrl = side === "left" ? baseLeftUrl : baseRightUrl;
+            if (!baseUrl || !window.electronAPI) continue;
+            setSteps((prev) => [
+              ...prev,
+              {
+                step: prev.length + 1,
+                action: "navigate",
+                description: `LOOP [${i + 1}/${targets.length}] 重置${side === "left" ? "左" : "右"}侧网页到搜索页`,
+                success: true,
+                timestamp: new Date().toISOString(),
+              },
+            ]);
+            await window.electronAPI.viewLoad(side, baseUrl);
+            await waitViewReady(side);
+            if (batchStopRef.current) break;
+          }
+          await sleep(300);
+          const r1 = await executeTemplateForRecord(tpl, record, i, onStepStart, {
+            wrapWithVerify: hasReviewSteps,
+            deferCompare: true,
+            onStepFail,
+            onStepSkip,
+          });
+          passResults.push({ record, i, result: r1 });
+          rlog(`[batch] pass1 浏览器步骤完成 [${i + 1}/${targets.length}]: ${record.fields.name || record.record_id}（AI 后台排版中）`);
+          setSteps((prev) => [
+            ...prev,
+            {
+              step: prev.length + 1,
+              action: "record",
+              description: `LOOP [${i + 1}/${targets.length}] 浏览器步骤完成：${record.fields.name || record.record_id}（AI 后台排版中）`,
+              success: true,
+              timestamp: new Date().toISOString(),
+            },
+          ]);
+        }
+      }
+
       for (let i = 0; i < targets.length; i++) {
         if (batchStopRef.current) {
           setSteps((prev) => [
@@ -8009,64 +8332,100 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           break;
         }
         const record = targets[i];
-        setBatchCursor(i);
-        setSelectedId(record.record_id);
-        setExecRecordId(record.record_id);
-        setBatchResults((prev) => ({
-          ...prev,
-          [record.record_id]: {
-            recordId: record.record_id,
-            status: "running",
-            startedAt: Date.now(),
-          },
-        }));
+        let result: Awaited<ReturnType<typeof executeTemplateForRecord>>;
+        if (tplHasWebMappings) {
+          // 网页字段映射：保持旧逐人时序（比对实时读当前页，不能延后）
+          setBatchCursor(i);
+          setSelectedId(record.record_id);
+          setExecRecordId(record.record_id);
+          setBatchResults((prev) => ({
+            ...prev,
+            [record.record_id]: {
+              recordId: record.record_id,
+              status: "running",
+              startedAt: Date.now(),
+            },
+          }));
 
-        setSteps((prev) => [
-          ...prev,
-          {
-            step: prev.length + 1,
-            action: "record",
-            description: `处理记录：${record.fields.name || record.record_id}`,
-            success: true,
-            timestamp: new Date().toISOString(),
-            isRecordStart: true,
-            recordName: record.fields.name || record.record_id,
-            recordId: record.record_id,
-            recordIndex: i + 1,
-            recordTotal: targets.length,
-          },
-        ]);
-
-        window.electronAPI?.viewClearHighlight("left").catch(() => {});
-        window.electronAPI?.viewClearHighlight("right").catch(() => {});
-
-        // 每条 LOOP 开始前，把用到的网页重置回教学时的搜索页，并等待加载完成。
-        // 这样每条记录都从同一初始状态开始：搜索框存在、无上一条记录的详情页残留。
-        for (const side of usedSides) {
-          const baseUrl = side === "left" ? baseLeftUrl : baseRightUrl;
-          if (!baseUrl || !window.electronAPI) continue;
           setSteps((prev) => [
             ...prev,
             {
               step: prev.length + 1,
-              action: "navigate",
-              description: `LOOP [${i + 1}/${targets.length}] 重置${side === "left" ? "左" : "右"}侧网页到搜索页`,
+              action: "record",
+              description: `处理记录：${record.fields.name || record.record_id}`,
               success: true,
               timestamp: new Date().toISOString(),
+              isRecordStart: true,
+              recordName: record.fields.name || record.record_id,
+              recordId: record.record_id,
+              recordIndex: i + 1,
+              recordTotal: targets.length,
             },
           ]);
-          await window.electronAPI.viewLoad(side, baseUrl);
-          await waitViewReady(side);
-          if (batchStopRef.current) break;
+
+          window.electronAPI?.viewClearHighlight("left").catch(() => {});
+          window.electronAPI?.viewClearHighlight("right").catch(() => {});
+
+          // 每条 LOOP 开始前，把用到的网页重置回教学时的搜索页，并等待加载完成。
+          // 这样每条记录都从同一初始状态开始：搜索框存在、无上一条记录的详情页残留。
+          for (const side of usedSides) {
+            const baseUrl = side === "left" ? baseLeftUrl : baseRightUrl;
+            if (!baseUrl || !window.electronAPI) continue;
+            setSteps((prev) => [
+              ...prev,
+              {
+                step: prev.length + 1,
+                action: "navigate",
+                description: `LOOP [${i + 1}/${targets.length}] 重置${side === "left" ? "左" : "右"}侧网页到搜索页`,
+                success: true,
+                timestamp: new Date().toISOString(),
+              },
+            ]);
+            await window.electronAPI.viewLoad(side, baseUrl);
+            await waitViewReady(side);
+            if (batchStopRef.current) break;
+          }
+
+          await sleep(300);
+
+          result = await executeTemplateForRecord(tpl, record, i, onStepStart, {
+            wrapWithVerify: hasReviewSteps,
+            onStepFail,
+            onStepSkip,
+          });
+        } else {
+          // pass2：该人浏览器步骤已在 pass1 跑完，join 后台 AI 管线（OCR+排版已堆积）后构建报告
+          const pr = passResults[i];
+          if (!pr) break; // pass1 中途被停止
+          setBatchCursor(i);
+          setSelectedId(record.record_id);
+          setExecRecordId(record.record_id);
+          await joinBgOcrForRecord(record.record_id);
+          await sleep(settingsRef.current.high_speed_mode === true ? 400 : 800);
+          // 纯文件提取对比（无网页映射）：compareFieldsForRecord 只做内存比对（提取值 vs Excel），
+          // 不读页面，pass2 调用安全；网页稳定等待也被跳过（effectiveMappings 为空）
+          let comparisons: FieldComparison[] = [];
+          let verifyOverall: "match" | "mismatch" = "match";
+          if (hasReviewSteps && pr.result.success) {
+            const cmp = await compareFieldsForRecord(record, i, getTemplateMappings(tpl), tpl.customTextEntries);
+            comparisons = cmp.comparisons;
+            verifyOverall = cmp.overall;
+            // 条件断点：字段不匹配 + pass1 的 marks 带 on-error 断点
+            if (verifyOverall === "mismatch" && comparisons.length > 0 && pr.result.hasOnErrorBreakpoint) {
+              const mismatchFields = comparisons.filter((c) => c.match === "mismatch" || c.match === "error");
+              const detail = mismatchFields.map((c) => `${c.field}: 「${c.excel_value}」vs「${c.website_value}」`).join("; ");
+              rlog(`[batch] 断点（条件-字段不匹配）触发：${mismatchFields.length} 个字段不匹配`);
+              await waitForBreakpointRef.current({
+                recordName: String(getRecordDisplayName(record)),
+                recordIndex: i + 1,
+                stepLabel: "字段比对（审查）",
+                type: "on-error",
+                error: `${mismatchFields.length} 个字段不匹配：${detail}`,
+              });
+            }
+          }
+          result = { ...pr.result, comparisons, verifyOverall };
         }
-
-        await sleep(300);
-
-        const result = await executeTemplateForRecord(tpl, record, i, onStepStart, {
-          wrapWithVerify: hasReviewSteps,
-          onStepFail,
-          onStepSkip,
-        });
 
         const recordName = getRecordDisplayName(record);
         // 本条记录的比对条目（用于按人物拆分报告）
@@ -8355,9 +8714,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           },
         }));
 
-        // 行之间等待，让用户能看清结果
+        // 行之间等待，让用户能看清结果（高速模式缩短，仍保留可辨识的节奏）
         if (i < targets.length - 1) {
-          await sleep(1500);
+          await sleep(settingsRef.current.high_speed_mode === true ? 800 : 1500);
         }
       }
 
@@ -8397,6 +8756,23 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           await sleep(500);
         }
       }
+    } catch (loopErr) {
+      // try 原本只有 finally：pass1/pass2 任何一环抛异常都会静默终止（0/0 结束且无日志），
+      // 与「用户手动停止」无法区分——必须留痕并提示
+      const errMsg = loopErr instanceof Error ? loopErr.message : String(loopErr);
+      rlog(`[batch] LOOP 异常终止: ${errMsg}`);
+      console.error("[runBatch] LOOP 异常终止:", loopErr);
+      setError(`LOOP 异常终止: ${errMsg}`);
+      setSteps((prev) => [
+        ...prev,
+        {
+          step: prev.length + 1,
+          action: "error",
+          description: `LOOP 异常终止: ${errMsg}`,
+          success: false,
+          timestamp: new Date().toISOString(),
+        },
+      ]);
     } finally {
       runBatchInFlightRef.current = false;
       setBatchRunning(false);
@@ -8456,12 +8832,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       window.electronAPI?.viewClearHighlight("left").catch(() => {});
       rlog("[batch] LOOP 执行结束:", summary);
 
-      // 执行结束：追加「执行总结」分段（总体结论/高频字段，排在所有单卡分析之后）
+      // 执行结束：追加「执行总结」分段（统计行 + 总体结论/高频字段，排在所有单卡分析之后）
       if (collectedReports.length > 0) {
-        void generateLoopAnalysis(collectedReports);
+        void generateLoopAnalysis(collectedReports, Date.now() - Date.parse(startedAt));
       }
     }
-  }, [workflowTemplate, records, cardRecords, selectedId, executeTemplateForRecord, selectMode, avatarMode, exitSelectMode, exitAvatarMode, rightUrl, leftUrl, waitViewReady, generateLoopAnalysis, appendCardAnalysis]);
+  }, [workflowTemplate, records, cardRecords, selectedId, executeTemplateForRecord, selectMode, avatarMode, exitSelectMode, exitAvatarMode, rightUrl, leftUrl, waitViewReady, generateLoopAnalysis, appendCardAnalysis, joinBgOcrForRecord, compareFieldsForRecord]);
   // 始终把最新版本的 runBatch 写入 ref，供 finishTeachingAndRunBatch 直接调用
   runBatchRef.current = runBatch;
 
@@ -8545,12 +8921,21 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         setDocExtractPanel(null);
         // 清空上一任务/教学期残留的文件提取缓存，防止字段对比串行（拿别人的信息检查当前卡）
         setDocExtractsByRecord({});
+        // 高速模式：同步清掉上一任务残留的后台 OCR 队列/缓存/延后校验
+        bgOcrResultRef.current = null;
+        bgOcrPromisesRef.current.clear();
+        pendingFileVerifyRef.current.clear();
         // 清空本次 LOOP 的"保底需人工"标记（跨任务不残留）
         needsManualRef.current = new Set();
         breakpointTotalRef.current = targets.length;
         let successCount = 0;
         let failCount = 0;
         const errors: string[] = [];
+        // 两遍式流水线：pass1 逐人浏览器步骤（AI 后台堆积），pass2 逐人 join+比对。
+        // 仅「审查步骤+网页字段映射」的 LOOP 必须旧时序（比对实时读当前页，翻页后读到别人的页面）；
+        // getTemplateMappings 会从 marks 反推恒非空，必须叠加 hasReviewSteps 判断（见 runBatch 同款注释）
+        const tplHasWebMappingsQ = task.workflowTemplate.reviewMarks.length > 0 && getTemplateMappings(task.workflowTemplate).length > 0;
+        const passResults: Array<Awaited<ReturnType<typeof executeTemplateForRecord>>> = [];
 
         for (let ri = 0; ri < targets.length; ri++) {
           if (queueStopRef.current || batchStopRef.current) break;
@@ -8629,18 +9014,113 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 timestamp: new Date().toISOString(),
               },
             ]);
-          }, { wrapWithVerify: hasReviewSteps });
+          }, { wrapWithVerify: hasReviewSteps, deferCompare: !tplHasWebMappingsQ });
+          passResults.push(result);
+          // pass1 完成提示：AI 管线（OCR+排版）在后台堆积并行，比对在 pass2 统一做
+          setSteps((prev) => [
+            ...prev,
+            {
+              step: prev.length + 1,
+              action: "record",
+              description: `LOOP [${ri + 1}/${targets.length}] 浏览器步骤完成：${record.fields.name || record.record_id}（AI 后台排版中）`,
+              success: true,
+              timestamp: new Date().toISOString(),
+            },
+          ]);
+        }
+
+        // 所有记录处理完后，执行文件提取的收尾点击（闭环操作）
+        if (!queueStopRef.current && !batchStopRef.current) {
+          const docPostClicks = pickedMarksRef.current.filter(
+            (m) => m.docExtractClick && m.docExtractClickPhase === "post"
+          ).sort((a, b) => a.order - b.order);
+          if (docPostClicks.length > 0) {
+            rlog(`[runQueue] 开始执行文件提取收尾点击，共 ${docPostClicks.length} 步`);
+            setSteps((prev) => [
+              ...prev,
+              {
+                step: prev.length + 1,
+                action: "final",
+                description: `执行收尾点击（${docPostClicks.length} 步）...`,
+                success: true,
+                timestamp: new Date().toISOString(),
+              },
+            ]);
+            for (const pm of docPostClicks) {
+              if (queueStopRef.current || batchStopRef.current) break;
+              try {
+                const side = pm.side;
+                rlog(`[runQueue] 收尾点击: ${pm.label} (${pm.selector})`);
+                let clickRes = await performRealClick(side, pm.selector, pm.inPopup);
+                if (clickRes && typeof clickRes === "object" && "ok" in clickRes && clickRes.ok === false) {
+                  await sleep(1500);
+                  clickRes = await performRealClick(side, pm.selector, pm.inPopup);
+                }
+                await sleep(800);
+              } catch (e) {
+                rlog(`[runQueue] 收尾点击失败: ${e instanceof Error ? e.message : String(e)}`);
+              }
+            }
+            await sleep(500);
+          }
+        }
+
+        // ============ pass2：逐人 join 后台 AI 管线 + 字段比对 + 三态判定 ============
+        // 此时 AI 管线（OCR+DeepSeek 排版）已在 pass1 期间后台并行堆积完毕，逐人 join 大概率零等待
+        const hasReviewStepsP2 = task.workflowTemplate.reviewMarks.length > 0;
+        for (let ri = 0; ri < targets.length; ri++) {
+          if (queueStopRef.current || batchStopRef.current) break;
+          const record = targets[ri];
+          const result = passResults[ri] || { success: false, error: "pass1 未执行（已中断）" } as Awaited<ReturnType<typeof executeTemplateForRecord>>;
+
+          // 选中该人（UI 联动：字段对比实时卡片/文件面板跟随切换）
+          setSelectedId(record.record_id);
+          setExecRecordId(record.record_id);
+          setBatchCursor(ri);
+
+          // join：等该人后台 OCR+排版落定，并执行延后的文件一致性校验
+          await joinBgOcrForRecord(record.record_id);
+          await sleep(settingsRef.current.high_speed_mode === true ? 400 : 800);
+
+          // 字段比对（pass1 deferCompare 延后的部分在此执行；pass1 执行失败的人跳过比对）
+          let comparisons: FieldComparison[] = [];
+          let verifyOverall: "match" | "mismatch" = "match";
+          if (hasReviewStepsP2 && result.success) {
+            if (tplHasWebMappingsQ) {
+              // 网页映射 LOOP：pass1 未延后（executeTemplateForRecord 已在当人页面内联完成比对+断点），直接沿用
+              comparisons = result.comparisons || [];
+              verifyOverall = result.verifyOverall || "match";
+            } else {
+            const cmp = await compareFieldsForRecord(record, ri, getTemplateMappings(task.workflowTemplate), task.workflowTemplate.customTextEntries);
+            comparisons = cmp.comparisons;
+            verifyOverall = cmp.overall;
+            // 条件断点：字段比对发现不匹配且 pass1 的 marks 中有 on-error 断点
+            if (verifyOverall === "mismatch" && comparisons.length > 0 && result.hasOnErrorBreakpoint) {
+              const mismatchFields = comparisons.filter((c) => c.match === "mismatch" || c.match === "error");
+              const detail = mismatchFields.map((c) => `${c.field}: 「${c.excel_value}」vs「${c.website_value}」`).join("; ");
+              rlog(`[batch] 断点（条件-字段不匹配）触发：${mismatchFields.length} 个字段不匹配`);
+              await waitForBreakpointRef.current({
+                recordName: String(record.fields.name || record.record_id),
+                recordIndex: ri + 1,
+                stepLabel: "字段比对（审查）",
+                type: "on-error",
+                error: `${mismatchFields.length} 个字段不匹配：${detail}`,
+              });
+            }
+            }
+          }
+          const merged = { ...result, comparisons, verifyOverall };
 
           // 三态判定：pass=全部一致 / review=部分对部分错 / fail=执行失败·缺项严重·无一正确
           // 保底自动跳过需人工的记录：无论执行结果如何都标为 review（需人工检查）
           const needsManual = needsManualRef.current.has(record.record_id);
-          const verifyFailed = hasReviewSteps && result.success && result.verifyOverall === "mismatch";
-          const qCmps = result.comparisons || [];
+          const verifyFailed = hasReviewStepsP2 && merged.success && merged.verifyOverall === "mismatch";
+          const qCmps = merged.comparisons || [];
           const qGood = qCmps.filter((c) => c.match === "match").length;
           const qBad = qCmps.length - qGood;
           const qOverall: Overall = needsManual
             ? "review"
-            : !result.success
+            : !merged.success
             ? "fail"
             : !verifyFailed
             ? "pass"
@@ -8686,7 +9166,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             failCount++;
             const failReason = verifyFailed
               ? (qCmps.length > 0 ? "无一字段一致，需检查" : "字段比对未执行：模板缺少字段映射")
-              : (result.error || "未知错误");
+              : (merged.error || "未知错误");
             errors.push(failReason);
             setBatchResults((prev) => ({
               ...prev,
@@ -8702,42 +9182,6 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 timestamp: new Date().toISOString(),
               },
             ]);
-          }
-        }
-
-        // 所有记录处理完后，执行文件提取的收尾点击（闭环操作）
-        if (!queueStopRef.current && !batchStopRef.current) {
-          const docPostClicks = pickedMarksRef.current.filter(
-            (m) => m.docExtractClick && m.docExtractClickPhase === "post"
-          ).sort((a, b) => a.order - b.order);
-          if (docPostClicks.length > 0) {
-            rlog(`[runQueue] 开始执行文件提取收尾点击，共 ${docPostClicks.length} 步`);
-            setSteps((prev) => [
-              ...prev,
-              {
-                step: prev.length + 1,
-                action: "final",
-                description: `执行收尾点击（${docPostClicks.length} 步）...`,
-                success: true,
-                timestamp: new Date().toISOString(),
-              },
-            ]);
-            for (const pm of docPostClicks) {
-              if (queueStopRef.current || batchStopRef.current) break;
-              try {
-                const side = pm.side;
-                rlog(`[runQueue] 收尾点击: ${pm.label} (${pm.selector})`);
-                let clickRes = await performRealClick(side, pm.selector, pm.inPopup);
-                if (clickRes && typeof clickRes === "object" && "ok" in clickRes && clickRes.ok === false) {
-                  await sleep(1500);
-                  clickRes = await performRealClick(side, pm.selector, pm.inPopup);
-                }
-                await sleep(800);
-              } catch (e) {
-                rlog(`[runQueue] 收尾点击失败: ${e instanceof Error ? e.message : String(e)}`);
-              }
-            }
-            await sleep(500);
           }
         }
 
@@ -8778,7 +9222,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setBatchCursor(-1);
     setBatchMarkCursor(null);
     rlog("[runQueue] 🏁 队列执行完毕");
-  }, [taskQueue, queueRunning, executeTemplateForRecord, waitViewReady]);
+  }, [taskQueue, queueRunning, executeTemplateForRecord, waitViewReady, joinBgOcrForRecord, compareFieldsForRecord]);
 
   // 始终把最新版本的 runQueue 写入 ref
   runQueueRef.current = runQueue;
@@ -9579,16 +10023,31 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   }, [batchRunning, singleRunning, queueRunning, cardPool, records, cardLoopMap, workflowTemplate, applySourceToTarget, executeTemplateForRecord, compareDocBindEntries, rightUrl, setError, setSuccessToast]);
 
   // ============ 导出 Excel：把内存中（修正后）的数据写回文件（本地路径原地写回，否则下载副本） ============
+  // 运行结束后点击导出：带上字段对比结果，有问题的单元格在导出文件里高亮（红=不一致/错误，琥珀=缺失）
   const [exportingExcel, setExportingExcel] = useState(false);
   const handleExportExcel = useCallback(async () => {
     if (exportingExcel) return;
     // 卡片池来源侧：右侧 Excel 生成的卡片导右侧，否则导左侧
     const side: "left" | "right" = rightCardsGenerated ? "right" : "left";
+    // 收集字段对比卡片的问题状态：{record_id: {字段名: match}}（只含有问题的字段，match 的不传）
+    const highlights = loopReportsRef.current
+      .map((rep) => ({
+        record_id: rep.record_id,
+        fields: Object.fromEntries(
+          rep.entries
+            .filter((e) => e.match === "mismatch" || e.match === "error" || e.match === "missing" || e.match === "partial")
+            .map((e) => [e.left_field, e.match])
+        ),
+      }))
+      .filter((h) => Object.keys(h.fields).length > 0);
     setExportingExcel(true);
     try {
-      const r = await api.exportExcel(side);
+      const r = highlights.length > 0
+        ? await api.exportExcelHighlighted(side, highlights)
+        : await api.exportExcel(side);
       if (r.mode === "inplace") {
-        setSuccessToast(`已原地写回原文件：${r.path}`);
+        // 后端统一导出到「下载」文件夹 <原名>_审核结果.xlsx，原文件不动
+        setSuccessToast(r.note ? r.note : `已导出到：${r.path}`);
       } else {
         const a = document.createElement("a");
         a.href = r.path!;
@@ -9597,7 +10056,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         a.click();
         a.remove();
         setTimeout(() => URL.revokeObjectURL(r.path!), 5000);
-        setSuccessToast("已导出 Excel 副本");
+        setSuccessToast(highlights.length > 0 ? "已导出 Excel 副本（问题单元格已高亮）" : "已导出 Excel 副本");
       }
     } catch (e) {
       setError(`导出 Excel 失败：${e instanceof Error ? e.message : String(e)}`);
@@ -14308,6 +14767,7 @@ type: info.type,
                   docLivePreview={docSourcePreview}
                   ocrEngine={settings.ocr_engine || "vision"}
                   onChangeOcrEngine={handleChangeOcrEngine}
+                  igpuAcceleration={!!settings.igpu_acceleration}
                   docBreakpoint={docBreakpoint}
                   onToggleDocBreakpoint={toggleDocBreakpoint}
                   switchToDocSignal={docSignal}
@@ -14326,6 +14786,7 @@ type: info.type,
                       onSetDocFileBindField={setDocFileBindField}
                       ocrEngine={(settings.ocr_engine as "vision" | "umi") || "vision"}
                       onChangeOcrEngine={handleChangeOcrEngine}
+                      igpuAcceleration={!!settings.igpu_acceleration}
                       onChooseWeb={chooseDocExtractWeb}
                       onChooseLocal={chooseDocExtractLocal}
                       onExitChoose={exitAddDocExtractMode}
