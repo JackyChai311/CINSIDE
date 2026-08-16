@@ -16,7 +16,7 @@ interface Props {
   steps: VerificationStep[];
   running: boolean;
   onAllGone?: () => void;
-  /** edge=屏幕右边缘（默认）；sphere=左栏左下角：气泡从角落向上吐出堆叠，旧的渐淡，消散时下沉淡出（不挡卡片） */
+  /** edge=屏幕右边缘（默认）；sphere=左栏球槽位：气泡从球的位置向上吐出堆叠，旧的渐淡，消散时下沉淡出（不挡卡片） */
   variant?: "edge" | "sphere";
 }
 
@@ -57,7 +57,11 @@ export default function ExecutionBubbles({ steps, running, onAllGone, variant = 
             enteredAt: Date.now() + i * 30,
             exitOrder: 0,
           }));
-          return [...shifted, ...newBubbles];
+          const merged = [...shifted, ...newBubbles];
+          // 硬上限：超出 MAX_STACK 时丢弃最旧的气泡——气泡随时间滚动消失，不会越积越多“噶在那里”
+          return merged.length > MAX_STACK
+            ? merged.sort((a, b) => a.stackPos - b.stackPos).slice(0, MAX_STACK)
+            : merged;
         });
       }
     } else {
@@ -144,14 +148,14 @@ export default function ExecutionBubbles({ steps, running, onAllGone, variant = 
 
   const now = Date.now();
   const isSphere = variant === "sphere";
-  const bubbleGap = isSphere ? 44 : 48;
+  const bubbleGap = isSphere ? 34 : 48;
 
   return (
     <div
       className={isSphere
-        ? "pointer-events-none absolute bottom-3 left-3 z-30"
+        ? "pointer-events-none absolute left-1/2 top-1/2 z-30 -translate-x-1/2 -translate-y-1/2"
         : "fixed right-3 bottom-20 z-[9997] pointer-events-none"}
-      style={{ width: isSphere ? 206 : 270, height: bubbleGap * MAX_STACK + 80 }}
+      style={{ width: isSphere ? 206 : 270, height: isSphere ? 110 : (bubbleGap * MAX_STACK + 80) }}
     >
       {bubbles.map((b) => {
         const s = b.step;
@@ -176,8 +180,8 @@ export default function ExecutionBubbles({ steps, running, onAllGone, variant = 
             opacity = pos === 0 ? 1 : pos === 1 ? 0.6 : 0.3;
             scale = pos === 0 ? 1 : pos === 1 ? 0.93 : 0.86;
           } else if (isSphere) {
-            // 左下角变体：消散时下沉淡出（安静退场，不回卷）
-            translateY = 14 * eased;
+            // 球槽位变体：消散时向上淡出（顺着"球收起来"的方向，远离下方日志/分析药丸）
+            translateY = -14 * eased;
             opacity = Math.max(0, (pos === 0 ? 1 : pos === 1 ? 0.55 : 0.26) * (1 - eased));
             scale = (pos === 0 ? 1 : pos === 1 ? 0.94 : 0.88) * (1 - 0.15 * eased);
           } else {

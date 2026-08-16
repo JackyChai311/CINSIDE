@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   AlertTriangle,
+  Archive,
   ArrowLeft,
   ArrowLeftRight,
   Bot,
+  BookMarked,
   Check,
   CheckCircle2,
   ClipboardCheck,
@@ -19,8 +21,11 @@ import {
   Globe,
   GraduationCap,
   KeyRound,
+  LayoutGrid,
+  Library,
   ListChecks,
   Loader2,
+  Maximize2,
   Minus,
   MousePointerClick,
   PanelBottom,
@@ -28,8 +33,9 @@ import {
   PanelLeftClose,
   Play,
   Plus,
-  LayoutGrid,
   Repeat2,
+  Rotate3D,
+  RotateCw,
   Save,
   Settings2,
   ShieldCheck,
@@ -1021,6 +1027,8 @@ export default function App() {
   const [bottomDetached, setBottomDetached] = useState(false);
   const [browserLeftDetached, setBrowserLeftDetached] = useState(false);
   const [browserRightDetached, setBrowserRightDetached] = useState(false);
+  // 聚焦下方：激活时隐藏上方两个 BrowserPane，下方审查面板三列铺满整屏
+  const [focusBottomMode, setFocusBottomMode] = useState(false);
   // Excel 视图脱离
   const [excelDetached, setExcelDetached] = useState(false);
   // 弹窗（window.open 拦截）：记录哪个 side 的弹窗处于激活状态
@@ -2630,23 +2638,15 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     [cardPool, cardLoopMap]
   );
 
-  // 一键生成人物卡片：按框选的行范围切片，追加到卡片池
-  const generateCards = useCallback(() => {
-    if (!rowRange || records.length === 0) return;
-    const slice = records.slice(rowRange.start, rowRange.end + 1);
-    // 深拷贝 + 生成唯一 record_id（避免不同 Excel 的 ID 冲突）
-    const newCards: ApplicantRecord[] = slice.map((r) => ({
-      ...r,
-      fields: { ...r.fields },
-      passport_fields: r.passport_fields ? { ...r.passport_fields } : undefined,
-      // 生成唯一 ID：原 ID + 短随机后缀
-      record_id: `${r.record_id}__${Math.random().toString(36).slice(2, 8)}`,
-    }));
+  // 一键生成人物卡片：ExcelView 内部已完成行范围切片 + 深拷贝 + 唯一 record_id，
+  // 这里只负责追加到卡片池（App 不再持有 rowRange 来切片，避免框选触发 App 重渲染）
+  const generateCards = useCallback((newCards: ApplicantRecord[]) => {
+    if (newCards.length === 0) return;
     setCardPool((prev) => [...prev, ...newCards]);
     setCardsGenerated(true);
     setSelectedId(newCards[0].record_id);
     setSuccessToast(`已追加 ${newCards.length} 张人物卡片（共 ${cardPool.length + newCards.length} 张）`);
-  }, [rowRange, records, cardPool.length, setSuccessToast]);
+  }, [cardPool.length, setSuccessToast]);
 
   // 重新框选：清除已生成卡片池，回到框选状态
   const resetCards = useCallback(() => {
@@ -2662,20 +2662,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   }, []);
 
   // 右侧 Excel：按框选行范围生成人物卡片（与左侧共用卡片池）
-  const generateRightCards = useCallback(() => {
-    if (!rightRowRange || rightRecords.length === 0) return;
-    const slice = rightRecords.slice(rightRowRange.start, rightRowRange.end + 1);
-    const newCards: ApplicantRecord[] = slice.map((r) => ({
-      ...r,
-      fields: { ...r.fields },
-      passport_fields: r.passport_fields ? { ...r.passport_fields } : undefined,
-      record_id: `${r.record_id}__${Math.random().toString(36).slice(2, 8)}`,
-    }));
+  const generateRightCards = useCallback((newCards: ApplicantRecord[]) => {
+    if (newCards.length === 0) return;
     setCardPool((prev) => [...prev, ...newCards]);
     setRightCardsGenerated(true);
     setSelectedId(newCards[0].record_id);
     setSuccessToast(`已追加 ${newCards.length} 张人物卡片（共 ${cardPool.length + newCards.length} 张）`);
-  }, [rightRowRange, rightRecords, cardPool.length, setSuccessToast]);
+  }, [cardPool.length, setSuccessToast]);
 
   // 右侧 Excel：清空卡片，重新框选
   const resetRightCards = useCallback(() => {
@@ -3794,14 +3787,16 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         return;
       }
       rlog(`[triggerWebExtract] 复用后台OCR缓存结果: ${pending.filename} (engine=${cached.engine})`);
+      // 内存保护：有裁剪图时 source/file_url 只存文件名（去重/类型判断用），不存原图 dataUrl
+      const hasProc = !!result.processed_image;
       const newExtract: DocExtractState = {
         filename: result.filename,
         method: result.method,
         text: result.text,
         fields: result.fields,
         entries: [],
-        source: pending.dataUrl,
-        file_url: pending.dataUrl,
+        source: hasProc ? pending.filename : pending.dataUrl,
+        file_url: hasProc ? pending.filename : pending.dataUrl,
         processed_image: result.processed_image,
         mrz_warnings: result.mrz_warnings,
         fallback: result.fallback,
@@ -3840,14 +3835,16 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const file = dataUrlToFile(pending.dataUrl, pending.filename);
     const extractP = api.extractDocumentFile(file, targetFields)
       .then((result) => {
+        // 内存保护：有裁剪图时 source/file_url 只存文件名（去重/类型判断用），不存原图 dataUrl
+        const hasProc = !!result.processed_image;
         const newExtract: DocExtractState = {
           filename: result.filename,
           method: result.method,
           text: result.text,
           fields: result.fields,
           entries: [],
-          source: pending.dataUrl,
-          file_url: pending.dataUrl,
+          source: hasProc ? pending.filename : pending.dataUrl,
+          file_url: hasProc ? pending.filename : pending.dataUrl,
           processed_image: result.processed_image,
           mrz_warnings: result.mrz_warnings,
           fallback: result.fallback,
@@ -5238,14 +5235,16 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         });
         // 同步更新文件处理面板（验证报告 > 文件处理 + 提取元素）
         // 追加到当前卡片的文件列表（支持多文件 TAB 切换）
+        // 内存保护：有裁剪图时 source/file_url 只存文件名（去重/类型判断用），不存原图 dataUrl
+        const hasProc = !!result.processed_image;
         const newExtract: DocExtractState = {
           filename: result.filename,
           method: result.method,
           text: result.text,
           fields: result.fields,
           entries,
-          source: url,
-          file_url: url,
+          source: hasProc ? (result.filename || url) : url,
+          file_url: hasProc ? (result.filename || url) : url,
           processed_image: result.processed_image,
           mrz_warnings: result.mrz_warnings,
           fallback: result.fallback,
@@ -6373,11 +6372,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       throw new Error("保底机制失败：未找到任何可下载文件");
     }
 
-    // 步骤4：批量下载所有文件
-    setDocWebStatus({ phase: "fallback-downloading", total: uniqueLinks.length, current: 0 });
-    updateLiveStepDetail(`保底机制：批量下载 ${uniqueLinks.length} 个候选文件…`);
+    // 步骤4：批量下载候选文件（限 5 个：页面附件链接往往含导航/头像/图标等噪音，
+    // 全量下载既慢又让每个候选文件的 dataUrl 驻留内存——假死/反复触发时是内存堆积主因）
+    const downloadCandidates = uniqueLinks.slice(0, 5);
+    setDocWebStatus({ phase: "fallback-downloading", total: downloadCandidates.length, current: 0 });
+    updateLiveStepDetail(`保底机制：批量下载 ${downloadCandidates.length} 个候选文件…`);
     
-    const downloadResult = await window.electronAPI?.viewBatchDownloadUrls(side, uniqueLinks.map(l => l.url), 30000);
+    const downloadResult = await window.electronAPI?.viewBatchDownloadUrls(side, downloadCandidates.map(l => l.url), 30000);
     
     if (!downloadResult?.ok || !downloadResult.files || downloadResult.files.length === 0) {
       setDocWebStatus({ phase: "error", message: "保底机制：所有文件下载失败" });
@@ -6774,6 +6775,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           try {
             const result = await extractFileWithVisionFallback(file, targetFields);
             // 同步写入 docExtractsByRecord：LOOP 运行时字段对比（提取值 vs Excel 绑定列）与提取元素面板都按当前记录从这里读取
+            // 内存保护：有裁剪图(processed_image)时抛弃原始大图 base64——面板预览只用裁剪图，
+            // file_url 退化为文件名（供去重/类型判断），避免每文件两份几 MB base64 堆积导致渲染进程 OOM
+            const hasProcessed = !!result.processed_image;
             const localExtract: DocExtractState = {
               filename: result.filename,
               method: result.method,
@@ -6781,8 +6785,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               text: result.text,
               fields: result.fields,
               entries: [],
-              source: readResult.dataUrl,
-              file_url: readResult.dataUrl,
+              source: hasProcessed ? (readResult.filename || result.filename) : readResult.dataUrl,
+              file_url: hasProcessed ? (readResult.filename || result.filename) : readResult.dataUrl,
               processed_image: result.processed_image,
               mrz_warnings: result.mrz_warnings,
               fallback: result.fallback,
@@ -6880,9 +6884,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                   const rid0 = record?.record_id || selected?.record_id || "_default";
                   setDocExtractsByRecord((prev) => {
                     const arr = prev[rid0] || [];
-                    // 已有完整结果（缓存热/跑得快）时不降级回 pending 占位
-                    if (arr.some((e) => e.file_url === fileData.dataUrl && !e.pending)) return prev;
-                    const filtered = arr.filter((e) => e.file_url !== fileData.dataUrl);
+                    // 已有完整结果（缓存热/跑得快）时不降级回 pending 占位（file_url 可能是文件名或 dataUrl，双匹配）
+                    if (arr.some((e) => (e.file_url === fileData.dataUrl || e.file_url === fileData.filename) && !e.pending)) return prev;
+                    const filtered = arr.filter((e) => e.file_url !== fileData.dataUrl && e.file_url !== fileData.filename);
                     return {
                       ...prev,
                       [rid0]: [
@@ -6893,8 +6897,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                           text: "",
                           fields: {},
                           entries: [],
-                          source: fileData.dataUrl,
-                          file_url: fileData.dataUrl,
+                          // 内存保护：有裁剪图占位时 source/file_url 只存文件名，不存原图 dataUrl
+                          source: fileData.filename || previewResult.filename || fileData.dataUrl,
+                          file_url: fileData.filename || previewResult.filename || fileData.dataUrl,
                           processed_image: previewResult.processed_image,
                           pending: true,
                         },
@@ -6925,6 +6930,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
               // 3.5 同步写入 docExtractsByRecord，让文件处理面板和提取元素面板实时显示
               //（LOOP运行期间不弹浮动审查面板，但下方面板要能看到内容）
+              // 内存保护：有裁剪图时 source/file_url 只存文件名（去重/类型判断用），不存原图 dataUrl
               const newExtract: DocExtractState = {
                 filename: result.filename,
                 method: result.method,
@@ -6932,8 +6938,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 text: result.text,
                 fields: result.fields,
                 entries: [],
-                source: fileData.dataUrl,
-                file_url: fileData.dataUrl,
+                source: result.processed_image ? (fileData.filename || result.filename) : fileData.dataUrl,
+                file_url: result.processed_image ? (fileData.filename || result.filename) : fileData.dataUrl,
                 processed_image: result.processed_image,
                 mrz_warnings: result.mrz_warnings,
                 fallback: result.fallback,
@@ -6975,8 +6981,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               const ridFail = record?.record_id || selected?.record_id || "_default";
               setDocExtractsByRecord((prev) => {
                 const arr = prev[ridFail];
-                if (!arr || !arr.some((e) => e.file_url === fileData.dataUrl && e.pending)) return prev;
-                return { ...prev, [ridFail]: arr.filter((e) => !(e.file_url === fileData.dataUrl && e.pending)) };
+                if (!arr || !arr.some((e) => (e.file_url === fileData.dataUrl || e.file_url === fileData.filename) && e.pending)) return prev;
+                return { ...prev, [ridFail]: arr.filter((e) => !((e.file_url === fileData.dataUrl || e.file_url === fileData.filename) && e.pending)) };
               });
             });
 
@@ -7024,7 +7030,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                   const reviewStatus = docWebStatusRef.current;
                   const stashFiles = reviewStatus.phase === "fallback-review" ? reviewStatus.files : [];
                   if (stashFiles.length) {
-                    setFallbackFilesByRecord((prev) => ({ ...prev, [record.record_id]: stashFiles }));
+                    // 内存保护：该状态未被任何组件读取，只保留文件名/元数据，丢弃整页截图 dataUrl
+                    setFallbackFilesByRecord((prev) => ({
+                      ...prev,
+                      [record.record_id]: stashFiles.map((f) => ({ ...f, dataUrl: "" })),
+                    }));
                   }
                   needsManualRef.current.add(record.record_id);
                   rlog(`[executeMark] 保底自动跳过（该步骤未设断点），保留 ${stashFiles.length} 个文件，本记录标记需人工`);
@@ -8085,6 +8095,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setDocExtractPanel(null);
     // 清空上一轮/教学期残留的文件提取缓存：每张卡片的字段对比只许用本次新鲜提取，杜绝串行（列对行错、拿别人的信息检查当前卡）
     setDocExtractsByRecord({});
+    // 清空上一轮保底机制残留的整页下载文件缓存（全文件无清空点、跨轮次累积；跑完到下一轮之间保留供人工回看）
+    setFallbackFilesByRecord({});
+    needsManualRef.current = new Set();
     // 高速模式：同步清掉上一轮残留的后台 OCR 队列/缓存/延后校验，防止上一轮的 OCR 写进新一轮的卡片
     bgOcrResultRef.current = null;
     bgOcrPromisesRef.current.clear();
@@ -8537,7 +8550,6 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               if (mk.excelField) usedExtractFields.add(mk.excelField);
             }
             for (const f of result.fills || []) usedExtractFields.add(f.field);
-            const normV = (s: string) => (s || "").trim().toLowerCase().replace(/\s+/g, "");
             const recordExtracts = docExtractsByRecordRef.current[record.record_id] || [];
             const seenExtractFields = new Set<string>();
             let skippedUnusedFields = 0;
@@ -8573,13 +8585,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 seenExtractFields.add(f);
                 const leftVal = String(record.fields[f] ?? record.passport_fields?.[f] ?? "");
                 const rightVal = String(rightValRaw ?? "");
-                const l = normV(leftVal);
-                const r = normV(rightVal);
                 let m: FieldMatch = "mismatch";
-                if (!r) m = "missing";
-                else if (!l) m = "unknown";
-                else if (l === r) m = "match";
-                else if (l.includes(r) || r.includes(l)) m = "partial";
+                if (!rightVal) m = "missing";
+                else if (!leftVal) m = "unknown";
+                else if (valuesEquivalent(f, leftVal, rightVal)) m = "match";
+                else if (leftVal.toLowerCase().includes(rightVal.toLowerCase()) || rightVal.toLowerCase().includes(leftVal.toLowerCase())) m = "partial";
                 const entry: VerificationReportEntry = {
                   right_selector: "",
                   // 标签带上对应 Excel 列名（=记录字段 key）：「以来源为准修正」按此定位要更新的列
@@ -8831,6 +8841,28 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
       window.electronAPI?.viewClearHighlight("left").catch(() => {});
       rlog("[batch] LOOP 执行结束:", summary);
+
+      // 内存回收：跑完即释放每张卡提取结果中的原图 base64（source/file_url，每张 1~4MB，百张卡合计数百 MB），
+      // 只保留缩略图 processed_image + 识别文本/字段供跑后回看，避免几百 MB 字符串常驻渲染进程导致卡顿。
+      // （预览逻辑优先用 processed_image，PDF 本就走图标占位，置空不影响文件处理面板的显示）
+      setDocExtractsByRecord((prev) => {
+        let changed = false;
+        const stripped: Record<string, DocExtractState[]> = {};
+        for (const [rid, arr] of Object.entries(prev)) {
+          stripped[rid] = arr.map((e) => {
+            if (!e.source && !e.file_url) return e;
+            changed = true;
+            return { ...e, source: "", file_url: undefined };
+          });
+        }
+        return changed ? stripped : prev;
+      });
+      // 运行期残留的下载数据/后台 OCR 队列/延后校验一并释放（此前只在下一轮开始时清空）
+      bgOcrResultRef.current = null;
+      bgOcrPromisesRef.current.clear();
+      pendingFileVerifyRef.current.clear();
+      pendingWebFileRef.current = null;
+      passDeferActiveRef.current = false;
 
       // 执行结束：追加「执行总结」分段（统计行 + 总体结论/高频字段，排在所有单卡分析之后）
       if (collectedReports.length > 0) {
@@ -9271,14 +9303,16 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         const result = await api.extractDocumentUrl(url, targetFields);
         const entries = buildDocEntries(result.fields, targetFields);
         // 追加到当前卡片的文件列表（支持多文件 TAB 切换）
+        // 内存保护：有裁剪图时 source/file_url 只存文件名（去重/类型判断用），不存原图 dataUrl
+        const hasProc = !!result.processed_image;
         const newExtract: DocExtractState = {
           filename: result.filename,
           method: result.method,
           text: result.text,
           fields: result.fields,
           entries,
-          source: url,
-          file_url: url,
+          source: hasProc ? (result.filename || url) : url,
+          file_url: hasProc ? (result.filename || url) : url,
           processed_image: result.processed_image,
           mrz_warnings: result.mrz_warnings,
           fallback: result.fallback,
@@ -9556,6 +9590,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // ============ 审查修正：人工确认来源字段正确后，一键把来源值写入被审查字段（网页/Excel），并可重新审查 ============
   const [fixingFieldKey, setFixingFieldKey] = useState<string | null>(null);
   const [fixRerunRecordId, setFixRerunRecordId] = useState<string | null>(null);
+  const [confirmingRecordId, setConfirmingRecordId] = useState<string | null>(null);
 
   /** 判断报告条目是否可一键修正（被审查侧是网页元素或 Excel 绑定列，且来源值非空） */
   const isFixableEntry = (e: VerificationReportEntry): boolean =>
@@ -9635,19 +9670,45 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const mExcel = /（(?:Excel|文件提取)·(.+)）$/.exec(entry.right_label || "");
     if (mExcel) {
       const excelField = mExcel[1];
-      try {
-        await api.updateRecordFields(toBaseRecordId(record.record_id), { [excelField]: sourceValue });
-      } catch (e) {
-        return { ok: false, error: `Excel 更新失败: ${e instanceof Error ? e.message : String(e)}` };
-      }
-      // 同步前端卡片数据，保证重新审查/界面显示读到新值（cardPool 用卡片ID，records 用原始ID）
       const baseId = toBaseRecordId(record.record_id);
+      // 先更新前端状态（用户立刻看到 Excel 变化），后端同步放在后头
       setCardPool((prev) => prev.map((r) => (r.record_id === record.record_id ? { ...r, fields: { ...r.fields, [excelField]: sourceValue } } : r)));
       setRecords((prev) => prev.map((r) => (r.record_id === baseId ? { ...r, fields: { ...r.fields, [excelField]: sourceValue } } : r)));
+      setRightRecords((prev) => prev.map((r) => (r.record_id === baseId ? { ...r, fields: { ...r.fields, [excelField]: sourceValue } } : r)));
+      try {
+        await api.updateRecordFields(baseId, { [excelField]: sourceValue });
+      } catch (e) {
+        const err = e instanceof Error ? e.message : String(e);
+        if (/404|not found/i.test(err)) return { ok: true, excelField };
+        return { ok: false, error: `Excel 更新失败: ${err}` };
+      }
       return { ok: true, excelField };
     }
 
-    return { ok: false, error: "该字段不支持一键修正" };
+    // C. 兜底：无 selector、无 Excel 标签——左值直接写回 record.fields[left_field]
+    //    用于 passport-vs-Excel 通用条目（未走提取元素面板绑定 Excel 列的条目）
+    const fallbackField = entry.left_field;
+    if (fallbackField && typeof fallbackField === "string" && fallbackField.trim()) {
+      const baseId = toBaseRecordId(record.record_id);
+      // 先更新前端状态（用户立刻看到 Excel 变化），后端同步放在后头
+      setCardPool((prev) => prev.map((r) => (r.record_id === record.record_id ? { ...r, fields: { ...r.fields, [fallbackField]: sourceValue } } : r)));
+      setRecords((prev) => prev.map((r) => (r.record_id === baseId ? { ...r, fields: { ...r.fields, [fallbackField]: sourceValue } } : r)));
+      setRightRecords((prev) => prev.map((r) => (r.record_id === baseId ? { ...r, fields: { ...r.fields, [fallbackField]: sourceValue } } : r)));
+      // 后端同步：允许 404（记录未在 store.records，如只上传了护照），不算失败
+      try {
+        await api.updateRecordFields(baseId, { [fallbackField]: sourceValue });
+      } catch (e) {
+        const err = e instanceof Error ? e.message : String(e);
+        // 404 不算失败：说明 Excel 数据在前端（cardPool/rightRecords）但后端 store.records 空（例如只上传了护照）
+        if (/404|not found/i.test(err)) {
+          return { ok: true, excelField: fallbackField };
+        }
+        return { ok: false, error: `Excel 更新失败（字段 ${fallbackField}）: ${err}` };
+      }
+      return { ok: true, excelField: fallbackField };
+    }
+
+    return { ok: false, error: `字段「${label}」不支持一键修正：无网页元素 selector、无 Excel 绑定列、且 left_field 为空` };
   }, [mappings, performInputValue, waitElementAppear]);
 
   /** 单字段修正（不重新审查）：返回是否成功；成功后就地更新报告条目为一致并重算卡片三态 */
@@ -9668,7 +9729,53 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           success: true,
           timestamp: new Date().toISOString(),
         }]);
-        // 报告就地更新：该条目转为一致，并重算卡片三态（全部不一致项修好 → 通过）
+        // 跨列同值连带修复：同一行其他字段含相同错误值的一并改为正确值（导出时一并黄色高亮）
+        const erroneousValue = (entry.right_value || "").trim();
+        const correctValue = (entry.left_value || "").trim();
+        const crossFixedFields: string[] = [];
+        if (erroneousValue && correctValue && erroneousValue !== correctValue) {
+          const baseIdF = toBaseRecordId(record.record_id);
+          const primaryField = r.excelField || entry.left_field || "";
+          const latestRecord = cardPool.find((x) => x.record_id === record.record_id)
+            || records.find((x) => x.record_id === baseIdF)
+            || rightRecords.find((x) => x.record_id === baseIdF)
+            || null;
+          if (latestRecord) {
+            for (const [field, val] of Object.entries(latestRecord.fields || {})) {
+              if (field === primaryField) continue;
+              if (String(val || "").trim() === erroneousValue) crossFixedFields.push(field);
+            }
+            if (crossFixedFields.length > 0) {
+              const updates: Record<string, string> = {};
+              crossFixedFields.forEach((f) => { updates[f] = correctValue; });
+              try {
+                await api.updateRecordFields(baseIdF, updates);
+              } catch (e) {
+                const err = e instanceof Error ? e.message : String(e);
+                if (!/404|not found/i.test(err)) {
+                  setSteps((prev) => [...prev, {
+                    step: prev.length + 1,
+                    action: "fix",
+                    description: `跨列连带修正 ${crossFixedFields.join(", ")} 失败：${err}`,
+                    success: false,
+                    timestamp: new Date().toISOString(),
+                  }]);
+                }
+              }
+              setCardPool((prev) => prev.map((rr) => rr.record_id === record.record_id ? { ...rr, fields: { ...rr.fields, ...updates } } : rr));
+              setRecords((prev) => prev.map((rr) => rr.record_id === baseIdF ? { ...rr, fields: { ...rr.fields, ...updates } } : rr));
+              setRightRecords((prev) => prev.map((rr) => rr.record_id === baseIdF ? { ...rr, fields: { ...rr.fields, ...updates } } : rr));
+              setSteps((prev) => [...prev, {
+                step: prev.length + 1,
+                action: "fix",
+                description: `跨列连带修正：${crossFixedFields.join(", ")}（${erroneousValue} → ${correctValue}）`,
+                success: true,
+                timestamp: new Date().toISOString(),
+              }]);
+            }
+          }
+        }
+        // 报告就地更新：该条目 + 连带修正的条目 一并转为一致，并重算卡片三态（全部不一致项修好 → 通过）
         const rep = loopReports.find((x) => x.record_id === recordId);
         if (rep) {
           let idx = rep.entries.indexOf(entry);
@@ -9689,6 +9796,24 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               right_value: (entry.left_value || "").trim(),
               reasoning: `已以来源为准修正（原被审查值：${(oldEntry.right_value || "").trim() || "空"}）`,
             };
+            // 连带修正的条目同步转绿（导出 Excel 时一并黄色高亮）
+            if (crossFixedFields.length > 0) {
+              for (let ci = 0; ci < newEntries.length; ci++) {
+                if (ci === idx) continue;
+                const ce = newEntries[ci];
+                if (ce.match !== "mismatch" && ce.match !== "error" && ce.match !== "missing" && ce.match !== "partial") continue;
+                const mExcelCross = /（(?:Excel|文件提取)·(.+)）$/.exec(ce.right_label || "");
+                const ceField = mExcelCross ? mExcelCross[1] : ce.left_field;
+                if (ceField && crossFixedFields.includes(ceField)) {
+                  newEntries[ci] = {
+                    ...ce,
+                    match: "match",
+                    right_value: (ce.left_value || "").trim(),
+                    reasoning: `已以来源为准修正（跨列连带：原值「${erroneousValue}」→「${correctValue}」）`,
+                  };
+                }
+              }
+            }
             const badCount = newEntries.filter((e) => e.match === "mismatch" || e.match === "error" || e.match === "missing").length;
             const goodCount = newEntries.filter((e) => e.match === "match").length;
             const hasMrz = (rep.mrz_warnings?.length ?? 0) > 0;
@@ -9725,6 +9850,265 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       setFixingFieldKey(null);
     }
   }, [batchRunning, singleRunning, queueRunning, fixingFieldKey, cardPool, records, loopReports, cardLoopMap, workflowTemplate, applySourceToTarget, setError, setSuccessToast]);
+
+  // ===== 从「提取结果」面板批量编辑 OCR 字段值（图1 🔧 → 校正）：同步到 docExtractsByRecord + loopReports 左值 =====
+  // 修正后点「修复」时，applySourceToTarget 会取到修正后的值同步到右侧/Excel
+  const handleEditExtractFields = useCallback((recordId: string, fieldValueMap: Record<string, string>) => {
+    if (Object.keys(fieldValueMap).length === 0) return;
+    // 更新到原始提取数据，保证报告重建后修正值仍在
+    setDocExtractsByRecord((prev) => {
+      const extracts = prev[recordId] || [];
+      if (extracts.length === 0) return prev;
+      const updated = extracts.map((e) => {
+        const merged: Record<string, string> = { ...e.fields };
+        for (const [field, value] of Object.entries(fieldValueMap)) merged[field] = String(value || "").trim();
+        return { ...e, fields: merged };
+      });
+      return { ...prev, [recordId]: updated };
+    });
+    // 更新到当前报告条目，即时反映到卡片
+    setLoopReports((prev) => {
+      return prev.map((rep) => {
+        if (rep.record_id !== recordId) return rep;
+        const newEntries = rep.entries.map((e) => {
+          const newLValue = fieldValueMap[e.left_field];
+          if (newLValue === undefined) return e;
+          const lv = String(newLValue || "").trim();
+          const rv = (e.right_value || "").trim();
+          let match: FieldMatch = "mismatch";
+          if (!rv) match = "missing";
+          else if (!lv) match = "unknown";
+          else if (valuesEquivalent(e.left_field, lv, rv)) match = "match";
+          else if (lv.toLowerCase().includes(rv.toLowerCase()) || rv.toLowerCase().includes(lv.toLowerCase())) match = "partial";
+          return { ...e, left_value: lv, match };
+        });
+        const goodCount = newEntries.filter((x) => x.match === "match" || x.match === "partial").length;
+        const badCount = newEntries.filter((x) => x.match === "mismatch" || x.match === "error").length;
+        const overall: Overall = badCount === 0 ? (rep.mrz_warnings && rep.mrz_warnings.length > 0 ? "review" : "pass") : goodCount === 0 ? "fail" : "review";
+        const summary = badCount === 0
+          ? rep.flow === "review"
+            ? "全部一致"
+            : "录入完成"
+          : `${goodCount} 项一致，${badCount} 项不一致`;
+        return { ...rep, entries: newEntries, overall, summary };
+      });
+    });
+    const fieldNames = Object.keys(fieldValueMap).join("、");
+    setSuccessToast(`已校正 OCR 值（${fieldNames}）`);
+  }, [setDocExtractsByRecord, setLoopReports, setSuccessToast]);
+  const handleConfirmFixes = useCallback(async (
+    recordId: string,
+    fixKeys: Set<string>,
+    confirmKeys: Set<string>,
+    _entries: VerificationReportEntry[],
+  ) => {
+    if (batchRunning || singleRunning || queueRunning || confirmingRecordId) return;
+    const record = cardPool.find((r) => r.record_id === recordId) || records.find((r) => r.record_id === recordId);
+    if (!record) { setError("找不到该卡片记录"); return; }
+    const tpl = findTemplateForRecord(recordId);
+    const rep = loopReports.find((x) => x.record_id === recordId);
+    if (!rep) { setError("找不到该卡片的核验报告"); return; }
+    const baseId = toBaseRecordId(recordId);
+
+    // 定位条目索引：key 形如 `${left_field||right_label||"field"}-${idx}`，尾部 -N 即 entries 索引
+    const fixIdxSet = new Set(fixKeys);
+    const confirmIdxSet = new Set(confirmKeys);
+    const fixIndices = [...fixKeys].map((k) => {
+      const m = /-(\d+)$/.exec(k);
+      return m ? parseInt(m[1], 10) : -1;
+    }).filter((i) => i >= 0 && i < rep.entries.length);
+    const confirmIndices = [...confirmKeys].map((k) => {
+      const m = /-(\d+)$/.exec(k);
+      return m ? parseInt(m[1], 10) : -1;
+    }).filter((i) => i >= 0 && i < rep.entries.length);
+
+    setConfirmingRecordId(recordId);
+    let applied = 0;
+    let failed = 0;
+    // 逐 entry 记录写回结果（key → 是否成功），失败项留原文档以待重试
+    const writeResults = new Map<string, { ok: boolean; error?: string; excelField?: string }>();
+    // 跨列连带修正的字段集合：报告条目同步标记（导出 Excel 一并黄色高亮）
+    const crossFixedAll: Array<{ fields: string[]; wrong: string; right: string }> = [];
+    try {
+      // 1) 左对：以左值写回右侧（复用 applySourceToTarget 的三条写回路径）
+      const failedErrors: string[] = [];
+      const crossColumnDetails: string[] = [];
+      for (const idx of fixIndices) {
+        const entry = rep.entries[idx];
+        const key = `${entry.left_field || entry.right_label || "field"}-${idx}`;
+        const r = await applySourceToTarget(record, entry, tpl);
+        if (r.ok) {
+          applied++;
+          // 跨列同值修复：同一行其他字段含相同错误值的一并改为正确值
+          const erroneousValue = (entry.right_value || "").trim();
+          const correctValue = (entry.left_value || "").trim();
+          if (erroneousValue && correctValue && erroneousValue !== correctValue) {
+            const baseId = toBaseRecordId(record.record_id);
+            const primaryField = r.excelField || entry.left_field || "";
+            // 从当前前端状态读最新记录（applySourceToTarget 已同步）
+            const latestRecord = cardPool.find((x) => x.record_id === record.record_id)
+              || records.find((x) => x.record_id === baseId)
+              || rightRecords.find((x) => x.record_id === baseId)
+              || null;
+            if (latestRecord) {
+              const otherFields: string[] = [];
+              for (const [field, val] of Object.entries(latestRecord.fields || {})) {
+                if (field === primaryField) continue;
+                if (String(val || "").trim() === erroneousValue) otherFields.push(field);
+              }
+              if (otherFields.length > 0) {
+                const updates: Record<string, string> = {};
+                otherFields.forEach((f) => { updates[f] = correctValue; });
+                try {
+                  await api.updateRecordFields(baseId, updates);
+                } catch (e) {
+                  const err = e instanceof Error ? e.message : String(e);
+                  if (!/404|not found/i.test(err)) {
+                    failedErrors.push(`跨列修正 ${otherFields.join(", ")} 失败：${err}`);
+                  }
+                }
+                // 同步前端状态
+                setCardPool((prev) => prev.map((rr) =>
+                  rr.record_id === record.record_id
+                    ? { ...rr, fields: { ...rr.fields, ...updates } }
+                    : rr
+                ));
+                setRecords((prev) => prev.map((rr) =>
+                  rr.record_id === baseId
+                    ? { ...rr, fields: { ...rr.fields, ...updates } }
+                    : rr
+                ));
+                setRightRecords((prev) => prev.map((rr) =>
+                  rr.record_id === baseId
+                    ? { ...rr, fields: { ...rr.fields, ...updates } }
+                    : rr
+                ));
+                crossColumnDetails.push(`${entry.left_field || "字段"} → 连修 ${otherFields.join(", ")}（${erroneousValue} → ${correctValue}）`);
+                crossFixedAll.push({ fields: otherFields, wrong: erroneousValue, right: correctValue });
+              }
+            }
+          }
+        } else {
+          failed++;
+          failedErrors.push(`${entry.left_field || entry.right_label || "字段"}: ${r.error || "未知"}`);
+        }
+        writeResults.set(key, r);
+      }
+      // 2) 右对：就地改报告条目为 match（以右侧值为准，不写值）
+      for (const idx of confirmIndices) {
+        const entry = rep.entries[idx];
+        const key = `${entry.left_field || entry.right_label || "field"}-${idx}`;
+        if (!((entry.right_value || "").trim())) { failed++; writeResults.set(key, { ok: false, error: "右侧值为空" }); continue; }
+        writeResults.set(key, { ok: true });
+        applied++;
+      }
+
+      // 3) 批量更新报告条目：仅对写回成功的条目改 match；失败项保持 mismatch 并留"写入失败"提示
+      const newEntries = rep.entries.map((e, idx) => {
+        const key = `${e.left_field || e.right_label || "field"}-${idx}`;
+        const fixHit = fixIdxSet.has(key);
+        const confirmHit = confirmIdxSet.has(key);
+        if (fixHit) {
+          const wr = writeResults.get(key);
+          if (wr && wr.ok) {
+            return { ...e, match: "match" as const, right_value: (e.left_value || "").trim(), reasoning: `已以来源为准修正（原被审查值：${(e.right_value || "").trim() || "空"}）` };
+          }
+          // 写回失败：不标 match，保留原 right_value，reasoning 提示失败原因，让用户能重试
+          return { ...e, match: "error" as const, reasoning: `写入失败：${wr?.error || "未知原因"}（点击修复可重试）` };
+        }
+        if (confirmHit) {
+          const wr = writeResults.get(key);
+          if (wr && wr.ok) {
+            return { ...e, match: "match" as const, reasoning: `人工确认：以右侧值为准（右侧正确）` };
+          }
+          return { ...e, match: "error" as const, reasoning: `确认失败：${wr?.error || "右侧值为空"}` };
+        }
+        // 跨列连带修正的条目：同步转绿（导出 Excel 时一并黄色高亮）
+        if (crossFixedAll.length > 0 && (e.match === "mismatch" || e.match === "error" || e.match === "missing" || e.match === "partial")) {
+          const mExcelCross = /（(?:Excel|文件提取)·(.+)）$/.exec(e.right_label || "");
+          const ceField = mExcelCross ? mExcelCross[1] : e.left_field;
+          if (ceField) {
+            const hitCross = crossFixedAll.find((c) => c.fields.includes(ceField));
+            if (hitCross) {
+              return { ...e, match: "match" as const, right_value: (e.left_value || "").trim(), reasoning: `已以来源为准修正（跨列连带：原值「${hitCross.wrong}」→「${hitCross.right}」）` };
+            }
+          }
+        }
+        return e;
+      });
+
+      // 4) 重算卡片三态
+      const badCount = newEntries.filter((e) => e.match === "mismatch" || e.match === "error" || e.match === "missing").length;
+      const goodCount = newEntries.filter((e) => e.match === "match").length;
+      const hasMrz = (rep.mrz_warnings?.length ?? 0) > 0;
+      const overall: Overall = badCount === 0 ? (hasMrz ? "review" : "pass") : goodCount === 0 ? "fail" : "review";
+      const summary = badCount === 0
+        ? hasMrz
+          ? rep.summary
+          : rep.flow === "review" ? "全部一致" : "录入完成"
+        : `${goodCount} 项一致，${badCount} 项不一致`;
+      const newRep: VerificationReport = { ...rep, entries: newEntries, overall, summary };
+
+      // 5) 同步 loopReports / recordResults / batchResults
+      setLoopReports((prev) => prev.map((x) => (x.record_id === recordId ? newRep : x)));
+      setRecordResults((prev) => ({ ...prev, [recordId]: overall }));
+      setBatchResults((prev) => prev[recordId]
+        ? { ...prev, [recordId]: {
+            ...prev[recordId],
+            status: overall === "pass" ? "success" : overall === "review" ? "review" : "failed",
+            error: overall === "pass" ? undefined : prev[recordId].error,
+          } }
+        : prev
+      );
+
+      // 6) 图2 分析卡片同步刷新状态（推理文本保留，只更新卡片 overall 与徽标；summary 段重算三态计数）
+      setAnalysisSegments((current) => {
+        let updated = current.map((seg) => {
+          if (seg.kind === "card" && seg.key === recordId) {
+            return { ...seg, overall };
+          }
+          return seg;
+        });
+        // 从更新后的所有 card 段重算三态计数
+        let newPass = 0, newReview = 0, newFail = 0;
+        for (const seg of updated) {
+          if (seg.kind === "card") {
+            if (seg.overall === "pass") newPass++;
+            else if (seg.overall === "review") newReview++;
+            else if (seg.overall === "fail") newFail++;
+          }
+        }
+        return updated.map((seg) => {
+          if (seg.kind === "summary" && seg.stats) {
+            return { ...seg, stats: { ...seg.stats, pass: newPass, review: newReview, fail: newFail } };
+          }
+          return seg;
+        });
+      });
+
+      setSuccessToast(`已确认修正 ${applied} 项${failed > 0 ? `（${failed} 项写入失败：${failedErrors.join("；") || "未知原因"}）` : ""}：${overall === "pass" ? "全部一致" : overall === "review" ? "仍有需复核项" : "需检查"}`);
+      setSteps((prev) => [...prev, {
+        step: prev.length + 1,
+        action: "fix",
+        description: `确认修正：${applied} 项已应用（左对写回 ${fixIndices.length} 项 / 右对改match ${confirmIndices.length} 项）${failed > 0 ? `，${failed} 项失败` : ""}；卡片三态 → ${overall}`,
+        success: applied > 0,
+        timestamp: new Date().toISOString(),
+      }]);
+
+      // 返回已成功应用的 key 集合，供 ResultsPanel 精确迁入 fixedKeys
+      const appliedKeys = new Set<string>(fixKeys.filter((k) => {
+        const wr = writeResults.get(k);
+        return wr && wr.ok;
+      }));
+      for (const k of confirmKeys) {
+        const wr = writeResults.get(k);
+        if (wr && wr.ok) appliedKeys.add(k);
+      }
+      return appliedKeys;
+    } finally {
+      setConfirmingRecordId(null);
+    }
+  }, [batchRunning, singleRunning, queueRunning, confirmingRecordId, cardPool, records, loopReports, cardLoopMap, workflowTemplate, analysisSegments, applySourceToTarget, setError, setSuccessToast, setSteps]);
 
   /** 一键修正该卡片全部不一致字段（以来源为准），然后重新审查该卡片并替换报告 */
   const handleFixAllAndRerun = useCallback(async (recordId: string, entries: VerificationReportEntry[]) => {
@@ -9889,7 +10273,6 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           if (mk.excelField) usedExtractFields.add(mk.excelField);
         }
         for (const f of result.fills || []) usedExtractFields.add(f.field);
-        const normV = (s: string) => (s || "").trim().toLowerCase().replace(/\s+/g, "");
         const recordExtracts = docExtractsByRecordRef.current[recordId] || [];
         for (const d of recordExtracts) {
           for (const [f, rightValRaw] of Object.entries(d.fields || {})) {
@@ -9898,13 +10281,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             seenExtractFields.add(f);
             const leftVal = String(fixedRecord.fields[f] ?? fixedRecord.passport_fields?.[f] ?? "");
             const rightVal = String(rightValRaw ?? "");
-            const l = normV(leftVal);
-            const rv = normV(rightVal);
             let m: FieldMatch = "mismatch";
-            if (!rv) m = "missing";
-            else if (!l) m = "unknown";
-            else if (l === rv) m = "match";
-            else if (l.includes(rv) || rv.includes(l)) m = "partial";
+            if (!rightVal) m = "missing";
+            else if (!leftVal) m = "unknown";
+            else if (valuesEquivalent(f, leftVal, rightVal)) m = "match";
+            else if (leftVal.toLowerCase().includes(rightVal.toLowerCase()) || rightVal.toLowerCase().includes(leftVal.toLowerCase())) m = "partial";
             currentRecordEntries.push({
               right_selector: "",
               right_label: `${FIELD_LABELS[f] || f}（文件提取·${f}）`,
@@ -10029,17 +10410,31 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     if (exportingExcel) return;
     // 卡片池来源侧：右侧 Excel 生成的卡片导右侧，否则导左侧
     const side: "left" | "right" = rightCardsGenerated ? "right" : "left";
-    // 收集字段对比卡片的问题状态：{record_id: {字段名: match}}（只含有问题的字段，match 的不传）
+    // 收集需要高亮的字段：只含真正有问题的格子（红/琥珀）+ 用户修好的格子（绿）
+    // 始终正确的格子（reasoning 不含"已以来源为准修正"或"人工确认"）不传入高亮 → 不填色
+    const highlightSignalRe = /已以来源为准修正|人工确认：/;
     const highlights = loopReportsRef.current
       .map((rep) => ({
-        record_id: rep.record_id,
+        // 卡片 record_id 带「__随机后缀」，后端 store 用原 ID——必须剥掉否则高亮永远对不上
+        record_id: toBaseRecordId(rep.record_id),
         fields: Object.fromEntries(
           rep.entries
-            .filter((e) => e.match === "mismatch" || e.match === "error" || e.match === "missing" || e.match === "partial")
-            .map((e) => [e.left_field, e.match])
+            .filter((e) =>
+              e.match === "mismatch" || e.match === "error" || e.match === "missing" || e.match === "partial"
+              || (e.match === "match" && highlightSignalRe.test(e.reasoning || ""))
+            )
+            .map((e) => [e.left_field, /已以来源为准修正|人工确认：/.test(e.reasoning || "") ? "fixed" : e.match])
         ),
       }))
       .filter((h) => Object.keys(h.fields).length > 0);
+    // 诊断：导出时打印高亮收集情况（排查"导出无红色"问题）
+    const allEntries = loopReportsRef.current.flatMap((rep) => rep.entries);
+    const matchDist = allEntries.reduce<Record<string, number>>((acc, e) => {
+      acc[e.match] = (acc[e.match] || 0) + 1;
+      return acc;
+    }, {});
+    rlog(`[export-hl] 报告数=${loopReportsRef.current.length} 条目分布=${JSON.stringify(matchDist)} 高亮记录数=${highlights.length} side=${side} 样本=${highlights.slice(0, 2).map((h) => `${h.record_id}:${Object.keys(h.fields).join(",")}`).join(" | ")}`);
+    console.log("[export-hl]", { reports: loopReportsRef.current.length, matchDist, highlights: highlights.length, side, sample: highlights.slice(0, 2) });
     setExportingExcel(true);
     try {
       const r = highlights.length > 0
@@ -10047,7 +10442,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         : await api.exportExcel(side);
       if (r.mode === "inplace") {
         // 后端统一导出到「下载」文件夹 <原名>_审核结果.xlsx，原文件不动
-        setSuccessToast(r.note ? r.note : `已导出到：${r.path}`);
+        setSuccessToast((highlights.length > 0 ? `已高亮 ${highlights.length} 条记录 · ` : "") + (r.note ? r.note : `已导出到：${r.path}`));
       } else {
         const a = document.createElement("a");
         a.href = r.path!;
@@ -10056,7 +10451,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         a.click();
         a.remove();
         setTimeout(() => URL.revokeObjectURL(r.path!), 5000);
-        setSuccessToast(highlights.length > 0 ? "已导出 Excel 副本（问题单元格已高亮）" : "已导出 Excel 副本");
+        setSuccessToast(highlights.length > 0 ? `已导出 Excel 副本（${highlights.length} 条记录的问题单元格已高亮）` : "已导出 Excel 副本（无问题记录，未高亮）");
       }
     } catch (e) {
       setError(`导出 Excel 失败：${e instanceof Error ? e.message : String(e)}`);
@@ -13039,7 +13434,6 @@ type: info.type,
               hasBoundInputs: pickedMarks.some((m) => m.action === "input" && !!m.variableField),
               hasConfirmClick: pickedMarks.some((m) => m.action === "click" && m.label.startsWith("确认人物")),
               cardsGenerated,
-              rowRange,
               hasCheckedBatch: checkedIds.size > 0,
               beginnerMode: settings.beginner_mode !== false,
             });
@@ -13049,7 +13443,7 @@ type: info.type,
       }
     });
     return off;
-  }, [refreshRecords, clearRecords, removeMapping, removePickedMark, clearPickedMarks, replayAll, stopReplay, advanceToReviewPhase, abortTeaching, goBackTeachingPhase, browserLeftDetached, browserRightDetached, bottomDetached, leftUrl, rightUrl, selectMode, pickTarget, avatarMode, pendingAction, teachingPhase, selected, mappings, result, report, loopReports, steps, shots, running, pickedMarks, replaying, replayCursor, rightPicked, leftPicked, selectedExcelColumn, bindInputSide, nextClickLabel, addingStepMode, addingClickMode, addingDocExtractMode, cardsGenerated, rowRange, pickLeftFromWeb, pickLeftFromExcel, resetMappingRound, saveMapping, startBindBothInputs, exitBindInputs, startConfirmPerson, startAddingReviewSteps, startAddingEntrySteps, exitAddingStepMode, handleSelectCard, startAddClickStep, exitAddClickMode, undoLastStep, startAddDocExtract, exitAddDocExtractMode, requestDocFileExtract, exitSelectMode, setShowSaveSkill, setSaveSkillRunAfter, handleQuickSaveLoop, handleSaveToBatch]);
+  }, [refreshRecords, clearRecords, removeMapping, removePickedMark, clearPickedMarks, replayAll, stopReplay, advanceToReviewPhase, abortTeaching, goBackTeachingPhase, browserLeftDetached, browserRightDetached, bottomDetached, leftUrl, rightUrl, selectMode, pickTarget, avatarMode, pendingAction, teachingPhase, selected, mappings, result, report, loopReports, steps, shots, running, pickedMarks, replaying, replayCursor, rightPicked, leftPicked, selectedExcelColumn, bindInputSide, nextClickLabel, addingStepMode, addingClickMode, addingDocExtractMode, cardsGenerated, pickLeftFromWeb, pickLeftFromExcel, resetMappingRound, saveMapping, startBindBothInputs, exitBindInputs, startConfirmPerson, startAddingReviewSteps, startAddingEntrySteps, exitAddingStepMode, handleSelectCard, startAddClickStep, exitAddClickMode, undoLastStep, startAddDocExtract, exitAddDocExtractMode, requestDocFileExtract, exitSelectMode, setShowSaveSkill, setSaveSkillRunAfter, handleQuickSaveLoop, handleSaveToBatch]);
 
   // Excel 拾取：把字段包装成 PickedElementInfo，并打 tag 区分来源
   const onExcelPicked = (info: ExcelPickedField) => {
@@ -13748,6 +14142,27 @@ type: info.type,
           >
             <PanelBottom className="h-4 w-4" />
           </button>
+          <button
+            onClick={() => {
+              if (!focusBottomMode) {
+                setBottomPanelOpen(true);
+                savedBottomHeightRef.current = bottomPanelHeight;
+                setFocusBottomMode(true);
+              } else {
+                setFocusBottomMode(false);
+              }
+            }}
+            className={[
+              "flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-all",
+              focusBottomMode
+                ? "bg-brand-100 text-brand-700 ring-1 ring-brand-300"
+                : "bg-white/70 text-slate-600 ring-1 ring-slate-200 hover:bg-white hover:text-slate-900",
+            ].join(" ")}
+            title={focusBottomMode ? "还原布局：恢复上方浏览器面板" : "聚焦下方：隐藏上方浏览器面板，下方审查面板铺满全屏"}
+          >
+            <PanelBottom className="h-3 w-3" />
+            {focusBottomMode ? "还原" : "聚焦"}
+          </button>
           <div className="mx-1 h-4 w-px bg-slate-200" />
           <button
             onClick={() => window.electronAPI?.windowMinimize()}
@@ -13781,7 +14196,7 @@ type: info.type,
           className="flex shrink-0 items-center gap-1 rounded-md bg-white/70 px-2 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-slate-200 transition-all hover:bg-slate-100 hover:text-slate-900"
           title="查看已保存的 Loop 模板并执行"
         >
-          <Sparkles className="h-3 w-3 text-slate-400" />
+          <BookMarked className="h-3 w-3 text-slate-400" />
           查看保存Loop
         </button>
 
@@ -13796,7 +14211,7 @@ type: info.type,
           ].join(" ")}
           title="站外循环：在屏幕边缘挂一个悬浮条，设置「提取源」和「操作页」后 AI 自主循环填写；数据痕迹见下方「站外循环记录」"
         >
-          <Bot className={`h-3 w-3 ${dockOpen ? "" : "text-slate-400"}`} />
+          <Rotate3D className={`h-3 w-3 ${dockOpen ? "" : "text-slate-400"}`} />
           {dockOpen ? "站外循环已开" : "站外循环"}
         </button>
 
@@ -13846,7 +14261,7 @@ type: info.type,
         {/* pendingAction 状态指示器（仅 S 输入模式显示；点击模式不显示提示） */}
         {pendingAction === "input" && (
           <div className={[
-            "flex shrink-0 items-center gap-1.5 rounded-md px-2 py-0.5 text-[11px] font-medium animate-glow-pulse",
+            "flex shrink-0 items-center gap-1.5 rounded-md px-2 py-0.5 text-[11px] font-medium",
             pendingAction === "input"
               ? "bg-slate-800 text-white ring-1 ring-slate-600"
               : "bg-slate-800 text-white ring-1 ring-slate-600",
@@ -13893,122 +14308,22 @@ type: info.type,
           ].join(" ")}
           title={appMode === "entry"
             ? "录入流操作：点右侧表单输入框，再从左侧 Excel 选对应字段填入"
-            : "步骤设置：选中 Excel 列作为 LOOP 变量，依次配置输入、点击、审查、录入步骤"
+            : appMode === "loop"
+              ? "循环操作：配置 LOOP 循环执行步骤"
+              : "步骤设置：选中 Excel 列作为 LOOP 变量，依次配置输入、点击、审查、录入步骤"
           }
         >
           <MousePointerClick className="h-3 w-3" />
-          {selectMode ? "退出选择" : (appMode === "entry" ? "录入流操作" : "步骤设置")}
+          {selectMode ? "退出选择" : (appMode === "entry" ? "录入流操作" : appMode === "loop" ? "循环操作" : "步骤设置")}
         </button>
 
-        {/* ============ 模式切换：LOOP 母容器，审查/录入/全流程 为内部切换键 ============ */}
-        <div className="flex shrink-0 items-stretch overflow-hidden rounded-md ring-1 ring-slate-300 bg-slate-50">
-          {/* LOOP 母标签：中性灰色，与内部切换键区分 */}
-          <div className="flex items-center gap-1 bg-slate-200/80 px-2 py-0.5 text-[10px] font-bold tracking-wide text-slate-600">
-            <Repeat2 className="h-3 w-3" />
-            LOOP
-          </div>
-          {/* 内部切换键：审查 / 录入 / 全流程 */}
-          <div className="flex items-center gap-0 bg-white/70 px-1 py-0.5">
-            <button
-              onClick={() => {
-                if (teachingPhase !== "idle" || batchRunning) return;
-                setAppMode("review");
-                setWorkflowTemplate(null);
-                if (selectMode) {
-                  setPickTarget("right");
-                  setRightPicked(null);
-                  setLeftPicked(null);
-                  setAddingStepMode(null);
-                  setAddingClickMode(false);
-                  setTimeout(() => {
-                    window.electronAPI?.viewStopPicking("left").catch(() => {});
-                    window.electronAPI?.viewStartPicking("right");
-                  }, 200);
-                }
-              }}
-              disabled={teachingPhase !== "idle" || batchRunning}
-              className={[
-                "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium transition-all",
-                appMode === "review"
-                  ? "bg-slate-900 text-white shadow-sm"
-                  : "text-slate-500 hover:bg-slate-100 hover:text-slate-700",
-                (teachingPhase !== "idle" || batchRunning) ? "cursor-not-allowed opacity-60" : "",
-              ].join(" ")}
-              title="包含审查步骤：对页面字段进行核对校验"
-            >
-              <ShieldCheck className="h-2.5 w-2.5" />
-              审查
-            </button>
-            <button
-              onClick={() => {
-                if (teachingPhase !== "idle" || batchRunning) return;
-                setAppMode("entry");
-                setWorkflowTemplate(null);
-                if (selectMode) {
-                  setPickTarget("left");
-                  setRightPicked(null);
-                  setLeftPicked(null);
-                  setAddingStepMode(null);
-                  setAddingClickMode(false);
-                  setTimeout(() => {
-                    window.electronAPI?.viewStopPicking("right").catch(() => {});
-                    window.electronAPI?.viewStartPicking("left");
-                  }, 200);
-                }
-              }}
-              disabled={teachingPhase !== "idle" || batchRunning}
-              className={[
-                "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium transition-all",
-                appMode === "entry"
-                  ? "bg-slate-900 text-white shadow-sm"
-                  : "text-slate-500 hover:bg-slate-100 hover:text-slate-700",
-                (teachingPhase !== "idle" || batchRunning) ? "cursor-not-allowed opacity-60" : "",
-              ].join(" ")}
-              title="包含录入步骤：把 Excel 数据批量填入表单"
-            >
-              <ClipboardEdit className="h-2.5 w-2.5" />
-              录入
-            </button>
-            <button
-              onClick={() => {
-                if (teachingPhase !== "idle" || batchRunning) return;
-                setAppMode("loop");
-                setWorkflowTemplate(null);
-                if (selectMode) {
-                  setPickTarget(null);
-                  setRightPicked(null);
-                  setLeftPicked(null);
-                  setAddingStepMode(null);
-                  setAddingClickMode(false);
-                  window.electronAPI?.viewStopPicking("left").catch(() => {});
-                  window.electronAPI?.viewStopPicking("right").catch(() => {});
-                }
-              }}
-              disabled={teachingPhase !== "idle" || batchRunning}
-              className={[
-                "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium transition-all",
-                appMode === "loop"
-                  ? "bg-slate-900 text-white shadow-sm"
-                  : "text-slate-500 hover:bg-slate-100 hover:text-slate-700",
-                (teachingPhase !== "idle" || batchRunning) ? "cursor-not-allowed opacity-60" : "",
-              ].join(" ")}
-              title="完整 LOOP：审查 + 录入 全部步骤"
-            >
-              全流程
-            </button>
-          </div>
-        </div>
-
         {/* ============ 教学完成后的批量执行按钮（仅 LOOP/录入模式显示） ============ */}
-        {appMode !== "review" && teachingPhase === "done" && workflowTemplate && !batchRunning && (
+        {appMode !== "review" && teachingPhase === "done" && workflowTemplate && !batchRunning && records.length > 0 && (
           <button
             onClick={() => runBatch()}
-            disabled={records.length === 0}
             className={[
               "flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-all",
-              records.length === 0
-                ? "bg-white/40 text-slate-300 ring-1 ring-slate-200 cursor-not-allowed"
-                : "bg-slate-900 text-white shadow-sm ring-1 ring-slate-700 hover:bg-slate-800",
+              "bg-slate-900 text-white shadow-sm ring-1 ring-slate-700 hover:bg-slate-800",
             ].join(" ")}
             title={`对所有 ${records.length} 张卡片批量执行模板${workflowTemplate.hasSearchSteps ? "（含搜索步骤）" : "（无搜索步骤，可能无法定位其他学生）"}`}
           >
@@ -14020,7 +14335,7 @@ type: info.type,
         {appMode !== "review" && batchRunning && (
           <button
             onClick={stopBatch}
-            className="flex items-center gap-1 rounded-md bg-rose-600 px-2 py-0.5 text-[11px] font-medium text-white shadow-sm ring-1 ring-rose-300 transition-all hover:bg-rose-700 animate-glow-pulse"
+            className="flex items-center gap-1 rounded-md bg-rose-600 px-2 py-0.5 text-[11px] font-medium text-white shadow-sm ring-1 ring-rose-300 transition-all hover:bg-rose-700"
             title="停止批量执行"
           >
             <Square className="h-3 w-3" />
@@ -14094,13 +14409,13 @@ type: info.type,
             disabled={running || mappings.length === 0 || (!selected && !mappings.every((m) => m.left_source === "database"))}
             className={[
               "flex items-center gap-1.5 rounded-md px-3 py-0.5 text-[11px] font-medium text-white transition-all",
-              running || mappings.length === 0 || (!selected && !mappings.every((m) => m.left_source === "database"))
+              running || singleRunning || batchRunning || mappings.length === 0 || (!selected && !mappings.every((m) => m.left_source === "database"))
                 ? "cursor-not-allowed bg-slate-400"
                 : "bg-slate-900 hover:bg-slate-800 active:scale-[.98] shadow-sm",
             ].join(" ")}
             title={
-              running
-                ? "核验进行中…"
+              running || singleRunning || batchRunning
+                ? "核验/LOOP 执行中…"
                 : mappings.length === 0
                 ? `请先配置至少一条字段映射（已拾取 ${pickedMarks.length} 个节点，已保存 ${mappings.length} 条映射）`
                 : !selected && !mappings.every((m) => m.left_source === "database")
@@ -14108,8 +14423,8 @@ type: info.type,
                 : `开始核验（${mappings.length} 条映射）`
             }
           >
-            {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
-            {running ? "核验中…" : "开始核验"}
+            {(running || singleRunning || batchRunning) ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+            {(running || singleRunning || batchRunning) ? "运行中" : "开始核验"}
           </button>
         )}
         {waitingManual && (
@@ -14236,7 +14551,10 @@ type: info.type,
         >
           {/* 两个浏览器并排（脱离后对应位置留空或单列），可拖拽调整比例 */}
           <div
-            className="flex min-h-0 min-w-0 flex-1 gap-1 overflow-hidden"
+            className={[
+              "min-h-0 min-w-0 gap-1 overflow-hidden",
+              focusBottomMode ? "hidden" : "flex flex-1",
+            ].join(" ")}
             onMouseMove={(e) => {
               if (!draggingRef.current) return;
               const rect = e.currentTarget.getBoundingClientRect();
@@ -14368,7 +14686,6 @@ type: info.type,
                       selectedColumn={selectedExcelColumn}
                       onSelectColumn={setSelectedExcelColumn}
                       rowRange={rowRange}
-                      onRowRangeChange={setRowRange}
                       cardsGenerated={cardsGenerated}
                       onGenerateCards={generateCards}
                       onResetCards={resetCards}
@@ -14545,7 +14862,6 @@ type: info.type,
                       selectedColumn={rightSelectedColumn}
                       onSelectColumn={setRightSelectedColumn}
                       rowRange={rightRowRange}
-                      onRowRangeChange={setRightRowRange}
                       cardsGenerated={rightCardsGenerated}
                       onGenerateCards={generateRightCards}
                       onResetCards={resetRightCards}
@@ -14576,7 +14892,7 @@ type: info.type,
           </div>
 
           {/* 垂直可拖拽分隔条：仅在审查面板可见时显示；双击最大化/还原 */}
-          {bottomPanelOpen && !bottomDetached && (
+          {bottomPanelOpen && !bottomDetached && !focusBottomMode && (
             <div
               className="relative z-10 h-1.5 shrink-0 cursor-row-resize select-none"
               onMouseDown={(e) => {
@@ -14604,11 +14920,12 @@ type: info.type,
           {bottomPanelOpen && !bottomDetached && (
             <div
               className={[
-                "flex min-h-0 shrink-0 gap-0 overflow-hidden",
+                "flex min-h-0 gap-0 overflow-hidden",
+                focusBottomMode ? "flex-1" : "shrink-0",
                 (selectMode && settings.beginner_mode !== false && teachingPhase !== "idle") ? "flex-row" : "flex-col",
               ].join(" ")}
               style={{
-                height: `${bottomPanelHeight}%`,
+                height: focusBottomMode ? undefined : `${bottomPanelHeight}%`,
                 minHeight: selectMode ? "200px" : "280px",
               }}
               onMouseMove={(e) => {
@@ -14753,6 +15070,10 @@ type: info.type,
                   appMode={appMode}
                   onFixField={handleFixField}
                   onFixAllAndRerun={handleFixAllAndRerun}
+                  onEditExtractFields={handleEditExtractFields}
+                  currentRecordId={currentRecordId}
+                  onConfirmFixes={handleConfirmFixes}
+                  confirmingRecordId={confirmingRecordId}
                   onExportExcel={handleExportExcel}
                   exportingExcel={exportingExcel}
                   fixingFieldKey={fixingFieldKey}
@@ -15199,7 +15520,7 @@ type: info.type,
       </main>
 
       {/* 设置弹窗（与 ppt 视图共用同一 settingsModal 变量） */}
-      {settingsModal}
+      {settingsModal}
 
       {/* 功能2：本地文档提取审核弹窗（确认后填入右侧网页输入框） */}
       <input
@@ -15670,6 +15991,8 @@ function UploadBindDialog({
 // 定位右侧（right-4），避免遮挡左侧 Excel/记录面板，方便左审查
 // 关键证件字段（姓/名/办证地点/护照号等）用带色边框卡片框出
 const DOC_KEY_FIELDS = ["surname", "given_name", "name", "passport_no", "birth_date", "issue_place", "nationality", "gender", "passport_issue", "passport_expiry", "issue_authority"];
+/** 护照号字段：OCR 常把数字 0/1 误识别为 O/I，或把 3 误识别为 NO，归一化时剥离非数字字符 */
+const PASSPORT_NO_KEYS = new Set(["passport_no", "passportnumber", "passport_number", "passno", "pass_num", "passport", "护照号", "护照号码", "护照", "pass"]);
 function DocExtractReviewPanel({
   panel,
   onClose,

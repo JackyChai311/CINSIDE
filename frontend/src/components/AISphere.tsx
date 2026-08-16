@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
  * AI 粒子球（黑白配色）：左侧面板的 AI 角色化身。
@@ -22,11 +22,26 @@ interface Particle {
 
 const PARTICLE_COUNT = 280;
 
-export default function AISphere({ state, size = 132 }: { state: AISphereState; size?: number }) {
+export default function AISphere({ state, size = 132, paused = false, retracted = false }: { state: AISphereState; size?: number; paused?: boolean; retracted?: boolean }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stateRef = useRef<AISphereState>(state);
   stateRef.current = state;
+  // 收起动画（300ms 过渡）期间保持渲染：球边升边缩边淡出，停稳后才真正停 rAF；
+  // 恢复时先恢复渲染再落回，保证「从上方下来」全程可见
+  const [settled, setSettled] = useState(retracted);
+  useEffect(() => {
+    setSettled(false);
+    const t = setTimeout(() => setSettled(true), 320);
+    return () => clearTimeout(t);
+  }, [retracted]);
+  const effectivePaused = paused || (retracted && settled);
+  const pausedRef = useRef(effectivePaused);
+  pausedRef.current = effectivePaused;
+  const rafRef = useRef(0);
+  const restartRef = useRef<() => void>(() => {});
+  // 是否已画过至少一帧：暂停时若从未渲染过，先补画一帧再停，避免空白画布（首次进入待命时球不可见）
+  const drawnOnceRef = useRef(false);
   // 暗色主题：球体用白色系；亮色主题：黑色系
   const darkRef = useRef(false);
 
@@ -67,8 +82,9 @@ export default function AISphere({ state, size = 132 }: { state: AISphereState; 
     }
 
     const resize = () => {
-      const rect = container.getBoundingClientRect();
-      const s = Math.min(rect.width, rect.height);
+      // 用固定的逻辑尺寸（props size），不随容器的 CSS transform（收起/落回动画）变化，
+      // 避免收起时画进一个偏移/缩放的盒子、落回后 canvas 边缘残留旧像素导致位置歪
+      const s = size;
       const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
       canvas.width = s * dpr;
       canvas.height = s * dpr;
@@ -78,7 +94,6 @@ export default function AISphere({ state, size = 132 }: { state: AISphereState; 
       ctx.scale(dpr, dpr);
     };
     resize();
-    window.addEventListener("resize", resize);
 
     // ---- 动画状态 ----
     const rot = { y: 0, x: 0, time: 0 };
@@ -94,10 +109,12 @@ export default function AISphere({ state, size = 132 }: { state: AISphereState; 
     let liquidTimer = 5 + Math.random() * 7;
 
     let raf = 0;
-    const animate = () => {
+    // 单帧绘制：animate 与暂停补画（resize/恢复落回）共用
+    const drawFrame = (): boolean => {
+      drawnOnceRef.current = true;
       const rect = container.getBoundingClientRect();
-      const s = Math.min(rect.width, rect.height);
-      if (s < 8) { raf = requestAnimationFrame(animate); return; }
+      if (Math.min(rect.width, rect.height) < 8) return false; // 容器不可见（被气泡覆盖/收起中）
+      const s = size; // 固定逻辑尺寸：CSS transform 只影响视觉，不改变绘制坐标，杜绝边缘残留/偏移
       const k = s / 100; // 逻辑坐标 → 实际像素
       const state = stateRef.current;
       if (state !== prevState) { prevState = state; stateTimer = 0; }
@@ -200,22 +217,59 @@ export default function AISphere({ state, size = 132 }: { state: AISphereState; 
         ctx.fillStyle = `hsla(0,0%,${p.lig}%,${Math.min(p.alpha, 1)})`;
         ctx.fillRect(p.x - p.half, p.y - p.half, p.half * 2, p.half * 2);
       }
-
+      return true;
+    };
+    const animate = () => {
+      if (pausedRef.current) {
+        // 从未画过一帧（首次进入待命且被暂停）：补画一帧再停，避免空白画布
+        if (!drawnOnceRef.current) drawFrame();
+        raf = 0;
+        rafRef.current = 0;
+        return;
+      }
+      drawFrame();
       raf = requestAnimationFrame(animate);
+      rafRef.current = raf;
     };
     raf = requestAnimationFrame(animate);
+    rafRef.current = raf;
+    restartRef.current = () => {
+      if (rafRef.current === 0) {
+        raf = requestAnimationFrame(animate);
+        rafRef.current = raf;
+      }
+    };
+    const onResize = () => {
+      resize();
+      // 暂停中 canvas 尺寸变化会清空画布，补画一帧保持可见
+      if (pausedRef.current) drawFrame();
+    };
+    window.addEventListener("resize", onResize);
 
     return () => {
       cancelAnimationFrame(raf);
+      rafRef.current = 0;
       observer.disconnect();
-      window.removeEventListener("resize", resize);
+      window.removeEventListener("resize", onResize);
     };
   }, []);
+
+  // 暂停/收起解除时重启动画循环（暂停时 animate 会在画完必要的一帧后自行停掉）
+  // 同时重置「已画过」标记：落回瞬间用当前状态补画一帧，避免停留在旧形态
+  useEffect(() => {
+    if (!effectivePaused || !retracted) {
+      drawnOnceRef.current = false;
+      restartRef.current();
+    }
+  }, [effectivePaused, retracted]);
 
   return (
     <div
       ref={containerRef}
-      className="flex items-center justify-center"
+      className={[
+        "flex items-center justify-center transition-[transform,opacity] duration-300 ease-out",
+        retracted ? "-translate-y-16 scale-75 opacity-0" : "translate-y-0 scale-100 opacity-100",
+      ].join(" ")}
       style={{ width: size, height: size }}
       title="AI 助手"
     >

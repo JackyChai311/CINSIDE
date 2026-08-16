@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   CalendarDays,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
@@ -27,7 +28,6 @@ import {
   MoveRight,
   Play,
   Plus,
-  RefreshCw,
   RotateCcw,
   RotateCw,
   Save,
@@ -270,6 +270,14 @@ interface Props {
   onFixField?: (recordId: string, entry: VerificationReportEntry, rowKey: string) => Promise<boolean>;
   /** 审查修正：一键修正全部不一致字段并重新审查该卡片 */
   onFixAllAndRerun?: (recordId: string, entries: VerificationReportEntry[]) => void;
+  /** 审查修正：确认后批量执行待标记项（fixKeys=左对右错写回，confirmKeys=右对左错就地改match），返回 Promise */
+  onConfirmFixes?: (recordId: string, fixKeys: Set<string>, confirmKeys: Set<string>, entries: VerificationReportEntry[]) => Promise<Set<string>>;
+  /** 从提取结果面板编辑 OCR 字段值后提交（同步到 docExtractsByRecord + loopReports 左值） */
+  onEditExtractFields?: (recordId: string, fieldValueMap: Record<string, string>) => void;
+  /** 当前正在查看的记录 id（用于将提取结果面板的字段编辑关联到正确的卡片） */
+  currentRecordId?: string;
+  /** 正在确认批量修正的记录 id（卡片级加载态） */
+  confirmingRecordId?: string | null;
   /** 导出修正后的 Excel（按钮显示在「字段对比」标题行，仅结果显示模式） */
   onExportExcel?: () => void;
   /** 导出 Excel 进行中 */
@@ -383,6 +391,10 @@ export default function ResultsPanel({
   onViewLiveCard,
   onFixField,
   onFixAllAndRerun,
+  onEditExtractFields,
+  currentRecordId = "",
+  onConfirmFixes,
+  confirmingRecordId = null,
   onExportExcel,
   exportingExcel = false,
   fixingFieldKey = null,
@@ -509,6 +521,10 @@ export default function ResultsPanel({
           onViewLiveCard={onViewLiveCard}
           onFixField={onFixField}
           onFixAllAndRerun={onFixAllAndRerun}
+          onEditExtractFields={onEditExtractFields}
+          currentRecordId={currentRecordId}
+          onConfirmFixes={onConfirmFixes}
+          confirmingRecordId={confirmingRecordId}
           onExportExcel={onExportExcel}
           exportingExcel={exportingExcel}
           fixingFieldKey={fixingFieldKey}
@@ -887,6 +903,10 @@ function ReportTab({
   onViewLiveCard,
   onFixField,
   onFixAllAndRerun,
+  onEditExtractFields,
+  currentRecordId = "",
+  onConfirmFixes,
+  confirmingRecordId = null,
   onExportExcel,
   exportingExcel = false,
   fixingFieldKey = null,
@@ -1060,6 +1080,14 @@ function ReportTab({
   onFixField?: (recordId: string, entry: VerificationReportEntry, rowKey: string) => Promise<boolean>;
   /** 审查修正：一键修正全部不一致字段并重新审查该卡片 */
   onFixAllAndRerun?: (recordId: string, entries: VerificationReportEntry[]) => void;
+  /** 审查修正：确认后批量执行待标记项（fixKeys=左对右错写回，confirmKeys=右对左错就地改match），返回 Promise */
+  onConfirmFixes?: (recordId: string, fixKeys: Set<string>, confirmKeys: Set<string>, entries: VerificationReportEntry[]) => Promise<Set<string>>;
+  /** 从提取结果面板编辑 OCR 字段值后提交（同步到 docExtractsByRecord + loopReports 左值） */
+  onEditExtractFields?: (recordId: string, fieldValueMap: Record<string, string>) => void;
+  /** 当前正在查看的记录 id（用于将提取结果面板的字段编辑关联到正确的卡片） */
+  currentRecordId?: string;
+  /** 正在确认批量修正的记录 id（卡片级加载态） */
+  confirmingRecordId?: string | null;
   /** 导出修正后的 Excel（按钮显示在「字段对比」标题行，仅结果显示模式） */
   onExportExcel?: () => void;
   /** 导出 Excel 进行中 */
@@ -1106,6 +1134,34 @@ function ReportTab({
   }, [widgetPassportPickingKey]);
   /** 提取全文展开/收起 */
   const [showFullText, setShowFullText] = useState(false);
+  /** 提取结果字段值编辑模式（点击🔧开启，可手动修正 OCR 错读后点「校正」） */
+  const [editExtractMode, setEditExtractMode] = useState(false);
+  const [editedExtractValues, setEditedExtractValues] = useState<Record<string, string>>({});
+  const startEditExtractFields = () => {
+    const initial: Record<string, string> = {};
+    for (const [f, v] of extractFields) initial[f] = String(v);
+    setEditedExtractValues(initial);
+    setEditExtractMode(true);
+  };
+  const cancelEditExtractFields = () => {
+    setEditExtractMode(false);
+    setEditedExtractValues({});
+  };
+  const commitEditExtractFields = () => {
+    const changes: Record<string, string> = {};
+    for (const [f] of extractFields) {
+      const oldVal = String(docExtract?.fields?.[f] ?? "");
+      const newVal = String(editedExtractValues[f] ?? "");
+      if (newVal !== oldVal) changes[f] = newVal;
+    }
+    if (Object.keys(changes).length === 0) { cancelEditExtractFields(); return; }
+    onEditExtractFields?.(currentRecordId, changes);
+    setEditExtractMode(false);
+    setEditedExtractValues({});
+  };
+  const updateEditedExtractValue = (field: string, value: string) => {
+    setEditedExtractValues((prev) => ({ ...prev, [field]: value }));
+  };
   /** 内嵌文件预览的旋转和缩放（切换文件时重置） */
   const [filePreviewRotation, setFilePreviewRotation] = useState(0);
   const [filePreviewZoom, setFilePreviewZoom] = useState(1);
@@ -1847,7 +1903,7 @@ function ReportTab({
                 <li
                   key={i}
                   className={[
-                    "animate-pair-in flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px]",
+                    "flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px]",
                     p.status === "mismatch" ? "bg-rose-50/80" : p.status === "missing" ? "bg-amber-50/80" : "",
                   ].join(" ")}
                 >
@@ -1976,20 +2032,23 @@ function ReportTab({
     const expanded = expandedState;
     // 展开/收起切换：展开的同时让右侧文件处理面板自动切到该人物那一套，无需再点「查看」
     const toggleExpanded = () => {
-      if (!expanded && onSelectRecord && r.record_id) onSelectRecord(r.record_id);
       setExpanded((v) => !v);
     };
-    /** 已修正的字段行 key（修正成功后标记，重新审查生成新报告后自动重置） */
+    /** 已应用的字段行 key（确认执行成功后迁入，重新审查生成新报告后自动重置） */
     const [fixedKeys, setFixedKeys] = useState<Set<string>>(new Set());
-    /** 人工确认打勾的字段行 key：人类检查后确认该字段无需修正/已核对（随卡片组件生命周期保留） */
-    const [confirmedKeys, setConfirmedKeys] = useState<Set<string>>(new Set());
-    const toggleConfirmed = (key: string) => {
-      setConfirmedKeys((prev) => {
-        const next = new Set(prev);
-        if (next.has(key)) next.delete(key);
-        else next.add(key);
-        return next;
-      });
+    // ===== 两阶段修正：先标记方向，再统一确认执行 =====
+    /** 扳手标记：左侧对、右侧错（确认时以左值写回右侧） */
+    const [fixStageKeys, setFixStageKeys] = useState<Set<string>>(new Set());
+    /** 圈勾标记：右侧对、左侧错（确认时不写值，就地改报告为 match，以右侧为准） */
+    const [confirmStageKeys, setConfirmStageKeys] = useState<Set<string>>(new Set());
+    /** 标记方向：扳手 vs 圈勾互斥——同一行点其一会清掉另一个 */
+    const stageMarkFix = (key: string) => {
+      setFixStageKeys((prev) => { const next = new Set(prev); if (next.has(key)) next.delete(key); else next.add(key); return next; });
+      setConfirmStageKeys((prev) => { const next = new Set(prev); next.delete(key); return next; });
+    };
+    const stageMarkConfirm = (key: string) => {
+      setConfirmStageKeys((prev) => { const next = new Set(prev); if (next.has(key)) next.delete(key); else next.add(key); return next; });
+      setFixStageKeys((prev) => { const next = new Set(prev); next.delete(key); return next; });
     };
     const isEntry = appMode === "entry";
     const rows: SideCompareRow[] = r.entries.map((e, i) => ({
@@ -2013,6 +2072,30 @@ function ReportTab({
     /** 可修正的不一致行数（决定卡片级按钮显隐） */
     const fixableRows = rows.filter(canFixRow);
     const isFixRerunning = fixRerunRecordId === r.record_id;
+    /** 底部「确认」：一次性执行全部待标记项（左对写回 / 右对改match），仅成功项迁入已修正，失败项保留待标记供重试 */
+    const stagedCount = fixStageKeys.size + confirmStageKeys.size;
+    const handleConfirm = async () => {
+      if (!onConfirmFixes || !r.record_id) return;
+      const fixKeysAtCall = new Set(fixStageKeys);
+      const confirmKeysAtCall = new Set(confirmStageKeys);
+      const appliedKeys = await onConfirmFixes(r.record_id, fixKeysAtCall, confirmKeysAtCall, r.entries) || new Set();
+      // 仅从待标记集合中移除成功项，失败项保留以显示红标并允许重试
+      setFixStageKeys((prev) => {
+        const next = new Set(prev);
+        for (const k of fixKeysAtCall) if (appliedKeys.has(k)) next.delete(k);
+        return next;
+      });
+      setConfirmStageKeys((prev) => {
+        const next = new Set(prev);
+        for (const k of confirmKeysAtCall) if (appliedKeys.has(k)) next.delete(k);
+        return next;
+      });
+      setFixedKeys((prev) => {
+        const next = new Set(prev);
+        for (const k of appliedKeys) next.add(k);
+        return next;
+      });
+    };
     const mc = rows.filter((x) => x.match === "match").length;
     const mmc = rows.filter((x) => x.match === "mismatch" || x.match === "error").length;
     const hasMrzWarning = (r.mrz_warnings?.length ?? 0) > 0;
@@ -2114,7 +2197,7 @@ function ReportTab({
                     <li
                       key={row.key}
                       className={[
-                        "animate-pair-in flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px]",
+                        "flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px]",
                         isMismatch ? "bg-rose-50/80" : row.match === "missing" ? "bg-amber-50/80" : "",
                       ].join(" ")}
                     >
@@ -2158,37 +2241,54 @@ function ReportTab({
                           {row.rightValue || "—"}
                         </span>
                       </span>
-                      {/* 一键修正 + 人工确认（仅可修正行，紧凑小按钮） */}
+                      {/* 两阶段修正：扳手=左对右错 / 圈勾=右对左错，点标记后等底部「确认」统一执行；互斥，已应用则显示"已修正" */}
                       {canFixRow(row) && r.record_id && (
                         <span className="flex shrink-0 items-center gap-1">
                           {fixedKeys.has(row.key) ? (
-                            <span className="inline-flex items-center gap-0.5 rounded bg-slate-100 px-1 py-0.5 text-[9px] font-medium text-slate-500 ring-1 ring-slate-200">
+                            <span className="inline-flex items-center gap-0.5 rounded bg-emerald-100/80 px-1 py-0.5 text-[9px] font-medium text-emerald-700 ring-1 ring-emerald-200">
                               <CheckCircle2 className="h-2.5 w-2.5" />
                               已修正
                             </span>
-                          ) : (
+                          ) : fixStageKeys.has(row.key) ? (
                             <button
-                              onClick={async () => {
-                                if (!row.entry || !onFixField || !r.record_id) return;
-                                const ok = await onFixField(r.record_id, row.entry, row.key);
-                                if (ok) setFixedKeys((prev) => new Set(prev).add(row.key));
-                              }}
-                              disabled={running || fixingFieldKey !== null || fixRerunRecordId !== null}
-                              className="inline-flex items-center gap-0.5 rounded bg-white px-1 py-0.5 text-[9px] font-medium text-slate-600 ring-1 ring-slate-300 transition-colors hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-                              title="确认来源正确？点击把来源值写入被审查字段（网页填值/Excel列更新）"
+                              onClick={() => stageMarkFix(row.key)}
+                              disabled={running || confirmingRecordId !== null}
+                              className="inline-flex items-center gap-0.5 rounded bg-indigo-100 px-1 py-0.5 text-[9px] font-medium text-indigo-700 ring-1 ring-indigo-300 transition-colors hover:bg-indigo-200 disabled:opacity-50"
+                              title="左值对、右值错：点「确认」时以左值写回右侧（点击取消标记）"
                             >
-                              {fixingFieldKey === row.key ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Wrench className="h-2.5 w-2.5" />}
-                              修正
+                              <Wrench className="h-2.5 w-2.5" />
+                              <span className="text-indigo-500">待</span>
                             </button>
+                          ) : confirmStageKeys.has(row.key) ? (
+                            <button
+                              onClick={() => stageMarkConfirm(row.key)}
+                              disabled={running || confirmingRecordId !== null}
+                              className="inline-flex items-center gap-0.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-700 ring-1 ring-amber-300 transition-colors hover:bg-amber-200 disabled:opacity-50"
+                              title="右值对、左值错（接受右侧）：点「确认」时以右侧为准、不写值（点击取消标记）"
+                            >
+                              <CheckCircle2 className="h-2.5 w-2.5" />
+                              <span className="text-amber-500">待</span>
+                            </button>
+                          ) : (
+                            <span className="inline-flex items-center gap-0.5">
+                              <button
+                                onClick={() => stageMarkFix(row.key)}
+                                disabled={running || confirmingRecordId !== null}
+                                className="inline-flex items-center gap-0.5 rounded bg-white px-1 py-0.5 text-[9px] font-medium text-slate-600 ring-1 ring-slate-300 transition-colors hover:bg-indigo-50 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                title="标记：左值对、右值错（下一步点底部「确认」统一执行）"
+                              >
+                                <Wrench className="h-2.5 w-2.5" />
+                              </button>
+                              <button
+                                onClick={() => stageMarkConfirm(row.key)}
+                                disabled={running || confirmingRecordId !== null}
+                                className="inline-flex items-center rounded p-0.5 text-slate-300 transition-colors hover:text-emerald-600 disabled:opacity-50"
+                                title="标记：右值对、左值错（接受右侧值，不写值）"
+                              >
+                                <Circle className="h-3 w-3" />
+                              </button>
+                            </span>
                           )}
-                          {/* 人工确认打勾：人类检查后认为该字段没问题，勾选标记（再点取消） */}
-                          <button
-                            onClick={() => toggleConfirmed(row.key)}
-                            className={`inline-flex items-center rounded p-0.5 transition-colors ${confirmedKeys.has(row.key) ? "text-emerald-600" : "text-slate-300 hover:text-slate-500"}`}
-                            title={confirmedKeys.has(row.key) ? "已人工确认无误（点击取消）" : "人工检查后确认该字段没问题，打勾标记"}
-                          >
-                            {confirmedKeys.has(row.key) ? <CheckCircle2 className="h-3 w-3" /> : <Circle className="h-3 w-3" />}
-                          </button>
                         </span>
                       )}
                     </li>
@@ -2199,20 +2299,34 @@ function ReportTab({
               {/* 底部统计条（紧凑单行：统计 + 修正全部并重新审查） */}
               <div className={`mt-1.5 flex items-center justify-between gap-2 border-t border-slate-200/60 px-1 pt-1.5 text-[10px] font-medium ${accent.footer}`}>
                 <span>
-                  {mc}/{rows.length} 项{isEntry ? "已填入" : "一致"}{mmc === 0 ? (isEntry ? " · 全部完成" : " · 全部一致") : (isEntry ? ` · ${mmc} 项待处理` : ` · ${mmc} 处不一致`)}
+                  {mc}/{rows.length} 项{isEntry ? "已填入" : "一致"}{mmc === 0 ? (isEntry ? " · 全部完成" : " · 全部一致") : (isEntry ? ` · ${mmc} 项待处理` : ` · ${mmc} 处不一致`)}{stagedCount > 0 ? ` · ${stagedCount} 项待确认` : ""}
                 </span>
-                {/* 一键修正全部不一致字段并重新审查该卡片 */}
-                {fixableRows.length > 0 && onFixAllAndRerun && r.record_id && (
-                  <button
-                    onClick={() => onFixAllAndRerun(r.record_id!, r.entries)}
-                    disabled={running || fixingFieldKey !== null || fixRerunRecordId !== null}
-                    className="inline-flex shrink-0 items-center gap-1 rounded bg-white px-1.5 py-0.5 text-[9px] font-medium text-slate-600 ring-1 ring-slate-300 transition-colors hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-                    title="把全部不一致字段以来源值覆盖被审查字段，然后重新审查该卡片"
-                  >
-                    {isFixRerunning ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Wrench className="h-2.5 w-2.5" />}
-                    {isFixRerunning ? "修正并重新审查中…" : `修正并重新审查（${fixableRows.length}）`}
-                  </button>
-                )}
+                <span className="inline-flex shrink-0 items-center gap-1">
+                  {/* 主按钮：确认后执行全部待标记项（左对写回 / 右对改match），完成后字段变绿、卡片变绿 */}
+                  {stagedCount > 0 && onConfirmFixes && r.record_id && (
+                    <button
+                      onClick={handleConfirm}
+                      disabled={running || confirmingRecordId !== null || fixRerunRecordId !== null}
+                      className="inline-flex items-center gap-1 rounded bg-emerald-600 px-1.5 py-0.5 text-[9px] font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      title="确认：左对项以左值写回右侧，右对项以右侧为准（不写值），全部执行后字段变绿"
+                    >
+                      {confirmingRecordId === r.record_id ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <CheckCircle2 className="h-2.5 w-2.5" />}
+                      确认（{stagedCount}）
+                    </button>
+                  )}
+                  {/* 次级：一键修正全部不一致字段并重新审查该卡片（面向需要完整重跑的场景） */}
+                  {fixableRows.length > 0 && onFixAllAndRerun && r.record_id && (
+                    <button
+                      onClick={() => onFixAllAndRerun(r.record_id!, r.entries)}
+                      disabled={running || fixingFieldKey !== null || fixRerunRecordId !== null}
+                      className="inline-flex items-center gap-1 rounded bg-white px-1.5 py-0.5 text-[9px] font-medium text-slate-500 ring-1 ring-slate-200 transition-colors hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      title="把全部不一致字段以来源值覆盖被审查字段，然后重新审查该卡片"
+                    >
+                      {isFixRerunning ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Wrench className="h-2.5 w-2.5" />}
+                      {isFixRerunning ? "重审中…" : `修正重审（${fixableRows.length}）`}
+                    </button>
+                  )}
+                </span>
               </div>
             </div>
           </>
@@ -2483,10 +2597,6 @@ function ReportTab({
         </div>
         {/* 预处理后的图片占位（DEMO 用彩色块示意） */}
         <div className="mb-2">
-          <div className="mb-1 flex items-center gap-1 text-[9px] font-medium text-emerald-600">
-            <CheckCircle2 className="h-3 w-3" />
-            已处理：自动旋转到正面 + 裁剪白边
-          </div>
           <div className="overflow-hidden rounded-md border border-slate-200 bg-gradient-to-br from-slate-100 via-sky-50 to-indigo-50">
             <div className="flex h-32 flex-col items-center justify-center gap-1 text-center">
               <div className="rounded-md bg-white/80 px-3 py-1.5 shadow-sm ring-1 ring-slate-200">
@@ -2554,13 +2664,6 @@ function ReportTab({
         const isRotated = filePreviewRotation === 90 || filePreviewRotation === 270;
         filePreview = (
           <div className="mb-2 flex min-h-[300px] flex-1 flex-col">
-            {docExtract.processed_image && (
-              <div className="mb-1 flex items-center gap-1 text-[9px] font-medium text-emerald-600">
-                <CheckCircle2 className="h-3 w-3" />
-                已处理：自动旋转到正面 + 裁剪白边
-              </div>
-            )}
-            {/* 旋转/缩放工具栏 */}
             <div className="mb-1 flex items-center gap-0.5 self-end rounded bg-slate-100/80 p-0.5">
               <button
                 onClick={() => setFilePreviewRotation((r) => (r - 90 + 360) % 360)}
@@ -2790,6 +2893,39 @@ function ReportTab({
               {docExtract.text!.length} 字
             </span>
           )}
+          <span
+              role="button"
+              onClick={(ev) => {
+                ev.stopPropagation();
+                if (editExtractMode) {
+                  // 关闭编辑模式 → 提交更改
+                  const changes: Record<string, string> = {};
+                  for (const [f] of extractFields) {
+                    const oldVal = String(docExtract?.fields?.[f] ?? "");
+                    const newVal = String(editedExtractValues[f] ?? "");
+                    if (newVal !== oldVal) changes[f] = newVal;
+                  }
+                  onEditExtractFields?.(currentRecordId, changes);
+                  setEditExtractMode(false);
+                  setEditedExtractValues({});
+                } else {
+                  const initial: Record<string, string> = {};
+                  for (const [f, v] of extractFields) initial[f] = String(v);
+                  setEditedExtractValues(initial);
+                  setEditExtractMode(true);
+                }
+              }}
+              className={[
+                "flex cursor-pointer items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium",
+                editExtractMode
+                  ? "bg-brand-100 text-brand-700 ring-1 ring-brand-200"
+                  : "text-slate-400 hover:bg-slate-100 hover:text-slate-600",
+              ].join(" ")}
+              title={editExtractMode ? "点击关闭编辑并保存" : "点击扳手编辑提取的字段值"}
+            >
+              <Wrench className="h-2.5 w-2.5" />
+              {editExtractMode ? "校正" : "编辑"}
+            </span>
           <ChevronDown className={`ml-auto h-3 w-3 shrink-0 transition-transform ${showExtractResult ? "" : "-rotate-90"}`} />
         </button>
         {showExtractResult && (
@@ -2816,11 +2952,20 @@ function ReportTab({
                       "rounded border bg-white px-1.5 py-1",
                       widgetPassportPickingKey
                         ? "cursor-pointer border-violet-300 ring-1 ring-violet-200 transition-colors hover:border-violet-400 hover:bg-violet-50 hover:ring-violet-300"
-                        : "border-slate-200",
+                        : editExtractMode ? "border-brand-300 ring-1 ring-brand-100" : "border-slate-200",
                     ].join(" ")}
                   >
                     <div className="text-[9px] font-medium text-slate-400">{FIELD_LABELS[field] || field}</div>
-                    <div className="truncate text-[11px] font-medium text-slate-700" title={String(value)}>{String(value)}</div>
+                    {editExtractMode ? (
+                      <input
+                        type="text"
+                        value={editedExtractValues[field] ?? String(value)}
+                        onChange={(ev) => { updateEditedExtractValue(field, ev.target.value); }}
+                        className="min-w-[60px] flex-1 truncate rounded border border-brand-200 bg-white px-1 py-0 text-[11px] font-medium font-mono text-slate-700 outline-none focus:border-brand-400"
+                      />
+                    ) : (
+                      <div className="truncate text-[11px] font-medium text-slate-700" title={String(value)}>{String(value)}</div>
+                    )}
                   </div>
                 ))}
                 {widgetFields.map((w) => (
@@ -3670,13 +3815,6 @@ function ReportTab({
               </button>
             )}
             <button
-              onClick={(e) => { e.stopPropagation(); onRefresh?.(); }}
-              className="flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
-              title="刷新：清空光标、步骤设置和字段对比（不刷新Excel）"
-            >
-              <RefreshCw className="h-3 w-3" />
-            </button>
-            <button
               onClick={() => setFieldSetupMode((v) => !v)}
               className={[
                 "flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
@@ -3993,26 +4131,8 @@ function ReportTab({
           <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-slate-100 px-1.5 py-1 text-[11px] font-semibold text-slate-700">
             <Database className="h-3.5 w-3.5 shrink-0 text-slate-500" />
             <span className="shrink-0">提取元素</span>
-            {docExtract && (
-              <span className="ml-0.5 min-w-0 max-w-full truncate rounded-full bg-slate-200/70 px-1.5 py-0.5 text-[9px] font-normal text-slate-500" title={docExtract.filename}>
-                {docExtract.filename}
-              </span>
-            )}
             {extractSetupMode && (
               <div className="ml-1 flex shrink-0 items-center gap-1">
-                {/* 统一模式：有字段内容时才显示来源图例 + 数量 */}
-                {hasFields && (
-                  <div className="flex items-center gap-1.5 rounded-md bg-slate-100 px-2 py-0.5 text-[9px] font-medium ring-1 ring-slate-200">
-                    <span className="inline-flex items-center gap-0.5 text-violet-600">
-                      <span className="h-2 w-2 rounded-full bg-violet-500" />
-                      文件{(extractCounts?.doc ?? 0) > 0 && <b>{extractCounts?.doc}</b>}
-                    </span>
-                    <span className="inline-flex items-center gap-0.5 text-sky-600">
-                      <span className="h-2 w-2 rounded-full bg-sky-500" />
-                      自定义{(extractCounts?.custom ?? 0) > 0 && <b>{extractCounts?.custom}</b>}
-                    </span>
-                  </div>
-                )}
                 {/* 控件提取切换按钮：始终显示，点击切换面板；两侧都有内容时进入分屏 */}
                 <button
                   onClick={toggleWidgetPanel}
@@ -4121,17 +4241,6 @@ function ReportTab({
                     className="flex min-h-0 min-w-0 flex-col overflow-hidden"
                     style={{ width: `${splitLeftPct}%` }}
                   >
-                    {/* 左侧标题条：来源图例 */}
-                    <div className="flex shrink-0 items-center gap-2 border-b border-slate-100 bg-slate-50/60 px-2 py-0.5">
-                      <span className="inline-flex items-center gap-1 text-[9px] font-medium text-violet-600">
-                        <span className="h-2 w-2 rounded-full bg-violet-500" />
-                        文件{(extractCounts?.doc ?? 0) > 0 && <b className="text-[9px]">{extractCounts?.doc}</b>}
-                      </span>
-                      <span className="inline-flex items-center gap-1 text-[9px] font-medium text-sky-600">
-                        <span className="h-2 w-2 rounded-full bg-sky-500" />
-                        自定义{(extractCounts?.custom ?? 0) > 0 && <b className="text-[9px]">{extractCounts?.custom}</b>}
-                      </span>
-                    </div>
                     <div className="min-h-0 flex-1 overflow-hidden">
                       {unifiedFieldsContent}
                     </div>

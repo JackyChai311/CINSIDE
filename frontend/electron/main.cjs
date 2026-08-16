@@ -29,14 +29,31 @@ function resolveLogFile() {
 const LOG_FILE = (typeof global.__CINSIDE_LOG_FILE === "string")
   ? global.__CINSIDE_LOG_FILE
   : resolveLogFile();
+// 日志批量落盘：LOOP 高频路径下逐行 appendFileSync 会阻塞主进程事件循环（BrowserView 合成同线程），
+// 改为内存队列 + 200ms 批量写，文件超 2MB 截断轮转（与后端 extract.log 同策略）
+const LOG_MAX_BYTES = 2 * 1024 * 1024;
+const logQueue = [];
 function debugLog(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
   console.log(msg);
-  try { fs.appendFileSync(LOG_FILE, line); } catch (e) {
+  logQueue.push(line);
+}
+function flushLogQueueSync() {
+  if (logQueue.length === 0) return;
+  const lines = logQueue.splice(0, logQueue.length).join("");
+  try {
+    try {
+      // 轮转：超限截断（写失败交给外层兜底留痕）
+      if (fs.statSync(LOG_FILE).size > LOG_MAX_BYTES) fs.truncateSync(LOG_FILE, 0);
+    } catch (e) { /* 文件不存在等，交给 appendFile 兜底 */ }
+    fs.appendFileSync(LOG_FILE, lines);
+  } catch (e) {
     // 写盘失败必须留痕（异常静默吞会导致「日志莫名消失」难排查）
     console.log(`[debugLog] WRITE FAILED -> LOG_FILE=${LOG_FILE} err=${e && e.message}`);
   }
 }
+setInterval(flushLogQueueSync, 200).unref();
+process.on("exit", flushLogQueueSync);
 
 // 资源路径解析：开发环境和打包环境路径不同
 function resolveAssetPath(relativePath) {
@@ -170,6 +187,33 @@ function createWindow() {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.show();
       mainWindow.focus();
+    }
+  });
+
+  // === 渲染进程崩溃/无响应自动恢复：白屏时自动重载主窗口（LOOP 状态在后端，重载可继续操作） ===
+  mainWindow.webContents.on("render-process-gone", (_e, details) => {
+    debugLog(`[main] ⚠️ 主窗口渲染进程崩溃: reason=${details?.reason} exitCode=${details?.exitCode} — 3 秒后自动重载`);
+    setTimeout(() => {
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.reload();
+          debugLog("[main] 主窗口已自动重载（崩溃恢复）");
+        }
+      } catch (err) {
+        debugLog(`[main] 崩溃恢复重载失败: ${err && err.message}`);
+      }
+    }, 3000);
+  });
+  mainWindow.webContents.on("unresponsive", () => {
+    debugLog("[main] ⚠️ 主窗口无响应（可能长任务阻塞渲染）");
+  });
+  // 渲染层未捕获异常转发到调试日志（定位白屏根因用）
+  mainWindow.webContents.on("console-message", (_e, _level, message, _line, sourceId) => {
+    if (typeof message !== "string") return;
+    if (message.startsWith("[cinside-crash]")) {
+      debugLog(`[renderer-crash] ${message}`);
+    } else if (/^(Uncaught|TypeError|ReferenceError|SyntaxError|RangeError)/i.test(message)) {
+      debugLog(`[main] 渲染层异常: ${message} @ ${sourceId}`);
     }
   });
 
@@ -2424,6 +2468,19 @@ app.whenReady().then(async () => {
   } catch (e) { debugLog(`[proxy] setProxy failed: ${e.message}`); }
 
   createSplashWindow();
+  // 清理历史下载临时文件（>24h）：LOOP 捕获的原始文件只在本轮使用，跨轮残留会持续占磁盘
+  try {
+    const dlDir = path.join(app.getPath("temp"), "cinside-downloads");
+    if (fs.existsSync(dlDir)) {
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      for (const f of fs.readdirSync(dlDir)) {
+        try {
+          const p = path.join(dlDir, f);
+          if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p);
+        } catch (e) { /* 单个文件失败不影响其他清理 */ }
+      }
+    }
+  } catch (e) { debugLog(`[download] 清理历史临时文件失败: ${e && e.message}`); }
   await cleanupStaleBackend();
   startBackend();
   createWindow();
@@ -3101,19 +3158,25 @@ app.whenReady().then(async () => {
     }
   });
 
-  // === ??????????????? ===
+  // === 更新检查 ===
   if (!isDev) {
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = true;
 
+    // 本地开发/自编译运行（win-unpacked 直接跑）没有发布到 GitHub releases，
+    // 自动检查必然失败——后台静默，只有用户手动点「检查更新」才向前端报错
+    let autoCheckInFlight = false;
+
     autoUpdater.on("update-available", (info) => {
       debugLog(`[updater] update available: ${info.version}`);
+      autoCheckInFlight = false;
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("update-available", info);
       }
     });
     autoUpdater.on("update-not-available", (info) => {
       debugLog(`[updater] update not available`);
+      autoCheckInFlight = false;
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("update-not-available", info);
       }
@@ -3131,14 +3194,21 @@ app.whenReady().then(async () => {
     });
     autoUpdater.on("error", (err) => {
       debugLog(`[updater] error: ${err.message}`);
+      // 自动检查失败（本地构建无 release / 网络不通）：只记日志，不打扰用户
+      if (autoCheckInFlight) {
+        autoCheckInFlight = false;
+        return;
+      }
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("update-error", { message: err.message });
       }
     });
 
-    // ??3??????
+    // 启动 3 秒后自动检查（失败静默）
     setTimeout(() => {
+      autoCheckInFlight = true;
       autoUpdater.checkForUpdates().catch((e) => {
+        autoCheckInFlight = false;
         debugLog(`[updater] check failed: ${e.message}`);
       });
     }, 3000);

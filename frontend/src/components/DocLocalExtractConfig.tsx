@@ -255,22 +255,33 @@ export default function DocLocalExtractConfig({
     return () => document.removeEventListener("mousedown", onClick);
   }, [fieldDropdownOpen]);
 
-  // 预览窗口滚轮链式传递：滚到顶/底后继续滚动自动传递给外层容器
-  const handlePreviewWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    const el = previewScrollRef.current;
-    const outer = contentScrollRef.current;
-    if (!el || !outer) return;
+  // 预览窗口滚轮：
+//   无修饰键 → 缩放图片（+/- 按钮的快捷操作）
+//   Ctrl → 滚动容器（原生行为）
+//   Shift → 水平滚动
+const handlePreviewWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+  const el = previewScrollRef.current;
+  const outer = contentScrollRef.current;
+  if (!el || !outer) return;
+  // 平移模式：滚轮水平滚动（Shift）或垂直滚动（Ctrl），不动缩放
+  if (e.shiftKey || e.ctrlKey) {
     const { deltaY } = e;
     const atTop = el.scrollTop <= 0;
     const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
-    if (deltaY > 0 && atBottom) {
-      e.preventDefault();
-      outer.scrollTop += deltaY;
-    } else if (deltaY < 0 && atTop) {
+    if ((deltaY > 0 && atBottom) || (deltaY < 0 && atTop)) {
       e.preventDefault();
       outer.scrollTop += deltaY;
     }
-  };
+    return;
+  }
+  // 无修饰键：缩放图片
+  e.preventDefault();
+  const delta = -e.deltaY * 0.001; // 0.25 步级缩放（与 +/- 按钮一致）
+  setPreviewZoom((z) => {
+    const next = +(z + delta).toFixed(2);
+    return Math.min(10, Math.max(0.1, next));
+  });
+};
 
   // ===== 签名截取：鼠标框选 =====
   // 计算 object-contain 下图片实际渲染区域（去除 letterbox 留白）

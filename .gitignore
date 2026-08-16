@@ -114,3 +114,10 @@ backend/svg_to_ico.py
 # Frontend icon generation scripts (one-time use)
 frontend/make-ico.cjs
 frontend/make-icons.cjs
+
+# Packaging temp dirs
+_repack2/
+_repack2_check/
+_repack_tmp/
+asar_temp/
+.repack_tmp/

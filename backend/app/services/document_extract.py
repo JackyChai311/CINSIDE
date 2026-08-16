@@ -1138,6 +1138,89 @@ async def _wait_for_umi_ocr_ready(max_wait: float = 8.0) -> bool:
     return False
 
 
+# ============ UMI-OCR 假死自愈机制 ============
+# 症状：Umi-OCR.exe 进程在、端口 1224 也在 LISTENING，但 TCP 连接超时不 accept
+# （长时间高强度 OCR 后偶发，进程内存掉到几十 MB 的僵尸态）。
+# 自愈链路：健康检查失败 + 进程存在 → 强杀假死进程 → 重置启动标志 → 自动重新拉起。
+# 自愈冷却：60s 内最多自愈一次，防止瞬时网络抖动触发连环重启。
+
+def _find_umi_ocr_pids() -> list[int]:
+    """查所有 Umi-OCR.exe 进程 PID（tasklist CSV 解析）。"""
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq Umi-OCR.exe", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except Exception:
+        return []
+    pids: list[int] = []
+    for line in out.splitlines():
+        # CSV 行形如: "Umi-OCR.exe","35020","Console","1","27,720 K"
+        parts = [p.strip('"') for p in line.split('","')]
+        if len(parts) >= 2 and parts[0].lower().startswith("umi-ocr"):
+            try:
+                pids.append(int(parts[1]))
+            except ValueError:
+                pass
+    return pids
+
+
+def _kill_hung_umi_ocr() -> bool:
+    """强杀假死的 UMI-OCR 进程（进程在但 HTTP 不响应时调用）。
+
+    杀掉后重置自动启动标志，让 _try_launch_umi_ocr 能重新拉起。
+    返回是否杀到了进程（没杀到 = 本来就没在跑，不是假死）。
+    """
+    global _umi_ocr_launch_attempted, _umi_ocr_process
+    pids = _find_umi_ocr_pids()
+    if not pids:
+        return False
+    killed = False
+    for pid in pids:
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=10)
+            killed = True
+            print(f"[OCR] 自愈：强杀假死 Umi-OCR 进程 PID={pid}", flush=True)
+            _flog(f"[OCR] 自愈：强杀假死 Umi-OCR 进程 PID={pid}")
+        except Exception as e:
+            print(f"[OCR] 自愈：强杀 PID={pid} 失败: {e}", flush=True)
+    if killed:
+        _umi_ocr_launch_attempted = False  # 解锁，允许重新自动启动
+        _umi_ocr_process = None
+        time.sleep(1.5)  # 等端口释放
+    return killed
+
+
+# 自愈冷却时间戳（monotonic）：60s 内不重复自愈
+_umi_heal_at: float = -1e9
+
+
+def _auto_heal_umi_ocr() -> None:
+    """同步自愈入口（供 executor / 直接调用）：杀假死进程并重新拉起。
+
+    带冷却：60s 内最多执行一次，防止健康检查抖动引发连环重启。
+    """
+    global _umi_heal_at
+    now = time.monotonic()
+    if now - _umi_heal_at < 60.0:
+        return
+    _umi_heal_at = now
+    try:
+        if _kill_hung_umi_ocr():
+            print("[OCR] 自愈：假死进程已清除，重新拉起 UMI-OCR...", flush=True)
+            _flog("[OCR] 自愈：假死进程已清除，重新拉起 UMI-OCR")
+            _try_launch_umi_ocr()
+    except Exception as e:
+        print(f"[OCR] 自愈流程异常: {e}", flush=True)
+
+
+def _mark_umi_offline() -> None:
+    """真实请求连接失败时失效在线缓存（避免 30s 内继续往假死端口投喂）。"""
+    global _umi_alive_at, _umi_alive_val
+    _umi_alive_at = time.monotonic()
+    _umi_alive_val = False
+
+
 # ============ OCR 结果 LRU 缓存 ============
 # key = sha1(缩放后的投喂字节)。预览裁切与正式提取、重跑/换挡前的重复识别
 # 都命中同一 key，省一次全图 OCR（内置引擎 2~5s、UMI 更慢）。
@@ -1269,11 +1352,16 @@ async def _ocr_run(content: bytes, cache_key: str) -> tuple[str, list, tuple[int
             resp.raise_for_status()
             data = resp.json()
     except httpx.ConnectError as e:
+        # 假死/离线：失效在线缓存 + 后台自愈（杀假死进程并重新拉起，带 60s 冷却）
+        _mark_umi_offline()
+        asyncio.get_running_loop().run_in_executor(None, _auto_heal_umi_ocr)
         raise RuntimeError(
-            f"UMI-OCR 连接失败（请确认已开启 UMI-OCR 的「HTTP接口服务」，地址 {settings.umi_ocr_host}:{settings.umi_ocr_port}）: {e}"
+            f"UMI-OCR 连接失败（已触发自动恢复，稍后将重试；若持续失败请确认 UMI-OCR 的「HTTP接口服务」已开启，地址 {settings.umi_ocr_host}:{settings.umi_ocr_port}）: {e}"
         ) from e
     except httpx.TimeoutException as e:
-        raise RuntimeError(f"UMI-OCR 请求超时（60秒）: {e}") from e
+        _mark_umi_offline()
+        asyncio.get_running_loop().run_in_executor(None, _auto_heal_umi_ocr)
+        raise RuntimeError(f"UMI-OCR 请求超时（60秒，已触发自动恢复）: {e}") from e
     except httpx.HTTPStatusError as e:
         raise RuntimeError(f"UMI-OCR 返回错误状态（HTTP {e.response.status_code}）: {e}") from e
     except Exception as e:
@@ -1317,15 +1405,16 @@ async def _ocr_run(content: bytes, cache_key: str) -> tuple[str, list, tuple[int
     return text, boxes, ocr_size, "umi"
 
 
-async def _check_umi_ocr_alive() -> bool:
+async def _check_umi_ocr_alive(force: bool = False) -> bool:
     """快速检测 UMI-OCR HTTP 服务是否在线（2秒超时，结果缓存 30s 节流）。
 
     _ocr_run 每张图都要判断 UMI 在线与否来选引擎，不节流的话 UMI 离线时
     每张图都要白等一次 2s 超时才落内置引擎。
+    force=True 绕过缓存（手动「重新检测」/ 自愈入口用）。
     """
     global _umi_alive_at, _umi_alive_val
     now = time.monotonic()
-    if _umi_alive_at is not None and now - _umi_alive_at < 30.0:
+    if not force and _umi_alive_at is not None and now - _umi_alive_at < 30.0:
         return _umi_alive_val
     url = f"http://{settings.umi_ocr_host}:{settings.umi_ocr_port}/api/ocr"
     try:
@@ -1339,13 +1428,18 @@ async def _check_umi_ocr_alive() -> bool:
 
 
 async def ensure_umi_ocr_running() -> tuple[bool, str]:
-    """确保 UMI-OCR 服务可用：在线则直接返回；否则尝试自动启动。
+    """确保 UMI-OCR 服务可用：在线则直接返回；否则自愈（杀假死进程）后自动启动。
 
     返回 (ok, message)。ok=True 时服务可调用；ok=False 时 message 含中文原因。
     """
-    # 1. 先检测是否已在线
-    if await _check_umi_ocr_alive():
+    # 1. 先检测是否已在线（force 绕过缓存：本入口是手动触发/自愈路径，必须探真实状态）
+    if await _check_umi_ocr_alive(force=True):
         return True, "UMI-OCR 服务已在线"
+
+    # 1.5 假死自愈：进程存在但 HTTP 不响应 → 强杀（内部会重置自动启动标志）
+    if _kill_hung_umi_ocr():
+        print("[OCR] 自愈：清除假死 Umi-OCR 进程，准备重新启动", flush=True)
+        _flog("[OCR] 自愈：清除假死 Umi-OCR 进程，准备重新启动")
 
     # 2. 未在线 → 尝试自动启动
     launched = _try_launch_umi_ocr()

@@ -43,6 +43,17 @@ export function looksLikePhone(value: string): boolean {
   return /^[\d\s+\-().]+$/.test(v);
 }
 
+/** 判断两个值都像证件号形态：以数字为主（6+位数字），其余字符不超过 30% */
+export function looksLikePassportNo(a: string, b: string): boolean {
+  const both = [a, b];
+  for (const v of both) {
+    const digits = v.replace(/\D/g, "").length;
+    if (digits < 6) return false;
+    if (digits < v.length * 0.7) return false; // 数字占比 < 70% 不像证件号
+  }
+  return true;
+}
+
 /** 日期解析：返回所有可能的 YYYY-MM-DD 候选（歧义日期多种解释） */
 export function parseDateCandidates(value: string): string[] {
   const s = (value || "").trim();
@@ -113,6 +124,29 @@ export function normalizeText(value: string): string {
 export function valuesEquivalent(field: string, a: string, b: string): boolean {
   const va = (a || "").trim();
   const vb = (b || "").trim();
+
+  // 护照号/证件号/学号：先校验（含等值情况——双方相同但都含非数字噪声 → 错值）
+  // 排除日期：passport_expiry/passport_issue 字段名含 passport 但值是日期；
+  // 且 looksLikePassportNo 会把 YYYY-MM-DD（8位数字/10字符=80%）误判为证件号形态
+  // 两层排除：字段名含 date 相关关键字（passport_expiry/birth_date）+ 值形态是日期（2008-07-17）
+  const PASSPORT_FIELD_RE = /passport|passnum|pass_no|pass no|护照|证件号|学号|id_no|student_id|idnum/i;
+  const isDateField = fieldMatches(field, DATE_FIELD_RE);
+  const bothDates = looksLikeDate(va) && looksLikeDate(vb);
+  if ((fieldMatches(field, PASSPORT_FIELD_RE) || looksLikePassportNo(va, vb)) && !isDateField && !bothDates) {
+    if (va === vb) {
+      // 双方相同但都含非数字噪声（如 67NO0906781）→ 视为错值（OCR/Excel 同源噪声）
+      return va === va.replace(/\D/g, "");
+    }
+    if (!va || !vb) return false;
+    const vaPure = /^\d+$/.test(va);
+    const vbPure = /^\d+$/.test(vb);
+    if (vaPure && vbPure) return va === vb;
+    // 一方纯数字、一方含非数字 → 错值（如 0→O、3→NO 噪声），不等价
+    if (vaPure !== vbPure) return false;
+    // 双方都含非数字：直接比较（忽略大小写）
+    return va.toLowerCase() === vb.toLowerCase();
+  }
+
   if (va === vb) return true;
   if (!va || !vb) return false;
 

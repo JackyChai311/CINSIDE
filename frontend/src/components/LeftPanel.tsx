@@ -311,13 +311,32 @@ export default function LeftPanel({
     if (execPanelOpen) setExecTab("steps");
   }, [execPanelOpen]);
 
+  // 气泡可见期：运行开始即收起球并让气泡占据球位；气泡全部消散后球才落回（球与气泡不抢位置）
+  const [bubblesVisible, setBubblesVisible] = useState(execRunning);
+  useEffect(() => {
+    if (execRunning) setBubblesVisible(true);
+  }, [execRunning]);
+  const sphereRetracted = execRunning || bubblesVisible;
+
   return (
     <div className="panel-solid relative flex h-full flex-col gap-3 p-3">
       {/* AI 助手：黑白方格粒子球（无边框无文字，LOOP 运行/告警/讲解时形态变化）
           执行气泡锚定在左栏左下角（不挡人物卡片），消散后球体下方显现「执行进度」药丸 */}
       <div className="relative flex shrink-0 items-center justify-center py-1">
-        <AISphere state={aiSphereState} size={132} />
-        {execChipVisible && !execPanelOpen && (
+        <AISphere state={aiSphereState} size={132} paused={aiSphereState === "idle"} retracted={sphereRetracted} />
+        {/* LOOP 执行气泡：球收起后占据球位，向上堆叠渐淡（运行中不停弹出但不挡卡片） */}
+        {!execPanelOpen && sphereRetracted && (
+          <ExecutionBubbles
+            variant="sphere"
+            steps={execSteps}
+            running={execRunning}
+            onAllGone={() => {
+              setBubblesVisible(false);
+              onExecBubblesGone?.();
+            }}
+          />
+        )}
+        {execChipVisible && !execPanelOpen && !sphereRetracted && (
           <div className="absolute -bottom-2 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 animate-fade-in">
             <button
               onClick={onOpenExecPanel}
@@ -738,20 +757,27 @@ export default function LeftPanel({
                         ].join(" ")} />
                       </div>
                     )}
-                    {/* 群组头部：展开按钮 + 范围信息 */}
+                    {/* 群组头部：一行内显示范围 + 操作面板 + 解散，保持整体极简风格 */}
                     {showGroupHeader && (
-                      <div className="group-header-bar relative mb-1 flex items-center gap-1.5 rounded-lg border border-indigo-300 bg-indigo-50/80 px-2 py-1.5 shadow-sm">
-                        <span className="flex items-center gap-1 text-[10px] font-semibold text-indigo-700">
-                          <Check className="h-3 w-3" strokeWidth={3} />
-                          群组 {firstCheckedIdx + 1}–{lastCheckedIdx + 1}（{checkedIds!.size} 张）
-                        </span>
+                      <div className="group-header-bar relative mb-1 flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 shadow-sm ring-1 ring-indigo-100">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-flex items-center justify-center rounded bg-indigo-500 p-0.5">
+                            <Check className="h-2.5 w-2.5 text-white" strokeWidth={3} />
+                          </span>
+                          <span className="text-[10px] font-medium text-slate-600">
+                            群组 <span className="font-semibold text-slate-800">{firstCheckedIdx + 1}–{lastCheckedIdx + 1}</span>
+                          </span>
+                          <span className="rounded-full bg-slate-100 px-1.5 py-0 text-[9px] font-bold text-slate-600 ring-1 ring-slate-200">
+                            {checkedIds!.size}
+                          </span>
+                        </div>
                         <button
                           onClick={() => setShowGroupPanel((v) => !v)}
                           className={[
                             "ml-auto flex items-center gap-0.5 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
                             showGroupPanel
-                              ? "bg-indigo-600 text-white"
-                              : "bg-white text-indigo-600 ring-1 ring-indigo-200 hover:bg-indigo-100",
+                              ? "bg-slate-800 text-white shadow-sm"
+                              : "bg-slate-50 text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 hover:text-slate-800",
                           ].join(" ")}
                           title="展开操作面板"
                         >
@@ -760,20 +786,19 @@ export default function LeftPanel({
                         </button>
                         <button
                           onClick={() => { onCheckChange?.(new Set()); lastCheckIdxRef.current = -1; setShowGroupPanel(false); }}
-                          className="rounded p-0.5 text-slate-400 hover:bg-rose-100 hover:text-rose-500"
+                          className="rounded p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-500"
                           title="解散群组"
                         >
-                          <X className="h-3 w-3" />
+                          <X className="h-2.5 w-2.5" />
                         </button>
 
-                        {/* 浮动操作面板：自定义 / 适配已有循环 */}
+                        {/* 浮动操作面板 */}
                         {showGroupPanel && (
-                          <div className="group-panel-dropdown absolute left-0 right-0 top-full z-[9999] mt-1 rounded-lg border border-slate-200 bg-white p-1.5 shadow-xl">
-                            <div className="mb-1 px-1 text-[9px] font-semibold uppercase tracking-wide text-slate-400">选择执行方式</div>
+                          <div className="group-panel-dropdown absolute left-0 right-0 top-full z-[9999] mt-1 rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
                             {onRunCheckedLoop && (
                               <button
                                 onClick={() => { setShowGroupPanel(false); onRunCheckedLoop(); }}
-                                className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] font-medium text-slate-700 transition-colors hover:bg-indigo-50 hover:text-indigo-700"
+                                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] font-medium text-slate-700 transition-colors hover:bg-indigo-50 hover:text-indigo-700"
                               >
                                 <Play className="h-3 w-3 text-indigo-500" />
                                 自定义
@@ -783,7 +808,7 @@ export default function LeftPanel({
                             {onAdaptLoopToChecked && (
                               <button
                                 onClick={() => { setShowGroupPanel(false); onAdaptLoopToChecked(); }}
-                                className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] font-medium text-slate-700 transition-colors hover:bg-indigo-50 hover:text-indigo-700"
+                                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] font-medium text-slate-700 transition-colors hover:bg-indigo-50 hover:text-indigo-700"
                               >
                                 <ListChecks className="h-3 w-3 text-indigo-500" />
                                 适配已有循环
@@ -931,16 +956,6 @@ export default function LeftPanel({
           )}
         </div>
       </div>
-      )}
-
-      {/* LOOP 执行气泡：锚定左栏左下角，向上堆叠渐淡（运行中不停弹出但不挡卡片） */}
-      {!execPanelOpen && (
-        <ExecutionBubbles
-          variant="sphere"
-          steps={execSteps}
-          running={execRunning}
-          onAllGone={onExecBubblesGone}
-        />
       )}
     </div>
   );

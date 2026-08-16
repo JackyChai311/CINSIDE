@@ -93,6 +93,9 @@ def _apply_records_to_first_sheet(wb, recs, highlights: Optional[dict] = None) -
     highlights: {record_id: {字段名: match状态}} —— 有问题的单元格填色高亮：
     mismatch/error=红色填充（红底深红字），missing/partial=琥珀填充（跟字段对比卡片色系一致）。
     """
+    import logging
+    _export_log = logging.getLogger("cinside.export")
+
     ws = None
     for sheet in wb.worksheets:
         for row in sheet.iter_rows(min_row=1, max_row=min(50, sheet.max_row or 1)):
@@ -122,9 +125,14 @@ def _apply_records_to_first_sheet(wb, recs, highlights: Optional[dict] = None) -
     red_font = Font(color="9C0006", bold=True)
     amber_fill = PatternFill("solid", fgColor="FFEB9C")
     amber_font = Font(color="9C6500")
+    green_fill = PatternFill("solid", fgColor="C6EFCE")
+    green_font = Font(color="006100", bold=True)
+    # 用户已修复（含跨列连带修复）：亮黄填充，与琥珀（缺失/部分）区分
+    yellow_fill = PatternFill("solid", fgColor="FFFF00")
+    yellow_font = Font(color="7F6000", bold=True)
 
     def _hl_cell(cell, status: str) -> None:
-        """按对比状态给单元格上高亮：红=不一致/错误，琥珀=缺失/部分。"""
+        """按对比状态给单元格上高亮：红=不一致/错误，琥珀=缺失/部分，亮黄=用户已修复。"""
         s = (status or "").lower()
         if s in ("mismatch", "error"):
             cell.fill = red_fill
@@ -132,19 +140,64 @@ def _apply_records_to_first_sheet(wb, recs, highlights: Optional[dict] = None) -
         elif s in ("missing", "partial"):
             cell.fill = amber_fill
             cell.font = amber_font
+        elif s in ("fixed",):
+            cell.fill = yellow_fill
+            cell.font = yellow_font
+        elif s in ("match",):
+            cell.fill = green_fill
+            cell.font = green_font
 
     highlights = highlights or {}
     # 高亮键兼容：报告的 left_field 是规范字段名（surname/passport_no），
-    # 而表头是原始列名（姓/护照号）——直接 key in rec_hl 永远对不上，高亮全丢。
-    # 用解析侧同一套别名归一化双向匹配：原始名==规范名、归一化后相等，任一命中即上色。
-    from ..services.excel_parser import _normalize_key
+    # 而表头是原始列名（姓/护照号/姓 Family Name）——直接 key in rec_hl 永远对不上。
+    # 分词精确匹配（避免子串误匹配：如 "name" 不应匹配 "family name"）
+    from ..services.excel_parser import _normalize_key, _FIELD_ALIASES
+    import re as _re
+
+    def _header_to_canonical(header_key: str) -> list[str]:
+        """把 Excel 表头转成所有可能的规范字段名列表。"""
+        candidates: list[str] = []
+        hk = _normalize_key(header_key)
+        candidates.append(hk)
+        hk_lower = hk.strip().lower()
+
+        # 1. 完整字符串精确匹配别名表
+        for alias, canonical in _FIELD_ALIASES.items():
+            if alias.strip().lower() == hk_lower:
+                candidates.append(canonical)
+                break
+
+        # 2. 按空格/分隔符分词，去除标点，逐词匹配别名表
+        raw_tokens = _re.split(r'[\s,/\-]+', hk_lower)
+        tokens = [_re.sub(r'[^\w\u4e00-\u9fff]', '', t) for t in raw_tokens if t.strip()]
+
+        # 2a. 连续词组（2-3 词）优先匹配（处理 "Family Name"→surname, "Passport No."→passport_no）
+        for i in range(len(tokens)):
+            for j in range(i + 2, min(i + 4, len(tokens) + 1)):
+                phrase = ' '.join(tokens[i:j])
+                for alias, canonical in _FIELD_ALIASES.items():
+                    if alias.strip().lower() == phrase:
+                        candidates.append(canonical)
+                        break
+
+        # 2b. 单词精确匹配（处理 "姓"→surname, "国籍"→nationality, "护照号"→passport_no）
+        for t in tokens:
+            for alias, canonical in _FIELD_ALIASES.items():
+                if alias.strip().lower() == t:
+                    candidates.append(canonical)
+                    break
+
+        return candidates
 
     def _hl_lookup(rec_hl: dict, header_key: str) -> Optional[str]:
         st = rec_hl.get(header_key)
         if st:
             return st
-        hk = _normalize_key(header_key)
-        return rec_hl.get(hk)
+        for ck in _header_to_canonical(header_key):
+            st = rec_hl.get(ck)
+            if st:
+                return st
+        return None
 
     written = 0
     data_idx = 0
@@ -338,6 +391,8 @@ def _do_export(side: str, highlights: Optional[dict]):
     red_font = Font(color="9C0006", bold=True)
     amber_fill = PatternFill("solid", fgColor="FFEB9C")
     amber_font = Font(color="9C6500")
+    yellow_fill = PatternFill("solid", fgColor="FFFF00")
+    yellow_font = Font(color="7F6000", bold=True)
     for r in recs:
         ws.append([r.fields.get(c, "") for c in cols])
         rec_hl = (highlights or {}).get(r.record_id, {})
@@ -351,6 +406,9 @@ def _do_export(side: str, highlights: Optional[dict]):
                 elif s in ("missing", "partial"):
                     cell.fill = amber_fill
                     cell.font = amber_font
+                elif s in ("fixed",):
+                    cell.fill = yellow_fill
+                    cell.font = yellow_font
     buf = io.BytesIO()
     wb.save(buf)
     out_name = os.path.splitext(src.get("filename") or "data.xlsx")[0] + "_updated.xlsx"

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import {
   Check,
@@ -59,15 +59,13 @@ interface Props {
   onSelectColumn?: (field: string | null) => void;
   /** 是否嵌入在外部容器（如BrowserPane）中，为true时隐藏自有头部/边框/圆角，仅渲染内容 */
   embedded?: boolean;
-  /** LOOP 行范围框选（0-based 闭区间，基于 records 数组顺序） */
+  /** 仅用于脱离/嵌入的只读视图：显示哪几行在框选范围内（不参与框选逻辑） */
   rowRange?: { start: number; end: number } | null;
-  /** 更新行范围框选 */
-  onRowRangeChange?: (range: { start: number; end: number } | null) => void;
   /** 人物卡片是否已按范围生成 */
   cardsGenerated?: boolean;
-  /** 一键生成人物卡片 */
-  onGenerateCards?: () => void;
-  /** 重新框选（清除已生成卡片） */
+  /** 一键生成人物卡片：传入切片后（deep-copy + 唯一 record_id）的新卡片数组 */
+  onGenerateCards?: (newCards: ApplicantRecord[]) => void;
+  /** 清空卡片并重置框选（回到待选状态） */
   onResetCards?: () => void;
   /** 字段列映射：标准字段名 -> Excel 原始列 key（手动标记列用） */
   fieldColumnMap?: Record<string, string>;
@@ -104,8 +102,7 @@ export default function ExcelView({
   selectedColumn,
   onSelectColumn,
   embedded = false,
-  rowRange = null,
-  onRowRangeChange,
+  rowRange: parentRowRange,
   cardsGenerated = false,
   onGenerateCards,
   onResetCards,
@@ -120,8 +117,17 @@ export default function ExcelView({
   side,
 }: Props) {
   const [filter, setFilter] = useState("");
-  // 行范围框选的锚点行（第一次点击的行号，0-based records 索引）
+  // ===== 行范围框选（两格点选 / 拖拽）：状态完全留在 ExcelView 内部 =====
+  // 之前把 rowRange 放在 App 根组件，而 App 里有个 200+ 行的长 effect 把 rowRange
+  // 放进了依赖数组——每次点行号/鼠标移动都会触发 App 整棵树重渲染，这就是框选卡顿的根源。
+  // 现在 ExcelView 自持行范围，框选只在组件内部重渲染（单表），App 零重渲染。
   const [rangeAnchor, setRangeAnchor] = useState<number | null>(null);
+  const [localRange, setLocalRange] = useState<{ start: number; end: number } | null>(null);
+  const localRangeRef = useRef(localRange);
+  localRangeRef.current = localRange;
+  // 行范围：脱离/嵌入的只读视图用父级传入的 rowRange，交互视图用内部 localRange
+  const rowRange = localRange ?? parentRowRange;
+  const setRowRange = useCallback((r: { start: number; end: number } | null) => setLocalRange(r), []);
   // 导出 Excel：把内存中（修正后）的数据写回文件
   const [exporting, setExporting] = useState(false);
   const handleExport = async () => {
@@ -162,9 +168,6 @@ export default function ExcelView({
   const didDragRef = useRef(false);                            // 本次手势是否已超过阈值成为拖拽
   const suppressClickRef = useRef(false);                      // 拖拽结束后抑制紧随的 click（避免误触发两格框选）
   const tbodyRef = useRef<HTMLTableSectionElement | null>(null);
-  // 父级 rowRange 镜像：拖拽开始时判断是否需要清旧高亮（避免 effect 闭包过期）
-  const rowRangeRef = useRef(rowRange);
-  rowRangeRef.current = rowRange;
 
   // ===== LOOP 审查期：平滑滚动定位到当前执行行/比对单元格（与网页侧高亮一致的直观对比） =====
   // 记录切换时：平滑滚动到该行（垂直居中）
@@ -213,17 +216,17 @@ export default function ExcelView({
     return new Set(Object.values(detectedColumnMap));
   }, [detectedColumnMap]);
 
-  // 是否处于行范围框选状态（卡片池模式下始终允许框选新段）
-  const rangeSelecting = !!onRowRangeChange;
+  // 是否处于行范围框选状态（有生成卡片能力即允许框选；脱离/嵌入只读视图不允许）
+  const rangeSelecting = !!onGenerateCards && records.length > 0;
 
   // 点击行号：第一次定起始行，第二次定结束行（自动排序）
   const handleRowNumClick = (realIdx: number) => {
-    if (!rangeSelecting || !onRowRangeChange) return;
+    if (!rangeSelecting) return;
     if (rangeAnchor == null) {
       setRangeAnchor(realIdx);
-      onRowRangeChange({ start: realIdx, end: realIdx });
+      setRowRange({ start: realIdx, end: realIdx });
     } else {
-      onRowRangeChange({ start: Math.min(rangeAnchor, realIdx), end: Math.max(rangeAnchor, realIdx) });
+      setRowRange({ start: Math.min(rangeAnchor, realIdx), end: Math.max(rangeAnchor, realIdx) });
       setRangeAnchor(null);
     }
   };
@@ -321,7 +324,7 @@ export default function ExcelView({
   // 松开时没有明显位移 → 当作一次点击（交给 click 走两格框选）；
   // 位移超过阈值 → 进入拖拽连续框选。
   const handleLoopCellMouseDown = (e: React.MouseEvent, realIdx: number) => {
-    if (!rangeSelecting || !onRowRangeChange) return;
+    if (!rangeSelecting) return;
     if (e.button !== 0) return; // 仅左键
     e.preventDefault();
     setDragSelecting(true);
@@ -332,10 +335,9 @@ export default function ExcelView({
   };
 
   // 在 document 上监听 mousemove/mouseup：位移超过阈值视为拖拽。
-  // 拖拽期间零 React 渲染——onRowRangeChange 是 App 根组件 setState，之前每帧提交
-  // 一次范围会全树重渲染（含整张 Excel 表所有单元格重算），这就是拖拽卡顿的根源。
-  // 现在拖拽高亮直接操作 DOM class（loop-drag-preview），松手时才一次性提交最终范围：
-  // 整场拖拽最多 2 次渲染（成为拖拽时清旧高亮 + 松手提交）。
+  // 拖拽期间零 React 渲染——直接操作 DOM class（loop-drag-preview）做预览，
+  // 松手时才一次性用内部 setRowRange 提交最终范围：整场拖拽最多 2 次组件内渲染
+  //（成为拖拽时清旧高亮 + 松手提交），App 根组件全程不参与。
   useEffect(() => {
     if (!dragSelecting) return;
     const tbody = tbodyRef.current;
@@ -351,30 +353,41 @@ export default function ExcelView({
     };
 
     let lastRange: { start: number; end: number } | null = null;
-    // 直接 DOM 预览：范围内行加类（已带类的行是 no-op，不触发样式重算）
+    // 直接 DOM 预览：遍历 tbody 的直接子 <tr>，读 tr 自身的 data-real-idx（跳过 querySelector 与嵌套 tbody），
+    // 已带类的行是 no-op，不触发样式重算。比每行 querySelector("td...") 快一个数量级。
     const applyPreview = (start: number, end: number) => {
-      tbody.querySelectorAll("tr").forEach((tr) => {
-        const idxAttr = tr.querySelector("td[data-real-idx]")?.getAttribute("data-real-idx");
-        if (idxAttr == null) return;
-        const idx = parseInt(idxAttr, 10);
-        if (idx >= start && idx <= end) tr.classList.add("loop-drag-preview");
-        else tr.classList.remove("loop-drag-preview");
-      });
+      let node: Node | null = tbody.firstChild;
+      while (node) {
+        if (node.nodeType === Node.ELEMENT_NODE && (node as Element).tagName === "TR") {
+          const el = node as HTMLElement;
+          const idxAttr = el.getAttribute("data-real-idx");
+          const idx = idxAttr != null ? parseInt(idxAttr, 10) : -1;
+          if (idx >= start && idx <= end) el.classList.add("loop-drag-preview");
+          else el.classList.remove("loop-drag-preview");
+        }
+        node = node.nextSibling;
+      }
     };
     const clearPreview = () => {
-      tbody.querySelectorAll("tr.loop-drag-preview").forEach((tr) => tr.classList.remove("loop-drag-preview"));
+      let node: Node | null = tbody.firstChild;
+      while (node) {
+        if (node.nodeType === Node.ELEMENT_NODE && (node as Element).tagName === "TR") {
+          (node as HTMLElement).classList.remove("loop-drag-preview");
+        }
+        node = node.nextSibling;
+      }
     };
 
     const onMove = (e: MouseEvent) => {
       const start = dragStartRef.current;
-      if (start == null || !onRowRangeChange) return;
+      if (start == null) return;
       // 位移未超过阈值 → 仍视为点击，不进入拖拽
       if (!didDragRef.current) {
         const dy = Math.abs(e.clientY - (dragStartYRef.current ?? e.clientY));
         if (dy < 4) return;
         didDragRef.current = true;
-        // 成为真拖拽：清掉旧范围高亮（一次渲染），新范围由 DOM 预览接管
-        if (rowRangeRef.current) onRowRangeChange(null);
+        // 成为真拖拽：清掉旧范围高亮（一次组件内渲染），新范围由 DOM 预览接管
+        if (localRangeRef.current) setRowRange(null);
       }
       const cur = getRealIdxFromEvent(e);
       if (cur == null) return;
@@ -393,7 +406,7 @@ export default function ExcelView({
         suppressClickRef.current = true;
         setRangeAnchor(null);
         // 松手一次性提交最终范围（拖拽期间唯一一次范围提交）
-        if (lastRange) onRowRangeChange?.(lastRange);
+        if (lastRange) setRowRange(lastRange);
       }
       // 未成为拖拽（纯点击）：保持锚点，交给 click 做两格框选
     };
@@ -405,7 +418,21 @@ export default function ExcelView({
       document.removeEventListener("mouseup", onUp);
       clearPreview();
     };
-  }, [dragSelecting, onRowRangeChange]);
+  }, [dragSelecting]);
+
+  // 一键生成人物卡片：在 ExcelView 内部完成行范围切片 + 深拷贝 + 唯一 record_id，
+  // 把准备好的卡片数组交给 App（App 不再持有 rowRange，也不再切片，避免框选触发 App 重渲染）
+  const handleGenerateCards = () => {
+    if (!onGenerateCards || !rowRange || records.length === 0) return;
+    const slice = records.slice(rowRange.start, rowRange.end + 1);
+    const newCards: ApplicantRecord[] = slice.map((r) => ({
+      ...r,
+      fields: { ...r.fields },
+      passport_fields: r.passport_fields ? { ...r.passport_fields } : undefined,
+      record_id: `${r.record_id}__${Math.random().toString(36).slice(2, 8)}`,
+    }));
+    onGenerateCards(newCards);
+  };
 
   const tableContent = (
     <>
@@ -427,7 +454,7 @@ export default function ExcelView({
           />
         </div>
         {/* LOOP 行范围框选 + 追加生成卡片（卡片池模式：始终允许框选新段追加） */}
-        {onRowRangeChange && records.length > 0 && (
+        {rangeSelecting && (
           <span className="flex shrink-0 items-center gap-1">
             <span className={[
               "text-[9px]",
@@ -439,9 +466,9 @@ export default function ExcelView({
                 ? "再点/拖一行定结束行"
                 : "点行号/LOOP列两格框选，或拖拽"}
             </span>
-            {rowRange && onGenerateCards && (
+            {rowRange && (
               <button
-                onClick={onGenerateCards}
+                onClick={handleGenerateCards}
                 className={[
                   "flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-medium text-white transition-all",
                   cardsGenerated ? "bg-emerald-600 hover:bg-emerald-700" : "btn-flash-attention",
@@ -454,7 +481,7 @@ export default function ExcelView({
             )}
             {cardsGenerated && onResetCards && (
               <button
-                onClick={onResetCards}
+                onClick={() => { setRowRange(null); setRangeAnchor(null); onResetCards(); }}
                 className="rounded-md bg-slate-200 px-1.5 py-0.5 text-[9px] font-medium text-slate-600 hover:bg-slate-300"
                 title="清空所有卡片，重新开始"
               >
