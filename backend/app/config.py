@@ -112,6 +112,7 @@ SETTING_KEYS = {
     "umi_ocr_port": "UMI_OCR_PORT",
     "umi_ocr_exe_path": "UMI_OCR_EXE_PATH",
     "beginner_mode": "BEGINNER_MODE",
+    "demo_site_enabled": "DEMO_SITE_ENABLED",
     "prevent_accidental_close": "PREVENT_ACCIDENTAL_CLOSE",
     "loop_keep_awake": "LOOP_KEEP_AWAKE",
     "high_speed_mode": "HIGH_SPEED_MODE",
@@ -130,6 +131,7 @@ VALID_ACCENTS = {"indigo", "sky", "emerald", "rose", "violet", "amber"}
 # 非字符串类型字段的类型映射（.env 中统一存字符串，读取时转换）
 _SETTING_TYPES: dict[str, type] = {
     "beginner_mode": bool,
+    "demo_site_enabled": bool,
     "prevent_accidental_close": bool,
     "loop_keep_awake": bool,
     "high_speed_mode": bool,
@@ -223,6 +225,8 @@ class Settings:
     # === UI 偏好（前端设置面板） ===
     # 新手模式：true=显示步骤引导，false=直接使用字段对比面板
     beginner_mode: bool = field(default_factory=lambda: _env_bool("BEGINNER_MODE", False))
+    # 模拟网页：true=右侧网页默认载入内置 DEMO 演示站点并显示 DEMO 快捷入口；默认关闭
+    demo_site_enabled: bool = field(default_factory=lambda: _env_bool("DEMO_SITE_ENABLED", False))
     # 防误关：true=关闭按钮最小化到托盘
     prevent_accidental_close: bool = field(default_factory=lambda: _env_bool("PREVENT_ACCIDENTAL_CLOSE", False))
     # LOOP 运行不息屏：true=执行 LOOP 期间阻止电脑息屏/休眠，结束后恢复
@@ -272,6 +276,7 @@ class Settings:
             "umi_ocr_port": self.umi_ocr_port,
             "umi_ocr_exe_path": self.umi_ocr_exe_path,
             "beginner_mode": self.beginner_mode,
+            "demo_site_enabled": self.demo_site_enabled,
             "prevent_accidental_close": self.prevent_accidental_close,
             "loop_keep_awake": self.loop_keep_awake,
             "high_speed_mode": self.high_speed_mode,

@@ -31,6 +31,7 @@ import {
   PanelBottom,
   PanelLeft,
   PanelLeftClose,
+  Pause,
   Play,
   Plus,
   Repeat2,
@@ -330,6 +331,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   high_speed_mode: false,
   ui_scale: 1.0,
   beginner_mode: false,
+  demo_site_enabled: false,
   theme: "light",
   accent: "indigo",
   browser_brightness: 1.0,
@@ -934,6 +936,89 @@ function DetachedExcelPanel() {
   );
 }
 
+// ===== 预览图 blob 化工具（模块级：registry 跨渲染存续，组件内重建会导致 revoke 失效） =====
+/** processed_image blob 登记册：docExtracts 整体清空时统一 revoke，防 blob store 跨轮累积 */
+const procBlobRegistry = new Set<string>();
+const revokeAllProcBlobs = () => {
+  procBlobRegistry.forEach((u) => URL.revokeObjectURL(u));
+  procBlobRegistry.clear();
+};
+/** 裸 base64 → blob URL：二进制驻留 Chromium blob store，JS 堆只留几十字节的 URL 字符串。
+ *  百张卡的裁剪预览图若以 base64 驻留，JS 字符串 UTF-16 + base64 双重放大 ≈2.67 倍
+ *  （百卡≈上百 MB JS 堆 → GC 频繁卡顿的元凶之一）；已是 URL 形态的原样返回（幂等）。 */
+const toProcBlobUrl = (v?: string | null): string | null | undefined => {
+  if (!v) return v;
+  if (/^(blob:|data:|https?:)/.test(v)) return v;
+  const bin = atob(v);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+  procBlobRegistry.add(url);
+  return url;
+};
+/** processed_image 统一出口：blob:/data:/http(s) 直接用，裸 base64 补 data: 前缀（兼容旧路径） */
+const procImageUrl = (p: string) => (/^(blob:|data:|https?:)/.test(p) ? p : `data:image/jpeg;base64,${p}`);
+
+/** 卡片图片 IndexedDB 持久化（替代 localStorage：二进制存储、异步读写、无 5MB 配额焦虑、
+ *  不阻塞主线程——旧实现每次设置卡图都同步 JSON.stringify 整个字典，百张卡时卡死主线程几百 ms） */
+const cardImageStore = {
+  _db: null as IDBDatabase | null,
+  async db(): Promise<IDBDatabase> {
+    if (this._db) return this._db;
+    this._db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open("cinside-media", 1);
+      req.onupgradeneeded = () => {
+        if (!req.result.objectStoreNames.contains("card-images")) req.result.createObjectStore("card-images");
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return this._db;
+  },
+  async put(id: string, blob: Blob): Promise<void> {
+    const db = await this.db();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("card-images", "readwrite");
+      tx.objectStore("card-images").put(blob, id);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  },
+  async del(id: string): Promise<void> {
+    const db = await this.db();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("card-images", "readwrite");
+      tx.objectStore("card-images").delete(id);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  },
+  async clear(): Promise<void> {
+    const db = await this.db();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("card-images", "readwrite");
+      tx.objectStore("card-images").clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  },
+  async getAll(): Promise<Map<string, Blob>> {
+    const db = await this.db();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("card-images", "readonly");
+      const store = tx.objectStore("card-images");
+      const keysReq = store.getAllKeys();
+      const valsReq = store.getAll();
+      tx.oncomplete = () => {
+        const out = new Map<string, Blob>();
+        keysReq.result.forEach((k, i) => out.set(String(k), valsReq.result[i] as Blob));
+        resolve(out);
+      };
+      tx.onerror = () => reject(tx.error);
+    });
+  },
+};
+
 export default function App() {
   const [records, setRecords] = useState<ApplicantRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -1123,7 +1208,23 @@ const sourceFieldLabelRef = useRef<string>("");
   // 数据源网页默认 DEMO 地址（模拟原 admin 数据源站点）
   // 左侧默认打开 DEMO 数据源管理页面（后端静态服务）
   const [leftUrl, setLeftUrl] = useState<string>("");
-  const [rightUrl, setRightUrl] = useState<string>("http://localhost:8000/demo-fill/");
+  // 右侧学校系统：仅「模拟网页」开关开启时才默认载入内置 DEMO 站点（设置异步加载，由下方 effect 补齐）
+  const [rightUrl, setRightUrl] = useState<string>("");
+
+  // 内置演示站点 URL 前缀（demo-fill/demo-review/demo-entry/demo-admin/mock 均算模拟网页）
+  const DEMO_URL_PREFIXES = ["http://localhost:8000/demo-", "http://localhost:8000/mock"];
+
+  // 模拟网页开关联动：关闭时若右侧停留在内置演示页则清空回空白态；开启且右侧为空时自动载入 DEMO 录入系统
+  useEffect(() => {
+    const enabled = settings.demo_site_enabled === true;
+    setRightUrl((cur) => {
+      const isDemo = DEMO_URL_PREFIXES.some((p) => cur.startsWith(p));
+      if (!enabled && isDemo) return "";
+      if (enabled && !cur) return "http://localhost:8000/demo-fill/";
+      return cur;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.demo_site_enabled]);
 
   // 元素屏蔽功能
   const [blockPickingSide, setBlockPickingSide] = useState<ViewSide | null>(null);
@@ -1457,7 +1558,7 @@ useEffect(() => {
 // - processed_image 存在时（PDF 扫描件渲染后 / 图片旋转裁剪后）用它（需要补 data:image/jpeg;base64, 前缀）
 // - 否则回退到原始文件 URL（普通图片可直接显示；原始 PDF 无法用 <img> 直接渲染）
 const toPreviewImageUrl = (rawUrl: string, processed?: string | null) => {
-  if (processed) return `data:image/jpeg;base64,${processed}`;
+  if (processed) return procImageUrl(processed);
   return rawUrl;
 };
 // 文件导出对话框开关（文件提取预览面板 →「导出」）
@@ -1655,6 +1756,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   /** 当前正在 LOOP 执行的记录 id（驱动 Excel 平滑滚动定位） */
   const [execRecordId, setExecRecordId] = useState<string | null>(null);
   const batchStopRef = useRef(false);
+  // LOOP 暂停：暂停后当前卡片跑完、在下一张卡片边界停住；恢复后继续（ref 供执行循环同步读取）
+  const [batchPaused, setBatchPaused] = useState(false);
+  const batchPausedRef = useRef(false);
   const runBatchRef = useRef<((tplOverride?: WorkflowTemplate, targetIds?: string[]) => Promise<void>) | null>(null);
   // 防重入：LOOP 批量执行期间为 true，任何重复触发（双击/effect 重放/IPC 重复投递）直接忽略
   const runBatchInFlightRef = useRef(false);
@@ -1843,6 +1947,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // pendingAction=click：执行真实点击（element.click()）
   const performRealClick = useCallback(async (side: ViewSide, selector: string, inPopup?: boolean) => {
     if (!window.electronAPI) return;
+    // 高速模式：滚动动画改瞬时（省 300~500ms 动画时间）、点击后等待压缩
+    const hs = settingsRef.current.high_speed_mode === true;
     try {
       const script = `
         ${DEEP_QUERY_HELPER}
@@ -1853,7 +1959,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           var el = null;
           try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(selector))}); } catch(e) { el = null; }
           if (!el) return { ok: false, reason: 'not_found' };
-          try { el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); } catch(e) {}
+          try { el.scrollIntoView({ behavior: ${JSON.stringify(hs ? "auto" : "smooth")}, block: 'center', inline: 'nearest' }); } catch(e) {}
           var orig = el.style.outline;
           var origOffset = el.style.outlineOffset;
           var origShadow = el.style.boxShadow;
@@ -1867,7 +1973,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             el.style.outlineOffset = origOffset || '';
             el.style.boxShadow = origShadow || '';
             el.style.transition = origTrans || '';
-          }, 800);
+          }, ${hs ? 400 : 800});
           el.click();
           return { ok: true, tag: el.tagName };
         })();
@@ -1876,7 +1982,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         ? await window.electronAPI.popupExecuteJS(side, script)
         : await window.electronAPI.viewExecuteJS(side, script);
       // 等待一小段时间让点击生效和页面开始响应
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, hs ? 120 : 300));
       return result;
     } catch (e) {
       console.warn("[performRealClick] 失败", e);
@@ -2034,30 +2140,32 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     return false;
   }, [checkViewOnline]);
 
-  /** 点击后等待页面稳定：readyState 到 complete，最多 maxMs（页面跳转/慢加载容错） */
+  /** 点击后等待页面稳定：readyState 到 complete，最多 maxMs（页面跳转/慢加载容错）；高速模式压缩起步/轮询/稳定后等待 */
   const waitPageSettled = useCallback(async (side: ViewSide, maxMs = 3000) => {
     if (!window.electronAPI) return;
+    const hs = settingsRef.current.high_speed_mode === true;
     const start = Date.now();
     // 先给导航/渲染一个起步时间
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, hs ? 100 : 200));
     while (Date.now() - start < maxMs) {
       try {
         const r = await window.electronAPI.viewExecuteJS(side, "document.readyState");
         if (r === "complete") {
           // 再短等一会让 SPA/弹窗渲染
-          await new Promise((res) => setTimeout(res, 400));
+          await new Promise((res) => setTimeout(res, hs ? 150 : 400));
           return;
         }
       } catch {
         // 导航中脚本上下文被销毁，继续等
       }
-      await new Promise((res) => setTimeout(res, 300));
+      await new Promise((res) => setTimeout(res, hs ? 150 : 300));
     }
   }, []);
 
-  /** 等待元素出现：慢渲染/弹窗延迟加载时轮询，最多 maxMs，找到返回 true */
+  /** 等待元素出现：慢渲染/弹窗延迟加载时轮询，最多 maxMs，找到返回 true（高速模式轮询间隔减半） */
   const waitElementAppear = useCallback(async (side: ViewSide, selector: string, maxMs = 6000, inPopup?: boolean): Promise<boolean> => {
     if (!window.electronAPI) return false;
+    const hs = settingsRef.current.high_speed_mode === true;
     const start = Date.now();
     const script = `${DEEP_QUERY_HELPER}(function(){ try { return !!__cinsideDeepQuery(${JSON.stringify(sanitizeSelector(selector))}); } catch(e) { return false; } })()`;
     while (Date.now() - start < maxMs) {
@@ -2069,7 +2177,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       } catch {
         // 页面导航中，继续等
       }
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, hs ? 250 : 500));
     }
     return false;
   }, []);
@@ -2342,28 +2450,64 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // 卡片池 state 提前声明，供 selected 查找（卡片池模式下卡片 record_id 带后缀，不在 records 里）
   const [cardPool, setCardPool] = useState<ApplicantRecord[]>([]);
 
-  // 卡片自定义图片：record_id -> base64 dataURL，用户可通过 Ctrl+V 或拖拽设置，持久化到 localStorage
-  const [cardImages, setCardImages] = useState<Record<string, string>>(() => {
-    try {
-      const raw = localStorage.getItem("cinside-card-images");
-      return raw ? (JSON.parse(raw) as Record<string, string>) : {};
-    } catch {
-      return {};
-    }
-  });
+  // 卡片自定义图片：record_id -> blob URL，用户可通过 Ctrl+V 或拖拽设置。
+  // 持久化走 IndexedDB（二进制、异步、无 localStorage 5MB 配额与同步 stringify 整典卡主线程问题——
+  // 百张卡图时旧实现每次设置都 JSON.stringify 几十 MB 字符串，是操作卡顿元凶之一）；
+  // state 里只放 blob URL（JS 堆占用可忽略），App 启动时从 IndexedDB 重建。
+  const [cardImages, setCardImages] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const all = await cardImageStore.getAll();
+        const urls: Record<string, string> = {};
+        all.forEach((blob, id) => { urls[id] = URL.createObjectURL(blob); });
+        // 一次性迁移：旧 localStorage base64 → IndexedDB，迁移完删除
+        try {
+          const raw = localStorage.getItem("cinside-card-images");
+          if (raw) {
+            const legacy = JSON.parse(raw) as Record<string, string>;
+            for (const [id, dataUrl] of Object.entries(legacy)) {
+              if (!urls[id]) {
+                try {
+                  const blob = await (await fetch(dataUrl)).blob();
+                  await cardImageStore.put(id, blob);
+                  urls[id] = URL.createObjectURL(blob);
+                } catch { /* 单条迁移失败跳过 */ }
+              }
+            }
+            localStorage.removeItem("cinside-card-images");
+          }
+        } catch { /* 迁移失败不阻塞 */ }
+        if (!cancelled) setCardImages(urls);
+        else Object.values(urls).forEach((u) => URL.revokeObjectURL(u));
+      } catch { /* IndexedDB 不可用时静默退化为纯内存 */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
   const setCardImage = useCallback((recordId: string, dataUrl: string) => {
-    setCardImages((prev) => {
-      const next = { ...prev, [recordId]: dataUrl };
-      try { localStorage.setItem("cinside-card-images", JSON.stringify(next)); } catch {}
-      return next;
-    });
+    void (async () => {
+      let blobUrl = "";
+      try {
+        const blob = await (await fetch(dataUrl)).blob();
+        await cardImageStore.put(recordId, blob);
+        blobUrl = URL.createObjectURL(blob);
+      } catch { return; }
+      setCardImages((prev) => {
+        const old = prev[recordId];
+        if (old) URL.revokeObjectURL(old);
+        return { ...prev, [recordId]: blobUrl };
+      });
+    })();
   }, []);
   const clearCardImage = useCallback((recordId: string) => {
+    void cardImageStore.del(recordId).catch(() => {});
     setCardImages((prev) => {
       if (!(recordId in prev)) return prev;
+      const old = prev[recordId];
+      if (old) URL.revokeObjectURL(old);
       const next = { ...prev };
       delete next[recordId];
-      try { localStorage.setItem("cinside-card-images", JSON.stringify(next)); } catch {}
       return next;
     });
   }, []);
@@ -2524,10 +2668,15 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setCheckedIds(new Set());
     setRunCursor(null);
     setCardsGenerated(false);
-    // 卡片自定义图片持久化在 localStorage，一并清理
-    setCardImages({});
+    // 卡片自定义图片持久化在 IndexedDB，一并清理（blob URL 全部回收）
+    setCardImages((prev) => {
+      Object.values(prev).forEach((u) => URL.revokeObjectURL(u));
+      return {};
+    });
+    void cardImageStore.clear().catch(() => {});
     try { localStorage.removeItem("cinside-card-images"); } catch {}
     // 与卡片绑定的文件提取结果随卡片删除一并清理
+    revokeAllProcBlobs(); // 提取结果整体清空：同步回收全部预览图 blob（已加载的 <img> 不受影响）
     setDocExtractsByRecord({});
     setDocExtractPanel(null);
     setSameNameImages(null);
@@ -2656,6 +2805,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setCardLoopMap({});
     setRunCursor(null);
     // 清理已删除卡片绑定的文件提取结果，避免内存泄漏
+    revokeAllProcBlobs(); // 提取结果整体清空：同步回收全部预览图 blob（已加载的 <img> 不受影响）
     setDocExtractsByRecord({});
     setDocExtractPanel(null);
     setSameNameImages(null);
@@ -2677,6 +2827,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setCardPool([]);
     setCardLoopMap({});
     setRunCursor(null);
+    revokeAllProcBlobs(); // 提取结果整体清空：同步回收全部预览图 blob（已加载的 <img> 不受影响）
     setDocExtractsByRecord({});
     setDocExtractPanel(null);
     setSameNameImages(null);
@@ -3350,26 +3501,6 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
   // ============ 教学模式控制函数（在 exitAvatarMode/exitSelectMode/setError 之后定义） ============
 
-  // 开始教学：根据 appMode 进入不同阶段
-  // - review 模式：先 data-source（教数据源补全），再 review（教审查点击对比）
-  // - entry 模式：直接 entry（教填表+提交），不需要数据源阶段
-  const startTeaching = useCallback(() => {
-    if (!selected) {
-      setError("请先选中一张申请人卡片作为教学样本");
-      return;
-    }
-    setPickedMarks([]);
-    setTeachingPhase(appMode === "entry" ? "entry" : "data-source");
-    setWorkflowTemplate(null);
-    setBatchResults({});
-    setError(null);
-    // 重新教学时自动进入元素选择模式
-    setSelectMode(true);
-    setPickTarget("right");
-    setRightPicked(null);
-    setLeftPicked(null);
-  }, [selected, setError, appMode]);
-
   // 数据源处理教完，进入审查流操作阶段
   const advanceToReviewPhase = useCallback(() => {
     setTeachingPhase("review");
@@ -3797,7 +3928,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         entries: [],
         source: hasProc ? pending.filename : pending.dataUrl,
         file_url: hasProc ? pending.filename : pending.dataUrl,
-        processed_image: result.processed_image,
+        processed_image: toProcBlobUrl(result.processed_image),
         mrz_warnings: result.mrz_warnings,
         fallback: result.fallback,
       };
@@ -3845,7 +3976,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           entries: [],
           source: hasProc ? pending.filename : pending.dataUrl,
           file_url: hasProc ? pending.filename : pending.dataUrl,
-          processed_image: result.processed_image,
+          processed_image: toProcBlobUrl(result.processed_image),
           mrz_warnings: result.mrz_warnings,
           fallback: result.fallback,
         };
@@ -5245,7 +5376,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           entries,
           source: hasProc ? (result.filename || url) : url,
           file_url: hasProc ? (result.filename || url) : url,
-          processed_image: result.processed_image,
+          processed_image: toProcBlobUrl(result.processed_image),
           mrz_warnings: result.mrz_warnings,
           fallback: result.fallback,
         };
@@ -5967,12 +6098,32 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const stopBatch = useCallback(() => {
     rlog("[batch] 用户请求停止 LOOP");
     batchStopRef.current = true;
+    // 停止时顺带解除暂停，防止执行循环卡在暂停等待里出不来
+    batchPausedRef.current = false;
+    setBatchPaused(false);
     // 如果正在断点暂停中，resolve Promise 让执行循环能检测到 batchStopRef 并退出
     breakpointResolveRef.current?.();
     breakpointResolveRef.current = null;
     setBreakpointState(null);
     setBatchRunning(false);
   }, []);
+
+  // 暂停/恢复批量执行：当前卡片跑完后在下一张卡片边界停住，恢复后继续
+  const toggleBatchPause = useCallback(() => {
+    setBatchPaused((p) => {
+      const next = !p;
+      batchPausedRef.current = next;
+      rlog(next ? "[batch] 用户暂停 LOOP（当前卡片执行完后停住）" : "[batch] 用户恢复 LOOP");
+      return next;
+    });
+  }, []);
+
+  // 暂停等待：在每张卡片边界调用；暂停中轮询等待，恢复或停止后返回
+  const waitIfBatchPaused = async () => {
+    while (batchPausedRef.current && !batchStopRef.current && !queueStopRef.current) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  };
 
   // ============ 开始新 LOOP：完全重置所有 LOOP 相关状态 ============
   // 跑完一个 LOOP 后，用户想跑其他 LOOP 时调用，确保之前的设置/结果不影响后续
@@ -6498,9 +6649,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // 后端 extract_document 内部已含完整回退链（MRZ → 本地正则 → VIZ 看图 + 文本 LLM 并行），
   // 前端不再二次重跑 Vision（之前"UMI 缺字段自动转 Vision 重试"会把整条 Vision 管线
   // 重跑一遍，白等 20~240 秒且命中率极低，是 LOOP 变慢的主因）。
-  const extractFileWithVisionFallback = useCallback(async (file: File, targetFields: string[], engine?: string) => {
+  const extractFileWithVisionFallback = useCallback(async (file: File, targetFields: string[], engine?: string, forceAiOrient?: boolean, forceViz?: boolean) => {
     // engine 显式传参：档位切换后重跑，用点击档位时快照的引擎，不依赖后端全局设置同步
-    return api.extractDocumentFile(file, targetFields, engine);
+    // forceAiOrient：强制 Vision 精判转正（高速模式首轮无文字后的后台重试用）
+    // forceViz：强制识图AI缺字段补提（高速模式下后台用闲置分析通道补提缺字段用）
+    return api.extractDocumentFile(file, targetFields, engine, forceAiOrient, forceViz);
   }, []);
 
   /** URL 版：同上，单次调用 */
@@ -6625,8 +6778,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       } catch (e) {
         console.warn("[executeMark] viewStopPicking 失败", e);
       }
-      // 短暂等待，让网页从拾取状态恢复
-      await new Promise((r) => setTimeout(r, 150));
+      // 短暂等待，让网页从拾取状态恢复（高速模式压缩）
+      await new Promise((r) => setTimeout(r, settingsRef.current.high_speed_mode === true ? 60 : 150));
 
       // 3. 等待目标输入框出现（SPA 页面可能需要时间渲染）
       const targetAppeared = await waitElementAppear(side, mark.inputTarget, 8000, inPopup);
@@ -6787,7 +6940,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               entries: [],
               source: hasProcessed ? (readResult.filename || result.filename) : readResult.dataUrl,
               file_url: hasProcessed ? (readResult.filename || result.filename) : readResult.dataUrl,
-              processed_image: result.processed_image,
+              processed_image: toProcBlobUrl(result.processed_image),
               mrz_warnings: result.mrz_warnings,
               fallback: result.fallback,
             };
@@ -6900,8 +7053,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                           // 内存保护：有裁剪图占位时 source/file_url 只存文件名，不存原图 dataUrl
                           source: fileData.filename || previewResult.filename || fileData.dataUrl,
                           file_url: fileData.filename || previewResult.filename || fileData.dataUrl,
-                          processed_image: previewResult.processed_image,
+                          processed_image: toProcBlobUrl(previewResult.processed_image),
                           pending: true,
+                          requested_fields: targetFields,
                         },
                       ],
                     };
@@ -6921,8 +7075,84 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             const ocrEngineNow = settingsRef.current.ocr_engine || "vision";
             const ocrPromise = extractFileWithVisionFallback(file, targetFields, ocrEngineNow);
 
+            // 高速OCR无有效文字 → 标记 + 后台AI转正重试：
+            // UMI 引擎且「AI自动转正」关闭（高速模式）时，首轮 OCR 文本 <120 字符且无字段
+            // → 先在面板标记「AI转正重试中」，接着异步用 Vision 精判转正后重提一遍；
+            // 重试链进同一个 promise —— pass1 浏览器步骤照常跑后面的卡片（不阻塞），
+            // pass2（比对轮）join 时拿到的即是重试后的最终结果，重试耗时被后续卡片浏览器步骤自然掩盖。
+            const retriedPromise = ocrPromise.then(async (first) => {
+              const tLen = (first?.text || "").trim().length;
+              const firstHasFields = Object.values(first?.fields || {}).some((v) => String(v || "").trim());
+              // fallback 非空 = 首轮 UMI 已失败回退：此时重试仍打同一个崩着的引擎，
+              // 白烧一次 Vision 转正 + 可能再吃 60s 超时，零收益 → 直接不重试
+              const retryable = ocrEngineNow === "umi"
+                && !settingsRef.current.vision_auto_orient
+                && tLen < 120
+                && !firstHasFields
+                && !first?.fallback;
+              if (!retryable) return first;
+              rlog(`[executeMark] 高速OCR无有效文字（${tLen} 字符），后台AI转正重试: ${fileData.filename}`);
+              const ridMark = record?.record_id || selected?.record_id || "_default";
+              setDocExtractsByRecord((prev) => {
+                const arr = prev[ridMark] || [];
+                return {
+                  ...prev,
+                  [ridMark]: arr.map((e) =>
+                    (e.file_url === fileData.filename || e.file_url === fileData.dataUrl)
+                      ? { ...e, ai_retry_pending: true }
+                      : e
+                  ),
+                };
+              });
+              try {
+                const second = await extractFileWithVisionFallback(file, targetFields, ocrEngineNow, true);
+                const sLen = (second?.text || "").trim().length;
+                const secondHasFields = Object.values(second?.fields || {}).some((v) => String(v || "").trim());
+                if (sLen > tLen || (secondHasFields && !firstHasFields)) {
+                  rlog(`[executeMark] AI转正重试改善: ${tLen}→${sLen} 字符${secondHasFields && !firstHasFields ? "（字段已提取）" : ""}`);
+                  return second;
+                }
+                rlog(`[executeMark] AI转正重试无改善（${sLen} 字符），保留首次结果`);
+                return first;
+              } catch (retryErr) {
+                rlog(`[executeMark] AI转正重试失败（保留首次结果）: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`);
+                return first;
+              }
+            });
+
+            // 缺字段后台补提：高速模式（VIZ兜底关）下「分析」通道（识图AI）在 pass1 全程闲置——
+            // 首轮 + 转正重试后仍缺的 VIZ 字段，后台强制看图补提一遍再合并。
+            // 链进同一 promise：pass1 浏览器步骤不等它，pass2 join 拿到补提后的最终结果。
+            const vizToppedPromise = retriedPromise.then(async (cur) => {
+              if (ocrEngineNow !== "umi") return cur;
+              if (settingsRef.current.vision_viz_fallback) return cur; // 兜底开关开：后端已内联补过
+              if (cur?.fallback) return cur; // UMI 挂了 → 不补（与转正重试同一守卫）
+              const VIZ_TOPUP = ["passport_issue", "passport_expiry", "issue_authority", "issue_place"];
+              const missing = targetFields.filter((f) => VIZ_TOPUP.includes(f) && !String(cur?.fields?.[f] || "").trim());
+              if (missing.length === 0) return cur;
+              rlog(`[executeMark] 缺字段后台VIZ补提（闲置分析通道）: ${missing.join("/")} ← ${fileData.filename}`);
+              try {
+                const second = await extractFileWithVisionFallback(file, missing, ocrEngineNow, false, true);
+                const gained: Record<string, string> = {};
+                for (const f of missing) {
+                  const v = String(second?.fields?.[f] || "").trim();
+                  if (v) gained[f] = v;
+                }
+                if (Object.keys(gained).length === 0) {
+                  rlog(`[executeMark] VIZ补提无新增: ${fileData.filename}`);
+                  return cur;
+                }
+                rlog(`[executeMark] VIZ补提命中 ${Object.keys(gained).length} 项: ${Object.keys(gained).join("/")}`);
+                return { ...cur, fields: { ...cur.fields, ...gained } };
+              } catch (vizErr) {
+                rlog(`[executeMark] VIZ补提失败（保留原结果）: ${vizErr instanceof Error ? vizErr.message : String(vizErr)}`);
+                return cur;
+              }
+            });
+
             // OCR 落定后的统一处理：同步缓存结果 + 写 docExtractsByRecord + 更新面板/状态
-            const settledPromise = ocrPromise.then((result) => {
+            //（写的是重试/补提后的最终结果，写入时整条替换 → ai_retry_pending 标记自动清除）
+            const settledPromise = vizToppedPromise.then((result) => {
               // 3. 缓存OCR结果（供triggerWebExtract复用，避免重复提取；记录引擎以便切换引擎后缓存失效）
               if (bgOcrResultRef.current && bgOcrResultRef.current.promise === settledPromise) {
                 bgOcrResultRef.current.result = result;
@@ -6940,9 +7170,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 entries: [],
                 source: result.processed_image ? (fileData.filename || result.filename) : fileData.dataUrl,
                 file_url: result.processed_image ? (fileData.filename || result.filename) : fileData.dataUrl,
-                processed_image: result.processed_image,
+                processed_image: toProcBlobUrl(result.processed_image),
                 mrz_warnings: result.mrz_warnings,
                 fallback: result.fallback,
+                requested_fields: targetFields,
               };
               const rid = record?.record_id || selected?.record_id || "_default";
               setDocExtractsByRecord((prev) => {
@@ -7163,7 +7394,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             var el = null;
             try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(mark.selector))}); } catch(e) { el = null; }
             if (!el) return { ok: false, reason: 'not_found' };
-            el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+            el.scrollIntoView({ behavior: ${settingsRef.current.high_speed_mode === true ? "'auto'" : "'smooth'"}, block: 'center', inline: 'nearest' });
             var linkEl = (el.closest && el.closest('a')) || (el.tagName === 'A' ? el : null);
             var imgEl = (el.tagName === 'IMG') ? el : (el.querySelector ? el.querySelector('img') : null);
             var url = '';
@@ -7225,9 +7456,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         await waitElementAppear(side, mark.selector, isPostClick ? 1500 : 6000, inPopup);
         result = await performRealClick(side, mark.selector, inPopup);
       }
-      // 再兜底重试一次（收尾点击不重试，直接走上层跳过逻辑）
+      // 再兜底重试一次（收尾点击不重试，直接走上层跳过逻辑；高速模式重试间隔减半）
       if (!isPostClick && result && typeof result === "object" && "ok" in result && result.ok === false) {
-        await new Promise((r) => setTimeout(r, 800));
+        await new Promise((r) => setTimeout(r, settingsRef.current.high_speed_mode === true ? 400 : 800));
         result = await performRealClick(side, mark.selector, inPopup);
       }
       if (result && typeof result === "object" && "ok" in result && result.ok === false) {
@@ -7253,7 +7484,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         var el = null;
         try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(mark.selector))}); } catch(e) { el = null; }
         if (!el) return { ok: false, reason: 'not_found' };
-        el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+        el.scrollIntoView({ behavior: ${settingsRef.current.high_speed_mode === true ? "'auto'" : "'smooth'"}, block: 'center', inline: 'nearest' });
         return { ok: true };
       })();
     `;
@@ -7787,13 +8018,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           // 点击按钮/链接后等待页面加载/跳转（智能等待页面稳定，替代纯固定延时）
           const isSubmitOrSearch = /搜索|查询|submit|search|确认|进入|查看|登录|提交|保存/i.test(mark.label);
           const hsClick = settingsRef.current.high_speed_mode === true;
-          const maxWait = isSubmitOrSearch ? (hsClick ? 1800 : 2500) : (hsClick ? 900 : 1500);
+          const maxWait = isSubmitOrSearch ? (hsClick ? 1200 : 2500) : (hsClick ? 600 : 1500);
           await Promise.race([waitPageSettled(markSide, maxWait + 1000), sleep(maxWait)]);
         } else if (mark.action === "input") {
           // 输入后等待较短时间让框架感知
-          await sleep(settingsRef.current.high_speed_mode === true ? 300 : 600);
+          await sleep(settingsRef.current.high_speed_mode === true ? 120 : 600);
         } else {
-          await sleep(settingsRef.current.high_speed_mode === true ? 200 : 400);
+          await sleep(settingsRef.current.high_speed_mode === true ? 80 : 400);
         }
         // postThenPre模式：post段结束后额外等待页面稳定（收尾点击后页面跳转回搜索页）
         if (postThenPreBoundary > 0 && mi === postThenPreBoundary - 1) {
@@ -7958,6 +8189,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     name: r.record_name || r.record_id,
     overall: r.overall,
     summary: r.summary || "",
+    // 执行级错误（LOOP 步骤跑挂等）：与字段比对不一致是两类问题，分析时需区分
+    error: (r.error || "").slice(0, 150),
+    flow: r.flow || "",
     mismatches: r.entries
       .filter((e) => e.match === "mismatch" || e.match === "error" || e.match === "missing")
       .slice(0, 10)
@@ -7966,6 +8200,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         source_value: (e.left_value || "").slice(0, 60),
         target_value: (e.right_value || "").slice(0, 60),
         match: e.match,
+        // 来源类型：excel=Excel 表格 / passport=文件提取（OCR）——分析定性「缺件 vs 识别问题」的关键依据
+        left_source: e.left_source || "",
         reasoning: (e.reasoning || "").slice(0, 120),
       })),
     mrz_warnings: r.mrz_warnings || [],
@@ -8081,6 +8317,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     rlog(`[runBatch] 🚀 启动，共 ${cardRecords.length} 条记录，marks: dataSource=${dataSourceCount}, review=${reviewCount}, entry=${entryCount}`);
 
     batchStopRef.current = false;
+    // 每次启动 LOOP 重置暂停态（防止上一轮暂停残留到新一轮）
+    batchPausedRef.current = false;
+    setBatchPaused(false);
     setBatchRunning(true);
     setHasRunOnce(true); // 跑完 LOOP 后「日志」按钮需要 hasRunOnce 才显示
     setBatchResults({});
@@ -8094,6 +8333,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 清掉教学期残留的文件提取浮动面板，防止运行结束后残留飘出
     setDocExtractPanel(null);
     // 清空上一轮/教学期残留的文件提取缓存：每张卡片的字段对比只许用本次新鲜提取，杜绝串行（列对行错、拿别人的信息检查当前卡）
+    revokeAllProcBlobs(); // 提取结果整体清空：同步回收全部预览图 blob（已加载的 <img> 不受影响）
     setDocExtractsByRecord({});
     // 清空上一轮保底机制残留的整页下载文件缓存（全文件无清空点、跨轮次累积；跑完到下一轮之间保留供人工回看）
     setFallbackFilesByRecord({});
@@ -8266,6 +8506,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       if (!tplHasWebMappings) {
         for (let i = 0; i < targets.length; i++) {
           if (batchStopRef.current) break;
+          // 暂停门：每张卡片边界检查，暂停中在此等待直到恢复/停止
+          await waitIfBatchPaused();
+          if (batchStopRef.current) break;
           const record = targets[i];
           setBatchCursor(i);
           setSelectedId(record.record_id);
@@ -8344,6 +8587,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           ]);
           break;
         }
+        // 暂停门：每张卡片边界检查，暂停中在此等待直到恢复/停止
+        await waitIfBatchPaused();
+        if (batchStopRef.current) break;
         const record = targets[i];
         let result: Awaited<ReturnType<typeof executeTemplateForRecord>>;
         if (tplHasWebMappings) {
@@ -8887,6 +9133,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     rlog(`[runQueue] 🚀 启动，共 ${taskQueue.length} 个任务`);
 
     queueStopRef.current = false;
+    // 每次启动队列重置暂停态（防止上一轮暂停残留到新一轮）
+    batchPausedRef.current = false;
+    setBatchPaused(false);
     setQueueRunning(true);
     setQueueCursor(-1);
     setHasRunOnce(true); // 跑完 LOOP 后「日志」按钮需要 hasRunOnce 才显示
@@ -8952,7 +9201,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         if ((task.workflowTemplate.customTextEntries?.length ?? 0) > 0) setCustomTextEntries(task.workflowTemplate.customTextEntries!);
         setDocExtractPanel(null);
         // 清空上一任务/教学期残留的文件提取缓存，防止字段对比串行（拿别人的信息检查当前卡）
-        setDocExtractsByRecord({});
+        revokeAllProcBlobs(); // 提取结果整体清空：同步回收全部预览图 blob（已加载的 <img> 不受影响）
+    setDocExtractsByRecord({});
         // 高速模式：同步清掉上一任务残留的后台 OCR 队列/缓存/延后校验
         bgOcrResultRef.current = null;
         bgOcrPromisesRef.current.clear();
@@ -8970,6 +9220,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         const passResults: Array<Awaited<ReturnType<typeof executeTemplateForRecord>>> = [];
 
         for (let ri = 0; ri < targets.length; ri++) {
+          if (queueStopRef.current || batchStopRef.current) break;
+          // 暂停门：每张卡片边界检查，暂停中在此等待直到恢复/停止
+          await waitIfBatchPaused();
           if (queueStopRef.current || batchStopRef.current) break;
 
           const record = targets[ri];
@@ -9101,6 +9354,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         // 此时 AI 管线（OCR+DeepSeek 排版）已在 pass1 期间后台并行堆积完毕，逐人 join 大概率零等待
         const hasReviewStepsP2 = task.workflowTemplate.reviewMarks.length > 0;
         for (let ri = 0; ri < targets.length; ri++) {
+          if (queueStopRef.current || batchStopRef.current) break;
+          // 暂停门：每张卡片边界检查，暂停中在此等待直到恢复/停止
+          await waitIfBatchPaused();
           if (queueStopRef.current || batchStopRef.current) break;
           const record = targets[ri];
           const result = passResults[ri] || { success: false, error: "pass1 未执行（已中断）" } as Awaited<ReturnType<typeof executeTemplateForRecord>>;
@@ -9313,7 +9569,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           entries,
           source: hasProc ? (result.filename || url) : url,
           file_url: hasProc ? (result.filename || url) : url,
-          processed_image: result.processed_image,
+          processed_image: toProcBlobUrl(result.processed_image),
           mrz_warnings: result.mrz_warnings,
           fallback: result.fallback,
         };
@@ -9896,18 +10152,233 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const fieldNames = Object.keys(fieldValueMap).join("、");
     setSuccessToast(`已校正 OCR 值（${fieldNames}）`);
   }, [setDocExtractsByRecord, setLoopReports, setSuccessToast]);
+
+  // ============ 查看问题卡片：手动重提取 / 框选区域识别 ============
+  const [docReextracting, setDocReextracting] = useState(false);
+  const [regionOcrField, setRegionOcrField] = useState<string | null>(null);
+
+  /** 当前卡片 LOOP 配置的文件提取字段清单：提取结果面板据此摆出全部字段框（识别不到也留空白框供人工补录） */
+  const currentExpectedDocFields = (() => {
+    if (!currentRecordId) return [] as string[];
+    const tpl = findTemplateForRecord(currentRecordId);
+    if (!tpl) return [] as string[];
+    return computeDocTargetFields(getTemplateMappings(tpl), tpl.customTextEntries);
+  })();
+
+  /** 画布旋转图片文件（90/180/270 度），返回新 File；0 度原样返回 */
+  const rotateImageFile = useCallback(async (file: File, deg: number): Promise<File> => {
+    const d = ((Math.round(deg) % 360) + 360) % 360;
+    if (d === 0) return file;
+    // createImageBitmap 直接解码 Blob（后台线程解码，比 new Image()+objectURL 快且不占主线程）
+    const bmp = await createImageBitmap(file);
+    try {
+      const swap = d === 90 || d === 270;
+      const canvas = document.createElement("canvas");
+      canvas.width = swap ? bmp.height : bmp.width;
+      canvas.height = swap ? bmp.width : bmp.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("画布不可用");
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate((d * Math.PI) / 180);
+      ctx.drawImage(bmp, -bmp.width / 2, -bmp.height / 2);
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+      if (!blob) throw new Error("图片编码失败");
+      return new File([blob], (file.name || "image").replace(/\.\w+$/, "") + ".jpg", { type: "image/jpeg" });
+    } finally {
+      bmp.close();
+    }
+  }, []);
+
+  /** 某文件当前可用于重提取/框选的图像源：裁切预览图优先，其次 dataUrl/http 原图（仅存文件名时不可用） */
+  const getDocImageSrc = (e: DocExtractState | null | undefined): string => {
+    if (!e) return "";
+    if (e.processed_image) return procImageUrl(e.processed_image);
+    const u = e.file_url || e.source || "";
+    return u.startsWith("data:") || u.startsWith("http") ? u : "";
+  };
+
+  /** 图像源 → File（可选先按预览旋转角转正） */
+  const docImageFile = useCallback(async (src: string, filename: string, rotation: number): Promise<File> => {
+    const resp = await fetch(src);
+    const blob = await resp.blob();
+    const base = new File([blob], filename || "image.jpg", { type: blob.type || "image/jpeg" });
+    return rotateImageFile(base, rotation);
+  }, [rotateImageFile]);
+
+  /** 旋转后全图缓存：同一文件同一旋转角只旋转编码一次。
+   *  用户转正一次后逐字段框选（7 项），没缓存时每框一次都要全图旋转+JPEG 重编码（大图 300~600ms），
+   *  有缓存后第 2 次起近零开销。key=recordId|docIndex，用 src 引用比较防重提取后误用旧图。 */
+  const rotatedFileCacheRef = useRef(new Map<string, { rotation: number; src: string; file: File }>());
+  const docImageFileCached = useCallback(async (recordId: string, docIndex: number, src: string, filename: string, rotation: number): Promise<File> => {
+    const d = ((Math.round(rotation) % 360) + 360) % 360;
+    if (d === 0) return docImageFile(src, filename, 0); // 0° 无旋转开销，无需缓存
+    const key = `${recordId}|${docIndex}`;
+    const hit = rotatedFileCacheRef.current.get(key);
+    if (hit && hit.rotation === d && hit.src === src) return hit.file;
+    const file = await docImageFile(src, filename, d);
+    rotatedFileCacheRef.current.set(key, { rotation: d, src, file });
+    return file;
+  }, [docImageFile]);
+
+  /** 仅重算「文件提取↔Excel 绑定列」比对并更新该卡片报告（网页映射条目保持原样，不读页面） */
+  const recompareDocBindFields = useCallback((recordId: string) => {
+    const tpl = findTemplateForRecord(recordId);
+    const record = cardPool.find((r) => r.record_id === recordId) || records.find((r) => r.record_id === recordId);
+    if (!tpl || !record) return;
+    const rows = compareDocBindEntries(tpl.customTextEntries || customTextEntriesRef.current, record);
+    if (rows.length === 0) return;
+    setLoopReports((prev) => prev.map((rep) => {
+      if (rep.record_id !== recordId) return rep;
+      // 文件提取绑定条目识别：左源 passport + 无网页选择器 + 标签带（Excel·/（文件提取· 标记
+      const isDocBindEntry = (e: VerificationReportEntry) =>
+        e.left_source === "passport" && !e.right_selector && /（(?:Excel|文件提取)·/.test(e.right_label || "");
+      const placed = new Set<number>();
+      const newEntries = rep.entries.map((e) => {
+        if (!isDocBindEntry(e)) return e;
+        const rowIdx = rows.findIndex((r) =>
+          !placed.has(rows.indexOf(r)) && (e.left_field === r.fieldKey || e.left_field === r.label || (e.right_label || "").startsWith(`${r.label}（`)));
+        if (rowIdx < 0) return e;
+        placed.add(rowIdx);
+        const row = rows[rowIdx];
+        return { ...e, left_value: row.ocrVal, right_value: row.excelVal, match: row.match, timestamp: new Date().toISOString() };
+      });
+      // 报告里还没有的绑定行（新增绑定/首次重提）→ 追加
+      rows.forEach((row, i) => {
+        if (placed.has(i)) return;
+        newEntries.push({
+          right_selector: "",
+          right_label: `${row.label}（Excel·${row.excelField}）`,
+          left_source: "passport",
+          left_field: row.fieldKey,
+          left_value: row.ocrVal,
+          right_value: row.excelVal,
+          match: row.match,
+          timestamp: new Date().toISOString(),
+        });
+      });
+      const goodCount = newEntries.filter((x) => x.match === "match" || x.match === "partial").length;
+      const badCount = newEntries.filter((x) => x.match === "mismatch" || x.match === "error").length;
+      const overall: Overall = badCount === 0 ? (rep.mrz_warnings && rep.mrz_warnings.length > 0 ? "review" : "pass") : goodCount === 0 ? "fail" : "review";
+      const summary = badCount === 0 ? (rep.flow === "review" ? "全部一致" : "录入完成") : `${goodCount} 项一致，${badCount} 项不一致`;
+      return { ...rep, entries: newEntries, overall, summary };
+    }));
+  }, [cardPool, records, compareDocBindEntries, setLoopReports]);
+
+  /** 手动重提取：预览转正后点「提取」→ 按当前旋转角重新 OCR + 字段提取 → 更新提取结果并重算绑定字段比对 */
+  const handleReextractDoc = useCallback(async (recordId: string, docIndex: number, rotation: number) => {
+    if (docReextracting) return;
+    const arr = docExtractsByRecordRef.current[recordId] || [];
+    const cur = arr[docIndex];
+    if (!cur) return;
+    const src = getDocImageSrc(cur);
+    if (!src) { setError("该文件没有可重新提取的图像（仅存文件名引用）"); return; }
+    const tpl = findTemplateForRecord(recordId);
+    const targetFields = tpl
+      ? computeDocTargetFields(getTemplateMappings(tpl), tpl.customTextEntries)
+      : (cur.requested_fields || []);
+    const ocrEngineNow = settingsRef.current.ocr_engine || "vision";
+    setDocReextracting(true);
+    setError(null);
+    try {
+      const file = await docImageFileCached(recordId, docIndex, src, cur.filename || "reextract.jpg", rotation);
+      rlog(`[reextract] 手动重提取: ${cur.filename} 旋转${rotation}° 字段${targetFields.length}项 引擎${ocrEngineNow}`);
+      const result = await extractFileWithVisionFallback(file, targetFields, ocrEngineNow);
+      // 整条替换该 docIndex 的提取结果（保留图像源引用），并同步 ref 供重算比对立即读取
+      const prevArr = docExtractsByRecordRef.current[recordId] || [];
+      if (docIndex >= prevArr.length) return;
+      const list = [...prevArr];
+      const oldProc = list[docIndex].processed_image;
+      const nextProc = toProcBlobUrl(result.processed_image) || oldProc;
+      // 被新图替换掉的旧 blob 及时回收（防重提取多次累积）
+      if (nextProc !== oldProc && oldProc && oldProc.startsWith("blob:")) {
+        URL.revokeObjectURL(oldProc);
+        procBlobRegistry.delete(oldProc);
+      }
+      list[docIndex] = {
+        ...list[docIndex],
+        filename: result.filename || list[docIndex].filename,
+        method: result.method,
+        ocr_backend: result.ocr_backend,
+        text: result.text,
+        fields: result.fields,
+        processed_image: nextProc,
+        mrz_warnings: result.mrz_warnings,
+        fallback: result.fallback,
+        pending: false,
+        ai_retry_pending: false,
+        requested_fields: targetFields,
+      };
+      docExtractsByRecordRef.current = { ...docExtractsByRecordRef.current, [recordId]: list };
+      setDocExtractsByRecord((prev) => ({ ...prev, [recordId]: list }));
+      recompareDocBindFields(recordId);
+      const hitCount = Object.values(result.fields || {}).filter((v) => String(v || "").trim()).length;
+      setSuccessToast(`重新提取完成：识别 ${hitCount}/${targetFields.length} 项字段`);
+    } catch (e) {
+      setError(`重新提取失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDocReextracting(false);
+    }
+  }, [docReextracting, docImageFileCached, extractFileWithVisionFallback, computeDocTargetFields, recompareDocBindFields, setError, setSuccessToast]);
+
+  /** 框选区域识别：预览图上拖框 → 按显示比例裁旋转后全图的对应区域 → 纯 OCR → 填入字段 → 重算比对 */
+  const handleRegionOcr = useCallback(async (recordId: string, docIndex: number, field: string, rect: { x: number; y: number; w: number; h: number }, rotation: number) => {
+    const arr = docExtractsByRecordRef.current[recordId] || [];
+    const cur = arr[docIndex];
+    if (!cur) return;
+    const src = getDocImageSrc(cur);
+    if (!src) { setError("该文件没有可识别的图像（仅存文件名引用）"); return; }
+    const ocrEngineNow = settingsRef.current.ocr_engine || "vision";
+    setRegionOcrField(field);
+    try {
+      // 旋转后全图走缓存（转正一次后逐字段框选不再重复全图旋转编码）
+      const file = await docImageFileCached(recordId, docIndex, src, cur.filename || "image.jpg", rotation);
+      // createImageBitmap 后台线程直接解码 File，比 new Image()+objectURL 省一次主线程解码
+      const bmp = await createImageBitmap(file);
+      try {
+        const W = bmp.width, H = bmp.height;
+        // 四周适量外扩：文字贴框边时识别更稳
+        const padX = rect.w * 0.08, padY = rect.h * 0.25;
+        const sx = Math.max(0, Math.floor((rect.x - padX) * W));
+        const sy = Math.max(0, Math.floor((rect.y - padY) * H));
+        const ex = Math.min(W, Math.ceil((rect.x + rect.w + padX) * W));
+        const ey = Math.min(H, Math.ceil((rect.y + rect.h + padY) * H));
+        const sw = Math.max(8, ex - sx), sh = Math.max(8, ey - sy);
+        const canvas = document.createElement("canvas");
+        canvas.width = sw; canvas.height = sh;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("画布不可用");
+        ctx.drawImage(bmp, sx, sy, sw, sh, 0, 0, sw, sh);
+        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.95));
+        if (!blob) throw new Error("裁图失败");
+        rlog(`[region-ocr] 框选识别: ${field} 区域${sw}x${sh} 引擎${ocrEngineNow}`);
+        const res = await api.ocrRegion(new File([blob], `region-${field}.jpg`, { type: "image/jpeg" }), ocrEngineNow);
+        const text = (res.text || "").trim();
+        if (!text) { setError(`框选区域未识别到文字（${FIELD_LABELS[field] || field}），可换个区域重试或点「编辑」手动填入`); return; }
+        handleEditExtractFields(recordId, { [field]: text });
+        recompareDocBindFields(recordId);
+        setSuccessToast(`已识别填入「${FIELD_LABELS[field] || field}」：${text}`);
+      } finally {
+        bmp.close();
+      }
+    } catch (e) {
+      setError(`框选识别失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRegionOcrField(null);
+    }
+  }, [docImageFileCached, handleEditExtractFields, recompareDocBindFields, setError, setSuccessToast]);
+
   const handleConfirmFixes = useCallback(async (
     recordId: string,
     fixKeys: Set<string>,
     confirmKeys: Set<string>,
     _entries: VerificationReportEntry[],
   ) => {
-    if (batchRunning || singleRunning || queueRunning || confirmingRecordId) return;
+    if (batchRunning || singleRunning || queueRunning || confirmingRecordId) return new Set<string>();
     const record = cardPool.find((r) => r.record_id === recordId) || records.find((r) => r.record_id === recordId);
-    if (!record) { setError("找不到该卡片记录"); return; }
+    if (!record) { setError("找不到该卡片记录"); return new Set<string>(); }
     const tpl = findTemplateForRecord(recordId);
     const rep = loopReports.find((x) => x.record_id === recordId);
-    if (!rep) { setError("找不到该卡片的核验报告"); return; }
+    if (!rep) { setError("找不到该卡片的核验报告"); return new Set<string>(); }
     const baseId = toBaseRecordId(recordId);
 
     // 定位条目索引：key 形如 `${left_field||right_label||"field"}-${idx}`，尾部 -N 即 entries 索引
@@ -10096,7 +10567,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       }]);
 
       // 返回已成功应用的 key 集合，供 ResultsPanel 精确迁入 fixedKeys
-      const appliedKeys = new Set<string>(fixKeys.filter((k) => {
+      const appliedKeys = new Set<string>([...fixKeys].filter((k) => {
         const wr = writeResults.get(k);
         return wr && wr.ok;
       }));
@@ -10410,7 +10881,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     if (exportingExcel) return;
     // 卡片池来源侧：右侧 Excel 生成的卡片导右侧，否则导左侧
     const side: "left" | "right" = rightCardsGenerated ? "right" : "left";
-    // 收集需要高亮的字段：只含真正有问题的格子（红/琥珀）+ 用户修好的格子（绿）
+    // 收集需要高亮的字段：只含真正有问题的格子（红/琥珀）+ 用户修好的格子（黄）+ 人工确认的格子（绿）
     // 始终正确的格子（reasoning 不含"已以来源为准修正"或"人工确认"）不传入高亮 → 不填色
     const highlightSignalRe = /已以来源为准修正|人工确认：/;
     const highlights = loopReportsRef.current
@@ -10423,7 +10894,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               e.match === "mismatch" || e.match === "error" || e.match === "missing" || e.match === "partial"
               || (e.match === "match" && highlightSignalRe.test(e.reasoning || ""))
             )
-            .map((e) => [e.left_field, /已以来源为准修正|人工确认：/.test(e.reasoning || "") ? "fixed" : e.match])
+            // 扳手修复（值被改写）→ fixed 亮黄；打勾确认（值未动，人工认可）→ confirmed 绿
+            .map((e) => [e.left_field, /已以来源为准修正/.test(e.reasoning || "") ? "fixed" : /人工确认：/.test(e.reasoning || "") ? "confirmed" : e.match])
         ),
       }))
       .filter((h) => Object.keys(h.fields).length > 0);
@@ -13497,21 +13969,22 @@ type: info.type,
       // 激活右侧网页拾取光标
       window.electronAPI?.viewStartPicking("right");
     }
-    // addingStepMode 下不添加 pick mark，保存映射时才添加 input mark
-    if (addingStepModeRef.current) return;
-    // 记录拾取标记（Excel 单元格）
-    addPickedMark({
-      side: "left",
-      source: "excel",
-      selector: info.field,
-      label: info.field,
-      value: info.value,
-      workflow: teachingPhase === "data-source" ? "data-source" : teachingPhase === "entry" ? "entry" : "review",
-      action: "pick",
-      recordId: selected?.record_id,
-      excelField: info.field,
-      excelRecordId: info.record_id,
-    });
+    // 仅在录入/审查步骤设置阶段打标（高光+序号）；平时浏览数据点格子不打标，
+    // 避免每次点击都 setState 触发 App 整树重渲染（点格子卡顿的来源之一）
+    if (addingStepModeRef.current) {
+      addPickedMark({
+        side: "left",
+        source: "excel",
+        selector: info.field,
+        label: info.field,
+        value: info.value,
+        workflow: teachingPhase === "data-source" ? "data-source" : teachingPhase === "entry" ? "entry" : "review",
+        action: "pick",
+        recordId: selected?.record_id,
+        excelField: info.field,
+        excelRecordId: info.record_id,
+      });
+    }
   };
   // 始终把最新版本的 onExcelPicked 写入 ref，供脱离 Excel 窗口的 IPC handler 调用
   onExcelPickedRef.current = onExcelPicked;
@@ -13562,20 +14035,21 @@ type: info.type,
     if (isEntry && leftViewMode === "web") {
       window.electronAPI?.viewStartPicking("left");
     }
-    if (addingStepModeRef.current) return;
-    // 记录拾取标记（Excel 单元格，side=right 表示来自右侧 Excel）
-    addPickedMark({
-      side: "right",
-      source: "excel",
-      selector: info.field,
-      label: info.field,
-      value: info.value,
-      workflow: teachingPhase === "data-source" ? "data-source" : teachingPhase === "entry" ? "entry" : "review",
-      action: "pick",
-      recordId: selected?.record_id,
-      excelField: info.field,
-      excelRecordId: info.record_id,
-    });
+    // 仅在录入/审查步骤设置阶段打标（与左侧 onExcelPicked 对称）；平时点格子不打标
+    if (addingStepModeRef.current) {
+      addPickedMark({
+        side: "right",
+        source: "excel",
+        selector: info.field,
+        label: info.field,
+        value: info.value,
+        workflow: teachingPhase === "data-source" ? "data-source" : teachingPhase === "entry" ? "entry" : "review",
+        action: "pick",
+        recordId: selected?.record_id,
+        excelField: info.field,
+        excelRecordId: info.record_id,
+      });
+    }
   };
 
   // 同理，把 onLeftPicked / onRightPicked 写入 ref，供脱离浏览器窗口的 IPC handler 调用
@@ -14332,27 +14806,31 @@ type: info.type,
           </button>
         )}
 
-        {appMode !== "review" && batchRunning && (
-          <button
-            onClick={stopBatch}
-            className="flex items-center gap-1 rounded-md bg-rose-600 px-2 py-0.5 text-[11px] font-medium text-white shadow-sm ring-1 ring-rose-300 transition-all hover:bg-rose-700"
-            title="停止批量执行"
-          >
-            <Square className="h-3 w-3" />
-            停止 ({batchCursor + 1}/{batchTargets.length})
-          </button>
-        )}
-
-        {/* 重新配置按钮：配置已完成但想重新设置（仅 LOOP/录入模式显示） */}
-        {appMode !== "review" && teachingPhase === "done" && workflowTemplate && !batchRunning && (
-          <button
-            onClick={startTeaching}
-            className="flex items-center gap-1 rounded-md bg-white/70 px-2 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200 transition-all hover:bg-white hover:text-slate-900"
-            title="重新配置步骤（清除现有模板）"
-          >
-            <Settings2 className="h-3 w-3" />
-            重新配置
-          </button>
+        {(batchRunning || queueRunning) && (
+          <>
+            {/* 暂停/继续：当前卡片跑完后在下一张边界停住；所有模式下运行时都显示 */}
+            <button
+              onClick={toggleBatchPause}
+              className={[
+                "flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-white shadow-sm transition-all",
+                batchPaused
+                  ? "animate-pulse bg-emerald-600 ring-1 ring-emerald-300 hover:bg-emerald-700"
+                  : "bg-amber-500 ring-1 ring-amber-300 hover:bg-amber-600",
+              ].join(" ")}
+              title={batchPaused ? "恢复执行" : "暂停执行（当前卡片跑完后停住）"}
+            >
+              {batchPaused ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
+              {batchPaused ? "继续" : "暂停"} ({batchCursor + 1}/{batchTargets.length})
+            </button>
+            <button
+              onClick={stopBatch}
+              className="flex items-center gap-1 rounded-md bg-rose-600 px-2 py-0.5 text-[11px] font-medium text-white shadow-sm ring-1 ring-rose-300 transition-all hover:bg-rose-700"
+              title="停止批量执行"
+            >
+              <Square className="h-3 w-3" />
+              停止
+            </button>
+          </>
         )}
 
         {/* 新 LOOP 按钮：完全重置所有 LOOP 状态，开始一个全新的 LOOP（仅 LOOP/录入模式显示） */}
@@ -14403,7 +14881,30 @@ type: info.type,
               执行
             </button>
           );
-        })() : (
+        })() : (() => {
+          // 同步左侧面板 LOOP 控制栏的功能：已设 LOOP 卡片时，顶部按钮直接按游标运行前 N 张
+          const loopCards = cardRecords.filter((r) => cardLoopMap[r.record_id]);
+          const anyRunning = running || singleRunning || batchRunning || queueRunning;
+          if (loopCards.length > 0) {
+            const cursorVal = Math.max(1, Math.min(runCursor ?? loopCards.length, loopCards.length));
+            return (
+              <button
+                onClick={handleRunLoopsWithCursor}
+                disabled={anyRunning}
+                className={[
+                  "flex items-center gap-1.5 rounded-md px-3 py-0.5 text-[11px] font-medium text-white transition-all",
+                  anyRunning
+                    ? "cursor-not-allowed bg-slate-400"
+                    : "bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] shadow-sm",
+                ].join(" ")}
+                title={anyRunning ? "核验/LOOP 执行中…" : `运行前 ${cursorVal} 张已设 LOOP 的卡片（与左侧 LOOP 面板游标联动）`}
+              >
+                {anyRunning ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+                {anyRunning ? "运行中" : `运行 ${cursorVal}/${loopCards.length}`}
+              </button>
+            );
+          }
+          return (
           <button
             onClick={start}
             disabled={running || mappings.length === 0 || (!selected && !mappings.every((m) => m.left_source === "database"))}
@@ -14426,7 +14927,8 @@ type: info.type,
             {(running || singleRunning || batchRunning) ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
             {(running || singleRunning || batchRunning) ? "运行中" : "开始核验"}
           </button>
-        )}
+          );
+        })()}
         {waitingManual && (
           <button
             onClick={continueManual}
@@ -14828,7 +15330,7 @@ type: info.type,
                   }
                   headerExtra={
                     <div className="flex items-center gap-0.5">
-                      {rightViewMode === "web" && (
+                      {rightViewMode === "web" && settings.demo_site_enabled === true && (
                         <>
                           <button
                             onClick={() => setRightUrl("http://localhost:8000/demo-review/")}
@@ -15072,6 +15574,11 @@ type: info.type,
                   onFixAllAndRerun={handleFixAllAndRerun}
                   onEditExtractFields={handleEditExtractFields}
                   currentRecordId={currentRecordId}
+                  expectedDocFields={currentExpectedDocFields}
+                  onReextractDoc={handleReextractDoc}
+                  docReextracting={docReextracting}
+                  onRegionOcr={handleRegionOcr}
+                  regionOcrField={regionOcrField}
                   onConfirmFixes={handleConfirmFixes}
                   confirmingRecordId={confirmingRecordId}
                   onExportExcel={handleExportExcel}

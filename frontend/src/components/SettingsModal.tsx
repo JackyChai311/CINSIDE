@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Compass, Cpu, Download, Eye, EyeOff, Film, FolderOpen, Loader2, Maximize2, Minus, MonitorCheck, MonitorOff, Moon, Package, Palette, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, Sparkles, Sun, Target, X, XCircle, Zap } from "lucide-react";
+import { CheckCircle2, Compass, Cpu, Download, Eye, EyeOff, Film, FolderOpen, Globe, Loader2, Maximize2, Minus, MonitorCheck, MonitorOff, Moon, Package, Palette, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, Sparkles, Sun, Target, X, XCircle, Zap } from "lucide-react";
 import { api } from "../api/client";
 import type { AppSettings, DepsStatus, GpuInfo } from "../types";
 
@@ -35,6 +35,7 @@ const DEFAULTS: AppSettings = {
   igpu_acceleration: false,
   ui_scale: 1.0,
   beginner_mode: false,
+  demo_site_enabled: false,
   theme: "light",
   accent: "indigo",
   browser_brightness: 1.0,
@@ -933,6 +934,41 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
                 </div>
                 <p className="mt-0.5 leading-relaxed">
                   开启时显示步骤仪表引导，按步骤逐步配置；关闭后直接使用字段对比面板，三个功能区常开无需切换，适合熟练用户。
+                </p>
+              </div>
+            </label>
+          </div>
+
+          {/* 模拟网页 */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-700">
+              <Globe className="h-3.5 w-3.5 text-brand-600" />
+              模拟网页
+            </div>
+            <label className="flex cursor-pointer items-start gap-2.5">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.demo_site_enabled === true}
+                onClick={() => update({ demo_site_enabled: settings.demo_site_enabled !== true })}
+                className={[
+                  "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors",
+                  settings.demo_site_enabled === true ? "bg-brand-500" : "bg-slate-300",
+                ].join(" ")}
+              >
+                <span
+                  className={[
+                    "inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform",
+                    settings.demo_site_enabled === true ? "translate-x-[18px]" : "translate-x-0.5",
+                  ].join(" ")}
+                />
+              </button>
+              <div className="text-xs text-slate-500">
+                <div className="font-medium text-slate-700">
+                  {settings.demo_site_enabled === true ? "已开启" : "已关闭"}
+                </div>
+                <p className="mt-0.5 leading-relaxed">
+                  开启后右侧网页默认载入内置的模拟学校系统（DEMO 演示站点），并显示「审查DEMO / 录入DEMO」快捷入口，适合演示和练习；关闭后右侧为空白，需自行输入真实的学校系统网址。默认关闭。
                 </p>
               </div>
             </label>

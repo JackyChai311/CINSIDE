@@ -391,20 +391,34 @@ export const api = {
     }, docTimeout(file.name));
   },
 
-  /** 上传本地文件（图片/PDF/Office）提取文字 + 字段；engine 可临时指定 "umi" 或 "vision" */
-  extractDocumentFile: (file: File, fields?: string[], engine?: string) => {
+  /** 上传本地文件（图片/PDF/Office）提取文字 + 字段；engine 可临时指定 "umi" 或 "vision"；forceAiOrient 强制 Vision 精判转正；forceViz 强制识图AI缺字段补提 */
+  extractDocumentFile: (file: File, fields?: string[], engine?: string, forceAiOrient?: boolean, forceViz?: boolean) => {
     const fd = new FormData();
     fd.append("file", file);
     if (fields && fields.length > 0) fd.append("fields", fields.join(","));
     if (engine) fd.append("engine", engine);
+    if (forceAiOrient) fd.append("force_ai_orient", "true");
+    if (forceViz) fd.append("force_viz", "true");
     return jsonFetch<DocumentExtractResult>(`${BASE}/document/extract`, {
       method: "POST",
       body: fd,
     }, docTimeout(file.name)).then(notifyEngineFallback);
   },
 
-  /** 从网页 URL 下载 PDF/图片并提取文字 + 字段；engine 可临时指定 "umi" 或 "vision" */
-  extractDocumentUrl: (url: string, fields?: string[], filename?: string, engine?: string) =>
+  /** 框选区域文字识别：裁好的小图 → 纯 OCR → 单行文本（不过 LLM）；engine 可临时指定引擎 */
+  ocrRegion: (file: File, engine?: string) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (engine) fd.append("engine", engine);
+    return jsonFetch<{ text: string; raw_text: string; fallback?: { from: string; to: string; reason: string } | null }>(
+      `${BASE}/document/ocr-region`,
+      { method: "POST", body: fd },
+      docTimeout(file.name),
+    ).then(notifyEngineFallback);
+  },
+
+  /** 从网页 URL 下载 PDF/图片并提取文字 + 字段；engine 可临时指定 "umi" 或 "vision"；forceAiOrient 强制 Vision 精判转正；forceViz 强制识图AI缺字段补提 */
+  extractDocumentUrl: (url: string, fields?: string[], filename?: string, engine?: string, forceAiOrient?: boolean, forceViz?: boolean) =>
     jsonFetch<DocumentExtractResult>(`${BASE}/document/extract-url`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -413,6 +427,8 @@ export const api = {
         filename: filename || null,
         fields: fields && fields.length > 0 ? fields.join(",") : null,
         engine: engine || null,
+        force_ai_orient: forceAiOrient || false,
+        force_viz: forceViz || false,
       }),
     }, docTimeout(filename)).then(notifyEngineFallback),
 

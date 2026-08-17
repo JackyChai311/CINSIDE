@@ -107,6 +107,8 @@ class LoopAnalysisMismatch(BaseModel):
     source_value: str = ""
     target_value: str = ""
     match: str = ""
+    # 来源类型：excel/database=Excel 表格，passport=文件提取（OCR）——定性「缺件 vs 识别问题」的依据
+    left_source: str = ""
     reasoning: str = ""
 
 
@@ -114,8 +116,63 @@ class LoopAnalysisCard(BaseModel):
     name: str = ""
     overall: str = ""
     summary: str = ""
+    # 执行级错误（LOOP 步骤中断等）：与字段比对不一致是两类问题
+    error: str = ""
+    # 产生报告的流程：entry=录入/提取流，review=审查流
+    flow: str = ""
     mismatches: list[LoopAnalysisMismatch] = []
     mrz_warnings: list[str] = []
+
+
+# 常见 OCR 混淆字符对（单字符差异且命中即判定为识别误差）
+_OCR_CONFUSE_PAIRS = {"O0", "0O", "I1", "1I", "l1", "1l", "Il", "lI", "S5", "5S", "B8", "8B", "Z2", "2Z", "G6", "6G", "U0", "0U"}
+
+
+def _source_label(left_source: str) -> str:
+    """来源类型 → 中文名（分析文案统一口径）。"""
+    s = (left_source or "").lower()
+    if s in ("excel", "database"):
+        return "Excel"
+    if s == "passport":
+        return "文件提取"
+    return "来源"
+
+
+def classify_mismatch(m: LoopAnalysisMismatch) -> str:
+    """把一条不一致项定性为固定类别，供 AI 提示词与本地兜底共用同一套判定语义：
+
+    - 来源为空·Excel：表格该单元格没填 → 缺件/漏填
+    - 来源为空·文件提取：证件文件里没提到该字段（缺件）或 OCR 未识别到（识别问题）
+    - 页面为空：网页侧未读到值（未加载/选择器偏移/页面确实无此字段）
+    - 仅格式差异：大小写/空格/连字符不同，实质一致
+    - 截断：一侧明显是另一侧的前缀/子串 → 识别截断或页面显示不全
+    - OCR 混淆：仅个别字符差异且命中 O/0、I/1 等混淆对 → 识别误差
+    - 实质不一致：两侧都有值且确实不同 → 源数据与页面内容冲突，需人工裁定
+    """
+    src = (m.source_value or "").strip()
+    tgt = (m.target_value or "").strip()
+    src_name = _source_label(m.left_source)
+    if not src and not tgt:
+        return "两侧均为空：提取与页面都未读到值"
+    if not src:
+        if (m.left_source or "").lower() in ("excel", "database"):
+            return f"{src_name}为空：表格中未填写该字段（缺件/漏填）"
+        return f"{src_name}为空：证件文件中未提到该字段（缺件）或 OCR 未识别到（识别问题）"
+    if not tgt:
+        return "页面为空：网页未读到该字段（页面未加载完成/元素选择器偏移/页面确实无此字段）"
+    norm_s = src.lower().replace(" ", "").replace("-", "").replace("'", "")
+    norm_t = tgt.lower().replace(" ", "").replace("-", "").replace("'", "")
+    if norm_s == norm_t:
+        return "仅格式差异（大小写/空格/连字符），实质一致"
+    if norm_s.startswith(norm_t) or norm_t.startswith(norm_s):
+        longer, shorter = (src, tgt) if len(norm_s) > len(norm_t) else (tgt, src)
+        return f"截断差异：「{shorter}」是「{longer}」的前段，较长一侧被截短（识别截断或显示不全）"
+    # 编辑距离很小的单双字符差异 → 检查是否 OCR 混淆对
+    if abs(len(src) - len(tgt)) <= 1:
+        diffs = [f"{a}{b}" for a, b in zip(src, tgt) if a != b]
+        if 0 < len(diffs) <= 2 and all(d in _OCR_CONFUSE_PAIRS for d in diffs):
+            return "识别误差：差异字符命中 OCR 混淆对（如 O/0、I/1），实质大概率为同一值"
+    return "实质不一致：来源与页面值确实不同，需人工裁定哪侧正确"
 
 
 class LoopAnalysisRequest(BaseModel):
@@ -173,10 +230,13 @@ async def loop_analysis(body: LoopAnalysisRequest):
         if problem_cards:
             lines += ["", "问题卡片："]
             for c in problem_cards[:10]:
+                if c.error:
+                    lines.append(f"· {c.name}：执行中断——{c.error}")
+                    continue
                 bad = [m for m in c.mismatches if m.label]
                 if bad:
                     fields = "、".join(
-                        f"{m.label}（来源「{m.source_value or '空'}」≠ 页面「{m.target_value or '空'}」）"
+                        f"{m.label}（{classify_mismatch(m)}）"
                         for m in bad[:4]
                     )
                     lines.append(f"· {c.name}：{fields}")
@@ -186,23 +246,24 @@ async def loop_analysis(body: LoopAnalysisRequest):
             lines += [
                 "",
                 "高频问题字段：" + "、".join(f"{k}（{v} 张卡片）" for k, v in top_fields),
-                "可能原因：网页元素未加载完成导致读取为空、字段映射选择器发生偏移、或源数据与页面数据确实不一致。",
             ]
         mrz_cards = [c for c in cards if c.mrz_warnings]
         if mrz_cards:
-            lines += ["", f"另有 {len(mrz_cards)} 张卡片存在 MRZ 交叉验证警告，建议人工复核证件信息。"]
+            lines += ["", f"另有 {len(mrz_cards)} 张卡片存在 MRZ 交叉验证警告（机读区与视读区不一致，以 MRZ 为准），建议人工复核证件信息。"]
         return "\n".join(lines)
 
     def local_card_summary(c: LoopAnalysisCard) -> str:
         lines = []
+        if c.error:
+            lines.append(f"· 执行中断：{c.error}")
         if c.mismatches:
             for m in c.mismatches[:6]:
-                lines.append(f"· {m.label}：来源「{m.source_value or '空'}」 vs 页面「{m.target_value or '空'}」（{m.match}）")
+                lines.append(f"· {m.label}：{_source_label(m.left_source)}「{m.source_value or '空'}」 vs 页面「{m.target_value or '空'}」→ {classify_mismatch(m)}")
         elif c.mrz_warnings:
             lines += [f"· {w}" for w in c.mrz_warnings[:4]]
         elif c.summary:
             lines.append(f"· {c.summary}")
-        else:
+        elif not lines:
             lines.append("· 未发现不一致字段。")
         return "\n".join(lines)
 
@@ -221,17 +282,22 @@ async def loop_analysis(body: LoopAnalysisRequest):
         c = cards[0]
         mismatch_lines = []
         for m in c.mismatches[:10]:
-            line = f"{m.label}: 来源「{m.source_value or '空'}」 vs 页面「{m.target_value or '空'}」（{m.match}）"
+            # 每条不一致项附系统定性：AI 基于定性输出原因与建议，不再自由猜测
+            line = (
+                f"{m.label}: {_source_label(m.left_source)}「{m.source_value or '空'}」 vs 页面「{m.target_value or '空'}」（{m.match}）"
+                f" → 定性：{classify_mismatch(m)}"
+            )
             if m.reasoning:
                 line += f" 说明：{m.reasoning}"
             mismatch_lines.append(line)
         prompt = (
-            "以下是 LOOP 批量审查运行中刚完成的一张问题卡片数据。请用简洁中文（60~150字）输出该卡片的即时分析：\n"
-            "1. 直接点名哪些字段不一致/有问题（字段名 + 两边值的差异）；\n"
-            "2. 给出最可能的原因（如网页未加载完读取为空、映射选择器偏移、源数据本身有误、OCR 识别误差）；\n"
-            "3. 如有 MRZ 警告需指出。\n"
+            "以下是 LOOP 批量审查运行中刚完成的一张问题卡片数据。每条不一致项后已附系统定性（缺件/识别误差/实质不一致等），请基于定性分析而非重新猜测。用简洁中文（60~150字）输出该卡片的即时分析：\n"
+            "1. 直接点名哪些字段有问题，引用系统定性；\n"
+            "2. 按定性给出处置建议：缺件/漏填→通知申请人补交该材料；识别误差（OCR 混淆/截断）→人工核对证件原图即可，大概率非真实错误；页面为空→检查网页加载或映射选择器是否偏移；实质不一致→需人工裁定哪侧数据正确；\n"
+            "3. 执行中断（如有 error）与字段不一致分开说明；如有 MRZ 警告需指出。\n"
             "直接给结论，不要寒暄，不要自我介绍，不要 Markdown 标题，可用「·」分条。\n\n"
-            f"卡片【{c.name}】结论={c.overall}\n"
+            f"卡片【{c.name}】结论={c.overall}，流程={c.flow or '未知'}\n"
+            + (f"执行错误：{c.error}\n" if c.error else "")
             + (f"摘要：{c.summary}\n" if c.summary else "")
             + ("不一致项：\n" + "\n".join(mismatch_lines) + "\n" if mismatch_lines else "")
             + (f"MRZ警告：{'；'.join(c.mrz_warnings[:3])}" if c.mrz_warnings else "")
@@ -249,9 +315,12 @@ async def loop_analysis(body: LoopAnalysisRequest):
         card_lines = []
         for c in cards:
             entry = f"【{c.name}】结论={c.overall}"
+            if c.error:
+                entry += f"，执行中断：{c.error}"
             if c.mismatches:
+                # 附系统定性：AI 总结时直接引用，保证「缺件 vs 识别问题」口径一致
                 ms = "；".join(
-                    f"{m.label}: 来源「{m.source_value}」vs 页面「{m.target_value}」({m.match})"
+                    f"{m.label}: {_source_label(m.left_source)}「{m.source_value}」vs 页面「{m.target_value}」({m.match})→ {classify_mismatch(m)}"
                     for m in c.mismatches[:8]
                 )
                 entry += f"，不一致项：{ms}"
@@ -259,11 +328,11 @@ async def loop_analysis(body: LoopAnalysisRequest):
                 entry += f"，MRZ警告：{'；'.join(c.mrz_warnings[:3])}"
             card_lines.append(entry)
         prompt = (
-            "以下是一次 LOOP 批量审查的结果数据。请用简洁中文输出一段执行分析（150~250字），包含：\n"
+            "以下是一次 LOOP 批量审查的结果数据。每条不一致项后已附系统定性（缺件/识别误差/实质不一致等），请基于定性分析而非重新猜测。用简洁中文输出一段执行分析（150~250字），包含：\n"
             "1. 一句话总体结论（必须包含处理张数、总用时与平均每张用时，数据在下方统计里）；\n"
-            "2. 哪几张卡片出了什么错（点名卡片和字段）；\n"
-            "3. 高频错误字段；\n"
-            "4. 最可能的原因（例如：网页未加载完成、映射选择器偏移、源数据本身有误）。\n"
+            "2. 哪几张卡片出了什么问题（点名卡片、字段与定性）；\n"
+            "3. 高频错误字段与定性分布（如多为识别误差则整体数据可信度高，多为缺件则需批量通知补交）；\n"
+            "4. 可执行的处置建议（按定性分类给出，例如：缺件→通知补交，识别误差→人工核对原图，页面为空→检查映射配置）。\n"
             "直接给结论，不要寒暄，不要自我介绍，不要 Markdown 标题，可用「·」分条。\n\n"
             f"统计：{stats}\n" + "\n".join(card_lines)
         )

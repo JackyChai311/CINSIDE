@@ -132,7 +132,7 @@ def _apply_records_to_first_sheet(wb, recs, highlights: Optional[dict] = None) -
     yellow_font = Font(color="7F6000", bold=True)
 
     def _hl_cell(cell, status: str) -> None:
-        """按对比状态给单元格上高亮：红=不一致/错误，琥珀=缺失/部分，亮黄=用户已修复。"""
+        """按对比状态给单元格上高亮：红=不一致/错误，琥珀=缺失/部分，亮黄=用户已修复（值被改），绿=人工确认一致（值未动）。"""
         s = (status or "").lower()
         if s in ("mismatch", "error"):
             cell.fill = red_fill
@@ -143,7 +143,7 @@ def _apply_records_to_first_sheet(wb, recs, highlights: Optional[dict] = None) -
         elif s in ("fixed",):
             cell.fill = yellow_fill
             cell.font = yellow_font
-        elif s in ("match",):
+        elif s in ("match", "confirmed"):
             cell.fill = green_fill
             cell.font = green_font
 

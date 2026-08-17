@@ -90,6 +90,24 @@ let isQuitting = false;
 const isDev = !app.isPackaged;
 const BACKEND_PORT = 8000;
 
+// === 单实例锁：防误关把窗口最小化到托盘后，用户再从快捷方式启动 ===
+// 若不开锁会再起一整套 electron（6+ 进程）——旧实例还躺在托盘里，
+// 每"重启"一次进程翻一倍（2026-08-17 用户实测进程越来越多即此因）。
+// 第二实例直接退出并唤起托盘里的旧实例；dev 流程不受影响
+// （dev-clean 启动前先杀光旧 electron，锁永远拿得到）。
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (mainWindow) {
+      if (!mainWindow.isVisible()) mainWindow.show();
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
 function createSplashWindow() {
   splashWindow = new BrowserWindow({
     width: 480,
@@ -2458,6 +2476,9 @@ function stopBackend() {
 }
 
 app.whenReady().then(async () => {
+  // 单实例锁失败时 app.quit() 在 ready 后才生效，whenReady 仍会触发——
+  // 必须立刻返回，否则 startBackend 的端口清理会杀掉第一实例的后端
+  if (!gotSingleInstanceLock) return;
   // 清空 Windows 任务栏跳转列表，移除默认的 "Electron" 分类
   try { app.setJumpList([]); } catch (e) { debugLog(`[jumplist] clear failed: ${e.message}`); }
 

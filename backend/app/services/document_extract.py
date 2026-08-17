@@ -425,7 +425,7 @@ async def _vision_detect_rotation_shared(img, cache_key: str | None) -> int:
         _orientation_inflight.pop(cache_key, None)
 
 
-async def ai_orient_and_enhance(content: bytes, cache_key: str | None = None, allow_vision: bool = True) -> tuple[bytes, str | None]:
+async def ai_orient_and_enhance(content: bytes, cache_key: str | None = None, allow_vision: bool = True, force_ai: bool = False) -> tuple[bytes, str | None]:
     """AI 自动转正（文字朝向检测）+ 小图放大，让 OCR 更好识别。
 
     流程：本地投影法粗判横竖 → 非明确水平时调 Vision 精确判断（0/90/180/270）→ PIL 转正
@@ -433,6 +433,8 @@ async def ai_orient_and_enhance(content: bytes, cache_key: str | None = None, al
 
     cache_key: 原始文件 hash，朝向结果按文件缓存（同文件的预览/正式提取只检测一次）。
     allow_vision: False 时不调 Vision，只做本地粗判且不写缓存。
+    force_ai: 单次调用强制走 Vision 精判（无视「AI 自动转正」开关）——
+    高速模式首轮 OCR 无有效文字后的后台转正重试用；Vision 精判结果照常写缓存。
     预览与正式提取默认都传 True：预览先到则发起检测并写缓存，正式提取命中缓存零等待；
     两者并行时通过 in-flight Future 共享同一次调用——总耗时与只有一方检测相同。
     返回 (处理后 JPEG bytes, base64 预览)；处理失败返回 (原 content, None)。
@@ -447,16 +449,16 @@ async def ai_orient_and_enhance(content: bytes, cache_key: str | None = None, al
         # 日志升级：本地粗判结果/缓存命中/每条决策路径全部落终端 + extract.log，
         # 否则"图片没转正"无从排查（比如粗判误报 horizontal 静默跳过）
         rotated = 0
-        # 缓存读取守卫：与写入守卫对称——只有「AI 自动转正」开着时才允许命中缓存。
+        # 缓存读取守卫：与写入守卫对称——「AI 自动转正」开着或本调用强制精判时才允许命中缓存。
         # 否则跨档串档：第2档（转正开）跑完缓存了 Vision 的 rotate=90，换第3/5档
         # （转正关）重跑同文件 → 命中旧缓存照样转 90°，关掉的开关形同虚设。
-        if cache_key and settings.vision_auto_orient and allow_vision and cache_key in _orientation_cache:
+        if cache_key and allow_vision and (settings.vision_auto_orient or force_ai) and cache_key in _orientation_cache:
             rotated = _orientation_cache[cache_key]
             _flog(f"[ORIENT] 命中缓存 cache={cache_key} → rotate={rotated}")
         else:
-            # 朝向是否调 Vision 只由「AI 自动转正」开关决定（开关是唯一权威）：
-            # 高速模式开启时前端会自动把开关关掉提速；用户手动重新打开 = 明确要转正，必须照办
-            if not settings.vision_auto_orient or not allow_vision:
+            # 朝向是否调 Vision 由「AI 自动转正」开关决定（开关是唯一权威），force_ai 例外：
+            # 高速模式首轮 OCR 失败后的后台重试明确要精判，必须照办。
+            if (not settings.vision_auto_orient and not force_ai) or not allow_vision:
                 # 开关关闭（或预览模式）时：跳过 Vision 朝向检测（省 2~10 秒/张）。
                 # 本地投影法仍做粗判：明确竖排时按惯例转 90°，其余保持原方向。
                 if orientation == "vertical" and confident:
@@ -479,11 +481,11 @@ async def ai_orient_and_enhance(content: bytes, cache_key: str | None = None, al
                 _flog("[ORIENT] 无Vision配置：粗判竖排，默认顺时针转 90°")
             else:
                 _flog(f"[ORIENT] 粗判={orientation} 且无Vision配置 → 保持原方向 rotated=0")
-            # 缓存写入守卫：只固化 Vision 精判结果（开关开 + 已配置 Vision API + 正式提取）。
+            # 缓存写入守卫：只固化 Vision 精判结果（开关开或强制精判 + 已配置 Vision API + 正式提取）。
             # 开关关闭/未配置 Vision 时的本地粗判（如 vertical→90 是猜测，Vision 可能判 0）绝不写缓存——
             # 否则用户重新打开转正（或补配 API）后，同文件命中脏缓存永远不再精判。
             # 预览模式（allow_vision=False）同样不写：粗判结果不固化，正式提取时仍走 Vision 精判。
-            if cache_key and allow_vision and settings.vision_auto_orient and settings.vision_api_key and settings.vision_api_base:
+            if cache_key and allow_vision and (settings.vision_auto_orient or force_ai) and settings.vision_api_key and settings.vision_api_base:
                 while len(_orientation_cache) >= _ORIENT_CACHE_MAX:
                     _orientation_cache.pop(next(iter(_orientation_cache)))
                 _orientation_cache[cache_key] = rotated
@@ -1097,8 +1099,16 @@ def _find_umi_ocr_executable() -> str | None:
 
 
 def _try_launch_umi_ocr() -> bool:
-    """尝试自动启动 UMI-OCR。返回是否成功启动。"""
+    """尝试自动启动 UMI-OCR。返回是否成功启动。
+
+    先查进程：Umi-OCR.exe 已在运行（包括自愈刚拉起的）→ 直接视为已启动返回 True，
+    让调用方走 _wait_for_umi_ocr_ready 等待 HTTP 就绪——否则自愈重启后
+    _umi_ocr_launch_attempted 已置位，后续请求误报「未安装或无法启动」，
+    白白回退 Vision（用户看到"明明开着却用不上"）。
+    """
     global _umi_ocr_launch_attempted, _umi_ocr_process
+    if _find_umi_ocr_pids():
+        return True
     if _umi_ocr_launch_attempted:
         return False
     _umi_ocr_launch_attempted = True
@@ -1215,10 +1225,16 @@ def _auto_heal_umi_ocr() -> None:
 
 
 def _mark_umi_offline() -> None:
-    """真实请求连接失败时失效在线缓存（避免 30s 内继续往假死端口投喂）。"""
-    global _umi_alive_at, _umi_alive_val
+    """真实请求连接失败时失效在线缓存（避免 30s 内继续往假死端口投喂）。
+
+    同时进入 90s 恢复期：识别器崩溃/假死被处理后 UMI 需要时间重新加载模型，
+    期间探测直接判离线（省 2s 探测），请求快速回退 Vision；自愈拉起后
+    90s 一到恢复探测，UMI 就绪即自动重新用上。
+    """
+    global _umi_alive_at, _umi_alive_val, _umi_recover_until
     _umi_alive_at = time.monotonic()
     _umi_alive_val = False
+    _umi_recover_until = time.monotonic() + 90.0
 
 
 # ============ OCR 结果 LRU 缓存 ============
@@ -1252,6 +1268,29 @@ _ocr_inflight: "dict[str, asyncio.Future]" = {}
 # UMI 在线状态节流缓存（_check_umi_ocr_alive 用，30s TTL）
 _umi_alive_at: float | None = None
 _umi_alive_val: bool = True
+# UMI 恢复期截止（monotonic）：识别器崩溃/假死被杀后进入 90s 恢复期——
+# 期间 _check_umi_ocr_alive 直接判离线（跳过 2s 探测），请求快速回退 Vision，
+# 绝不每张图白等 60s 超时；自愈在后台重启 UMI，90s 后恢复探测自动重新用上。
+_umi_recover_until: float = -1e9
+
+# UMI-OCR 是单实例本地服务（一次只能识别一张图）。高速模式/两遍式流水线会并发
+# 发起多个 OCR 请求打到同一个 HTTP 端口——UMI 内部识别器输出被并发请求互相覆盖，
+# 表现为 code=904「识别器输出值反序列化JSON失败，原始内容：[…]」，我们随即误判
+# UMI 失败回退 Vision（用户看到"明明开着却用不上"）。全局信号量把所有 UMI HTTP
+# 调用串行化：UMI 本来一次就处理一张，串行化不损失吞吐，只是把并发变成排队，
+# 彻底消除 904 并发干扰。
+_umi_http_lock = asyncio.Lock()
+
+# UMI 在线探测用 1x1 白图 base64（空 base64 会让部分 UMI 版本返回异常 → 误判离线回退 Vision）
+def _make_umi_probe_b64() -> str:
+    try:
+        from PIL import Image as _PImg
+        _buf = io.BytesIO()
+        _PImg.new("RGB", (1, 1), "white").save(_buf, format="JPEG", quality=85)
+        return base64.b64encode(_buf.getvalue()).decode()
+    except Exception:
+        return ""
+_UMI_PROBE_B64 = _make_umi_probe_b64()
 
 
 async def _call_umi_ocr(content: bytes, want_boxes: bool = False):
@@ -1346,11 +1385,36 @@ async def _ocr_run(content: bytes, cache_key: str) -> tuple[str, list, tuple[int
     # 每张慢 2~3 倍（批量 LOOP 明显劣化），且 det 框变碎导致裁切退化。
     # UMI 流水线本就是 det（缩放图找框）→ 坐标映射回原图 → rec 从原图裁块识别，
     # 小字识别率不受 det 缩放影响；960 默认值是 UMI 多年调好的均衡档。
+    # 全局信号量串行化（单实例 UMI 并发请求会互相干扰 → code=904），
+    # 904 属瞬时并发干扰/引擎半初始化，短等后重试一次即可恢复，不必直接回退 Vision。
+    data = None
     try:
-        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
-            resp = await client.post(url, json={"base64": b64})
-            resp.raise_for_status()
-            data = resp.json()
+        async with _umi_http_lock:
+            for attempt in (0, 1):
+                try:
+                    async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
+                        resp = await client.post(url, json={"base64": b64})
+                        resp.raise_for_status()
+                        data = resp.json()
+                    # 904 = 识别器输出损坏（并发干扰/引擎半初始化）→ 短等重试一次
+                    if data.get("code") == 904 and attempt == 0:
+                        print(f"[UMI-DEBUG] code=904 瞬时异常，1.2s 后重试: {str(data)[:200]}")
+                        _flog("[UMI-DEBUG] code=904 瞬时异常（识别器输出损坏），1.2s 后重试一次")
+                        await asyncio.sleep(1.2)
+                        continue
+                    break
+                except httpx.ConnectError:
+                    raise
+                except httpx.TimeoutException:
+                    raise
+                except httpx.HTTPStatusError:
+                    raise
+                except RuntimeError:
+                    raise
+                except Exception as e:
+                    raise RuntimeError(
+                        f"UMI-OCR 调用失败（请确认已开启 UMI-OCR 的「HTTP接口服务」，地址 {settings.umi_ocr_host}:{settings.umi_ocr_port}）: {e}"
+                    ) from e
     except httpx.ConnectError as e:
         # 假死/离线：失效在线缓存 + 后台自愈（杀假死进程并重新拉起，带 60s 冷却）
         _mark_umi_offline()
@@ -1364,6 +1428,8 @@ async def _ocr_run(content: bytes, cache_key: str) -> tuple[str, list, tuple[int
         raise RuntimeError(f"UMI-OCR 请求超时（60秒，已触发自动恢复）: {e}") from e
     except httpx.HTTPStatusError as e:
         raise RuntimeError(f"UMI-OCR 返回错误状态（HTTP {e.response.status_code}）: {e}") from e
+    except RuntimeError:
+        raise
     except Exception as e:
         raise RuntimeError(
             f"UMI-OCR 调用失败（请确认已开启 UMI-OCR 的「HTTP接口服务」，地址 {settings.umi_ocr_host}:{settings.umi_ocr_port}）: {e}"
@@ -1375,6 +1441,14 @@ async def _ocr_run(content: bytes, cache_key: str) -> tuple[str, list, tuple[int
     if code == 101:
         print(f"[UMI-DEBUG] code=101 no text found. full response: {str(data)[:500]}")
         return "", [], (0, 0), "umi"
+    # 902 = 识别器子进程崩溃（长时间高强度 OCR 后 UMI 子进程内存膨胀崩溃的典型症状）。
+    # 立即失效在线缓存 + 后台自愈杀进程重启；本次快速回退，绝不让半死端口继续拖 60s 超时。
+    if code == 902:
+        print(f"[UMI-DEBUG] code=902 识别器子进程崩溃，触发自愈。full response: {str(data)[:300]}")
+        _flog("[OCR] 识别器子进程崩溃（902），触发自愈重启 UMI-OCR")
+        _mark_umi_offline()
+        asyncio.get_running_loop().run_in_executor(None, _auto_heal_umi_ocr)
+        raise RuntimeError(f"UMI-OCR 识别器子进程崩溃（code=902），已触发自动重启: {str(data)[:200]}")
     if code != 100:
         print(f"[UMI-DEBUG] unexpected code. full response: {str(data)[:500]}")
         raise RuntimeError(f"UMI-OCR 返回异常: {str(data)[:300]}")
@@ -1411,16 +1485,36 @@ async def _check_umi_ocr_alive(force: bool = False) -> bool:
     _ocr_run 每张图都要判断 UMI 在线与否来选引擎，不节流的话 UMI 离线时
     每张图都要白等一次 2s 超时才落内置引擎。
     force=True 绕过缓存（手动「重新检测」/ 自愈入口用）。
+
+    探测用 1x1 真实小图而非空 base64（空串会让部分 UMI 版本直接返回异常，
+    误判离线导致回退 Vision）；探测也走 _umi_http_lock——锁被占用说明有识别
+    正在进行 = 服务在线，直接判在线，避免 UMI 忙时探测超时误判离线。
     """
     global _umi_alive_at, _umi_alive_val
     now = time.monotonic()
+    # 恢复期内直接判离线（省探测等待，快速回退 Vision；自愈后台重启 UMI）
+    if not force and now < _umi_recover_until:
+        return False
     if not force and _umi_alive_at is not None and now - _umi_alive_at < 30.0:
         return _umi_alive_val
     url = f"http://{settings.umi_ocr_host}:{settings.umi_ocr_port}/api/ocr"
     try:
-        async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
-            await client.post(url, json={"base64": ""})
+        # 锁被占用 = 有识别在进行 = 服务在线；最多等 2s，拿不到锁也判在线
+        acquired = False
+        try:
+            await asyncio.wait_for(_umi_http_lock.acquire(), 2.0)
+            acquired = True
+        except asyncio.TimeoutError:
             _umi_alive_val = True
+            _umi_alive_at = now
+            return True
+        try:
+            async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
+                await client.post(url, json={"base64": _UMI_PROBE_B64})
+                _umi_alive_val = True
+        finally:
+            if acquired:
+                _umi_http_lock.release()
     except Exception:
         _umi_alive_val = False
     _umi_alive_at = now
@@ -2903,6 +2997,15 @@ def _build_fields_prompt(text: str, target_fields: list[str]) -> str:
    - 文档同时存在西里尔文等非拉丁原文（如 ДЖУМАНИЯЗОВА）和拉丁转写（DZHUMANIAZOVA，
      含MRZ行）时，一律取拉丁字母版本，不要返回非拉丁文字的值
    - 完整拼写拿不准时优先从 MRZ 行取（P< 开头那行是官方拉丁转写，最可靠）
+8. surname（姓）与 given_name（名）必须严格区分，严禁对调或混填：
+   - 证件可视区的标签决定身份：SURNAME / FAMILY NAME / ФАМИЛИЯ 后面的值是姓；
+     GIVEN NAMES / FIRST NAME / ИМЯ（俄语证件的 ОТЧЕСТВО 父名也归入名）后面的值是名
+   - MRZ 行 P<XXX<SSSSS<<GGGGG<G 结构中：国家码之后、第一个 << 之前是姓，<< 之后全部是名
+   - 可视区与 MRZ 冲突时以 MRZ 行为准；只有 name 字段时按「姓 + 名」顺序组合
+9. 国籍（nationality）必须是真实存在的国家：
+   - 优先取证件上的三字国家码（如 RUS/CHN/USA/GBR），或标准英文国名/国籍词
+     （RUSSIA 与 RUSSIAN 同义，都是 RUS）
+   - OCR 噪声导致值不像任何真实国家时，按最接近的真实国家修正；实在无法确定返回 ""
 """
 
 
@@ -2954,6 +3057,10 @@ def _heal_name_fragments(fields: dict[str, str], text: str) -> dict[str, str]:
 # 文本 LLM 并发上限：两遍式流水线下多人文件的 DeepSeek 排版在后台并行堆积，
 # 不限流会集中打到 API 触发限速（429 重试反而更慢）。3 并发实测兼顾吞吐与稳定
 _llm_semaphore = asyncio.Semaphore(3)
+
+# VIZ 看图并发上限：高速模式下多张卡的缺字段后台补提会并行打到识图 AI，
+# 限 2 并发防触发频率限制（429 重试反而更慢）
+_viz_semaphore = asyncio.Semaphore(2)
 
 
 async def extract_fields_from_text(text: str, target_fields: list[str]) -> dict[str, str]:
@@ -3377,10 +3484,14 @@ async def preview_document(content: bytes, filename: str) -> dict:
     }
 
 
-async def extract_document(content: bytes, filename: str, target_fields: list[str] | None = None, engine: str | None = None) -> dict:
+async def extract_document(content: bytes, filename: str, target_fields: list[str] | None = None, engine: str | None = None, force_ai_orient: bool = False, force_viz: bool = False) -> dict:
     """提取文档文字 + 可选的字段结构化。
 
     engine: 临时覆盖 OCR 引擎（"umi" 或 "vision"），不传则用 settings.ocr_engine。
+    force_ai_orient: 强制走 Vision 精判转正（无视「AI 自动转正」开关）——
+    高速模式首轮 OCR 无有效文字后的后台重试用。
+    force_viz: 强制对缺失的 VIZ 字段看图补提（无视「VIZ 看图兜底」开关）——
+    高速模式下后台用闲置的识图 AI 通道补提缺字段用。
 
     返回: { filename, method, text, fields, processed_image, fallback }
     method: "markitdown" | "vision_ocr" | "umi_ocr" | "pdf_ocr" | "pdf_umi_ocr"
@@ -3421,7 +3532,7 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
         # 开=Vision 精判 0/90/180/270（本地投影法分不出 180° 倒置和 90/270 方向）；
         # 关=全本地，仅高置信竖排转 90°，绝不调识图 AI。
         content, orient_b64 = await ai_orient_and_enhance(
-            content, cache_key=file_hash, allow_vision=True
+            content, cache_key=file_hash, allow_vision=True, force_ai=force_ai_orient
         )
         if orient_b64:
             processed_image = orient_b64
@@ -3461,13 +3572,20 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
         # 垃圾文字层守卫：扫描件 PDF 常带几个~几十个字符的噪声文字层（页眉/水印/乱码），
         # 不足以构成有效内容，必须走 OCR（护照等正常文字层通常有数百字符）
         _PDF_TEXT_LAYER_MIN = 50
-        if text and len(text.strip()) >= _PDF_TEXT_LAYER_MIN:
+        # UMI 引擎（高速模式）不走 markitdown 文字层捷径：PDF 一律渲染成图走 UMI-OCR；
+        # 文字层仅在 OCR 双引擎都失败时兜底（下方 RuntimeError 分支）
+        if text and len(text.strip()) >= _PDF_TEXT_LAYER_MIN and active_engine != "umi":
             # 文字层有效，直接用
             method = "markitdown"
             print(f"[EXTRACT-DEBUG] PDF 文字层提取成功: {filename}, {len(text)} 字符 (MarkItDown，无需OCR)")
         else:
-            # 文字层为空或为垃圾 → 渲染为图片走 OCR
-            print(f"[EXTRACT-DEBUG] PDF 文字层过短（{len(text.strip()) if text else 0} 字符 < {_PDF_TEXT_LAYER_MIN}），渲染为图片走OCR: {filename}, engine={active_engine}")
+            # 文字层为空/为垃圾，或 UMI 引擎强制 OCR → 渲染为图片走 OCR
+            _layer_reason = (
+                "UMI引擎强制OCR（不走文字层）"
+                if active_engine == "umi"
+                else f"文字层过短（{len(text.strip()) if text else 0} 字符 < {_PDF_TEXT_LAYER_MIN}）"
+            )
+            print(f"[EXTRACT-DEBUG] PDF {_layer_reason}，渲染为图片走OCR: {filename}, engine={active_engine}")
             rendered = await asyncio.to_thread(render_pdf_to_image, content, 200)
             if rendered is None:
                 # PyMuPDF 不可用，回退提示
@@ -3481,7 +3599,7 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
                 # AI 自动转正 + 小图放大（扫描件常横放/内容占比小，转正放大后 OCR 更准）
                 # 朝向是否调 Vision 由「AI 自动转正」开关统一决定（与图片路径一致）
                 content, orient_b64 = await ai_orient_and_enhance(
-                    content, cache_key=file_hash, allow_vision=True
+                    content, cache_key=file_hash, allow_vision=True, force_ai=force_ai_orient
                 )
                 if orient_b64:
                     processed_image = orient_b64
@@ -3697,7 +3815,12 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
         ]
         viz_fields: dict[str, str] = {}
         if viz_targets and is_passport and not settings.vision_viz_fallback:
-            if len(viz_targets) == 1 and active_engine == "umi":
+            if force_viz:
+                # 后台缺字段补提（高速模式）：无视兜底开关，所有缺失 VIZ 字段都看一遍
+                msg = f"[VIZ] 后台缺字段补提（force_viz）: {viz_targets}"
+                print(msg, flush=True)
+                _flog(msg)
+            elif len(viz_targets) == 1 and active_engine == "umi":
                 msg = f"[VIZ] UMI-OCR 其他字段齐全，仅缺「{viz_targets[0]}」→ 识图AI 单字段补提（下一张卡片仍为 UMI-OCR）"
                 print(msg, flush=True)
                 _flog(msg)
@@ -3734,9 +3857,10 @@ async def extract_document(content: bytes, filename: str, target_fields: list[st
             # 60 秒上限：VIZ 是兜底手段，超时跳过（字段留空 → 对比时标缺失），
             # 不让单个字段拖死整批 LOOP。SENSENOVA 正常时几秒~几十秒返回
             try:
-                viz_fields = await asyncio.wait_for(
-                    _extract_viz_fields_from_image(viz_image, viz_targets), timeout=60.0
-                )
+                async with _viz_semaphore:
+                    viz_fields = await asyncio.wait_for(
+                        _extract_viz_fields_from_image(viz_image, viz_targets), timeout=60.0
+                    )
             except asyncio.TimeoutError:
                 print(f"[VIZ-TIME] 看图兜底超时（60s），跳过字段: {viz_targets}", flush=True)
                 viz_fields = {}

@@ -13,7 +13,7 @@ import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from ..services.document_extract import extract_document, preview_document
+from ..services.document_extract import extract_document, preview_document, ocr_image_bytes
 from ..services.doc_convert import convert_document
 
 logger = logging.getLogger(__name__)
@@ -113,10 +113,13 @@ async def extract_upload(
     file: UploadFile = File(...),
     fields: Optional[str] = Form(default=None),
     engine: Optional[str] = Form(default=None),
+    force_ai_orient: bool = Form(default=False),
+    force_viz: bool = Form(default=False),
 ):
     """上传本地文件（图片/PDF/Office），提取文字 + 可选字段结构化。
 
     engine: 可选，临时指定 OCR 引擎（"umi" 或 "vision"），不传则用全局设置。
+    force_ai_orient: 强制 Vision 精判转正（高速模式 OCR 失败后的后台重试用）。
     """
     content = await file.read()
     if not content:
@@ -124,7 +127,7 @@ async def extract_upload(
     if len(content) > 30 * 1024 * 1024:
         raise HTTPException(400, "文件过大（>30MB）")
     try:
-        result = await extract_document(content, file.filename or "upload.bin", _parse_fields(fields), engine=engine)
+        result = await extract_document(content, file.filename or "upload.bin", _parse_fields(fields), engine=engine, force_ai_orient=force_ai_orient, force_viz=force_viz)
     except RuntimeError as e:
         msg = _safe_err_msg(e, "提取失败")
         logger.warning("文档提取 RuntimeError: %s\n%s", msg, traceback.format_exc())
@@ -136,11 +139,43 @@ async def extract_upload(
     return result
 
 
+@router.post("/ocr-region")
+async def ocr_region(
+    file: UploadFile = File(...),
+    engine: Optional[str] = Form(default=None),
+):
+    """框选区域文字识别：前端裁好的小图 → 纯 OCR → 拼接单行文本。
+
+    不过 LLM、不做字段结构化——给「手动框选区域识别填入字段」用。
+    engine: 可选，临时指定 OCR 引擎（"umi" 或 "vision"），不传则用全局设置。
+    """
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "empty file")
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(400, "图片过大（>20MB）")
+    try:
+        text, fallback = await ocr_image_bytes(content, engine=engine or None)
+    except RuntimeError as e:
+        msg = _safe_err_msg(e, "区域识别失败")
+        logger.warning("区域OCR RuntimeError: %s", msg)
+        raise HTTPException(500, msg)
+    except Exception as e:
+        msg = _safe_err_msg(e, "区域识别失败")
+        logger.error("区域OCR异常: %s\n%s", msg, traceback.format_exc())
+        raise HTTPException(400, f"区域识别失败: {msg}")
+    # OCR 按行输出，字段值一般单行——拼成单行（空格分隔）方便直接填入字段框
+    one_line = " ".join(t.strip() for t in (text or "").splitlines() if t.strip())
+    return {"text": one_line, "raw_text": text, "fallback": fallback}
+
+
 class ExtractUrlBody(BaseModel):
     url: str
     filename: Optional[str] = None
     fields: Optional[str] = None  # 逗号分隔的目标字段
     engine: Optional[str] = None  # 临时指定 OCR 引擎（"umi" 或 "vision"）
+    force_ai_orient: bool = False  # 强制 Vision 精判转正（高速模式失败重试用）
+    force_viz: bool = False  # 强制 VIZ 缺字段看图补提（高速模式后台补提缺字段用）
 
 
 @router.post("/extract-url")
@@ -192,7 +227,7 @@ async def extract_from_url(body: ExtractUrlBody):
         filename = f"download{ext}"
 
     try:
-        result = await extract_document(content, filename, _parse_fields(body.fields), engine=body.engine)
+        result = await extract_document(content, filename, _parse_fields(body.fields), engine=body.engine, force_ai_orient=body.force_ai_orient, force_viz=body.force_viz)
     except RuntimeError as e:
         msg = _safe_err_msg(e, "提取失败")
         logger.warning("URL文档提取 RuntimeError: %s\n%s", msg, traceback.format_exc())

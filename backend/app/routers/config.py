@@ -49,6 +49,7 @@ class AppSettings(BaseModel):
     umi_ocr_port: int = 1224
     umi_ocr_exe_path: str = ""
     beginner_mode: bool = False
+    demo_site_enabled: bool = False
     prevent_accidental_close: bool = False
     loop_keep_awake: bool = False
     high_speed_mode: bool = False

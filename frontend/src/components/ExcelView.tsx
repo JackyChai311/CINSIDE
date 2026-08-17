@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import {
   Check,
@@ -32,6 +32,186 @@ const STANDARD_FIELDS: { key: string; label: string; Icon: typeof User }[] = [
   { key: "passport_no", label: "护照号", Icon: CreditCard },
   { key: "student_id", label: "学号", Icon: GraduationCap },
 ];
+
+/** 单行 props：全部为原始值或身份稳定引用（memo 浅比较有效） */
+interface ExcelRowProps {
+  record: ApplicantRecord;
+  /** 在 filtered 中的序号（斑马纹用） */
+  idx: number;
+  /** 在完整 records 中的真实序号 */
+  realIdx: number;
+  columns: string[];
+  isSelected: boolean;
+  inRange: boolean;
+  isAnchor: boolean;
+  isActiveRow: boolean;
+  /** 仅活动行传入，非活动行恒为 null（避免 LOOP 逐字段推进时全表重渲染） */
+  activeField: string | null;
+  activeFieldStatus: "pending" | "match" | "mismatch" | "missing" | null;
+  /** 仅活动行传入，非活动行恒为 undefined */
+  rowFieldResults: Record<string, "match" | "mismatch" | "missing"> | undefined;
+  rangeSelecting: boolean;
+  cardsGenerated: boolean;
+  selectedColumn: string | null;
+  picking: boolean;
+  canPick: boolean;
+  /** 本行的拾取标记（field → mark），身份经 reconcile 缓存保持稳定 */
+  rowMarks: Map<string, PickedMark> | undefined;
+  onRowNumClick: (realIdx: number) => void;
+  onLoopCellClick: (realIdx: number) => void;
+  onLoopCellMouseDown: (e: React.MouseEvent, realIdx: number) => void;
+  onPickedField: (info: ExcelPickedField) => void;
+}
+
+/**
+ * Excel 行组件（memo 化）：框选/点选时只有 inRange/isAnchor 等真正变化的行重渲染，
+ * 不再整表（百行×数十列）重渲染——这是 LOOP 列点击/长按多选卡顿的修复核心。
+ */
+const ExcelRow = memo(function ExcelRow({
+  record: r,
+  idx,
+  realIdx,
+  columns,
+  isSelected,
+  inRange,
+  isAnchor,
+  isActiveRow,
+  activeField,
+  activeFieldStatus,
+  rowFieldResults,
+  rangeSelecting,
+  cardsGenerated,
+  selectedColumn,
+  picking,
+  canPick,
+  rowMarks,
+  onRowNumClick,
+  onLoopCellClick,
+  onLoopCellMouseDown,
+  onPickedField,
+}: ExcelRowProps) {
+  return (
+    <tr
+      data-record-id={r.record_id}
+      data-real-idx={realIdx}
+      className={[
+        "transition-colors",
+        isActiveRow
+          ? "bg-slate-200/50"
+          : inRange
+          ? cardsGenerated
+            ? "bg-emerald-50/60"
+            : "bg-indigo-50/70"
+          : isSelected
+          ? "bg-brand-50/60"
+          : idx % 2 === 0
+          ? "bg-white/40"
+          : "bg-slate-50/30",
+      ].join(" ")}
+    >
+      <td
+        onClick={() => onRowNumClick(realIdx)}
+        className={[
+          "px-2 py-1 font-mono text-[10px] transition-colors",
+          rangeSelecting ? "cursor-pointer select-none hover:bg-indigo-100" : "",
+          inRange
+            ? cardsGenerated
+              ? "font-semibold text-emerald-600"
+              : "font-semibold text-indigo-600"
+            : "text-slate-400",
+          isAnchor ? "bg-indigo-200 text-indigo-800" : "",
+        ].join(" ")}
+        title={rangeSelecting ? "点击设定 LOOP 起止行（先点起始行，再点结束行）" : undefined}
+      >
+        {realIdx + 1}
+      </td>
+      {columns.map((c) => {
+        const v = r.fields[c] || "";
+        const display = v || "—";
+        const mark = rowMarks?.get(c);
+        const justPicked = !!mark && Date.now() - mark.createdAt < 2500;
+        const colSelected = selectedColumn === c;
+        // 框选模式下，点击 LOOP 列单元格也能选择范围
+        const isLoopCol = rangeSelecting && c === selectedColumn;
+        // LOOP 审查期：该单元格的比对状态（当前比对中 / 已有结果）
+        const isActiveCell = isActiveRow && !!activeField && c === activeField;
+        const cellReviewResult = isActiveRow ? rowFieldResults?.[c] : undefined;
+        const reviewCellCls = isActiveCell
+          ? activeFieldStatus === "match"
+            ? "bg-emerald-100 outline outline-2 outline-emerald-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(16,185,129,0.22),0_0_14px_rgba(16,185,129,0.45)]"
+            : activeFieldStatus === "mismatch"
+            ? "bg-rose-100 outline outline-2 outline-rose-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(244,63,94,0.22),0_0_14px_rgba(244,63,94,0.45)]"
+            : activeFieldStatus === "missing"
+            ? "bg-amber-100 outline outline-2 outline-amber-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(245,158,11,0.22),0_0_14px_rgba(245,158,11,0.45)]"
+            : "bg-indigo-100 outline outline-2 outline-indigo-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(99,102,241,0.22),0_0_14px_rgba(99,102,241,0.45)] animate-glow-pulse"
+          : cellReviewResult === "match"
+          ? "bg-emerald-50/80 outline outline-1 outline-emerald-300 -outline-offset-1"
+          : cellReviewResult === "mismatch"
+          ? "bg-rose-50/80 outline outline-1 outline-rose-300 -outline-offset-1"
+          : cellReviewResult === "missing"
+          ? "bg-amber-50/80 outline outline-1 outline-amber-300 -outline-offset-1"
+          : "";
+        return (
+          <td
+            key={c}
+            data-real-idx={realIdx}
+            data-field={c}
+            onClick={() => {
+              if (isLoopCol) {
+                onLoopCellClick(realIdx);
+                return;
+              }
+              if (canPick) {
+                console.log("[ExcelView] 单元格点击", { field: c, value: v, recordId: r.record_id, picking });
+                onPickedField({ field: c, value: v, record_id: r.record_id });
+              }
+            }}
+            onMouseDown={isLoopCol ? (e) => onLoopCellMouseDown(e, realIdx) : undefined}
+            className={[
+              "group relative border-b border-slate-100/60 px-2 py-1 align-top transition-all",
+              isLoopCol
+                ? "cursor-pointer hover:bg-indigo-100 hover:ring-1 hover:ring-indigo-300"
+                : picking || canPick
+                ? "cursor-pointer hover:bg-brand-100/70 hover:ring-1 hover:ring-brand-300"
+                : "",
+              mark
+                ? "bg-blue-100/80 outline outline-2 outline-blue-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(59,130,246,0.25),0_0_14px_rgba(59,130,246,0.55)]"
+                : "",
+              colSelected && !mark && !isLoopCol ? "bg-brand-50/60" : "",
+              isLoopCol && inRange ? "bg-indigo-50/70" : "",
+              isLoopCol && isAnchor ? "bg-indigo-200" : "",
+              justPicked ? "animate-glow-pulse" : "",
+              // LOOP 审查期单元格着色优先级最高（覆盖拾取/列选色）
+              reviewCellCls,
+            ].join(" ")}
+            title={
+              isLoopCol
+                ? "点击两格设定起止行（中间行自动框选）；按下鼠标拖拽可连续框选多行"
+                : picking
+                ? `点击拾取字段「${c}」`
+                : mark
+                ? `第 ${mark.order} 个拾取 · ${mark.label}`
+                : display
+            }
+          >
+            <span className={["block max-w-[200px] truncate", v ? "text-slate-700" : "text-slate-300"].join(" ")}>
+              {display}
+            </span>
+            {mark && (
+              <span
+                className="pointer-events-none absolute -left-1 -top-2 z-20 flex h-5 min-w-[20px] items-center justify-center gap-0.5 rounded-sm bg-blue-600 px-1 text-[10px] font-bold text-white shadow-lg ring-1 ring-white whitespace-nowrap"
+                title={`第 ${mark.order} 个拾取 · ${mark.label}`}
+              >
+                {mark.order}
+                {mark.action === "input" && <span className="text-[8px] font-normal opacity-90">输入</span>}
+              </span>
+            )}
+          </td>
+        );
+      })}
+    </tr>
+  );
+});
 
 /** 后端可能作为别名自动添加的标准字段 key 集合（用于过滤重复列） */
 const STANDARD_ALIAS_KEYS = new Set([
@@ -219,17 +399,42 @@ export default function ExcelView({
   // 是否处于行范围框选状态（有生成卡片能力即允许框选；脱离/嵌入只读视图不允许）
   const rangeSelecting = !!onGenerateCards && records.length > 0;
 
+  // ===== 稳定回调（供 memo 化的 ExcelRow 使用，避免每次渲染都换引用导致全表重渲染）=====
+  const rangeAnchorRef = useRef<number | null>(null);
+  rangeAnchorRef.current = rangeAnchor;
+  const rangeSelectingRef = useRef(rangeSelecting);
+  rangeSelectingRef.current = rangeSelecting;
+
   // 点击行号：第一次定起始行，第二次定结束行（自动排序）
-  const handleRowNumClick = (realIdx: number) => {
-    if (!rangeSelecting) return;
-    if (rangeAnchor == null) {
+  const handleRowNumClick = useCallback((realIdx: number) => {
+    if (!rangeSelectingRef.current) return;
+    const anchor = rangeAnchorRef.current;
+    if (anchor == null) {
+      rangeAnchorRef.current = realIdx;
       setRangeAnchor(realIdx);
-      setRowRange({ start: realIdx, end: realIdx });
+      setLocalRange({ start: realIdx, end: realIdx });
     } else {
-      setRowRange({ start: Math.min(rangeAnchor, realIdx), end: Math.max(rangeAnchor, realIdx) });
+      rangeAnchorRef.current = null;
       setRangeAnchor(null);
+      setLocalRange({ start: Math.min(anchor, realIdx), end: Math.max(anchor, realIdx) });
     }
-  };
+  }, []);
+
+  // LOOP 列单元格点击：先消化"拖拽结束后的抑制 click"，否则走两格框选
+  const handleLoopCellClick = useCallback((realIdx: number) => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    handleRowNumClick(realIdx);
+  }, [handleRowNumClick]);
+
+  // 拾取回调稳定化（App 侧回调引用可能随渲染变化，这里用 ref 兜底）
+  const pickedFieldRef = useRef(onPickedField);
+  pickedFieldRef.current = onPickedField;
+  const stablePickedField = useCallback((info: ExcelPickedField) => {
+    pickedFieldRef.current?.(info);
+  }, []);
 
   // 收集所有字段名（保持出现顺序，过滤后端自动添加的标准别名列）
   const columns = useMemo(() => {
@@ -263,16 +468,40 @@ export default function ExcelView({
     });
   }, [records, filter]);
 
-  // 拾取标记索引：recordId+字段名 → mark。避免每个单元格渲染都做 O(marks) 的
-  // find 线性扫描——大表（千行×二十列）+ 多标记时，单次全表渲染就是数万次扫描。
-  const markByKey = useMemo(() => {
-    const m = new Map<string, PickedMark>();
+  // 拾取标记索引：recordId → (字段名 → mark)。两层 Map 按记录分组，
+  // 配合 reconcile 缓存复用未变化行的内层 Map 引用——memo 行的 rowMarks prop 身份稳定，
+  // 新增一个拾取标记时只有目标行重渲染，其余行 memo 直接命中。
+  const marksCacheRef = useRef(new Map<string, Map<string, PickedMark>>());
+  const marksByRecord = useMemo(() => {
+    const grouped = new Map<string, Map<string, PickedMark>>();
     for (const mk of pickedMarks) {
       if (mk.source === "excel" && mk.excelRecordId && mk.excelField) {
-        m.set(`${mk.excelRecordId}	${mk.excelField}`, mk);
+        let inner = grouped.get(mk.excelRecordId);
+        if (!inner) {
+          inner = new Map();
+          grouped.set(mk.excelRecordId, inner);
+        }
+        inner.set(mk.excelField, mk);
       }
     }
-    return m;
+    const prev = marksCacheRef.current;
+    const reconciled = new Map<string, Map<string, PickedMark>>();
+    grouped.forEach((inner, rid) => {
+      const p = prev.get(rid);
+      if (p && p.size === inner.size) {
+        let same = true;
+        inner.forEach((v, k) => {
+          if (p.get(k) !== v) same = false;
+        });
+        if (same) {
+          reconciled.set(rid, p);
+          return;
+        }
+      }
+      reconciled.set(rid, inner);
+    });
+    marksCacheRef.current = reconciled;
+    return reconciled;
   }, [pickedMarks]);
 
   // 表头右键菜单：阻止默认菜单，弹出自定义菜单
@@ -323,8 +552,8 @@ export default function ExcelView({
   // 按下：只记录起点与坐标，不立即提交范围、不设置锚点——
   // 松开时没有明显位移 → 当作一次点击（交给 click 走两格框选）；
   // 位移超过阈值 → 进入拖拽连续框选。
-  const handleLoopCellMouseDown = (e: React.MouseEvent, realIdx: number) => {
-    if (!rangeSelecting) return;
+  const handleLoopCellMouseDown = useCallback((e: React.MouseEvent, realIdx: number) => {
+    if (!rangeSelectingRef.current) return;
     if (e.button !== 0) return; // 仅左键
     e.preventDefault();
     setDragSelecting(true);
@@ -332,7 +561,7 @@ export default function ExcelView({
     dragStartYRef.current = e.clientY;
     didDragRef.current = false;
     suppressClickRef.current = false;
-  };
+  }, []);
 
   // 在 document 上监听 mousemove/mouseup：位移超过阈值视为拖拽。
   // 拖拽期间零 React 渲染——直接操作 DOM class（loop-drag-preview）做预览，
@@ -563,136 +792,38 @@ export default function ExcelView({
                 })}
               </tr>
             </thead>
-            <tbody ref={tbodyRef}>
+            {/* select-none 提到 tbody（user-select 级联到所有单元格）：
+                行组件不再依赖 dragSelecting，mousedown 起手拖拽时整表零行重渲染 */}
+            <tbody ref={tbodyRef} className={dragSelecting ? "select-none" : ""}>
               {filtered.map((r, idx) => {
-                const isSelected = r.record_id === selectedId;
                 const realIdx = recordIndexMap.get(r.record_id) ?? idx;
-                const inRange = !!rowRange && realIdx >= rowRange.start && realIdx <= rowRange.end;
-                const isAnchor = rangeSelecting && rangeAnchor === realIdx;
                 // LOOP 审查期：当前执行行高亮（中性聚焦色，区别于框选/选中色）
                 const isActiveRow = !!activeRecordId && r.record_id === activeRecordId;
                 return (
-                  <tr
+                  <ExcelRow
                     key={r.record_id}
-                    data-record-id={r.record_id}
-                    className={[
-                      "transition-colors",
-                      isActiveRow
-                        ? "bg-slate-200/50"
-                        : inRange
-                        ? cardsGenerated
-                          ? "bg-emerald-50/60"
-                          : "bg-indigo-50/70"
-                        : isSelected
-                        ? "bg-brand-50/60"
-                        : idx % 2 === 0
-                        ? "bg-white/40"
-                        : "bg-slate-50/30",
-                      dragSelecting ? "select-none" : "",
-                    ].join(" ")}
-                  >
-                    <td
-                      onClick={() => handleRowNumClick(realIdx)}
-                      className={[
-                        "px-2 py-1 font-mono text-[10px] transition-colors",
-                        rangeSelecting ? "cursor-pointer select-none hover:bg-indigo-100" : "",
-                        inRange
-                          ? cardsGenerated
-                            ? "font-semibold text-emerald-600"
-                            : "font-semibold text-indigo-600"
-                          : "text-slate-400",
-                        isAnchor ? "bg-indigo-200 text-indigo-800" : "",
-                      ].join(" ")}
-                      title={rangeSelecting ? (rangeAnchor == null ? "点击设为 LOOP 起始行" : "点击设为 LOOP 结束行") : undefined}
-                    >
-                      {realIdx + 1}
-                    </td>
-                    {columns.map((c) => {
-                      const v = r.fields[c] || "";
-                      const display = v || "—";
-                      const mark = markByKey.get(`${r.record_id}	${c}`);
-                      const justPicked = !!mark && Date.now() - mark.createdAt < 2500;
-                      const colSelected = selectedColumn === c;
-                      // 框选模式下，点击 LOOP 列单元格也能选择范围
-                      const isLoopCol = rangeSelecting && c === selectedColumn;
-                      // LOOP 审查期：该单元格的比对状态（当前比对中 / 已有结果）
-                      const isActiveCell = isActiveRow && !!activeField && c === activeField;
-                      const cellReviewResult = isActiveRow ? fieldResults?.[c] : undefined;
-                      const reviewCellCls = isActiveCell
-                        ? activeFieldStatus === "match"
-                          ? "bg-emerald-100 outline outline-2 outline-emerald-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(16,185,129,0.22),0_0_14px_rgba(16,185,129,0.45)]"
-                          : activeFieldStatus === "mismatch"
-                          ? "bg-rose-100 outline outline-2 outline-rose-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(244,63,94,0.22),0_0_14px_rgba(244,63,94,0.45)]"
-                          : activeFieldStatus === "missing"
-                          ? "bg-amber-100 outline outline-2 outline-amber-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(245,158,11,0.22),0_0_14px_rgba(245,158,11,0.45)]"
-                          : "bg-indigo-100 outline outline-2 outline-indigo-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(99,102,241,0.22),0_0_14px_rgba(99,102,241,0.45)] animate-glow-pulse"
-                        : cellReviewResult === "match"
-                        ? "bg-emerald-50/80 outline outline-1 outline-emerald-300 -outline-offset-1"
-                        : cellReviewResult === "mismatch"
-                        ? "bg-rose-50/80 outline outline-1 outline-rose-300 -outline-offset-1"
-                        : cellReviewResult === "missing"
-                        ? "bg-amber-50/80 outline outline-1 outline-amber-300 -outline-offset-1"
-                        : "";
-                      return (
-                        <td
-                          key={c}
-                          data-real-idx={realIdx}
-                          data-field={c}
-                          onClick={() => {
-                            if (isLoopCol) {
-                              // 刚结束一次拖拽：忽略紧随其后的 click，避免误触发两格框选
-                              if (suppressClickRef.current) {
-                                suppressClickRef.current = false;
-                                return;
-                              }
-                              handleRowNumClick(realIdx);
-                              return;
-                            }
-                            if (onPickedField) {
-                              console.log("[ExcelView] 单元格点击", { field: c, value: v, recordId: r.record_id, picking });
-                              onPickedField({ field: c, value: v, record_id: r.record_id });
-                            }
-                          }}
-                          onMouseDown={isLoopCol ? (e) => handleLoopCellMouseDown(e, realIdx) : undefined}
-                          className={[
-                            "group relative border-b border-slate-100/60 px-2 py-1 align-top transition-all",
-                            isLoopCol
-                              ? "cursor-pointer hover:bg-indigo-100 hover:ring-1 hover:ring-indigo-300"
-                              : (picking || onPickedField)
-                              ? "cursor-pointer hover:bg-brand-100/70 hover:ring-1 hover:ring-brand-300"
-                              : "",
-                            mark
-                              ? "bg-blue-100/80 outline outline-2 outline-blue-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(59,130,246,0.25),0_0_14px_rgba(59,130,246,0.55)]"
-                              : "",
-                            colSelected && !mark && !isLoopCol ? "bg-brand-50/60" : "",
-                            isLoopCol && inRange ? "bg-indigo-50/70" : "",
-                            isLoopCol && isAnchor ? "bg-indigo-200" : "",
-                            justPicked ? "animate-glow-pulse" : "",
-                            // LOOP 审查期单元格着色优先级最高（覆盖拾取/列选色）
-                            reviewCellCls,
-                          ].join(" ")}
-                          title={
-                            isLoopCol
-                              ? "点击两格设定起止行（中间行自动框选）；按下鼠标拖拽可连续框选多行"
-                              : (picking ? `点击拾取字段「${c}」` : (mark ? `第 ${mark.order} 个拾取 · ${mark.label}` : display))
-                          }
-                        >
-                          <span className={["block max-w-[200px] truncate", v ? "text-slate-700" : "text-slate-300"].join(" ")}>
-                            {display}
-                          </span>
-                          {mark && (
-                            <span
-                              className="pointer-events-none absolute -left-1 -top-2 z-20 flex h-5 min-w-[20px] items-center justify-center gap-0.5 rounded-sm bg-blue-600 px-1 text-[10px] font-bold text-white shadow-lg ring-1 ring-white whitespace-nowrap"
-                              title={`第 ${mark.order} 个拾取 · ${mark.label}`}
-                            >
-                              {mark.order}
-                              {mark.action === "input" && <span className="text-[8px] font-normal opacity-90">输入</span>}
-                            </span>
-                          )}
-                        </td>
-                      );
-                    })}
-                  </tr>
+                    record={r}
+                    idx={idx}
+                    realIdx={realIdx}
+                    columns={columns}
+                    isSelected={r.record_id === selectedId}
+                    inRange={!!rowRange && realIdx >= rowRange.start && realIdx <= rowRange.end}
+                    isAnchor={rangeSelecting && rangeAnchor === realIdx}
+                    isActiveRow={isActiveRow}
+                    activeField={isActiveRow ? activeField : null}
+                    activeFieldStatus={isActiveRow ? activeFieldStatus : null}
+                    rowFieldResults={isActiveRow ? fieldResults : undefined}
+                    rangeSelecting={rangeSelecting}
+                    cardsGenerated={cardsGenerated}
+                    selectedColumn={selectedColumn ?? null}
+                    picking={picking}
+                    canPick={!!onPickedField}
+                    rowMarks={marksByRecord.get(r.record_id)}
+                    onRowNumClick={handleRowNumClick}
+                    onLoopCellClick={handleLoopCellClick}
+                    onLoopCellMouseDown={handleLoopCellMouseDown}
+                    onPickedField={stablePickedField}
+                  />
                 );
               })}
               {filtered.length === 0 && records.length > 0 && (

@@ -16,6 +16,8 @@ function fieldMatches(field: string, patterns: RegExp): boolean {
 const PHONE_FIELD_RE = /phone|tel|mobile|contact.*number|guardian.*phone/;
 const DATE_FIELD_RE = /date|dob|birth|issue|expiry|expire/;
 const EMAIL_FIELD_RE = /email|mail/;
+const NAME_FIELD_RE = /name|姓名|名字/;
+const NATIONALITY_FIELD_RE = /nationality|citizenship|citizen|国籍/;
 
 /** 电话归一化：去非数字 → 国家码前缀等价处理（取核心10-11位） */
 export function normalizePhone(value: string): string {
@@ -117,6 +119,104 @@ export function normalizeText(value: string): string {
   return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
+/** 国籍别名组：同一国家的三字码/英文国名/国籍形容词/中文名（组首=三字码，作归一锚点）。
+ *  比对常识：RUS = RUSSIA = RUSSIAN = 俄罗斯，同理其他国家。 */
+const NATIONALITY_GROUPS: string[][] = [
+  ["rus", "russia", "russian", "russian federation", "俄罗斯"],
+  ["chn", "china", "chinese", "中国"],
+  ["usa", "united states", "united states of america", "american", "america", "us", "u s", "美国"],
+  ["gbr", "united kingdom", "british", "britain", "great britain", "uk", "u k", "english", "英国"],
+  ["ukr", "ukraine", "ukrainian", "乌克兰"],
+  ["blr", "belarus", "belarusian", "白俄罗斯"],
+  ["kaz", "kazakhstan", "kazakh", "kazakhstani", "哈萨克", "哈萨克斯坦"],
+  ["uzb", "uzbekistan", "uzbek", "乌兹别克", "乌兹别克斯坦"],
+  ["kgz", "kyrgyzstan", "kyrgyz", "吉尔吉斯", "吉尔吉斯斯坦"],
+  ["tjk", "tajikistan", "tajik", "塔吉克", "塔吉克斯坦"],
+  ["tkm", "turkmenistan", "turkmen", "土库曼", "土库曼斯坦"],
+  ["aze", "azerbaijan", "azerbaijani", "阿塞拜疆"],
+  ["arm", "armenia", "armenian", "亚美尼亚"],
+  ["geo", "georgia", "georgian", "格鲁吉亚"],
+  ["mda", "moldova", "moldovan", "摩尔多瓦"],
+  ["jpn", "japan", "japanese", "日本"],
+  ["kor", "south korea", "republic of korea", "korea", "korean", "韩国"],
+  ["prk", "north korea", "north korean", "dprk", "朝鲜"],
+  ["mng", "mongolia", "mongolian", "蒙古"],
+  ["ind", "india", "indian", "印度"],
+  ["idn", "indonesia", "indonesian", "印度尼西亚", "印尼"],
+  ["mys", "malaysia", "malaysian", "马来西亚"],
+  ["sgp", "singapore", "singaporean", "新加坡"],
+  ["tha", "thailand", "thai", "泰国"],
+  ["vnm", "vietnam", "viet nam", "vietnamese", "越南"],
+  ["phl", "philippines", "filipino", "philippine", "菲律宾"],
+  ["mmr", "myanmar", "burma", "burmese", "缅甸"],
+  ["khm", "cambodia", "cambodian", "柬埔寨"],
+  ["lao", "laos", "laotian", "老挝"],
+  ["pak", "pakistan", "pakistani", "巴基斯坦"],
+  ["bgd", "bangladesh", "bangladeshi", "孟加拉国"],
+  ["lka", "sri lanka", "sri lankan", "斯里兰卡"],
+  ["npl", "nepal", "nepali", "nepalese", "尼泊尔"],
+  ["afg", "afghanistan", "afghan", "阿富汗"],
+  ["irn", "iran", "iranian", "伊朗"],
+  ["irq", "iraq", "iraqi", "伊拉克"],
+  ["tur", "turkey", "turkish", "土耳其"],
+  ["sau", "saudi arabia", "saudi", "沙特", "沙特阿拉伯"],
+  ["are", "united arab emirates", "uae", "u a e", "emirati", "阿联酋"],
+  ["isr", "israel", "israeli", "以色列"],
+  ["egy", "egypt", "egyptian", "埃及"],
+  ["nga", "nigeria", "nigerian", "尼日利亚"],
+  ["zaf", "south africa", "south african", "南非"],
+  ["ken", "kenya", "kenyan", "肯尼亚"],
+  ["deu", "germany", "german", "deutschland", "德国"],
+  ["fra", "france", "french", "法国"],
+  ["ita", "italy", "italian", "意大利"],
+  ["esp", "spain", "spanish", "西班牙"],
+  ["prt", "portugal", "portuguese", "葡萄牙"],
+  ["nld", "netherlands", "dutch", "holland", "荷兰"],
+  ["bel", "belgium", "belgian", "比利时"],
+  ["che", "switzerland", "swiss", "瑞士"],
+  ["aut", "austria", "austrian", "奥地利"],
+  ["pol", "poland", "polish", "波兰"],
+  ["cze", "czech republic", "czechia", "czech", "捷克"],
+  ["svk", "slovakia", "slovak", "斯洛伐克"],
+  ["hun", "hungary", "hungarian", "匈牙利"],
+  ["rou", "romania", "romanian", "罗马尼亚"],
+  ["bgr", "bulgaria", "bulgarian", "保加利亚"],
+  ["grc", "greece", "greek", "希腊"],
+  ["srb", "serbia", "serbian", "塞尔维亚"],
+  ["hrv", "croatia", "croatian", "克罗地亚"],
+  ["swe", "sweden", "swedish", "瑞典"],
+  ["nor", "norway", "norwegian", "挪威"],
+  ["dnk", "denmark", "danish", "丹麦"],
+  ["fin", "finland", "finnish", "芬兰"],
+  ["irl", "ireland", "irish", "爱尔兰"],
+  ["est", "estonia", "estonian", "爱沙尼亚"],
+  ["lva", "latvia", "latvian", "拉脱维亚"],
+  ["ltu", "lithuania", "lithuanian", "立陶宛"],
+  ["can", "canada", "canadian", "加拿大"],
+  ["mex", "mexico", "mexican", "墨西哥"],
+  ["bra", "brazil", "brazilian", "巴西"],
+  ["arg", "argentina", "argentine", "argentinian", "阿根廷"],
+  ["col", "colombia", "colombian", "哥伦比亚"],
+  ["per", "peru", "peruvian", "秘鲁"],
+  ["chl", "chile", "chilean", "智利"],
+  ["cub", "cuba", "cuban", "古巴"],
+  ["ven", "venezuela", "venezuelan", "委内瑞拉"],
+  ["aus", "australia", "australian", "澳大利亚"],
+  ["nzl", "new zealand", "new zealander", "新西兰"],
+  ["twn", "taiwan", "taiwanese", "台湾"],
+  ["hkg", "hong kong", "香港"],
+];
+
+/** 国籍归一：识别为已知国家 → 返回三字码锚点；认不出 → 返回 ""（走通用文本比对兜底） */
+export function normalizeNationality(value: string): string {
+  const v = normalizeText(value).replace(/[.,;]+$/, "").trim();
+  if (!v) return "";
+  for (const group of NATIONALITY_GROUPS) {
+    if (group.includes(v)) return group[0];
+  }
+  return "";
+}
+
 /**
  * 格式等价判断：两个值在语义上是否相等（允许格式差异）。
  * field 用于类型提示（可为空字符串，此时按值形态自动推断）。
@@ -174,6 +274,22 @@ export function valuesEquivalent(field: string, a: string, b: string): boolean {
   // 3. 邮箱等价
   if (fieldMatches(field, EMAIL_FIELD_RE) || (va.includes("@") && vb.includes("@"))) {
     return va.toLowerCase() === vb.toLowerCase();
+  }
+
+  // 3.5 姓名等价：忽略全部空格差异（OCR 常丢/增空格，"LI NA" = "LINA"、"RUSKHAN  KRISTINA" = "RUSKHAN KRISTINA"），
+  // 不限长度——短名字走通用文本的 <12 字符完全相等判据会被空格误伤
+  if (fieldMatches(field, NAME_FIELD_RE)) {
+    const na = normalizeText(va).replace(/\s+/g, "");
+    const nb = normalizeText(vb).replace(/\s+/g, "");
+    if (na && na === nb) return true;
+  }
+
+  // 3.6 国籍等价：三字码 = 英文国名 = 国籍形容词（RUS = RUSSIA = RUSSIAN = 俄罗斯），
+  // 双方都识别为已知国家时按归一锚点比较；认不出的落回通用文本比对
+  if (fieldMatches(field, NATIONALITY_FIELD_RE)) {
+    const nna = normalizeNationality(va);
+    const nnb = normalizeNationality(vb);
+    if (nna && nnb) return nna === nnb;
   }
 
   // 4. 通用文本：压缩空白 + 忽略大小写 + 互相包含

@@ -1,13 +1,14 @@
 {
   "name": "cinside-frontend",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.7.1",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
+    "preelectron:dev": "node scripts/dev-clean.cjs",
+    "electron:dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "build:backend": "cd /d ..\\backend && .venv\\Scripts\\pyinstaller.exe cinside-backend.spec --clean --noconfirm",
     "build:backend:mac": "cd ../backend && .venv/bin/pyinstaller cinside-backend.spec --clean --noconfirm",
     "electron:build": "npm run build && npm run build:backend && electron-builder",

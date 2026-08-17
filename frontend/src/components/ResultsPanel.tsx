@@ -12,6 +12,7 @@ import {
   CirclePause,
   AlertOctagon,
   Columns2,
+  Crop,
   Crosshair,
   Database,
   Download,
@@ -32,6 +33,7 @@ import {
   RotateCw,
   Save,
   ScanLine,
+  ScanSearch,
   Settings2,
   Table2,
   Trash2,
@@ -276,6 +278,16 @@ interface Props {
   onEditExtractFields?: (recordId: string, fieldValueMap: Record<string, string>) => void;
   /** 当前正在查看的记录 id（用于将提取结果面板的字段编辑关联到正确的卡片） */
   currentRecordId?: string;
+  /** LOOP 配置的文件提取字段清单：即便识别不到也把字段框摆出来（空白供人工补录） */
+  expectedDocFields?: string[];
+  /** 手动重提取：预览转正后点「提取」按当前旋转角重新提取并重算比对 */
+  onReextractDoc?: (recordId: string, docIndex: number, rotation: number) => void;
+  /** 手动重提取进行中 */
+  docReextracting?: boolean;
+  /** 框选区域识别：预览图上拖框 → 裁图纯 OCR → 填入字段（rect 为相对显示图的 0~1 比例） */
+  onRegionOcr?: (recordId: string, docIndex: number, field: string, rect: { x: number; y: number; w: number; h: number }, rotation: number) => void;
+  /** 正在做区域识别的字段（字段框上的加载态） */
+  regionOcrField?: string | null;
   /** 正在确认批量修正的记录 id（卡片级加载态） */
   confirmingRecordId?: string | null;
   /** 导出修正后的 Excel（按钮显示在「字段对比」标题行，仅结果显示模式） */
@@ -393,6 +405,11 @@ export default function ResultsPanel({
   onFixAllAndRerun,
   onEditExtractFields,
   currentRecordId = "",
+  expectedDocFields = [],
+  onReextractDoc,
+  docReextracting = false,
+  onRegionOcr,
+  regionOcrField = null,
   onConfirmFixes,
   confirmingRecordId = null,
   onExportExcel,
@@ -523,6 +540,11 @@ export default function ResultsPanel({
           onFixAllAndRerun={onFixAllAndRerun}
           onEditExtractFields={onEditExtractFields}
           currentRecordId={currentRecordId}
+          expectedDocFields={expectedDocFields}
+          onReextractDoc={onReextractDoc}
+          docReextracting={docReextracting}
+          onRegionOcr={onRegionOcr}
+          regionOcrField={regionOcrField}
           onConfirmFixes={onConfirmFixes}
           confirmingRecordId={confirmingRecordId}
           onExportExcel={onExportExcel}
@@ -905,6 +927,11 @@ function ReportTab({
   onFixAllAndRerun,
   onEditExtractFields,
   currentRecordId = "",
+  expectedDocFields = [],
+  onReextractDoc,
+  docReextracting = false,
+  onRegionOcr,
+  regionOcrField = null,
   onConfirmFixes,
   confirmingRecordId = null,
   onExportExcel,
@@ -1086,6 +1113,16 @@ function ReportTab({
   onEditExtractFields?: (recordId: string, fieldValueMap: Record<string, string>) => void;
   /** 当前正在查看的记录 id（用于将提取结果面板的字段编辑关联到正确的卡片） */
   currentRecordId?: string;
+  /** LOOP 配置的文件提取字段清单：即便识别不到也把字段框摆出来（空白供人工补录） */
+  expectedDocFields?: string[];
+  /** 手动重提取：预览转正后点「提取」按当前旋转角重新提取并重算比对 */
+  onReextractDoc?: (recordId: string, docIndex: number, rotation: number) => void;
+  /** 手动重提取进行中 */
+  docReextracting?: boolean;
+  /** 框选区域识别：预览图上拖框 → 裁图纯 OCR → 填入字段（rect 为相对显示图的 0~1 比例） */
+  onRegionOcr?: (recordId: string, docIndex: number, field: string, rect: { x: number; y: number; w: number; h: number }, rotation: number) => void;
+  /** 正在做区域识别的字段（字段框上的加载态） */
+  regionOcrField?: string | null;
   /** 正在确认批量修正的记录 id（卡片级加载态） */
   confirmingRecordId?: string | null;
   /** 导出修正后的 Excel（按钮显示在「字段对比」标题行，仅结果显示模式） */
@@ -1137,34 +1174,18 @@ function ReportTab({
   /** 提取结果字段值编辑模式（点击🔧开启，可手动修正 OCR 错读后点「校正」） */
   const [editExtractMode, setEditExtractMode] = useState(false);
   const [editedExtractValues, setEditedExtractValues] = useState<Record<string, string>>({});
-  const startEditExtractFields = () => {
-    const initial: Record<string, string> = {};
-    for (const [f, v] of extractFields) initial[f] = String(v);
-    setEditedExtractValues(initial);
-    setEditExtractMode(true);
-  };
-  const cancelEditExtractFields = () => {
-    setEditExtractMode(false);
-    setEditedExtractValues({});
-  };
-  const commitEditExtractFields = () => {
-    const changes: Record<string, string> = {};
-    for (const [f] of extractFields) {
-      const oldVal = String(docExtract?.fields?.[f] ?? "");
-      const newVal = String(editedExtractValues[f] ?? "");
-      if (newVal !== oldVal) changes[f] = newVal;
-    }
-    if (Object.keys(changes).length === 0) { cancelEditExtractFields(); return; }
-    onEditExtractFields?.(currentRecordId, changes);
-    setEditExtractMode(false);
-    setEditedExtractValues({});
-  };
   const updateEditedExtractValue = (field: string, value: string) => {
     setEditedExtractValues((prev) => ({ ...prev, [field]: value }));
   };
   /** 内嵌文件预览的旋转和缩放（切换文件时重置） */
   const [filePreviewRotation, setFilePreviewRotation] = useState(0);
   const [filePreviewZoom, setFilePreviewZoom] = useState(1);
+  /** 框选区域识别：当前正在框选的字段（非 null 时预览图进入框选模式） */
+  const [regionPickField, setRegionPickField] = useState<string | null>(null);
+  /** 框选橡皮筋（client 坐标） */
+  const [regionRect, setRegionRect] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+  const regionStartRef = useRef<{ x: number; y: number } | null>(null);
+  const filePreviewImgRef = useRef<HTMLImageElement | null>(null);
   /** 预览平移偏移（拖拽移动 / 滚轮缩放时围绕鼠标位置同步调整） */
   const [filePreviewPan, setFilePreviewPan] = useState({ x: 0, y: 0 });
   const [filePreviewDragging, setFilePreviewDragging] = useState(false);
@@ -2424,18 +2445,18 @@ function ReportTab({
     const filtered = filter === "all" ? reports : reports.filter((r) => r.overall === filter);
 
     // 紧凑版筛选 chip：渲染在「字段对比」标题行内（与运行中徽标同一行，跑完不掉下来）
+    // 数量内嵌为「N/总数」，不再单独占一个「共N人」chip；点击已激活 chip 取消筛选回到全部
     const FilterChip = ({ target, label, activeBg, inactiveBg, activeText, inactiveText, activeRing }: { target: typeof filter; label: string; activeBg: string; inactiveBg: string; activeText: string; inactiveText: string; activeRing: string }) => (
-      <button onClick={() => setFilter(target)} className={["shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium transition-all", filter === target ? `${activeBg} ${activeText} ring-2 ${activeRing} shadow-sm` : `${inactiveBg} ${inactiveText} ring-1 ring-transparent hover:ring-slate-300`].join(" ")}>
+      <button onClick={() => setFilter(filter === target ? "all" : target)} className={["shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium transition-all", filter === target ? `${activeBg} ${activeText} ring-2 ${activeRing} shadow-sm` : `${inactiveBg} ${inactiveText} ring-1 ring-transparent hover:ring-slate-300`].join(" ")}>
         {label}
       </button>
     );
 
     headerBadges = (
       <>
-        <FilterChip target="all" label={`共 ${reports.length} 人`} activeBg="bg-slate-800" inactiveBg="bg-slate-200" activeText="text-white" inactiveText="text-slate-600" activeRing="ring-slate-500" />
-        {passCount > 0 && <FilterChip target="pass" label={`✓ 通过 ${passCount}`} activeBg="bg-emerald-500" inactiveBg="bg-emerald-100" activeText="text-white" inactiveText="text-emerald-700" activeRing="ring-emerald-300" />}
-        {reviewCount > 0 && <FilterChip target="review" label={`有问题 ${reviewCount}`} activeBg="bg-amber-500" inactiveBg="bg-amber-100" activeText="text-white" inactiveText="text-amber-700" activeRing="ring-amber-300" />}
-        {failCount > 0 && <FilterChip target="fail" label={`需检查 ${failCount}`} activeBg="bg-rose-500" inactiveBg="bg-rose-100" activeText="text-white" inactiveText="text-rose-700" activeRing="ring-rose-300" />}
+        {(passCount > 0 || filter === "pass") && <FilterChip target="pass" label={`${passCount}/${reports.length} 通过`} activeBg="bg-emerald-500" inactiveBg="bg-emerald-100" activeText="text-white" inactiveText="text-emerald-700" activeRing="ring-emerald-300" />}
+        {(reviewCount > 0 || filter === "review") && <FilterChip target="review" label={`${reviewCount}/${reports.length} 问题`} activeBg="bg-amber-500" inactiveBg="bg-amber-100" activeText="text-white" inactiveText="text-amber-700" activeRing="ring-amber-300" />}
+        {(failCount > 0 || filter === "fail") && <FilterChip target="fail" label={`${failCount}/${reports.length} 需检查`} activeBg="bg-rose-500" inactiveBg="bg-rose-100" activeText="text-white" inactiveText="text-rose-700" activeRing="ring-rose-300" />}
       </>
     );
     fieldContent = <div className="space-y-1.5">{filtered.map((r) => <PersonReportCard key={r.task_id || r.record_id} r={r} />)}</div>;
@@ -2445,16 +2466,15 @@ function ReportTab({
     const filtered = filter === "all" ? sampleReports : sampleReports.filter((r) => r.overall === filter);
 
     const FilterChip = ({ target, label, activeBg, inactiveBg, activeText, inactiveText, activeRing }: { target: typeof filter; label: string; activeBg: string; inactiveBg: string; activeText: string; inactiveText: string; activeRing: string }) => (
-      <button onClick={() => setFilter(target)} className={["rounded-full px-2.5 py-1 text-[11px] font-medium transition-all", filter === target ? `${activeBg} ${activeText} ring-2 ${activeRing} shadow-sm` : `${inactiveBg} ${inactiveText} ring-1 ring-transparent hover:ring-slate-300`].join(" ")}>
+      <button onClick={() => setFilter(filter === target ? "all" : target)} className={["rounded-full px-2.5 py-1 text-[11px] font-medium transition-all", filter === target ? `${activeBg} ${activeText} ring-2 ${activeRing} shadow-sm` : `${inactiveBg} ${inactiveText} ring-1 ring-transparent hover:ring-slate-300`].join(" ")}>
         {label}
       </button>
     );
 
     summaryBar = (
       <div className="mb-3 flex shrink-0 flex-wrap items-center gap-2">
-        <FilterChip target="all" label={`共 ${sampleReports.length} 人`} activeBg="bg-slate-800" inactiveBg="bg-slate-200" activeText="text-white" inactiveText="text-slate-600" activeRing="ring-slate-500" />
-        <FilterChip target="pass" label={`✓ 通过 ${passCount}`} activeBg="bg-emerald-500" inactiveBg="bg-emerald-100" activeText="text-white" inactiveText="text-emerald-700" activeRing="ring-emerald-300" />
-        <FilterChip target="fail" label={`需检查 ${failCount}`} activeBg="bg-rose-500" inactiveBg="bg-rose-100" activeText="text-white" inactiveText="text-rose-700" activeRing="ring-rose-300" />
+        {(passCount > 0 || filter === "pass") && <FilterChip target="pass" label={`${passCount}/${sampleReports.length} 通过`} activeBg="bg-emerald-500" inactiveBg="bg-emerald-100" activeText="text-white" inactiveText="text-emerald-700" activeRing="ring-emerald-300" />}
+        {(failCount > 0 || filter === "fail") && <FilterChip target="fail" label={`${failCount}/${sampleReports.length} 需检查`} activeBg="bg-rose-500" inactiveBg="bg-rose-100" activeText="text-white" inactiveText="text-rose-700" activeRing="ring-rose-300" />}
         <button
           onClick={() => { setShowSample(false); setFilter("all"); }}
           className="ml-auto rounded-md bg-slate-100 px-2 py-1 text-[10px] text-slate-600 hover:bg-slate-200"
@@ -2513,11 +2533,13 @@ function ReportTab({
   const safeDocIdx = docExtracts.length > 0 ? Math.min(activeDocIndex, docExtracts.length - 1) : 0;
   const docExtract = docExtracts[safeDocIdx] || null;
 
-  // 切换文件时重置预览旋转、缩放和平移
+  // 切换文件时重置预览旋转、缩放和平移（并退出框选模式）
   useEffect(() => {
     setFilePreviewRotation(0);
     setFilePreviewZoom(1);
     setFilePreviewPan({ x: 0, y: 0 });
+    setRegionPickField(null);
+    setRegionRect(null);
   }, [docExtract?.file_url, docExtract?.filename]);
 
   // 预览区滚轮缩放：以鼠标位置为中心（原生监听，passive:false 才能阻止页面滚动）
@@ -2653,10 +2675,10 @@ function ReportTab({
       || (!!docExtract?.method && docExtract.method !== "markitdown" && docExtract.method !== "pdf_ocr" && docExtract.method !== "pdf_umi_ocr");
     const isPdfFile = /\.pdf(\?|#|$)/i.test(fileUrl) || docExtract?.method === "pdf_ocr" || docExtract?.method === "pdf_umi_ocr" || (!isImageFile && docExtract?.method === "markitdown");
 
-    // 文件预览区：优先显示预处理后的图片（base64），其次显示原始图片 URL，PDF 显示图标占位
+    // 文件预览区：优先显示预处理后的图片（写入 state 时已转 blob URL；裸 base64 为旧路径兼容），其次显示原始图片 URL，PDF 显示图标占位
     let filePreview: React.ReactNode = null;
     const previewImgSrc = docExtract?.processed_image
-      ? `data:image/jpeg;base64,${docExtract.processed_image}`
+      ? (/^(blob:|data:|https?:)/.test(docExtract.processed_image) ? docExtract.processed_image : `data:image/jpeg;base64,${docExtract.processed_image}`)
       : (isImageFile && fileUrl) ? fileUrl : null;
     if (docExtract) {
       if (previewImgSrc) {
@@ -2711,20 +2733,37 @@ function ReportTab({
               >
                 <ZoomIn className="h-3 w-3" />
               </button>
+              {onReextractDoc && currentRecordId && (
+                <>
+                  <div className="mx-0.5 h-3 w-px bg-slate-300" />
+                  <button
+                    onClick={() => onReextractDoc(currentRecordId, safeDocIdx, filePreviewRotation)}
+                    disabled={docReextracting}
+                    className="flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium text-slate-600 hover:bg-white hover:text-slate-800 disabled:opacity-50"
+                    title="按当前转正角度重新识别全部字段并重算比对（先把图片旋转到正向再点）"
+                  >
+                    {docReextracting ? <Loader2 className="h-3 w-3 animate-spin" /> : <ScanSearch className="h-3 w-3" />}
+                    提取
+                  </button>
+                </>
+              )}
             </div>
             <div
               ref={filePreviewBoxRef}
               className={[
-                "min-h-0 flex-1 touch-none select-none overflow-hidden rounded-md border border-slate-200 bg-slate-50 p-1",
-                filePreviewDragging ? "cursor-grabbing" : "cursor-grab",
+                "relative min-h-0 flex-1 touch-none select-none overflow-hidden rounded-md border bg-slate-50 p-1",
+                regionPickField ? "border-brand-300 cursor-crosshair" : "border-slate-200",
+                !regionPickField && (filePreviewDragging ? "cursor-grabbing" : "cursor-grab"),
               ].join(" ")}
-              title="滚轮缩放 · 按住拖拽平移"
+              title={regionPickField ? `框选「${FIELD_LABELS[regionPickField] || regionPickField}」所在区域` : "滚轮缩放 · 按住拖拽平移"}
               onPointerDown={(e) => {
+                if (regionPickField) return;
                 e.currentTarget.setPointerCapture(e.pointerId);
                 filePreviewDragRef.current = { id: e.pointerId, startX: e.clientX, startY: e.clientY, panX: filePreviewPan.x, panY: filePreviewPan.y };
                 setFilePreviewDragging(true);
               }}
               onPointerMove={(e) => {
+                if (regionPickField) return;
                 const d = filePreviewDragRef.current;
                 if (!d || d.id !== e.pointerId) return;
                 setFilePreviewPan({ x: d.panX + (e.clientX - d.startX), y: d.panY + (e.clientY - d.startY) });
@@ -2734,6 +2773,7 @@ function ReportTab({
             >
               <div className="flex h-full min-h-[220px] items-center justify-center">
                 <img
+                  ref={filePreviewImgRef}
                   src={previewImgSrc}
                   alt={docExtract.filename}
                   draggable={false}
@@ -2751,6 +2791,68 @@ function ReportTab({
                   }}
                 />
               </div>
+              {/* 框选区域识别覆盖层：拖框后按比例换算到显示图坐标（含旋转/缩放/平移），交给上层裁图 OCR */}
+              {regionPickField && (
+                <div
+                  className="absolute inset-0 z-20 cursor-crosshair"
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    regionStartRef.current = { x: e.clientX, y: e.clientY };
+                    setRegionRect({ x1: e.clientX, y1: e.clientY, x2: e.clientX, y2: e.clientY });
+                  }}
+                  onPointerMove={(e) => {
+                    const s = regionStartRef.current;
+                    if (!s) return;
+                    setRegionRect({ x1: s.x, y1: s.y, x2: e.clientX, y2: e.clientY });
+                  }}
+                  onPointerUp={(e) => {
+                    const s = regionStartRef.current;
+                    regionStartRef.current = null;
+                    const rr = regionRect;
+                    setRegionRect(null);
+                    if (!s || !rr || !regionPickField) return;
+                    const imgBox = filePreviewImgRef.current?.getBoundingClientRect();
+                    if (!imgBox || imgBox.width < 4 || imgBox.height < 4) { setRegionPickField(null); return; }
+                    const cx1 = Math.min(rr.x1, rr.x2), cx2 = Math.max(rr.x1, rr.x2);
+                    const cy1 = Math.min(rr.y1, rr.y2), cy2 = Math.max(rr.y1, rr.y2);
+                    // 显示图（getBoundingClientRect 已含全部 transform）→ 0~1 比例
+                    const fx = (cx1 - imgBox.left) / imgBox.width;
+                    const fy = (cy1 - imgBox.top) / imgBox.height;
+                    const fw = (cx2 - cx1) / imgBox.width;
+                    const fh = (cy2 - cy1) / imgBox.height;
+                    const field = regionPickField;
+                    setRegionPickField(null);
+                    // 太小视为误触（<8px），不出识别请求
+                    if (cx2 - cx1 < 8 || cy2 - cy1 < 8) return;
+                    onRegionOcr?.(currentRecordId, safeDocIdx, field, {
+                      x: Math.max(0, Math.min(1, fx)),
+                      y: Math.max(0, Math.min(1, fy)),
+                      w: Math.max(0.01, Math.min(1, fw)),
+                      h: Math.max(0.01, Math.min(1, fh)),
+                    }, filePreviewRotation);
+                  }}
+                  onPointerCancel={() => { regionStartRef.current = null; setRegionRect(null); }}
+                >
+                  {regionRect && (() => {
+                    const box = filePreviewBoxRef.current?.getBoundingClientRect();
+                    if (!box) return null;
+                    const rx = Math.min(regionRect.x1, regionRect.x2) - box.left;
+                    const ry = Math.min(regionRect.y1, regionRect.y2) - box.top;
+                    const rw = Math.abs(regionRect.x2 - regionRect.x1);
+                    const rh = Math.abs(regionRect.y2 - regionRect.y1);
+                    return (
+                      <div
+                        className="pointer-events-none absolute border-2 border-brand-500 bg-brand-400/15"
+                        style={{ left: rx, top: ry, width: rw, height: rh }}
+                      />
+                    );
+                  })()}
+                  <div className="pointer-events-none absolute left-1 top-1 rounded bg-slate-900/75 px-1.5 py-0.5 text-[10px] text-white">
+                    框选「{FIELD_LABELS[regionPickField] || regionPickField}」区域 · 再点字段框上的框选钮取消
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         );
@@ -2798,6 +2900,12 @@ function ReportTab({
             <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-indigo-100 px-1.5 py-0.5 text-[9px] font-medium text-indigo-700">
               <Loader2 className="h-2.5 w-2.5 animate-spin" />
               识别中
+            </span>
+          )}
+          {docExtract.ai_retry_pending && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-medium text-violet-700" title="高速OCR无有效文字，后台AI转正后重试中（比对轮拿到最终结果）">
+              <Loader2 className="h-2.5 w-2.5 animate-spin" />
+              AI转正重试中
             </span>
           )}
         </div>
@@ -2856,20 +2964,41 @@ function ReportTab({
     ) : null;
 
     // 提取结果（文件字段 + 控件字段 + 全文）：可展开/收起，始终绑定在文件预览下方
+    // 字段固定排序（护照字段在前），已提取值与缺失空白框共用同一套顺序
+    const FIELD_ORDER = ["name", "passport_no", "nationality", "birth_date", "gender", "passport_issue", "passport_expiry", "issue_authority", "email", "phone"];
+    const byFieldOrder = (a: string, b: string) => {
+      const ia = FIELD_ORDER.indexOf(a);
+      const ib = FIELD_ORDER.indexOf(b);
+      return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+    };
     const extractFields = docExtract?.fields
       ? Object.entries(docExtract.fields)
           .filter(([, v]) => v && String(v).trim())
-          .sort((a, b) => {
-            const fieldOrder = ["name", "passport_no", "nationality", "birth_date", "gender", "passport_issue", "passport_expiry", "issue_authority", "email", "phone"];
-            const ia = fieldOrder.indexOf(a[0]);
-            const ib = fieldOrder.indexOf(b[0]);
-            return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
-          })
+          .sort((a, b) => byFieldOrder(a[0], b[0]))
       : [];
+    // 请求了但没识别到的字段：也放出来（空白框），方便后期人工手写补录
+    // 字段清单 = 本次提取请求回显 ∪ LOOP 配置的提取字段（即便提取请求没带上字段，7 项也照摆空白框）
+    const expectedAll = Array.from(new Set([...(docExtract?.requested_fields || []), ...expectedDocFields]));
+    const missingFields = expectedAll
+      .filter((f) => !String(docExtract?.fields?.[f] || "").trim())
+      .sort(byFieldOrder);
     const widgetFields = widgetResultFields.filter((w) => w.value && String(w.value).trim());
     const hasExtractText = !!(docExtract?.text && docExtract.text.trim().length > 0);
     const totalFieldCount = extractFields.length + widgetFields.length;
-    const hasExtractResult = docExtract ? (extractFields.length > 0 || hasExtractText) : widgetFields.length > 0;
+    const hasExtractResult = docExtract ? (extractFields.length > 0 || hasExtractText || missingFields.length > 0) : widgetFields.length > 0;
+    // 字段框上的「框选识别」小按钮：点击后预览图进入框选模式，拖框裁图 OCR 后自动填入该字段
+    const regionPickBtn = (field: string) => (onRegionOcr && currentRecordId) ? (
+      <button
+        onClick={(ev) => { ev.stopPropagation(); setRegionPickField((cur) => (cur === field ? null : field)); }}
+        className={[
+          "shrink-0 rounded p-0.5 transition-colors",
+          regionPickField === field ? "bg-brand-100 text-brand-600" : "text-slate-300 hover:bg-slate-100 hover:text-slate-500",
+        ].join(" ")}
+        title="在图片上框选该字段区域，识别后自动填入"
+      >
+        {regionOcrField === field ? <Loader2 className="h-2.5 w-2.5 animate-spin text-brand-500" /> : <Crop className="h-2.5 w-2.5" />}
+      </button>
+    ) : null;
     const extractResultBlock = hasExtractResult ? (
       <div className="mb-2 rounded-md border border-violet-200 bg-violet-50/30">
         <button
@@ -2881,6 +3010,11 @@ function ReportTab({
           {totalFieldCount > 0 && (
             <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-medium text-violet-600">
               {totalFieldCount} 项
+            </span>
+          )}
+          {missingFields.length > 0 && (
+            <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-medium text-slate-500" title="请求了但未识别到的字段，点「编辑」可手动补录">
+              缺 {missingFields.length} 项
             </span>
           )}
           {widgetFields.length > 0 && (
@@ -2898,9 +3032,9 @@ function ReportTab({
               onClick={(ev) => {
                 ev.stopPropagation();
                 if (editExtractMode) {
-                  // 关闭编辑模式 → 提交更改
+                  // 关闭编辑模式 → 提交更改（含缺失字段的手写补录值）
                   const changes: Record<string, string> = {};
-                  for (const [f] of extractFields) {
+                  for (const f of [...extractFields.map(([k]) => k), ...missingFields]) {
                     const oldVal = String(docExtract?.fields?.[f] ?? "");
                     const newVal = String(editedExtractValues[f] ?? "");
                     if (newVal !== oldVal) changes[f] = newVal;
@@ -2911,6 +3045,7 @@ function ReportTab({
                 } else {
                   const initial: Record<string, string> = {};
                   for (const [f, v] of extractFields) initial[f] = String(v);
+                  for (const f of missingFields) initial[f] = "";
                   setEditedExtractValues(initial);
                   setEditExtractMode(true);
                 }
@@ -2942,7 +3077,7 @@ function ReportTab({
                 </button>
               </div>
             )}
-            {totalFieldCount > 0 && (
+            {(totalFieldCount > 0 || missingFields.length > 0) && (
               <div className="grid grid-cols-2 gap-1.5">
                 {extractFields.map(([field, value]) => (
                   <div
@@ -2955,7 +3090,10 @@ function ReportTab({
                         : editExtractMode ? "border-brand-300 ring-1 ring-brand-100" : "border-slate-200",
                     ].join(" ")}
                   >
-                    <div className="text-[9px] font-medium text-slate-400">{FIELD_LABELS[field] || field}</div>
+                    <div className="flex items-center justify-between gap-0.5 text-[9px] font-medium text-slate-400">
+                      <span className="truncate">{FIELD_LABELS[field] || field}</span>
+                      {regionPickBtn(field)}
+                    </div>
                     {editExtractMode ? (
                       <input
                         type="text"
@@ -2965,6 +3103,32 @@ function ReportTab({
                       />
                     ) : (
                       <div className="truncate text-[11px] font-medium text-slate-700" title={String(value)}>{String(value)}</div>
+                    )}
+                  </div>
+                ))}
+                {missingFields.map((field) => (
+                  <div
+                    key={field}
+                    className={[
+                      "rounded border border-dashed bg-white px-1.5 py-1",
+                      editExtractMode ? "border-brand-300 ring-1 ring-brand-100" : "border-slate-300",
+                    ].join(" ")}
+                    title="未识别到该字段，点「编辑」可手动补录"
+                  >
+                    <div className="flex items-center justify-between gap-0.5 text-[9px] font-medium text-slate-400">
+                      <span className="truncate">{FIELD_LABELS[field] || field}</span>
+                      {regionPickBtn(field)}
+                    </div>
+                    {editExtractMode ? (
+                      <input
+                        type="text"
+                        value={editedExtractValues[field] ?? ""}
+                        onChange={(ev) => { updateEditedExtractValue(field, ev.target.value); }}
+                        placeholder="手动补录"
+                        className="min-w-[60px] flex-1 truncate rounded border border-brand-200 bg-white px-1 py-0 text-[11px] font-medium font-mono text-slate-700 outline-none focus:border-brand-400"
+                      />
+                    ) : (
+                      <div className="min-h-[16px] truncate text-[11px] font-medium text-slate-700" />
                     )}
                   </div>
                 ))}
@@ -3219,7 +3383,7 @@ function ReportTab({
     <div className="flex h-full flex-col gap-2 overflow-y-auto p-1.5">
       {/* 前置设置分组 —— 小卡片从左到右排列（含步骤2绑定输入框 + 步骤3前置点击） */}
       <div className="shrink-0">
-        <div className="mb-0 flex items-center gap-1.5 border-b border-slate-100 pb-1.5 text-[11px] font-bold text-slate-700">
+        <div className="mb-0 flex items-center gap-1.5 border-b-2 border-slate-200 pb-1.5 text-[11px] font-bold text-slate-700">
           <MousePointerClick className="h-3.5 w-3.5 text-slate-500" />
           前置设置
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{preClickMarks.length}</span>
@@ -3328,7 +3492,7 @@ function ReportTab({
 
       {/* 审查映射分组 —— 小卡片从左到右排列 */}
       <div className="shrink-0">
-        <div className="mb-0 flex flex-wrap items-center gap-1.5 border-b border-slate-100 pb-1.5 text-[11px] font-bold text-slate-700">
+        <div className="mb-0 flex flex-wrap items-center gap-1.5 border-b-2 border-slate-200 pb-1.5 text-[11px] font-bold text-slate-700">
           <Table2 className="h-3.5 w-3.5 text-slate-500" />
           审查映射
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{reviewMappings.length}</span>
@@ -3465,7 +3629,7 @@ function ReportTab({
 
       {/* 过程点击分组 —— 点击NEXT等中间步骤，位于审查映射与收尾点击之间 */}
       <div className="shrink-0">
-        <div className="mb-0 flex items-center gap-1.5 border-b border-slate-100 pb-1.5 text-[11px] font-bold text-slate-700">
+        <div className="mb-0 flex items-center gap-1.5 border-b-2 border-slate-200 pb-1.5 text-[11px] font-bold text-slate-700">
           <MousePointerClick className="h-3.5 w-3.5 text-slate-500" />
           过程点击
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{processClickMarks.length}</span>
@@ -3538,7 +3702,7 @@ function ReportTab({
 
       {/* 提取元素分组 —— 文件提取/自定义文本/控件小卡片，按设置先后 FIFO 排列（全局观察） */}
       <div className="shrink-0">
-        <div className="mb-0 flex flex-wrap items-center gap-1.5 border-b border-slate-100 pb-1.5 text-[11px] font-bold text-slate-700">
+        <div className="mb-0 flex flex-wrap items-center gap-1.5 border-b-2 border-slate-200 pb-1.5 text-[11px] font-bold text-slate-700">
           <Eye className="h-3.5 w-3.5 text-slate-500" />
           提取元素
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{extractStepSummary.length}</span>
@@ -3633,7 +3797,7 @@ function ReportTab({
 
       {/* 收尾点击分组 —— 小卡片从左到右排列 */}
       <div className="shrink-0">
-        <div className="mb-0 flex items-center gap-1.5 border-b border-slate-100 pb-1.5 text-[11px] font-bold text-slate-700">
+        <div className="mb-0 flex items-center gap-1.5 border-b-2 border-slate-200 pb-1.5 text-[11px] font-bold text-slate-700">
           <MousePointerClick className="h-3.5 w-3.5 text-slate-500" />
           收尾点击
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{postClickMarks.length}</span>
@@ -4217,7 +4381,7 @@ function ReportTab({
             <button
               onClick={() => setExtractSetupMode((v) => !v)}
               className={[
-                "ml-1 flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
+                "ml-auto flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
                 extractSetupMode
                   ? "bg-slate-200 text-slate-700"
                   : "text-slate-400 hover:bg-slate-100 hover:text-slate-600",

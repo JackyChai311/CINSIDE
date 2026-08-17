@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type RefObject } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type RefObject } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -28,6 +28,9 @@ import ExecutionBubbles from "./ExecutionBubbles";
 import PluginPanel from "./PluginPanel";
 
 const SKILL_DRAG_MIME = "application/x-cinside-skill-id";
+
+/** 空列常量：非选列中的卡片一律传同一引用，配合 RecordItem memo 引用比较不炸 */
+const EMPTY_COLUMNS: { key: string; sample: string }[] = [];
 
 /** 后端可能作为别名自动添加的标准字段 key 集合（用于过滤重复列） */
 const STANDARD_ALIAS_KEYS = new Set([
@@ -546,20 +549,23 @@ export default function LeftPanel({
                         {seg.kind === "summary" && seg.stats && (
                           <div className="mb-1.5 flex flex-wrap items-center gap-1">
                             <span className="rounded-full bg-white/80 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">
-                              共处理 {seg.stats.total} 张
-                            </span>
-                            <span className="rounded-full bg-white/80 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">
                               用时 {seg.stats.duration}
                             </span>
-                            <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
-                              通过 {seg.stats.pass}
-                            </span>
-                            <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
-                              有问题 {seg.stats.review}
-                            </span>
-                            <span className="rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] font-medium text-rose-700">
-                              需检查（缺件）{seg.stats.fail}
-                            </span>
+                            {seg.stats.pass > 0 && (
+                              <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
+                                {seg.stats.pass}/{seg.stats.total} 通过
+                              </span>
+                            )}
+                            {seg.stats.review > 0 && (
+                              <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                                {seg.stats.review}/{seg.stats.total} 问题
+                              </span>
+                            )}
+                            {seg.stats.fail > 0 && (
+                              <span className="rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] font-medium text-rose-700">
+                                {seg.stats.fail}/{seg.stats.total} 需检查
+                              </span>
+                            )}
                           </div>
                         )}
                         <div className="whitespace-pre-wrap text-xs leading-relaxed text-slate-700">{seg.text}</div>
@@ -649,8 +655,13 @@ export default function LeftPanel({
                 <span className="font-semibold text-indigo-700">
                   {loopCount} 张已设 LOOP
                 </span>
-                <span className="text-slate-400">·</span>
-                <span className="text-slate-500">{loopIds.size} 个分组</span>
+                {/* 分组数仅在多分组时展示：单分组是常态，显示「1 个分组」纯属占地方 */}
+                {loopIds.size > 1 && (
+                  <>
+                    <span className="text-slate-400">·</span>
+                    <span className="text-slate-500">{loopIds.size} 个分组</span>
+                  </>
+                )}
                 <div className="ml-auto flex items-center gap-0.5">
                   <button
                     onClick={onRunLoopsWithCursor}
@@ -946,8 +957,10 @@ export default function LeftPanel({
                       onRequestPickField={onFieldColumnMapChange ? (field) => handleRequestPickField(r.record_id, field) : undefined}
                       showPicker={pickingAnchorId === r.record_id && !!pickingField}
                       pickerField={pickingField}
-                      availableColumns={availableColumns}
+                      availableColumns={pickingAnchorId === r.record_id && !!pickingField ? availableColumns : EMPTY_COLUMNS}
                       onPickColumn={handlePickColumn}
+                      checkEpoch={checkedIds}
+                      dragEpoch={`${dragId ?? ""}|${dragLoopId ?? ""}`}
                     />
                   </Fragment>
                 );
@@ -961,7 +974,7 @@ export default function LeftPanel({
   );
 }
 
-function RecordItem({
+function RecordItemInner({
   record,
   selected,
   onClick,
@@ -1055,6 +1068,10 @@ function RecordItem({
   availableColumns?: { key: string; sample: string }[];
   /** 用户选完列后的回调 */
   onPickColumn?: (columnKey: string) => void;
+  /** 渲染纪元（不渲染、仅参与 memo 比较）：勾选集引用——勾选变化时全量刷新内联闭包 */
+  checkEpoch?: unknown;
+  /** 渲染纪元：拖拽状态（dragId|dragLoopId）——拖拽开始/结束时全量刷新内联闭包 */
+  dragEpoch?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [skillDragOver, setSkillDragOver] = useState(false);
@@ -1226,6 +1243,9 @@ function RecordItem({
       }}
       onDragEnd={handleSortDragEnd}
       onPaste={handlePasteImage}
+      // 百卡长列表：浏览器自动跳过屏幕外卡片的布局/绘制（DOM 保留、滚动即恢复，零交互差异）；
+      // contain-intrinsic-size 给未渲染卡片一个占位高度，auto 前缀让渲染过的卡片记住真实高度
+      style={{ contentVisibility: "auto", containIntrinsicSize: "auto 96px" }}
     >
       <div
         className={[
@@ -1533,6 +1553,36 @@ function RecordItem({
     </li>
   );
 }
+
+/** 百卡长列表性能核心：memo 自定义比较——数据/视觉 prop 全比引用或值；
+ *  函数 prop（onClick/onCheck/onDragOver 等内联闭包）每轮必变、一律不比，
+ *  其捕获的可变外层值（checkedIds/dragId/dragLoopId）以 checkEpoch/dragEpoch 纪元参与比较：
+ *  勾选或拖拽状态变化时全卡重渲染一次刷新闭包（稀有操作无感），
+ *  LOOP 热路径（字段更新/选中切换/结果回写）只有受影响的 1~2 张卡重渲染。 */
+const RecordItem = memo(RecordItemInner, (prev, next) => (
+  prev.record === next.record
+  && prev.selected === next.selected
+  && prev.result === next.result
+  && prev.batchResult === next.batchResult
+  && prev.runDisabled === next.runDisabled
+  && prev.running === next.running
+  && prev.checked === next.checked
+  && prev.checkable === next.checkable
+  && prev.checkDisabled === next.checkDisabled
+  && prev.isSaved === next.isSaved
+  && prev.draggable === next.draggable
+  && prev.isDragging === next.isDragging
+  && prev.isDragOver === next.isDragOver
+  && prev.isBatchDragging === next.isBatchDragging
+  && prev.loopInfo === next.loopInfo
+  && prev.cardImage === next.cardImage
+  && prev.getFieldValue === next.getFieldValue
+  && prev.showPicker === next.showPicker
+  && prev.pickerField === next.pickerField
+  && prev.availableColumns === next.availableColumns
+  && prev.checkEpoch === next.checkEpoch
+  && prev.dragEpoch === next.dragEpoch
+));
 
 function DetailRow({
   label,

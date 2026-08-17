@@ -178,6 +178,9 @@ export interface AppSettings {
   // 新手模式：开启时显示步骤仪表引导，关闭时直接用字段对比面板且三面板常开
   beginner_mode?: boolean;
 
+  // 模拟网页：开启后右侧网页默认载入内置 DEMO 演示站点（模拟学校系统）并显示 DEMO 快捷入口；默认关闭
+  demo_site_enabled?: boolean;
+
   // 主题：light=浅色 / dark=深色
   theme?: string;
   // 主色调：indigo / sky / emerald / rose / violet / amber
@@ -805,6 +808,10 @@ export interface DocExtractState {
   fallback?: ExtractFallback | null;
   /** 识别中占位：裁切预览先行回填面板，正式提取完成后按 file_url 覆盖为完整结果 */
   pending?: boolean;
+  /** 高速OCR无有效文字 → 后台AI转正重试中（pass2 join 时拿到重试后的最终结果） */
+  ai_retry_pending?: boolean;
+  /** 本次提取请求的目标字段（提取结果面板据此把未识别到的字段也渲染为空白框，供人工补录） */
+  requested_fields?: string[];
 }
 
 // ============ 外挂插件（体外循环） ============
