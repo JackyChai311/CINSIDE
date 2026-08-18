@@ -203,6 +203,24 @@ const getTemplateMappings = (tpl: WorkflowTemplate): FieldMapping[] =>
     ? tpl.mappings
     : deriveMappingsFromMarks([...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks]);
 
+/** 录入流中「值来自 Excel」的输入步骤里，当前卡片对应 Excel 格子为空的步骤列表。
+ *  任一为空 → 整卡跳过（分数未出等场景：不白跑搜索/点击/保存，也避免把半套空数据写进网页）。
+ *  passport 来源的 variableField 不查：其值在执行期由文件提取产出，预判必误判为空；
+ *  键不在 record.fields/passport_fields 里的同理（运行时产出，跳过预判）。 */
+const findEmptyExcelEntryInputs = (tpl: WorkflowTemplate, record: ApplicantRecord): PickedMark[] => {
+  const empties: PickedMark[] = [];
+  for (const m of tpl.entryMarks) {
+    if (m.action !== "input" || !m.variableField || m.source === "passport") continue;
+    const f = m.variableField;
+    const inExcel = f in record.fields;
+    const inPassport = record.passport_fields ? f in record.passport_fields : false;
+    if (!inExcel && !inPassport) continue;
+    const v = record.fields[f] ?? record.passport_fields?.[f] ?? "";
+    if (String(v ?? "").trim() === "") empties.push(m);
+  }
+  return empties;
+};
+
 /** 将 data URL 转换为 File 对象（用于下载文件 OCR 提取） */
 function dataUrlToFile(dataUrl: string, filename: string): File {
   const arr = dataUrl.split(",");
@@ -4065,6 +4083,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       })
       .catch((e) => {
         const msg = e instanceof Error ? e.message : String(e);
+        rlog(`[reextract-alt] ${altEngine} 引擎提取失败: ${msg}（文件=${panel.filename} 图源=${isDataUrl ? "data" : "http"}）`);
         setError(`${extractMethodLabel(altEngine === "umi" ? "umi_ocr" : "vision_ocr")} 提取失败: ${msg}`);
       })
       .finally(() => {
@@ -8283,6 +8302,33 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     generateSingleCardAnalysis(recordId, rec?.fields?.name || "");
   }, [handleSelectCard, records, generateSingleCardAnalysis]);
 
+  /** LOOP 空值跳卡：把该卡片标记为 skipped（左栏卡片显示「跳过」徽标），并写执行日志 */
+  const markCardSkipped = useCallback((record: ApplicantRecord, index: number, total: number, emptyFields: string[]) => {
+    const name = record.fields.name || record.record_id;
+    const fieldList = emptyFields.join("、");
+    rlog(`[batch] 第 ${index + 1} 行跳过: ${name}（Excel 录入值为空: ${fieldList}）`);
+    setSteps((prev) => [
+      ...prev,
+      {
+        step: prev.length + 1,
+        action: "record",
+        description: `LOOP [${index + 1}/${total}] 跳过：${name}（录入值为空: ${fieldList}）`,
+        success: true,
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+    setBatchResults((prev) => ({
+      ...prev,
+      [record.record_id]: {
+        recordId: record.record_id,
+        status: "skipped",
+        startedAt: Date.now(),
+        finishedAt: Date.now(),
+        error: `录入值为空: ${fieldList}`,
+      },
+    }));
+  }, []);
+
   const runBatch = useCallback(async (tplOverride?: WorkflowTemplate, targetIds?: string[]) => {
     // 防重入：已有 LOOP 在执行时忽略重复触发（双击/effect 重放/IPC 重复投递），杜绝"结束后自己又跑一遍"
     if (runBatchInFlightRef.current) {
@@ -8414,6 +8460,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     let failCount = 0;
     let matchCount = 0;
     let mismatchCount = 0;
+    let skippedCount = 0; // 空值跳卡数量（录入值为空主动跳过，不算成功也不算失败）
     const allEntries: VerificationReportEntry[] = [];
     const allComparisons: FieldComparison[] = [];
     // 本次执行的人物报告累积：供结束后 AI 执行分析使用（state 异步，finally 里读不到最新值）
@@ -8502,7 +8549,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       // 从 marks 反推出非空映射（恒 true）。录入+文件提取型 LOOP（hasReviewSteps=false）
       // 的比对是纯内存（fills+提取值vsExcel），延后安全。
       const tplHasWebMappings = hasReviewSteps && getTemplateMappings(tpl).length > 0;
-      const passResults: Array<{ record: ApplicantRecord; i: number; result: Awaited<ReturnType<typeof executeTemplateForRecord>> }> = [];
+      // 跳卡占位结果的类型：复用 executeTemplateForRecord 返回类型 + skipped 标记
+      type PassResult = Awaited<ReturnType<typeof executeTemplateForRecord>> & { skipped?: boolean };
+      const passResults: Array<{ record: ApplicantRecord; i: number; result: PassResult }> = [];
       if (!tplHasWebMappings) {
         for (let i = 0; i < targets.length; i++) {
           if (batchStopRef.current) break;
@@ -8510,6 +8559,14 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           await waitIfBatchPaused();
           if (batchStopRef.current) break;
           const record = targets[i];
+          // 空值跳卡：录入值（Excel 格子）任一为空 → 整卡跳过，不白跑搜索/点击/保存
+          const emptyInputs = findEmptyExcelEntryInputs(tpl, record);
+          if (emptyInputs.length > 0) {
+            skippedCount++;
+            markCardSkipped(record, i, targets.length, emptyInputs.map((m) => m.variableField || m.label));
+            passResults.push({ record, i, result: { success: true, skipped: true } });
+            continue;
+          }
           setBatchCursor(i);
           setSelectedId(record.record_id);
           setExecRecordId(record.record_id);
@@ -8593,6 +8650,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         const record = targets[i];
         let result: Awaited<ReturnType<typeof executeTemplateForRecord>>;
         if (tplHasWebMappings) {
+          // 空值跳卡：录入值（Excel 格子）任一为空 → 整卡跳过，不白跑搜索/点击/保存
+          const emptyInputsW = findEmptyExcelEntryInputs(tpl, record);
+          if (emptyInputsW.length > 0) {
+            skippedCount++;
+            markCardSkipped(record, i, targets.length, emptyInputsW.map((m) => m.variableField || m.label));
+            continue;
+          }
           // 网页字段映射：保持旧逐人时序（比对实时读当前页，不能延后）
           setBatchCursor(i);
           setSelectedId(record.record_id);
@@ -8656,6 +8720,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           // pass2：该人浏览器步骤已在 pass1 跑完，join 后台 AI 管线（OCR+排版已堆积）后构建报告
           const pr = passResults[i];
           if (!pr) break; // pass1 中途被停止
+          if (pr.result.skipped) continue; // 空值跳卡：pass1 已标记 skipped，无需 join/比对/建报告
           setBatchCursor(i);
           setSelectedId(record.record_id);
           setExecRecordId(record.record_id);
@@ -9041,9 +9106,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
       const total = successCount + failCount;
       const overall: Overall = failCount === 0 ? "pass" : "fail";
+      const skippedNote = skippedCount > 0 ? `，跳过 ${skippedCount} 人（录入值为空）` : "";
       const summary = hasReviewSteps
-        ? `LOOP 执行完成：${successCount}/${total} 成功，${failCount} 失败，${matchCount} 匹配，${mismatchCount} 不匹配`
-        : `录入完成：${successCount}/${total} 成功，${failCount} 失败`;
+        ? `LOOP 执行完成：${successCount}/${total} 成功，${failCount} 失败，${matchCount} 匹配，${mismatchCount} 不匹配${skippedNote}`
+        : `录入完成：${successCount}/${total} 成功，${failCount} 失败${skippedNote}`;
 
       setSteps((prev) => [
         ...prev,
@@ -9115,7 +9181,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         void generateLoopAnalysis(collectedReports, Date.now() - Date.parse(startedAt));
       }
     }
-  }, [workflowTemplate, records, cardRecords, selectedId, executeTemplateForRecord, selectMode, avatarMode, exitSelectMode, exitAvatarMode, rightUrl, leftUrl, waitViewReady, generateLoopAnalysis, appendCardAnalysis, joinBgOcrForRecord, compareFieldsForRecord]);
+  }, [workflowTemplate, records, cardRecords, selectedId, executeTemplateForRecord, selectMode, avatarMode, exitSelectMode, exitAvatarMode, rightUrl, leftUrl, waitViewReady, generateLoopAnalysis, appendCardAnalysis, joinBgOcrForRecord, compareFieldsForRecord, markCardSkipped]);
   // 始终把最新版本的 runBatch 写入 ref，供 finishTeachingAndRunBatch 直接调用
   runBatchRef.current = runBatch;
 
@@ -9217,7 +9283,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         // 仅「审查步骤+网页字段映射」的 LOOP 必须旧时序（比对实时读当前页，翻页后读到别人的页面）；
         // getTemplateMappings 会从 marks 反推恒非空，必须叠加 hasReviewSteps 判断（见 runBatch 同款注释）
         const tplHasWebMappingsQ = task.workflowTemplate.reviewMarks.length > 0 && getTemplateMappings(task.workflowTemplate).length > 0;
-        const passResults: Array<Awaited<ReturnType<typeof executeTemplateForRecord>>> = [];
+        type PassResultQ = Awaited<ReturnType<typeof executeTemplateForRecord>> & { skipped?: boolean };
+        const passResults: PassResultQ[] = [];
 
         for (let ri = 0; ri < targets.length; ri++) {
           if (queueStopRef.current || batchStopRef.current) break;
@@ -9226,6 +9293,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           if (queueStopRef.current || batchStopRef.current) break;
 
           const record = targets[ri];
+          // 空值跳卡：录入值（Excel 格子）任一为空 → 整卡跳过，不白跑搜索/点击/保存
+          const emptyInputsQ = findEmptyExcelEntryInputs(task.workflowTemplate, record);
+          if (emptyInputsQ.length > 0) {
+            markCardSkipped(record, ri, targets.length, emptyInputsQ.map((m) => m.variableField || m.label));
+            passResults.push({ success: true, skipped: true });
+            continue;
+          }
           setSelectedId(record.record_id);
           setExecRecordId(record.record_id);
           setBatchCursor(ri);
@@ -9359,7 +9433,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           await waitIfBatchPaused();
           if (queueStopRef.current || batchStopRef.current) break;
           const record = targets[ri];
-          const result = passResults[ri] || { success: false, error: "pass1 未执行（已中断）" } as Awaited<ReturnType<typeof executeTemplateForRecord>>;
+          const result = passResults[ri] || { success: false, error: "pass1 未执行（已中断）" } as PassResultQ;
+          if (result.skipped) continue; // 空值跳卡：pass1 已标记 skipped，无需 join/比对/判定
 
           // 选中该人（UI 联动：字段对比实时卡片/文件面板跟随切换）
           setSelectedId(record.record_id);
@@ -9510,7 +9585,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setBatchCursor(-1);
     setBatchMarkCursor(null);
     rlog("[runQueue] 🏁 队列执行完毕");
-  }, [taskQueue, queueRunning, executeTemplateForRecord, waitViewReady, joinBgOcrForRecord, compareFieldsForRecord]);
+  }, [taskQueue, queueRunning, executeTemplateForRecord, waitViewReady, joinBgOcrForRecord, compareFieldsForRecord, markCardSkipped]);
 
   // 始终把最新版本的 runQueue 写入 ref
   runQueueRef.current = runQueue;
@@ -10199,8 +10274,27 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
   /** 图像源 → File（可选先按预览旋转角转正） */
   const docImageFile = useCallback(async (src: string, filename: string, rotation: number): Promise<File> => {
-    const resp = await fetch(src);
+    let resp: Response;
+    try {
+      resp = await fetch(src);
+    } catch (e) {
+      // fetch 失败给出可读原因：blob 被回收（提取结果清空/重跑后旧 URL 失效，<img> 还能显示但 fetch 不到）
+      // 或 http 图源跨域/断网——原生 "Failed to fetch" 对用户毫无意义
+      if (src.startsWith("blob:")) {
+        throw new Error("预览图数据已被清理（重新运行/清空提取结果后旧图失效），请重新上传或重新下载该文件后再提取");
+      }
+      if (src.startsWith("http")) {
+        throw new Error(`网页图像拉取失败（${new URL(src).host}）：${e instanceof Error ? e.message : String(e)}——可能是网络断开或目标站点拒绝访问`);
+      }
+      throw e;
+    }
+    if (!resp.ok) {
+      throw new Error(`图像读取失败（HTTP ${resp.status}）：${src.startsWith("http") ? new URL(src).host : "本地预览图"}`);
+    }
     const blob = await resp.blob();
+    if (!blob.size) {
+      throw new Error("图像数据为空（0 字节），无法重新提取");
+    }
     const base = new File([blob], filename || "image.jpg", { type: blob.type || "image/jpeg" });
     return rotateImageFile(base, rotation);
   }, [rotateImageFile]);
@@ -10279,10 +10373,14 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const ocrEngineNow = settingsRef.current.ocr_engine || "vision";
     setDocReextracting(true);
     setError(null);
+    const _srcKind = src.startsWith("blob:") ? "blob" : src.startsWith("data:") ? "data" : src.startsWith("http") ? "http" : "unknown";
+    rlog(`[reextract] 手动重提取开始: ${cur.filename} 旋转${rotation}° 字段${targetFields.length}项 引擎${ocrEngineNow} 图源=${_srcKind}`);
+    const _t0 = performance.now();
     try {
       const file = await docImageFileCached(recordId, docIndex, src, cur.filename || "reextract.jpg", rotation);
-      rlog(`[reextract] 手动重提取: ${cur.filename} 旋转${rotation}° 字段${targetFields.length}项 引擎${ocrEngineNow}`);
+      rlog(`[reextract] 图像构建完成: ${(file.size / 1024).toFixed(0)}KB 耗时${((performance.now() - _t0) / 1000).toFixed(1)}s`);
       const result = await extractFileWithVisionFallback(file, targetFields, ocrEngineNow);
+      rlog(`[reextract] 后端返回: method=${result.method} backend=${result.ocr_backend || "-"} 文本${(result.text || "").length}字符 字段${Object.keys(result.fields || {}).length}项 耗时${((performance.now() - _t0) / 1000).toFixed(1)}s${result.fallback ? ` 回退=${result.fallback.from}→${result.fallback.to}(${result.fallback.reason})` : ""}`);
       // 整条替换该 docIndex 的提取结果（保留图像源引用），并同步 ref 供重算比对立即读取
       const prevArr = docExtractsByRecordRef.current[recordId] || [];
       if (docIndex >= prevArr.length) return;
@@ -10313,8 +10411,15 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       recompareDocBindFields(recordId);
       const hitCount = Object.values(result.fields || {}).filter((v) => String(v || "").trim()).length;
       setSuccessToast(`重新提取完成：识别 ${hitCount}/${targetFields.length} 项字段`);
+      if (hitCount === 0 && targetFields.length > 0) {
+        rlog(`[reextract] 警告：提取成功但 0/${targetFields.length} 字段有值（文本${(result.text || "").length}字符）——疑似 OCR 未识别到有效内容或图片角度不对`);
+      }
     } catch (e) {
-      setError(`重新提取失败：${e instanceof Error ? e.message : String(e)}`);
+      const _msg = e instanceof Error ? e.message : String(e);
+      const _stack = e instanceof Error && e.stack ? ` | ${e.stack.split("\n").slice(0, 3).join(" ← ")}` : "";
+      // 失败原因落调试日志（setError 只上 UI 不进 log，事后排查无据——"不知道什么原因"的根因）
+      rlog(`[reextract] 失败: ${_msg}（耗时${((performance.now() - _t0) / 1000).toFixed(1)}s 图源=${_srcKind} 引擎${ocrEngineNow}）${_stack}`);
+      setError(`重新提取失败：${_msg}`);
     } finally {
       setDocReextracting(false);
     }

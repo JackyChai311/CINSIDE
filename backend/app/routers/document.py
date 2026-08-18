@@ -13,7 +13,7 @@ import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from ..services.document_extract import extract_document, preview_document, ocr_image_bytes
+from ..services.document_extract import extract_document, preview_document, ocr_image_bytes, _flog
 from ..services.doc_convert import convert_document
 
 logger = logging.getLogger(__name__)
@@ -126,15 +126,20 @@ async def extract_upload(
         raise HTTPException(400, "empty file")
     if len(content) > 30 * 1024 * 1024:
         raise HTTPException(400, "文件过大（>30MB）")
+    # 入口落日志：前端重提取失败时，若 extract.log 无此行=请求根本没到后端（图源/blob 问题），
+    # 有此行但无 [EXTRACT-TIME]=extract_document 内部早期异常——两类故障一眼区分
+    _flog(f"[EXTRACT-IN] {file.filename or 'upload.bin'} {len(content) / 1024:.0f}KB engine={engine or '默认'} fields={fields or '-'}")
     try:
         result = await extract_document(content, file.filename or "upload.bin", _parse_fields(fields), engine=engine, force_ai_orient=force_ai_orient, force_viz=force_viz)
     except RuntimeError as e:
         msg = _safe_err_msg(e, "提取失败")
         logger.warning("文档提取 RuntimeError: %s\n%s", msg, traceback.format_exc())
+        _flog(f"[EXTRACT-FAIL] {file.filename or 'upload.bin'} RuntimeError: {msg}")
         raise HTTPException(500, msg)
     except Exception as e:
         msg = _safe_err_msg(e, "提取失败")
         logger.error("文档提取异常: %s\n%s", msg, traceback.format_exc())
+        _flog(f"[EXTRACT-FAIL] {file.filename or 'upload.bin'} {type(e).__name__}: {msg}")
         raise HTTPException(400, f"提取失败: {msg}")
     return result
 

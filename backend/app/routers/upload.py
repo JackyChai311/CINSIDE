@@ -37,8 +37,10 @@ async def upload_excel(file: UploadFile = File(...)):
 
     upsert_records(records)
     # 保存上传源字节：导出时可在原始布局上写回修正值（Electron 本地路径会再覆盖为 path 模式）
+    # detected_map 一并保存：导出高亮按「解析期权威列映射」定位字段列，
+    # 不再靠表头分词猜测（"身份 Student Type" 里的 student 曾把 name 的高亮误打到整列"新生"上）
     LEFT_SOURCE.clear()
-    LEFT_SOURCE.update({"kind": "bytes", "bytes": content, "filename": file.filename or "data.xlsx"})
+    LEFT_SOURCE.update({"kind": "bytes", "bytes": content, "filename": file.filename or "data.xlsx", "detected_map": detected_map})
     return {
         "count": len(records),
         "records": [r.model_dump() for r in records],
@@ -61,7 +63,7 @@ async def upload_excel_right(file: UploadFile = File(...)):
 
     upsert_right_records(records)
     RIGHT_SOURCE.clear()
-    RIGHT_SOURCE.update({"kind": "bytes", "bytes": content, "filename": file.filename or "data.xlsx"})
+    RIGHT_SOURCE.update({"kind": "bytes", "bytes": content, "filename": file.filename or "data.xlsx", "detected_map": detected_map})
     return {
         "count": len(records),
         "records": [r.model_dump() for r in records],
@@ -80,18 +82,26 @@ class ExcelSourceBody(BaseModel):
 def set_excel_source(body: ExcelSourceBody):
     target = LEFT_SOURCE if body.side == "left" else RIGHT_SOURCE
     if body.path and os.path.exists(body.path):
+        # 保留上传时保存的 detected_map（导出高亮精确映射要用）
+        preserved = target.get("detected_map")
         target.clear()
         target.update({"kind": "path", "path": body.path, "filename": body.filename or os.path.basename(body.path)})
+        if preserved:
+            target["detected_map"] = preserved
     elif body.filename:
         target["filename"] = body.filename
     return {"ok": True, "mode": target.get("kind", "bytes")}
 
 
-def _apply_records_to_first_sheet(wb, recs, highlights: Optional[dict] = None) -> int:
+def _apply_records_to_first_sheet(
+    wb, recs, highlights: Optional[dict] = None, column_map: Optional[dict[str, str]] = None
+) -> int:
     """把内存 records 的字段值写回工作簿第一个有数据的 sheet（按 rec-XXX 行序对应）。
 
     highlights: {record_id: {字段名: match状态}} —— 有问题的单元格填色高亮：
     mismatch/error=红色填充（红底深红字），missing/partial=琥珀填充（跟字段对比卡片色系一致）。
+    column_map: 解析期权威列映射 {原始列名: 标准字段名}。导出高亮时优先用它做精确反向映射，
+               不再靠表头分词猜测（"身份 Student Type" 里的 student 曾把 name 的高亮误打到整列"新生"上）。
     """
     import logging
     _export_log = logging.getLogger("cinside.export")
@@ -155,44 +165,72 @@ def _apply_records_to_first_sheet(wb, recs, highlights: Optional[dict] = None) -
     import re as _re
 
     def _header_to_canonical(header_key: str) -> list[str]:
-        """把 Excel 表头转成所有可能的规范字段名列表。"""
+        """把 Excel 表头转成所有可能的规范字段名列表（按优先级）。
+
+        匹配层级：整串规范化 → 整串别名 → 词组别名（"Family Name"→surname）
+        → 解析期权威列映射（AI 识别）→ 中文单词别名（"姓"→surname）。
+        英文单词级别名匹配已移除——复合表头里的泛化英文单词（"身份 Student Type"
+        里的 "student"）会把 name 的高亮误打到无关列（新生列误高亮事故）。
+        """
         candidates: list[str] = []
         hk = _normalize_key(header_key)
         candidates.append(hk)
         hk_lower = hk.strip().lower()
 
+        def _push(name: str) -> None:
+            if name and name not in candidates:
+                candidates.append(name)
+
         # 1. 完整字符串精确匹配别名表
         for alias, canonical in _FIELD_ALIASES.items():
             if alias.strip().lower() == hk_lower:
-                candidates.append(canonical)
+                _push(canonical)
                 break
 
-        # 2. 按空格/分隔符分词，去除标点，逐词匹配别名表
+        # 2. 按空格/分隔符分词，去除标点
         raw_tokens = _re.split(r'[\s,/\-]+', hk_lower)
         tokens = [_re.sub(r'[^\w\u4e00-\u9fff]', '', t) for t in raw_tokens if t.strip()]
+        tokens = [t for t in tokens if t]
 
-        # 2a. 连续词组（2-3 词）优先匹配（处理 "Family Name"→surname, "Passport No."→passport_no）
+        # 2a. 连续词组（2-3 词）紧凑匹配别名（忽略空格/标点差异：
+        #     "Family Name"→surname、"Given Name"→given_name、"Passport No."→passport_no、"Student Name"→name）
         for i in range(len(tokens)):
             for j in range(i + 2, min(i + 4, len(tokens) + 1)):
-                phrase = ' '.join(tokens[i:j])
+                phrase = ''.join(tokens[i:j])
                 for alias, canonical in _FIELD_ALIASES.items():
-                    if alias.strip().lower() == phrase:
-                        candidates.append(canonical)
+                    if _re.sub(r'[\s_\-]+', '', alias.strip().lower()) == phrase:
+                        _push(canonical)
                         break
 
-        # 2b. 单词精确匹配（处理 "姓"→surname, "国籍"→nationality, "护照号"→passport_no）
+        # 2b. 解析期权威列映射（AI 在解析时已看过表头+数据样例，识别结果可信）
+        if column_map:
+            _push(column_map.get(header_key, ""))
+
+        # 2c. 中文单词精确匹配（"姓"→surname、"国籍"→nationality、"申请编号"→student_id）；
+        #     中文词在复合表头里语义明确，不会像英文泛化词那样误伤
         for t in tokens:
+            if not any('\u4e00' <= ch <= '\u9fff' for ch in t):
+                continue
             for alias, canonical in _FIELD_ALIASES.items():
                 if alias.strip().lower() == t:
-                    candidates.append(canonical)
+                    _push(canonical)
                     break
 
         return candidates
 
     def _hl_lookup(rec_hl: dict, header_key: str) -> Optional[str]:
+        # 1. 直接原始名匹配（如 right_label 恰好带原始列名）
         st = rec_hl.get(header_key)
         if st:
             return st
+        # 2. 解析期权威列映射：原始列名 → 标准字段名 → 反向精确查 rec_hl
+        if column_map:
+            canonical = column_map.get(header_key)
+            if canonical:
+                return rec_hl.get(canonical)
+            # column_map 非空但该列未被映射 → 这是无关列，禁止模糊匹配误伤
+            return None
+        # 3. 无权威映射时回退到模糊匹配（兼容旧数据/CSV）
         for ck in _header_to_canonical(header_key):
             st = rec_hl.get(ck)
             if st:
@@ -334,11 +372,12 @@ def _do_export(side: str, highlights: Optional[dict]):
     if not recs:
         raise HTTPException(400, "没有可导出的数据，请先上传 Excel")
 
+    column_map = src.get("detected_map") or {}
     path = src.get("path")
     if path and os.path.exists(path) and str(path).lower().endswith((".xlsx", ".xlsm")):
         from openpyxl import load_workbook
         wb = load_workbook(path)
-        _apply_records_to_first_sheet(wb, recs, highlights)
+        _apply_records_to_first_sheet(wb, recs, highlights, column_map)
         # 导出统一落「下载」文件夹：<原名>_审核结果.xlsx——原文件可能藏在
         # 微信/OneDrive 等深层目录，原地写回用户根本找不到；原文件保持不动。
         stem, ext = os.path.splitext(os.path.basename(path))

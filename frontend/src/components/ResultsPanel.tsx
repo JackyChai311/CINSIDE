@@ -2090,9 +2090,6 @@ function ReportTab({
       if (!(e.left_value || "").trim()) return false;
       return !!e.right_selector || /（(?:Excel|文件提取)·.+）$/.test(e.right_label || "");
     };
-    /** 可修正的不一致行数（决定卡片级按钮显隐） */
-    const fixableRows = rows.filter(canFixRow);
-    const isFixRerunning = fixRerunRecordId === r.record_id;
     /** 底部「确认」：一次性执行全部待标记项（左对写回 / 右对改match），仅成功项迁入已修正，失败项保留待标记供重试 */
     const stagedCount = fixStageKeys.size + confirmStageKeys.size;
     const handleConfirm = async () => {
@@ -2333,18 +2330,6 @@ function ReportTab({
                     >
                       {confirmingRecordId === r.record_id ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <CheckCircle2 className="h-2.5 w-2.5" />}
                       确认（{stagedCount}）
-                    </button>
-                  )}
-                  {/* 次级：一键修正全部不一致字段并重新审查该卡片（面向需要完整重跑的场景） */}
-                  {fixableRows.length > 0 && onFixAllAndRerun && r.record_id && (
-                    <button
-                      onClick={() => onFixAllAndRerun(r.record_id!, r.entries)}
-                      disabled={running || fixingFieldKey !== null || fixRerunRecordId !== null}
-                      className="inline-flex items-center gap-1 rounded bg-white px-1.5 py-0.5 text-[9px] font-medium text-slate-500 ring-1 ring-slate-200 transition-colors hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
-                      title="把全部不一致字段以来源值覆盖被审查字段，然后重新审查该卡片"
-                    >
-                      {isFixRerunning ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Wrench className="h-2.5 w-2.5" />}
-                      {isFixRerunning ? "重审中…" : `修正重审（${fixableRows.length}）`}
                     </button>
                   )}
                 </span>
@@ -3867,6 +3852,62 @@ function ReportTab({
           </div>
         )}
       </div>
+      {/* 底部操作行：清空步骤 / 保存为LOOP / 执行 —— 面板最右下方，收尾点击之下 */}
+      {(onRefresh || onRequestSaveLoop || onDirectRun) && (
+        <div className="flex shrink-0 items-center justify-end gap-1.5 pt-2">
+          {onRefresh && (
+            <button
+              onClick={() => {
+                if (running) return;
+                if (window.confirm("确定要清空所有已配置的步骤吗？（前置设置/审查映射/过程点击/提取元素/收尾点击都会被删除）")) onRefresh();
+              }}
+              disabled={running}
+              className={[
+                "flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold transition-all",
+                running
+                  ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                  : "bg-white/70 text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 hover:text-slate-900 shadow-sm",
+              ].join(" ")}
+              title="清空所有已配置的步骤（前置设置/审查映射/过程点击/提取元素/收尾点击）"
+            >
+              <Trash2 className="h-2.5 w-2.5" />
+              清空步骤
+            </button>
+          )}
+          {onRequestSaveLoop && (
+            <button
+              onClick={() => { if (!running) onRequestSaveLoop?.(); }}
+              disabled={running || !canSaveLoop}
+              className={[
+                "flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold transition-all",
+                (running || !canSaveLoop)
+                  ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                  : "bg-white/70 text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 hover:text-slate-900 shadow-sm",
+              ].join(" ")}
+              title="命名保存为 LOOP 模板"
+            >
+              <Save className="h-2.5 w-2.5" />
+              保存为LOOP
+            </button>
+          )}
+          {onDirectRun && (
+            <button
+              onClick={() => { if (!running) onDirectRun?.(); }}
+              disabled={running || !canSaveLoop}
+              className={[
+                "flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold transition-all",
+                (running || !canSaveLoop)
+                  ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                  : "bg-slate-900 text-white hover:bg-slate-700 shadow-sm",
+              ].join(" ")}
+              title="直接执行当前配置（临时运行，不保存）"
+            >
+              <Play className="h-2.5 w-2.5" />
+              执行
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 
@@ -3932,39 +3973,6 @@ function ReportTab({
               >
                 <Layers className="h-2.5 w-2.5" />
                 应用LOOP
-              </button>
-            )}
-            {onRequestSaveLoop && fieldSetupMode && (
-              <button
-                onClick={() => { if (!running) onRequestSaveLoop?.(); }}
-                disabled={running || !canSaveLoop}
-                className={[
-                  onRequestApplyLoop ? "ml-1" : "ml-auto",
-                  "flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold transition-all",
-                  (running || !canSaveLoop)
-                    ? "cursor-not-allowed bg-slate-200 text-slate-400"
-                    : "bg-white/70 text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 hover:text-slate-900 shadow-sm",
-                ].join(" ")}
-                title="命名保存为 LOOP 模板"
-              >
-                <Save className="h-2.5 w-2.5" />
-                保存为LOOP
-              </button>
-            )}
-            {onDirectRun && fieldSetupMode && (
-              <button
-                onClick={() => { if (!running) onDirectRun?.(); }}
-                disabled={running || !canSaveLoop}
-                className={[
-                  "ml-1 flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold transition-all",
-                  (running || !canSaveLoop)
-                    ? "cursor-not-allowed bg-slate-200 text-slate-400"
-                    : "bg-slate-900 text-white hover:bg-slate-700 shadow-sm",
-                ].join(" ")}
-                title="直接执行当前配置（临时运行，不保存）"
-              >
-                <Play className="h-2.5 w-2.5" />
-                执行
               </button>
             )}
             {onExportExcel && !fieldSetupMode && (
