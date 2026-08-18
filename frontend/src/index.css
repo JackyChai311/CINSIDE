@@ -88,6 +88,8 @@ html[data-theme="dark"] .panel-solid {
 }
 /* 深色下统一覆盖常见浅色工具类（卡片/文字/边框），保证整体观感一致 */
 html[data-theme="dark"] .bg-white { background-color: #1a2236; }
+html[data-theme="dark"] .bg-white\/80 { background-color: rgba(26, 34, 54, .72); }
+html[data-theme="dark"] .border-white\/40 { border-color: rgba(255, 255, 255, .12); }
 html[data-theme="dark"] .bg-slate-50 { background-color: rgba(38, 51, 75, .65); }
 html[data-theme="dark"] .bg-slate-50\/50 { background-color: rgba(38, 51, 75, .65); }
 html[data-theme="dark"] .bg-slate-100 { background-color: #26334b; }
