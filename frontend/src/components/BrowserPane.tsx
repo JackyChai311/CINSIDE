@@ -824,10 +824,10 @@ export default function BrowserPane({
 
   return (
     <div
-      className={`relative flex h-full flex-col overflow-hidden rounded-lg bg-white/80 ring-1 ${STATUS_RING[verifyStatus]} ${picking ? "picking-breath" : ""} transition-[box-shadow,background-color] duration-300`}
+      className={`relative flex h-full flex-col overflow-hidden rounded-lg bg-white/80 dark:bg-slate-800/80 ring-1 ${STATUS_RING[verifyStatus]} ${picking ? "picking-breath" : ""} transition-[box-shadow,background-color] duration-300`}
     >
       {/* 顶部：标题 + URL/Tab融合区域 + 操作（紧凑单行） */}
-      <div className="glass-frame flex items-center gap-2 border-b border-white/40 px-2 py-1">
+      <div className="glass-frame flex items-center gap-2 border-b border-white/40 dark:border-slate-600/40 px-2 py-1">
         <div className="flex shrink-0 items-center gap-1.5">
           <span className="truncate text-[11px] font-semibold text-slate-700">{title}</span>
           {!enableViewSwitch && headerExtra}
