@@ -45,6 +45,13 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      # DMG 构建后 hdiutil detach 被 Spotlight 索引占用 → Resource busy →
+      # electron-builder "Cannot cleanup" 退出非零（macos-15-intel 必现），先关索引
+      - name: Disable Spotlight indexing (fix hdiutil detach busy)
+        run: |
+          sudo mdutil -a -i off || true
+          sudo pkill -f mds_stores || true
+
       - name: Build frontend (Vite)
         working-directory: frontend
         run: npm run build
