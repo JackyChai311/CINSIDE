@@ -19,8 +19,9 @@ jobs:
           # Apple Silicon (M 系列)
           - os: macos-14
             arch: arm64
-          # Intel
-          - os: macos-13
+          # Intel（macos-13 已于 2025-12-04 退役，任务会排队 24h 后被杀；
+          # macos-15-intel 是官方免费替代标签，支持至 2027-08）
+          - os: macos-15-intel
             arch: x64
     runs-on: ${{ matrix.os }}
 

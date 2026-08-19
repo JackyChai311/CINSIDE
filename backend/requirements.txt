@@ -14,7 +14,9 @@ pillow-heif>=0.16  # HEIC/HEIF（iPhone 拍摄照片）解码，供文件提取 
 # 内置本地 OCR 引擎（「核显加速」开关）：RapidOCR PP-OCRv6 + DirectML
 # （Intel/AMD/NVIDIA 通用 GPU 推理；自检不过自动锁 CPU，无需 UMI-OCR）
 rapidocr>=3.9
-onnxruntime-directml>=1.20
+# DirectML 仅有 Windows 轮子；macOS/Linux 用 CPU 版 onnxruntime（gpu_ocr 探测链自动降级）
+onnxruntime-directml>=1.20; sys_platform == "win32"
+onnxruntime>=1.17; sys_platform != "win32"
 openvino>=2024.3  # CPU 推理加速候选：Intel CPU 指令级优化，AMD 亦可用（自检择优）
 
 # 真实跑 Browser Use 时再装（依赖较重）
