@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 240" fill="none">
+  <!-- 一笔连体：完整方框 + 右侧中部外凸C形 单路径绘制 -->
+  <path
+    d="M52 36 H148 A16 16 0 0 1 164 52 V100 A18 22 0 0 1 164 144 V168 A16 16 0 0 1 148 184 H52 A16 16 0 0 1 36 168 V52 A16 16 0 0 1 52 36"
+    stroke="#1a1a1a"
+    stroke-width="13"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    fill="none"
+  />
+  <text
+    x="100"
+    y="220"
+    text-anchor="middle"
+    font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif"
+    font-size="26"
+    font-weight="700"
+    letter-spacing="5"
+    fill="#1a1a1a"
+  >CINSIDE</text>
+</svg>

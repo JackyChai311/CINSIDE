@@ -1938,7 +1938,13 @@ function ReportTab({
                     <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" />
                   )}
                   <span className="shrink-0 font-medium text-slate-700">{p.label}</span>
-                  {p.kind === "compare" ? (
+                  {p.kind === "fill" && p.leftValue && !p.rightValue ? (
+                    // 兼容旧数据：无回读值的 fill 行退化为单值显示
+                    <span className="min-w-0 flex-1 truncate rounded bg-sky-50/80 px-1 py-0.5 font-mono text-[10px] text-sky-700" title={p.leftValue}>
+                      {p.leftValue || "—"}
+                    </span>
+                  ) : (
+                    // 左右双值：compare=左提取值 vs 右网页值；fill=左来源值 vs 右网页实际收到的值
                     <span className="flex min-w-0 flex-1 items-center gap-1 font-mono text-[10px]">
                       <span
                         className={`truncate rounded px-1 py-0.5 ${p.status === "pending" && !p.leftValue ? "text-slate-400" : "bg-indigo-50/80 text-indigo-700"}`}
@@ -1962,10 +1968,6 @@ function ReportTab({
                       >
                         {p.rightValue || (p.status === "pending" ? "比对中…" : "—")}
                       </span>
-                    </span>
-                  ) : (
-                    <span className="min-w-0 flex-1 truncate rounded bg-sky-50/80 px-1 py-0.5 font-mono text-[10px] text-sky-700" title={p.leftValue}>
-                      {p.leftValue || "—"}
                     </span>
                   )}
                 </li>

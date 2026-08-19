@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useRef, useState, type DragEvent, type ClipboardEvent, type ChangeEvent } from "react";
-import { Check, Play, Pencil, Trash2, X, Sparkles, GitBranch, ImagePlus, Search, Layers, Share2, KeyRound, Copy, Download, Loader2, Wifi, WifiOff } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ClipboardEvent, type ChangeEvent } from "react";
+import { Check, Play, Pencil, Trash2, X, Sparkles, GitBranch, ImagePlus, Search, Layers, Share2, KeyRound, Copy, Download, Loader2, Wifi, WifiOff, RefreshCw } from "lucide-react";
 import type { WorkflowTemplate, AppMode } from "../types";
 import { loadSkills, deleteSkill, updateSkillMeta, getDefaultIcons, importSkill } from "../lib/skills";
 import { encodeShareCode, decodeShareCode } from "../lib/skillShare";
@@ -67,10 +67,26 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
   const [importError, setImportError] = useState("");
   const [importSuccess, setImportSuccess] = useState("");
 
+  // 刷新按钮的旋转反馈
+  const [refreshSpin, setRefreshSpin] = useState(false);
+
   const refresh = () => {
     setSkills(loadSkills());
     onSkillsChange?.();
   };
+
+  const handleManualRefresh = () => {
+    refresh();
+    setRefreshSpin(true);
+    setTimeout(() => setRefreshSpin(false), 600);
+  };
+
+  // 面板打开时重新读取技能列表，保证刚保存的卡片立即可见
+  useEffect(() => {
+    if (open) {
+      setSkills(loadSkills());
+    }
+  }, [open]);
 
   const handleDelete = (id: string) => {
     deleteSkill(id);
@@ -398,6 +414,14 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                   : `${skills.length} 个技能 · 拖拽到人物卡片可单卡执行 · Ctrl+V / 拖入图片换图标`}
               </p>
             </div>
+            <button
+              onClick={handleManualRefresh}
+              className="ml-auto flex h-9 items-center gap-1.5 rounded-xl bg-white/60 px-3 text-[12px] font-medium text-slate-600 shadow-sm ring-1 ring-slate-200 backdrop-blur-sm transition-all hover:bg-white hover:text-slate-900 dark:bg-slate-900/40 dark:text-slate-300 dark:ring-white/5 dark:hover:bg-slate-800/60 dark:hover:text-slate-100"
+              title="刷新技能列表"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${refreshSpin ? "animate-spin" : ""}`} />
+              刷新
+            </button>
             <button
               onClick={openImport}
               className="flex items-center gap-1.5 rounded-xl bg-white/60 px-3 py-2 text-[12px] font-medium text-slate-600 shadow-sm ring-1 ring-slate-200 backdrop-blur-sm transition-all hover:bg-white hover:text-slate-900 dark:bg-slate-900/40 dark:text-slate-300 dark:ring-white/5 dark:hover:bg-slate-800/60 dark:hover:text-slate-100"

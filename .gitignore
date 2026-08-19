@@ -110,10 +110,12 @@ sensenova_ok.json
 backend/test_browser_use.py
 backend/test_screenshot_stream.py
 backend/svg_to_ico.py
+backend/_diag_*.py
 
 # Frontend icon generation scripts (one-time use)
 frontend/make-ico.cjs
 frontend/make-icons.cjs
+frontend/src/assets/logo-preview.html
 
 # Packaging temp dirs
 _repack2/

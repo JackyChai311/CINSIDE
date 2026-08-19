@@ -73,7 +73,30 @@ const COMMON = `
     try { if (typeof el.click === 'function') el.click(); } catch (e) {}
   }
   function __wsWait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function __wsNorm(s) { return (s || '').replace(/[\\s ]+/g, '').toLowerCase(); }
+  function __wsNorm(s) { return (s || '').replace(/[\\s ]+/g, '').toLowerCase(); }
+  // 选中态判定：class 词边界匹配（避免 unselected/icon 这类子串误伤）+ aria + radio/checkbox 本体与关联 input
+  function __wsIsSelected(el) {
+    if (!el || el.nodeType !== 1) return false;
+    try {
+      var cls = (el.getAttribute && el.getAttribute('class')) || '';
+      if (/(^|[\\s_\\-])(selected|active|checked|on|cur|current|chosen|is-selected|is-active|is-checked)([\\s_\\-]|$)/i.test(' ' + cls + ' ')) return true;
+      if (el.getAttribute('aria-selected') === 'true' || el.getAttribute('aria-checked') === 'true') return true;
+      var tp = (el.getAttribute && el.getAttribute('type')) || '';
+      if (el.tagName === 'INPUT' && (tp === 'radio' || tp === 'checkbox') && el.checked) return true;
+      var inp = el.querySelector ? el.querySelector('input[type="radio"],input[type="checkbox"]') : null;
+      if (inp && inp.checked) return true;
+      if (el.tagName === 'LABEL' && el.htmlFor) {
+        var rel = el.ownerDocument ? el.ownerDocument.getElementById(el.htmlFor) : null;
+        if (rel && rel.checked) return true;
+      }
+      var sib = el.previousElementSibling;
+      if (sib && sib.tagName === 'INPUT') {
+        var stp = (sib.getAttribute && sib.getAttribute('type')) || '';
+        if ((stp === 'radio' || stp === 'checkbox') && sib.checked) return true;
+      }
+    } catch (e) {}
+    return false;
+  }
   // 元素中心相对面板左上角的投影坐标（px）；miss 时返回当前面板 rect 供调用方自行计算
   function __wsProj(el, panel) {
     if (!el || !panel) return null;
@@ -1479,6 +1502,11 @@ export function buildWidgetReadScript(widget: WidgetDef): string {
     kind: widget.kind,
     triggerSelector: sanitize(widget.triggerSelector),
     panelSelector: sanitize(widget.panelSelector || ""),
+    options: (widget.options || []).map((o) => ({
+      text: o.text,
+      selector: sanitize(o.selector),
+      alias: o.alias || "",
+    })),
   };
   return `
   ${DEEP_QUERY}
@@ -1502,18 +1530,37 @@ export function buildWidgetReadScript(widget: WidgetDef): string {
       if (inner && inner.value) val = inner.value;
       if (!val) val = (trigger.innerText || trigger.textContent || '').trim();
     }
-    // 选项控件：面板 DOM 中找选中态（面板可能隐藏但选中类仍在）
+    // 选项控件：优先在已记录的选项里找「选中态」，命中返回该选项的 alias（比对锚点，如 male/female）——
+    // 不能返回整个按钮组的显示文本（如「♂ 男 ♀ 女」），否则与左值（Male）比对永远不一致
+    if (W.kind === 'option' && W.options && W.options.length) {
+      var anyFound = false;
+      for (var i = 0; i < W.options.length; i++) {
+        var opt = W.options[i];
+        var el = null;
+        try { el = __cinsideDeepQuery(opt.selector); } catch (e) {}
+        if (!el) continue;
+        anyFound = true;
+        if (__wsIsSelected(el)) {
+          var av = (opt.alias || '').split('/')[0].trim();
+          return { found: true, value: av || opt.text || '' };
+        }
+      }
+      // 选项元素都在但无选中态 → 确实未选择（返回空，比对显示「未填」而非按钮组文本）
+      if (anyFound) return { found: true, value: '' };
+      // 选项选择器全部失效（DOM 结构变了）→ 落到下方旧逻辑兜底
+    }
+    // 选项控件兜底：面板 DOM 中找带选中态的任意元素
     if (W.kind === 'option' && W.panelSelector) {
       var panel = null;
       try { panel = __cinsideDeepQuery(W.panelSelector); } catch (e) { panel = null; }
       if (panel) {
-        var sel = null;
-        try {
-          sel = panel.querySelector('[class*="selected"],[class*="active"],[class*="checked"],[aria-selected="true"],[aria-checked="true"]');
-        } catch (e) {}
-        if (sel) {
-          var t = (sel.innerText || sel.textContent || '').trim().replace(/\\s+/g, ' ');
-          if (t && t.length <= 60) val = t;
+        var all = [];
+        try { all = panel.querySelectorAll('*'); } catch (e) {}
+        for (var j = 0; j < all.length; j++) {
+          if (__wsIsSelected(all[j])) {
+            var t = (all[j].innerText || all[j].textContent || '').trim().replace(/\\s+/g, ' ');
+            if (t && t.length <= 60) { val = t; break; }
+          }
         }
       }
     }

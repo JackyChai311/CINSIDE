@@ -2,13 +2,13 @@ import { useState } from "react";
 import {
     ArrowLeft,
     Users,
-    Cpu,
     Sparkles,
-    UserCircle,
     Bot,
 } from "lucide-react";
 import AIStudio from "./cowork/AIStudio";
 import HumanStudio from "./cowork/HumanStudio";
+import aiCardImg from "../assets/cowork-ai.jpg";
+import humanCardImg from "../assets/cowork-human.jpg";
 
 type Mode = "entry" | "ai" | "human";
 
@@ -32,17 +32,15 @@ export default function CoworkStudio({ onBack }: { onBack: () => void }) {
                 </button>
 
                 <div className="cw-header">
-                    <div className="cw-logo">
-                        <Users size={32} strokeWidth={1.6} />
-                    </div>
                     <h1>Cowork Studio</h1>
                     <p>协作工作台 · 人工与 AI 协同完成任务</p>
                 </div>
 
                 <div className="cw-cards">
                     <button className="cw-card cw-card-ai" onClick={() => setMode("ai")}>
-                        <div className="cw-card-icon">
-                            <Cpu size={28} strokeWidth={1.5} />
+                        <div className="cw-card-banner">
+                            <img src={aiCardImg} alt="AI 协作" />
+                            <div className="cw-card-banner-overlay" />
                         </div>
                         <div className="cw-card-body">
                             <h2>
@@ -59,8 +57,9 @@ export default function CoworkStudio({ onBack }: { onBack: () => void }) {
                     </button>
 
                     <button className="cw-card cw-card-human" onClick={() => setMode("human")}>
-                        <div className="cw-card-icon cw-card-icon-human">
-                            <UserCircle size={28} strokeWidth={1.5} />
+                        <div className="cw-card-banner">
+                            <img src={humanCardImg} alt="人工协作" />
+                            <div className="cw-card-banner-overlay" />
                         </div>
                         <div className="cw-card-body">
                             <h2>
@@ -120,18 +119,6 @@ export default function CoworkStudio({ onBack }: { onBack: () => void }) {
                     text-align: center;
                     margin: 48px 0 44px;
                 }
-                .cw-logo {
-                    display: inline-flex;
-                    align-items: center;
-                    justify-content: center;
-                    width: 64px;
-                    height: 64px;
-                    border-radius: 18px;
-                    color: #7c3aed;
-                    background: linear-gradient(135deg, #ede9fe, #e0f2fe);
-                    box-shadow: 0 8px 24px -8px rgba(124, 58, 237, 0.35);
-                    margin-bottom: 18px;
-                }
                 .cw-header h1 {
                     font-size: 32px;
                     font-weight: 700;
@@ -154,36 +141,46 @@ export default function CoworkStudio({ onBack }: { onBack: () => void }) {
                 }
                 .cw-card {
                     display: flex;
-                    gap: 18px;
+                    flex-direction: column;
                     text-align: left;
-                    padding: 28px;
-                    background: rgba(255,255,255,0.85);
+                    padding: 0;
+                    background: rgba(255,255,255,0.92);
                     border: 1px solid #e2e8f0;
                     border-radius: 20px;
                     cursor: pointer;
-                    transition: all 0.25s cubic-bezier(.4,0,.2,1);
+                    transition: all 0.3s cubic-bezier(.4,0,.2,1);
                     backdrop-filter: blur(8px);
+                    overflow: hidden;
                 }
                 .cw-card:hover {
-                    transform: translateY(-4px);
-                    box-shadow: 0 20px 40px -16px rgba(15, 23, 42, 0.18);
+                    transform: translateY(-6px);
+                    box-shadow: 0 24px 48px -16px rgba(15, 23, 42, 0.22);
                 }
-                .cw-card-ai:hover { border-color: #a78bfa; }
-                .cw-card-human:hover { border-color: #5eead4; }
-                .cw-card-icon {
-                    flex-shrink: 0;
-                    width: 52px;
-                    height: 52px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    border-radius: 14px;
-                    color: #7c3aed;
-                    background: linear-gradient(135deg, #f5f3ff, #ede9fe);
+                .cw-card-ai:hover { border-color: #a78bfa; box-shadow: 0 24px 48px -16px rgba(124, 58, 237, 0.28); }
+                .cw-card-human:hover { border-color: #5eead4; box-shadow: 0 24px 48px -16px rgba(13, 148, 136, 0.28); }
+                .cw-card-banner {
+                    position: relative;
+                    width: 100%;
+                    height: 150px;
+                    overflow: hidden;
                 }
-                .cw-card-icon-human {
-                    color: #0d9488;
-                    background: linear-gradient(135deg, #f0fdfa, #ccfbf1);
+                .cw-card-banner img {
+                    width: 100%;
+                    height: 100%;
+                    object-fit: cover;
+                    transition: transform 0.5s cubic-bezier(.4,0,.2,1);
+                }
+                .cw-card:hover .cw-card-banner img {
+                    transform: scale(1.06);
+                }
+                .cw-card-banner-overlay {
+                    position: absolute;
+                    inset: 0;
+                    background: linear-gradient(180deg, rgba(255,255,255,0) 40%, rgba(255,255,255,0.92) 100%);
+                    pointer-events: none;
+                }
+                .cw-card-body {
+                    padding: 16px 20px 20px;
                 }
                 .cw-card-body h2 {
                     display: flex;

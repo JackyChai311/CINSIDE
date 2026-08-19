@@ -13,15 +13,29 @@ function fieldMatches(field: string, patterns: RegExp): boolean {
   return patterns.test((field || "").toLowerCase());
 }
 
-const PHONE_FIELD_RE = /phone|tel|mobile|contact.*number|guardian.*phone/;
-const DATE_FIELD_RE = /date|dob|birth|issue|expiry|expire/;
-const EMAIL_FIELD_RE = /email|mail/;
+const PHONE_FIELD_RE = /phone|tel|mobile|contact.*number|guardian.*phone|手机|电话/;
+const DATE_FIELD_RE = /date|dob|birth|issue|expiry|expire|日期/;
+const EMAIL_FIELD_RE = /email|mail|邮箱|邮件/;
 const NAME_FIELD_RE = /name|姓名|名字/;
 const NATIONALITY_FIELD_RE = /nationality|citizenship|citizen|国籍/;
 
+/** 不可见字符：零宽空格/连接符/方向控制符/字节序标记
+ *  （网页常用 U+200E 等包裹电话号码保持排版，视觉与正常文本完全一样，但会让字符串比对假不一致） */
+const INVISIBLE_CHARS_RE = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g;
+
+/** 全角转半角：全角数字/字母/符号（U+FF01-FF5E）转 ASCII，全角空格（U+3000）转普通空格 */
+export function toHalfwidth(s: string): string {
+  return (s || "").replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0)).replace(/　/g, " ");
+}
+
+/** 比对前清洗：去不可见字符 + 全角转半角（不改变可见内容，只消除网页排版噪声） */
+function cleanComparable(value: string): string {
+  return toHalfwidth((value || "").replace(INVISIBLE_CHARS_RE, ""));
+}
+
 /** 电话归一化：去非数字 → 国家码前缀等价处理（取核心10-11位） */
 export function normalizePhone(value: string): string {
-  let digits = (value || "").replace(/\D/g, "");
+  let digits = cleanComparable(value).replace(/\D/g, "");
   if (!digits) return "";
   // 处理国际前缀 00：0079... → 79...
   if (digits.startsWith("00")) digits = digits.slice(2);
@@ -37,7 +51,7 @@ export function normalizePhone(value: string): string {
 
 /** 判断值是否长得像电话（>=7位数字且含电话字符） */
 export function looksLikePhone(value: string): boolean {
-  const v = (value || "").trim();
+  const v = cleanComparable(value).trim();
   if (!v) return false;
   const digits = v.replace(/\D/g, "");
   if (digits.length < 7 || digits.length > 15) return false;
@@ -47,7 +61,7 @@ export function looksLikePhone(value: string): boolean {
 
 /** 判断两个值都像证件号形态：以数字为主（6+位数字），其余字符不超过 30% */
 export function looksLikePassportNo(a: string, b: string): boolean {
-  const both = [a, b];
+  const both = [cleanComparable(a), cleanComparable(b)];
   for (const v of both) {
     const digits = v.replace(/\D/g, "").length;
     if (digits < 6) return false;
@@ -114,9 +128,9 @@ export function looksLikeDate(value: string): boolean {
   return parseDateCandidates(value).length > 0;
 }
 
-/** 通用文本归一化：压缩空白 + 小写 */
+/** 通用文本归一化：去不可见字符 + 全角转半角 + 压缩空白 + 小写 */
 export function normalizeText(value: string): string {
-  return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  return cleanComparable(value).replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 /** 国籍别名组：同一国家的三字码/英文国名/国籍形容词/中文名（组首=三字码，作归一锚点）。
@@ -222,17 +236,21 @@ export function normalizeNationality(value: string): string {
  * field 用于类型提示（可为空字符串，此时按值形态自动推断）。
  */
 export function valuesEquivalent(field: string, a: string, b: string): boolean {
-  const va = (a || "").trim();
-  const vb = (b || "").trim();
+  const va = cleanComparable(a).trim();
+  const vb = cleanComparable(b).trim();
 
   // 护照号/证件号/学号：先校验（含等值情况——双方相同但都含非数字噪声 → 错值）
   // 排除日期：passport_expiry/passport_issue 字段名含 passport 但值是日期；
   // 且 looksLikePassportNo 会把 YYYY-MM-DD（8位数字/10字符=80%）误判为证件号形态
   // 两层排除：字段名含 date 相关关键字（passport_expiry/birth_date）+ 值形态是日期（2008-07-17）
+  // 再排除电话形态：+79005674322 这类带 + 的电话同样满足证件号形态（11位数字/91%占比），
+  // 进入证件号分支会被「同值含非数字噪声 → 错值」规则误杀（+ 被当噪声）；显式证件字段不受此豁免
   const PASSPORT_FIELD_RE = /passport|passnum|pass_no|pass no|护照|证件号|学号|id_no|student_id|idnum/i;
   const isDateField = fieldMatches(field, DATE_FIELD_RE);
   const bothDates = looksLikeDate(va) && looksLikeDate(vb);
-  if ((fieldMatches(field, PASSPORT_FIELD_RE) || looksLikePassportNo(va, vb)) && !isDateField && !bothDates) {
+  const isPassField = fieldMatches(field, PASSPORT_FIELD_RE);
+  const phoneish = !isPassField && (fieldMatches(field, PHONE_FIELD_RE) || (looksLikePhone(va) && looksLikePhone(vb)));
+  if ((isPassField || looksLikePassportNo(va, vb)) && !isDateField && !bothDates && !phoneish) {
     if (va === vb) {
       // 双方相同但都含非数字噪声（如 67NO0906781）→ 视为错值（OCR/Excel 同源噪声）
       return va === va.replace(/\D/g, "");

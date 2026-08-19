@@ -172,8 +172,20 @@ const deriveMappingsFromMarks = (marks: PickedMark[]): FieldMapping[] => {
     if (!m.selector || m.selector.includes("://")) continue;
     if (out.some((x) => x.right_selector === m.selector)) continue;
     const isPass = m.source === "passport";
-    const leftSource: FieldMapping["left_source"] = m.excelField ? "excel" : isPass ? "passport" : m.value ? "manual" : "excel";
-    const leftField = m.excelField || (isPass ? (m.variableField || "") : (m.value || m.variableField || ""));
+    // 左网页来源（database）：审查 mark 的 sourceSelector 携带左网页元素 selector，
+    // 供反推对比映射用（entry mark 不反推——纯录入 LOOP 的两遍式时序不被改变）
+    const dbReviewSelector = m.workflow === "review" && m.source === "web" ? (m.sourceSelector || "") : "";
+    const leftSource: FieldMapping["left_source"] = m.excelField
+      ? "excel"
+      : isPass
+      ? "passport"
+      : dbReviewSelector
+      ? "database"
+      : m.value
+      ? "manual"
+      : "excel";
+    const leftField = m.excelField
+      || (isPass ? (m.variableField || "") : (m.value || m.variableField || dbReviewSelector));
     if (!leftField) continue;
     const cleanLabel = (m.label || "").replace(/^(审查|录入|输入)\s*·\s*/, "").split(" ← ")[0].trim();
     out.push({
@@ -202,6 +214,22 @@ const getTemplateMappings = (tpl: WorkflowTemplate): FieldMapping[] =>
   tpl.mappings && tpl.mappings.length > 0
     ? tpl.mappings
     : deriveMappingsFromMarks([...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks]);
+
+/** 比对专用映射：仅保留「用户显式放了审查步骤」的字段。
+ *  mappings 里会混有录入绑定/控件绑定（commitWidgetDraft 与审查映射（录入）无条件写入），
+ *  若按 mappings 全量比对，用户没设审查的字段（如性别控件/日历）也会被拉进字段对比面板。 */
+const getTemplateCompareMappings = (tpl: WorkflowTemplate): FieldMapping[] => {
+  const all = getTemplateMappings(tpl);
+  const reviewSels = new Set<string>();
+  for (const m of [...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks]) {
+    if (m.workflow === "review" && !m.clickPhase && m.selector) reviewSels.add(m.selector);
+  }
+  // 模板完全没有审查步骤时不过滤（保持原行为：纯录入 LOOP 本就不会走到比对）
+  if (reviewSels.size === 0) return all;
+  const filtered = all.filter((mp) => reviewSels.has(mp.right_selector));
+  // 映射与审查步骤对不上（老模板映射缺漏）：从审查 marks 直接推导兜底，保证比对有数据
+  return filtered.length > 0 ? filtered : deriveMappingsFromMarks([...tpl.reviewMarks]);
+};
 
 /** 录入流中「值来自 Excel」的输入步骤里，当前卡片对应 Excel 格子为空的步骤列表。
  *  任一为空 → 整卡跳过（分数未出等场景：不白跑搜索/点击/保存，也避免把半套空数据写进网页）。
@@ -1499,6 +1527,9 @@ widgetDraftRef.current = widgetDraft;
 const [widgetDraftBinding, setWidgetDraftBinding] = useState<WidgetBinding>({ leftSource: "excel", leftField: "" });
 const widgetDraftBindingRef = useRef<WidgetBinding>({ leftSource: "excel", leftField: "" });
 widgetDraftBindingRef.current = widgetDraftBinding;
+// 控件提取开始时记住当前步骤设置模式（entry/review）：startWidgetPick 会 exitAllSetupModes 清掉
+// addingStepMode，但控件步骤必须归属用户穿插控件提取时所在的那个模式，否则 LOOP 模板里没有控件步骤
+const widgetStepTypeRef = useRef<"entry" | "review" | null>(null);
 // 正在重选日历角色的 key（"draft:prevMonth" 或 "saved:<selector>:prevMonth"）
 const [widgetRolePickingKey, setWidgetRolePickingKey] = useState<string | null>(null);
 const widgetRolePickingKeyRef = useRef<string | null>(null);
@@ -3532,6 +3563,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   /** 统一退出所有设置模式（绑定输入框/添加点击/审查录入/文件提取/控件提取/自定义文本） */
   const exitAllSetupModes = useCallback(() => {
     rlog("[exitAllSetupModes] 退出所有设置模式");
+    // 清掉上一轮残留的来源字段值：录入→审查切换时若不清，审查模式下点右侧核对框会把上次录入值填进去
+    sourceFieldValueRef.current = "";
+    sourceFieldLabelRef.current = "";
     setBindInputSide(null);
     setAddingClickMode(false);
     setAddingClickPhase(null);
@@ -3742,6 +3776,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       setTeachingPhase(type);
       setRightPicked(null);
       setLeftPicked(null);
+      // 来源字段值属于被放弃的上一轮（如录入轮），切模式必须清掉，防审查轮误填
+      sourceFieldValueRef.current = "";
+      sourceFieldLabelRef.current = "";
       setBindInputSide(null);
       setPendingAction("none");
       setError(null);
@@ -4660,11 +4697,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // 重置当前映射选择轮次：根据当前步骤模式回到初始拾取侧
   // 审查模式（先右后左）：回到 right；录入模式（先左后右）：回到 left
   // 右侧Excel模式：审查回到左网页 / 录入回到右侧 Excel
+  // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
   const resetMappingRound = useCallback(() => {
     setRightPicked(null);
     setLeftPicked(null);
     rightPickedSideRef.current = "right";
-    const isEntry = currentLoopStepTypeRef.current === "entry";
+    const isEntry = addingStepModeRef.current === "entry";
     const target: PickTarget = rightExcelModeRef.current
       ? (isEntry ? "right" : "left")
       : (isEntry ? "left" : "right");
@@ -5569,6 +5607,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       dataSourceMarks,
       reviewMarks,
       entryMarks,
+      // 字段映射必须随模板保存：compareFieldsForRecord 依赖它构建对比条目。
+      // 此前 finishTeaching 漏存 mappings，getTemplateMappings 只能从 marks 反推，
+      // 而左网页/护照来源的审查 mark 不带 left_field 信息 → 反推为空 → 审查对比静默跳过
+      mappings: mappings.length > 0 ? mappings : undefined,
       hasSearchSteps,
       hasSubmitStep,
     };
@@ -5608,7 +5650,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       });
     }
     return tpl;
-  }, [pickedMarks, selected, selectMode, avatarMode, setError, appMode, checkedIds]);
+  }, [pickedMarks, selected, selectMode, avatarMode, setError, appMode, checkedIds, mappings]);
 
   // 教学模式向导：完成教学并立即开始 LOOP 批量执行
   const finishTeachingAndRunBatch = useCallback(() => {
@@ -5643,7 +5685,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     if (pendingEntries.length === 0) {
       return { extraMarks: [], pendingEntries, marksWithExtras: pickedMarks, pendingMappings: [] };
     }
-    const stepType = currentLoopStepTypeRef.current;
+    // 设置期以 addingStepModeRef 为准；非设置期回退 LOOP 运行时类型（保持原行为）
+    const stepType = addingStepModeRef.current ?? currentLoopStepTypeRef.current;
     const isEntryStep = stepType === "entry";
     const nowTs = Date.now();
     // 收尾点击必须保持最后：新步骤排在非收尾步骤之后、收尾点击之前
@@ -6684,7 +6727,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const executeMark = useCallback(async (
     mark: PickedMark,
     record: ApplicantRecord
-  ): Promise<void> => {
+  ): Promise<{ filledValue?: string } | void> => {
     if (!window.electronAPI) {
       console.warn("[executeMark] electronAPI 不可用");
       return;
@@ -6700,6 +6743,29 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const execJS = (script: string) => inPopup
       ? window.electronAPI!.popupExecuteJS(side, script)
       : window.electronAPI!.viewExecuteJS(side, script);
+    // 填入后回读元素实际值（录入卡片右侧展示：左=来源值，右=网页实际收到的值）；
+    // 回读失败返回 null（调用方回退为填入值），绝不影响执行流程
+    const readElementValue = async (selector: string): Promise<string | null> => {
+      const script = `
+        ${DEEP_QUERY_HELPER}
+        (function() {
+          var el = null;
+          try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(selector))}); } catch(e) { el = null; }
+          if (!el) return { ok: false, reason: 'not_found' };
+          var val = '';
+          try {
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') val = el.value || '';
+            else if (el.contentEditable === 'true') val = el.textContent || '';
+            else val = el.textContent || el.innerText || '';
+          } catch(e) { val = el.textContent || ''; }
+          return { ok: true, value: String(val).trim() };
+        })();
+      `;
+      try {
+        const rb = await execJS(script) as { ok?: boolean; value?: string } | null;
+        return rb?.ok && typeof rb.value === "string" && rb.value ? rb.value : null;
+      } catch { return null; }
+    };
 
     // 计算变量替换后的值
     let resolvedValue = mark.value || "";
@@ -6785,7 +6851,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             throw new Error(`日历控件设定失败: ${wres?.reason || "未知"} (${w.triggerSelector})`);
           }
         }
-        return;
+        // 控件填值后回读触发框实际显示值（框架可能带格式化，如日期 1990-01-01 → 1990/01/01）
+        await new Promise((r) => setTimeout(r, 100));
+        return { filledValue: (await readElementValue(w.triggerSelector)) ?? resolvedValue };
       }
 
       rlog(`[executeMark] INPUT side=${side}, target=${mark.inputTarget}, value="${resolvedValue}", variableField=${mark.variableField || "(none)"}, sourceSelector=${mark.sourceSelector || "(none)"}`);
@@ -6821,7 +6889,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       if (!result?.ok) {
         throw new Error(`输入失败: ${result?.reason || "未知原因"} (${mark.inputTarget})`);
       }
-      return;
+      // 6. 回读输入框实际值：框架受控组件需短暂等待 state 同步后回读（失败回退为填入值）
+      await new Promise((r) => setTimeout(r, 100));
+      return { filledValue: (await readElementValue(mark.inputTarget!)) ?? resolvedValue };
     }
 
     // click 动作：真实点击
@@ -7643,8 +7713,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       let leftFound = true;
 
       if (mp.left_source === "passport") {
+        // 取值兜底链与录入 executeMark 取值一致：record.fields（Excel行）→ passport_fields → 提取结果。
+        // 录入来源字段值常存在 record.fields（用户「放录入」的来源就是 Excel 行数据），
+        // 漏掉它会导致审查时同一字段取值失败，报告「来源为空」——尽管页面已被正确填入
         const docFields = getRecordDocFields(record.record_id);
-        leftValue = record.passport_fields?.[mp.left_field] || docFields[mp.left_field] || "";
+        leftValue = record.fields[mp.left_field] || record.passport_fields?.[mp.left_field] || docFields[mp.left_field] || "";
       } else if (mp.left_source === "manual") {
         leftValue = mp.left_field;
       } else if (mp.left_source === "database") {
@@ -7850,7 +7923,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     recordIndex: number,
     onStepStart?: (recordIndex: number, mark: PickedMark) => void,
     options?: { wrapWithVerify?: boolean; skipSubmit?: boolean; preOnly?: boolean; postThenPre?: boolean; entryReview?: boolean; deferCompare?: boolean; onStepFail?: (recordIndex: number, mark: PickedMark, error: string) => void; onStepSkip?: (recordIndex: number, mark: PickedMark, note: string) => void }
-  ): Promise<{ success: boolean; failedOrder?: number; error?: string; comparisons?: FieldComparison[]; verifyOverall?: "match" | "mismatch"; skippedErrors?: string[]; fills?: { label: string; field: string; value: string }[]; hasOnErrorBreakpoint?: boolean }> => {
+  ): Promise<{ success: boolean; failedOrder?: number; error?: string; comparisons?: FieldComparison[]; verifyOverall?: "match" | "mismatch"; skippedErrors?: string[]; fills?: { label: string; field: string; value: string; filled?: string }[]; hasOnErrorBreakpoint?: boolean }> => {
     // 根据模板模式选择执行哪一段 marks
     // - entry 模式：只执行录入流（填表+提交）
     // - review 模式：只执行审查流（搜索+对比）
@@ -7927,6 +8000,73 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     allMarks = allMarks.filter(
       (m) => !(m.docExtractClick && m.docExtractClickPhase === "post")
     );
+    // 控件录入兜底：老模板 mappings 中的 widget 绑定可能没有对应步骤 mark（绑定保存时设置上下文丢失），
+    // 录入执行必须覆盖——否则性别/日期等控件永远不会被真正填入（mapping 只在比对阶段被读取）。
+    // 仅补录入语义：模板含录入步骤时才补；纯审查模板的 widget 由比对阶段 buildWidgetReadScript 读值。
+    if (
+      !options?.preOnly && !options?.postThenPre && !options?.entryReview && !options?.skipSubmit
+      && tpl.mode !== "review" && tpl.entryMarks.length > 0
+    ) {
+      const covered = new Set<string>();
+      for (const m of allMarks) {
+        if (m.widget?.triggerSelector) covered.add(m.widget.triggerSelector);
+        if (m.inputTarget) covered.add(m.inputTarget);
+      }
+      // 兜底步骤排在录入区段末尾（录入最大 order 之后、收尾点击之前）
+      const entryMaxOrder = Math.max(0, ...tpl.entryMarks.map((m) => m.order));
+      let bump = 0;
+      for (const mp of tpl.mappings ?? []) {
+        if (mp.right_input_type !== "widget" || !mp.widget?.triggerSelector) continue;
+        if (covered.has(mp.widget.triggerSelector)) continue;
+        const lf = (mp.left_field || "").trim();
+        if (!lf) continue; // 未绑定左源：无值可填，跳过
+        covered.add(mp.widget.triggerSelector);
+        bump += 1;
+        const wgSide: "left" | "right" = mp.widget.side === "left" ? "left" : "right";
+        const wgOrder = entryMaxOrder + bump / 100;
+        // 日历控件：先补一个「打开日历」点击步骤（与 commitWidgetDraft 创建的步骤结构一致）
+        if (mp.widget.kind === "calendar") {
+          allMarks.push({
+            id: `wg-open-${mp.widget.triggerSelector}`,
+            order: wgOrder - 0.001,
+            side: wgSide,
+            source: "web",
+            selector: mp.widget.triggerSelector,
+            label: `点击 · 打开日历「${mp.right_label || mp.widget.triggerSelector}」`,
+            value: "",
+            workflow: "entry",
+            action: "click",
+            tag: "",
+            type: "",
+            createdAt: Date.now(),
+          });
+        }
+        allMarks.push({
+          id: `wg-fill-${mp.widget.triggerSelector}`,
+          order: wgOrder,
+          side: wgSide,
+          source: mp.left_source === "excel" ? "excel" : mp.left_source === "passport" ? "passport" : "web",
+          selector: mp.widget.triggerSelector,
+          label: `录入 · ${mp.right_label || mp.widget.triggerSelector}（控件兜底）`,
+          value: mp.left_source === "manual" ? lf : "",
+          workflow: "entry",
+          action: "input",
+          tag: "",
+          type: "",
+          inputTarget: mp.widget.triggerSelector,
+          inputTargetLabel: mp.right_label || mp.widget.triggerSelector,
+          variableField: (mp.left_source === "excel" || mp.left_source === "passport") ? lf : undefined,
+          excelField: mp.left_source === "excel" ? lf : undefined,
+          sourceSelector: (mp.left_source !== "excel" && mp.left_source !== "manual" && mp.left_source !== "passport") ? lf : undefined,
+          widget: mp.widget,
+          createdAt: Date.now(),
+        });
+      }
+      if (bump > 0) {
+        allMarks = allMarks.sort((a, b) => a.order - b.order);
+        rlog(`[batch] 控件录入兜底：模板缺 ${bump} 个控件步骤（映射已绑定但无步骤），已自动补入执行`);
+      }
+    }
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
     // 通用recordKey查找：优先name字段，再找第一个非空字段，最后用record_id
@@ -7957,15 +8097,55 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setLivePairs({ recordId: record.record_id, pairs: [] });
 
     // 本记录实际填入的值（供录入流报告卡片展示一左一右内容，不再空白）
-    const fills: { label: string; field: string; value: string }[] = [];
+    const fills: { label: string; field: string; value: string; filled?: string }[] = [];
     // 本记录被跳过/吞掉的失败步骤（收尾点击失败、断点人工跳过）——必须体现在最终报告里
     const skippedErrors: string[] = [];
+
+    // === 字段比对动作（含后台 OCR join + 页面稳定等待）：一次性闭包 ===
+    // 收尾点击（保存/返回首页/Home）一旦执行，左右网页就离开数据页，详情元素再也读不到——
+    // 比对必须赶在首个收尾点击前完成（此时页面仍停留在数据页）；无收尾点击时在 marks 末尾兜底。
+    let verifyDone = false;
+    let comparisons: FieldComparison[] = [];
+    let verifyOverall: "match" | "mismatch" = "match";
+    const runVerifyOnce = async () => {
+      if (verifyDone) return;
+      verifyDone = true;
+      // 高速模式 join：等待本记录后台 OCR 全部落定（浏览器步骤已并行执行完毕）
+      await joinBgOcrForRecord(record.record_id);
+      // 步骤执行完后等待，让页面稳定（高速模式减半）
+      await sleep(settingsRef.current.high_speed_mode === true ? 400 : 800);
+      if (!options?.wrapWithVerify) return;
+      // 模板未保存 mappings 时从审查 marks 兜底推导，保证字段对比有数据；
+      // 比对范围仅限有审查步骤的字段（录入/控件绑定不产生比对，见 getTemplateCompareMappings）
+      const cmp = await compareFieldsForRecord(record, recordIndex, getTemplateCompareMappings(tpl), tpl.customTextEntries);
+      comparisons = cmp.comparisons;
+      verifyOverall = cmp.overall;
+      // 条件断点：字段比对发现不匹配，且本次执行的 marks 中有 on-error 断点
+      // （比对未执行/无比对条目时不触发，避免"0 个字段不匹配"的空断点）
+      if (verifyOverall === "mismatch" && comparisons.length > 0 && allMarks.some((m) => m.breakpoint === "on-error")) {
+        const mismatchFields = comparisons.filter((c) => c.match === "mismatch" || c.match === "error");
+        const detail = mismatchFields.map((c) => `${c.field}: 「${c.excel_value}」vs「${c.website_value}」`).join("; ");
+        rlog(`[batch] 断点（条件-字段不匹配）触发：${mismatchFields.length} 个字段不匹配`);
+        await waitForBreakpointRef.current({
+          recordName: String(recordKey),
+          recordIndex: recordIndex + 1,
+          stepLabel: "字段比对（审查）",
+          type: "on-error",
+          error: `${mismatchFields.length} 个字段不匹配：${detail}`,
+        });
+      }
+    };
 
     for (let mi = 0; mi < allMarks.length; mi++) {
       if (batchStopRef.current) {
         return { success: false, error: "用户已停止批量执行" };
       }
       const mark = allMarks[mi];
+      // 收尾点击是页面清理动作（保存/返回首页/Home），一旦执行左右网页就离开数据页——
+      // 字段比对必须赶在首个收尾点击前完成（此时页面仍停留在数据页，值还读得到）
+      if (!options?.deferCompare && mark.action === "click" && mark.clickPhase === "post") {
+        await runVerifyOnce();
+      }
       const markSide: ViewSide = mark.side === "left" ? "left" : "right";
       try {
         // 计算当前mark之前已经执行了多少个pre-click步骤（供保底机制回退页面用）
@@ -8008,23 +8188,26 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         }
         // 步骤开始前通知外层，用于高亮/日志/动画
         onStepStart?.(recordIndex, mark);
-        await executeMark(mark, record);
-        // 记录填入值（录入流报告卡片的一左一右内容：左=来源值，右=填入的网页字段）
+        const execRes = (await executeMark(mark, record)) || {};
+        // 记录填入值（录入流报告卡片的一左一右内容：左=来源值，右=网页实际收到的值）
         if (mark.action === "input") {
           const docFields = getRecordDocFields(record.record_id);
           const v = mark.variableField
             ? (record.fields[mark.variableField] ?? record.passport_fields?.[mark.variableField] ?? docFields[mark.variableField] ?? "")
             : (mark.value || "");
+          const sourceVal = String(v ?? "").trim();
+          const filledVal = execRes.filledValue ?? sourceVal;
           fills.push({
             label: markDisplayLabel(mark),
             field: mark.variableField || "",
-            value: String(v ?? "").trim(),
+            value: sourceVal,
+            filled: filledVal,
           });
-          // 逐对填入卡片：录入值作为一对（左=来源字段值，右=填入的网页字段）
+          // 逐对填入卡片：录入值作为一对（左=来源字段值，右=网页实际收到的值）
           const fillPair: LivePair = {
             label: markDisplayLabel(mark),
-            leftValue: String(v ?? "").trim(),
-            rightValue: "",
+            leftValue: sourceVal,
+            rightValue: filledVal,
             status: "match",
             kind: "fill",
           };
@@ -8147,36 +8330,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       };
     }
 
-    // === 高速模式 join：等待本记录后台 OCR 全部落定（浏览器步骤已并行执行完毕）===
-    // 字段对比/报告依赖 OCR 结果，此处统一收口；正常情况下浏览器步骤耗时已覆盖大半 OCR 时长
-    await joinBgOcrForRecord(record.record_id);
-
-    // 每条记录workflow步骤执行完后等待，让页面稳定（高速模式减半）
-    await sleep(settingsRef.current.high_speed_mode === true ? 400 : 800);
-
-    // 所有 marks 执行完毕，进行字段比对（审查机制）
-    let comparisons: FieldComparison[] = [];
-    let verifyOverall: "match" | "mismatch" = "match";
-    if (options?.wrapWithVerify) {
-      // 模板未保存 mappings 时从审查 marks 兜底推导，保证字段对比有数据
-      const cmp = await compareFieldsForRecord(record, recordIndex, getTemplateMappings(tpl), tpl.customTextEntries);
-      comparisons = cmp.comparisons;
-      verifyOverall = cmp.overall;
-      // 条件断点：字段比对发现不匹配，且本次执行的 marks 中有 on-error 断点
-      // （比对未执行/无比对条目时不触发，避免"0 个字段不匹配"的空断点）
-      if (verifyOverall === "mismatch" && comparisons.length > 0 && allMarks.some((m) => m.breakpoint === "on-error")) {
-        const mismatchFields = comparisons.filter((c) => c.match === "mismatch" || c.match === "error");
-        const detail = mismatchFields.map((c) => `${c.field}: 「${c.excel_value}」vs「${c.website_value}」`).join("; ");
-        rlog(`[batch] 断点（条件-字段不匹配）触发：${mismatchFields.length} 个字段不匹配`);
-        await waitForBreakpointRef.current({
-          recordName: String(recordKey),
-          recordIndex: recordIndex + 1,
-          stepLabel: "字段比对（审查）",
-          type: "on-error",
-          error: `${mismatchFields.length} 个字段不匹配：${detail}`,
-        });
-      }
-    }
+    // === 高速模式 join + 字段比对：无收尾点击时在 marks 末尾兜底执行 ===
+    // （有收尾点击时已在首个收尾点击前完成——收尾会把页面导航走，之后比对读不到值）
+    await runVerifyOnce();
 
     return { success: true, comparisons, verifyOverall, skippedErrors, fills };
   }, [executeMark, compareFieldsForRecord, checkViewOnline, waitNetworkRestore, waitPageSettled, getRecordDocFields, joinBgOcrForRecord]);
@@ -8413,15 +8569,27 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     window.electronAPI?.viewClearHighlight("left").catch(() => {});
     window.electronAPI?.viewClearHighlight("right").catch(() => {});
 
-    // 非勾选模式：跳过第一张示范卡（教学时已录入过），从第二张开始按原顺序执行
-    // 勾选模式：只执行勾选的卡片，按原列表顺序排列
-    const skipFirst = !targetIds || targetIds.length === 0;
-    const pool = skipFirst ? cardRecords.slice(1) : cardRecords;
-    const targets = targetIds && targetIds.length > 0
+    // 录入为主的 LOOP（会执行录入步骤）：教学时示范卡已录入过网页，批量执行时跳过它，从第二张开始；
+    // 纯审查 LOOP（无录入步骤）：示范卡也需参与审查，不跳过。勾选/游标模式同样适用。
+    // 只有一张目标卡时不跳过——用户明确只跑这张卡。
+    const willRunEntry = tpl.mode !== "review" && tpl.entryMarks.length > 0;
+    const baseTargets = targetIds && targetIds.length > 0
       ? cardRecords.filter((r) => targetIds.includes(r.record_id))
-      : pool;
+      : cardRecords.slice();
+    let targets = baseTargets;
+    let skippedDemo = false;
+    if (willRunEntry && baseTargets.length > 1) {
+      // 优先精确跳过教学示范卡（sourceRecordId）；老模板缺该字段时退化为跳过第一张
+      const demoIdx = tpl.sourceRecordId
+        ? baseTargets.findIndex((r) => r.record_id === tpl.sourceRecordId)
+        : 0;
+      if (demoIdx >= 0) {
+        targets = baseTargets.filter((_, i) => i !== demoIdx);
+        skippedDemo = true;
+      }
+    }
     if (targets.length === 0) {
-      console.warn("[runBatch] ⚠️ 待执行卡片为空（已全部跳过示范卡）");
+      console.warn("[runBatch] ⚠️ 待执行卡片为空");
       setBatchRunning(false);
       runBatchInFlightRef.current = false;
       return;
@@ -8472,7 +8640,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setAnalysisOpen(true);
 
     // 首条日志同步写入，让用户点击后立刻看到 LOOP 已启动
-    rlog(`[batch] 开始LOOP执行，共 ${targets.length} 条${skipFirst ? "（已跳过示范卡，从第二张开始）" : "（勾选模式）"}`);
+    rlog(`[batch] 开始LOOP执行，共 ${targets.length} 条${skippedDemo ? "（已跳过示范卡，从第二张开始）" : ""}`);
     setSteps([
       {
         step: 1,
@@ -8731,7 +8899,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           let comparisons: FieldComparison[] = [];
           let verifyOverall: "match" | "mismatch" = "match";
           if (hasReviewSteps && pr.result.success) {
-            const cmp = await compareFieldsForRecord(record, i, getTemplateMappings(tpl), tpl.customTextEntries);
+            const cmp = await compareFieldsForRecord(record, i, getTemplateCompareMappings(tpl), tpl.customTextEntries);
             comparisons = cmp.comparisons;
             verifyOverall = cmp.overall;
             // 条件断点：字段不匹配 + pass1 的 marks 带 on-error 断点
@@ -8843,7 +9011,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 left_source: "excel",
                 left_field: f.field,
                 left_value: f.value,
-                right_value: f.value,
+                right_value: f.filled || f.value,
                 match: "match",
                 timestamp: new Date().toISOString(),
               };
@@ -9259,7 +9427,17 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         }
 
         // 2. 批量执行该组所有卡片（复用现有 executeTemplateForRecord 逻辑）
-        const targets = task.cardRecords;
+        // 录入为主的任务：教学时示范卡已录入过网页，批量执行跳过它（单卡任务不跳过——用户明确只跑这张）
+        let targets = task.cardRecords;
+        const willEntryQ = task.workflowTemplate.mode !== "review" && task.workflowTemplate.entryMarks.length > 0;
+        if (willEntryQ && targets.length > 1) {
+          const demoIdQ = task.workflowTemplate.sourceRecordId;
+          const demoIdxQ = demoIdQ ? targets.findIndex((r) => r.record_id === demoIdQ) : 0;
+          if (demoIdxQ >= 0) {
+            targets = targets.filter((_, i) => i !== demoIdxQ);
+            rlog(`[runQueue] 任务 ${ti + 1}: 已跳过示范卡，从第二张开始（共 ${targets.length} 条）`);
+          }
+        }
         // 回填该任务 LOOP 的步骤与字段映射到会话面板（字段对比区域可见）
         setPickedMarks([...task.workflowTemplate.dataSourceMarks, ...task.workflowTemplate.reviewMarks, ...task.workflowTemplate.entryMarks]);
         setMappings(getTemplateMappings(task.workflowTemplate));
@@ -9454,7 +9632,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               comparisons = result.comparisons || [];
               verifyOverall = result.verifyOverall || "match";
             } else {
-            const cmp = await compareFieldsForRecord(record, ri, getTemplateMappings(task.workflowTemplate), task.workflowTemplate.customTextEntries);
+            const cmp = await compareFieldsForRecord(record, ri, getTemplateCompareMappings(task.workflowTemplate), task.workflowTemplate.customTextEntries);
             comparisons = cmp.comparisons;
             verifyOverall = cmp.overall;
             // 条件断点：字段比对发现不匹配且 pass1 的 marks 中有 on-error 断点
@@ -10819,7 +10997,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             left_source: "excel",
             left_field: f.field,
             left_value: f.value,
-            right_value: f.value,
+            right_value: f.filled || f.value,
             match: "match",
             timestamp: new Date().toISOString(),
           });
@@ -12239,11 +12417,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setRightPicked(info);
     rightPickedSideRef.current = "right";
     // 审查模式（先右后左）：右侧拾取完成后切到左侧拾取来源；录入模式（先左后右）：两侧已完成，等待保存
-    setPickTarget(currentLoopStepTypeRef.current === "review" ? "left" : null);
+    // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
+    setPickTarget(addingStepModeRef.current === "review" ? "left" : null);
     // 录入/映射流程：点击右侧输入框时立即填入来源字段值（优先）或 Excel 列值
     // 参考「绑定搜索」逻辑：即使没有选中 Excel 列，只要来源字段值已捕获就填入；延迟 350ms 确保元素就绪
+    // ⚠️ 审查模式例外：右侧是核对目标（只登记待比对），绝不填值
     const ordinaryFillCol = rightBindColumnRef.current || currentExcelCol;
-    if (isInputLike && (sourceFieldValueRef.current || ordinaryFillCol)) {
+    if (addingStepModeRef.current !== "review" && isInputLike && (sourceFieldValueRef.current || ordinaryFillCol)) {
       const previewValue = ((sourceFieldValueRef.current || (ordinaryFillCol ? selected?.fields?.[ordinaryFillCol] : "")) || "").trim();
       if (previewValue) {
         console.log("[onRightPicked] 普通映射填入:", { selector: info.selector, previewValue, source: sourceFieldValueRef.current ? "来源字段" : "Excel列" });
@@ -12651,10 +12831,11 @@ if (info.value || info.text) {
 }
 // 审查模式（先右后左）：两侧已完成，等待保存；录入模式（先左后右）：左源拾取完成后继续拾取右侧元素
 // 右侧 Excel 模式：审查=继续点右侧 Excel 来源字段；录入=两侧完成
+// 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
 setPickTarget(
   rightExcelModeRef.current
-    ? (currentLoopStepTypeRef.current === "entry" ? null : "right")
-    : (currentLoopStepTypeRef.current === "entry" ? "right" : null)
+    ? (addingStepModeRef.current === "entry" ? null : "right")
+    : (addingStepModeRef.current === "entry" ? "right" : null)
 );
 // addingStepMode 下不添加 pick mark，保存映射时才添加 input mark
 if (!addingStepModeRef.current) {
@@ -12719,7 +12900,8 @@ type: info.type,
       mappingToSave,
     ]);
     // 如果正在添加审查/录入步骤，把映射转化为 pickedMark
-    const stepType = currentLoopStepTypeRef.current;
+    // 设置期以 addingStepModeRef 为准；非设置期回退 LOOP 运行时类型（保持原行为）
+    const stepType = addingStepModeRef.current ?? currentLoopStepTypeRef.current;
     if (addingStepMode) {
       const isEntry = stepType === "entry";
       const isExcelSource = m.left_source === "excel";
@@ -12744,9 +12926,11 @@ type: info.type,
         inputTarget: isEntry ? m.right_selector : undefined,
         inputTargetLabel: isEntry ? (m.right_label || m.right_selector) : undefined,
         // Excel来源：从record.fields按字段名取值；护照来源：从docExtract.fields取值；左网页/固定值：不设variableField
-        variableField: isEntry && (isExcelSource || isPassportSource) ? m.left_field : undefined,
+        // 审查 mark 同样携带 variableField/sourceSelector：pick 步骤执行时不消费它们，
+        // 但模板缺 mappings 时 deriveMappingsFromMarks 反推对比映射依赖这些字段（否则审查对比静默丢失）
+        variableField: (isExcelSource || isPassportSource) ? m.left_field : undefined,
         excelField: isExcelSource ? m.left_field : undefined,
-        sourceSelector: isEntry ? leftWebSelector : undefined,
+        sourceSelector: leftWebSelector,
         // 点击展开型控件：执行时走控件脚本（选项选择/日历设定）而非普通填值
         widget: m.widget || undefined,
       });
@@ -12759,9 +12943,10 @@ type: info.type,
     setLeftPicked(null);
     rightPickedSideRef.current = "right";
     // 标准：审查→右网页目标 / 录入→左侧来源；右侧Excel模式：审查→左网页目标 / 录入→右侧Excel来源
+    // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
     const nextTarget: PickTarget = rightExcelModeRef.current
-      ? (currentLoopStepTypeRef.current === "entry" ? "right" : "left")
-      : (currentLoopStepTypeRef.current === "entry" ? "left" : "right");
+      ? (addingStepModeRef.current === "entry" ? "right" : "left")
+      : (addingStepModeRef.current === "entry" ? "left" : "right");
     setPickTarget(nextTarget);
     setTimeout(() => {
       // 只在对应侧显示网页时才启动 webview 拾取（显示 Excel 时靠单元格点击拾取）
@@ -12855,7 +13040,9 @@ type: info.type,
    * @param createMark 是否同步创建 pickedMark（供 LOOP 执行）——绑定时为 true，未绑定时为 false（绑定时再补建）
    */
   const commitWidgetDraft = useCallback((draft: WidgetDef, binding: WidgetBinding, opts: { createMark: boolean }) => {
-    const stepType = currentLoopStepTypeRef.current;
+    // 设置期以 addingStepModeRef 为准；控件提取穿插场景（startWidgetPick 已清 addingStepMode）
+    // 回退 widgetStepTypeRef（进入控件提取时记住的模式）；非设置期再回退 LOOP 运行时类型
+    const stepType = addingStepModeRef.current ?? widgetStepTypeRef.current ?? currentLoopStepTypeRef.current;
     const isEntry = stepType === "entry";
     const isExcelSource = binding.leftSource === "excel";
     const isManualSource = binding.leftSource === "manual";
@@ -12879,8 +13066,10 @@ type: info.type,
       },
     ]);
 
-    // 2. 仅当有绑定且正在添加步骤模式时，才创建 pickedMark（无绑定时不创建，避免 LOOP 执行时空值报错）
-    if (opts.createMark && leftFieldTrimmed && addingStepModeRef.current) {
+    // 2. 仅当有绑定且处于步骤设置上下文时，才创建 pickedMark（无绑定时不创建，避免 LOOP 执行时空值报错）。
+    // 步骤设置上下文 = 正在添加步骤模式（addingStepModeRef）或控件提取穿插场景记住的模式（widgetStepTypeRef）
+    const widgetSetupMode = addingStepModeRef.current ?? widgetStepTypeRef.current;
+    if (opts.createMark && leftFieldTrimmed && widgetSetupMode) {
       const wgSide = draft.side || "right";
       // 日历控件：先记录一个「打开日历」点击步骤（LOOP 时先真实点开日历，设值步骤检测到已打开则跳过重复点击）
       if (draft.kind === "calendar") {
@@ -12922,6 +13111,9 @@ type: info.type,
 
   /** 开始拾取控件触发框（左右两侧网页均可），不 toggle —— 始终启动新一轮拾取 */
   const startWidgetPick = useCallback((kind: "option" | "calendar") => {
+    // 进入控件提取前记住当前步骤设置模式：exitAllSetupModes 会清掉 addingStepMode，
+    // 但用户是在录入/审查设置中穿插控件提取，控件步骤必须归属这个模式（否则 LOOP 模板缺控件步骤）
+    widgetStepTypeRef.current = addingStepModeRef.current;
     // 若日历引导式拾取进行中，先取消并丢弃不完整 draft（引导未完成不应保存）
     const wasInSplitView = docExtractSplitViewRef.current;
     if (wasInSplitView) {
@@ -12982,6 +13174,7 @@ type: info.type,
   }, [exitAllSetupModes]);
 
   const cancelWidgetPick = useCallback(() => {
+    widgetStepTypeRef.current = null; // 控件提取取消，释放记住的模式
     setWidgetPickKind(null);
     setWidgetLeftPickingKey(null);
     setWidgetPassportPickingKey(null);
@@ -13461,12 +13654,13 @@ type: info.type,
           };
         });
       }
-      // 无已有 mark：若绑定有效且在步骤添加模式，补建一个
-      if (leftFieldTrimmed && addingStepModeRef.current) {
+      // 无已有 mark：若绑定有效且处于步骤设置上下文（含控件提取穿插场景），补建一个
+      if (leftFieldTrimmed && (addingStepModeRef.current ?? widgetStepTypeRef.current)) {
         const mapping = mappingsRef.current.find((m) => m.right_selector === rightSelector);
         const w = mapping?.widget;
         if (w) {
-          const stepType = currentLoopStepTypeRef.current;
+          // 设置期以 addingStepModeRef 为准；控件提取穿插场景回退 widgetStepTypeRef；非设置期再回退 LOOP 运行时类型
+          const stepType = addingStepModeRef.current ?? widgetStepTypeRef.current ?? currentLoopStepTypeRef.current;
           const isEntry = stepType === "entry";
           const isExcel = binding.leftSource === "excel";
           const isPassport = binding.leftSource === "passport";
@@ -14068,7 +14262,8 @@ type: info.type,
       sourceFieldLabelRef.current = info.field || "";
     }
     // 录入模式（先左后右）：Excel 来源确定后激活右侧拾取光标；审查模式（先右后左）：等待保存
-    const isEntry = addingStepModeRef.current === "entry" || currentLoopStepTypeRef.current === "entry";
+    // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
+    const isEntry = addingStepModeRef.current === "entry";
     setPickTarget(isEntry ? "right" : null);
     if (isEntry) {
       // 激活右侧网页拾取光标
@@ -14135,7 +14330,8 @@ type: info.type,
       sourceFieldLabelRef.current = info.field || "";
     }
     // 录入流：来源确定后切到左网页选目标输入框；审查流：等待保存映射
-    const isEntry = addingStepModeRef.current === "entry" || currentLoopStepTypeRef.current === "entry";
+    // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
+    const isEntry = addingStepModeRef.current === "entry";
     setPickTarget(isEntry ? "left" : null);
     if (isEntry && leftViewMode === "web") {
       window.electronAPI?.viewStartPicking("left");
