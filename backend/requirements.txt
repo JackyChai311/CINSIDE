@@ -17,7 +17,7 @@ rapidocr>=3.9
 # DirectML 仅有 Windows 轮子；macOS/Linux 用 CPU 版 onnxruntime（gpu_ocr 探测链自动降级）
 onnxruntime-directml>=1.20; sys_platform == "win32"
 onnxruntime>=1.17; sys_platform != "win32"
-openvino>=2024.3  # CPU 推理加速候选：Intel CPU 指令级优化，AMD 亦可用（自检择优）
+openvino>=2024.3; sys_platform == "win32"  # CPU 推理加速候选：Intel CPU 指令级优化，AMD 亦可用（自检择优）；其 libtbb 在 macOS codesign 失败，仅装 Windows
 
 # 真实跑 Browser Use 时再装（依赖较重）
 # browser-use>=0.1.30
