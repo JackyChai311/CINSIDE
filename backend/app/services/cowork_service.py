@@ -8,7 +8,12 @@
 数据全部落盘在用户数据目录的 cowork/ 下：
   skills.json     — 用户技能库
   profile.md      — 累积的用户风格与要求（中央 AI 持续学习）
-  tasks/<id>/     — 每个任务的工作目录（task.md / result-*.md / qc-*.md）
+  clients.json    — 用户手动设置的客户端可执行文件位置（优先于 PATH 检测）
+  tasks/<id>/     — 每个任务的工作目录：
+                    task-r*.md         — 每轮派发给客户端的完整指令
+                    result-r*-*.md     — 每个客户端的成果文件（客户端自写优先，回退 stdout）
+                    outputs-r*.md      — 每轮全部客户端产出的汇总文件
+                    final.md           — 品控后交付的最终成果
 """
 from __future__ import annotations
 
@@ -34,6 +39,7 @@ _COWORK_DIR = _USER_DATA_DIR / "cowork"
 _TASKS_DIR = _COWORK_DIR / "tasks"
 _SKILLS_FILE = _COWORK_DIR / "skills.json"
 _PROFILE_FILE = _COWORK_DIR / "profile.md"
+_CLIENT_PATHS_FILE = _COWORK_DIR / "clients.json"
 
 
 def _ensure_dirs() -> None:
@@ -198,6 +204,49 @@ def set_profile(text: str) -> str:
     return text or ""
 
 
+# ---- 客户端位置（用户手动设置，优先于 PATH 自动检测）----
+
+def _load_client_paths() -> dict[str, str]:
+    _ensure_dirs()
+    if not _CLIENT_PATHS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(_CLIENT_PATHS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {k: str(v) for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_client_paths(paths: dict[str, str]) -> None:
+    _ensure_dirs()
+    _CLIENT_PATHS_FILE.write_text(
+        json.dumps(paths, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def save_client_path(client_id: str, path: str) -> bool:
+    """保存/清除某个客户端的可执行文件位置。path 为空表示清除，恢复自动检测。"""
+    if not any(c.id == client_id for c in _BUILTIN_CLIENTS):
+        return False
+    paths = _load_client_paths()
+    if path.strip():
+        paths[client_id] = path.strip()
+    else:
+        paths.pop(client_id, None)
+    _save_client_paths(paths)
+    return True
+
+
+def _path_usable(path: str) -> bool:
+    """自定义路径是否可用：绝对/相对文件存在，或在 PATH 中可解析。"""
+    if not path:
+        return False
+    return Path(path).exists() or shutil.which(path) is not None
+
+
 # ---- 客户端检测 ----
 
 def _which(bin_name: str) -> str | None:
@@ -213,11 +262,24 @@ def _which(bin_name: str) -> str | None:
     return None
 
 
+def _resolve_bin(adapter: ClientAdapter) -> tuple[str | None, str]:
+    """解析客户端实际启动位置。返回 (路径, 来源 custom/path/none)。
+
+    用户手动设置的位置最优先；设置但无效时视为不可用（不再回退 PATH，避免悄悄用了另一个版本）。
+    """
+    custom = _load_client_paths().get(adapter.id, "")
+    if custom:
+        return (custom, "custom") if _path_usable(custom) else (None, "custom")
+    found = _which(adapter.bin_name) or _which(adapter.windows_bin)
+    return found, ("path" if found else "none")
+
+
 def detect_clients() -> list[dict]:
-    """检测本机已安装的编码客户端。"""
+    """检测本机已安装的编码客户端（自定义位置优先，其次 PATH）。"""
     results = []
     for c in _BUILTIN_CLIENTS:
-        path = _which(c.bin_name) or _which(c.windows_bin)
+        path, source = _resolve_bin(c)
+        custom_path = _load_client_paths().get(c.id, "")
         version = ""
         if path:
             try:
@@ -237,6 +299,8 @@ def detect_clients() -> list[dict]:
             "path": path or "",
             "version": version,
             "hint": c.hint,
+            "custom_path": custom_path,
+            "source": source,
         })
     return results
 
@@ -308,7 +372,8 @@ async def _call_central_ai(system_prompt: str, user_content: str, temperature: f
     return data["choices"][0]["message"]["content"] or ""
 
 
-def _build_prompt(task: Task, skills: list[Skill], profile: str, qc_feedback: str = "") -> str:
+def _build_prompt(task: Task, skills: list[Skill], profile: str, result_file: Path,
+                  qc_feedback: str = "") -> str:
     """组装给执行客户端的完整任务指令。"""
     parts = ["# 任务\n", task.instruction.strip(), "\n"]
 
@@ -332,22 +397,33 @@ def _build_prompt(task: Task, skills: list[Skill], profile: str, qc_feedback: st
         parts.append(qc_feedback.strip() + "\n")
 
     parts.append(
-        "\n## 输出要求\n"
-        "1. 直接完成任务，输出最终成果（代码/文档/分析等）。\n"
-        "2. 不要询问额外问题，基于现有信息做出合理判断。\n"
-        "3. 成果完整可直接使用，不要用占位符。\n"
+        "\n## 输出与交付（必须遵守）\n"
+        f"1. 把最终成果完整写入这个文件（绝对路径）：\n   {result_file}\n"
+        "2. 文件格式：UTF-8 Markdown；首行为 `# 交付成果`，正文即成品本身（代码/文档/分析），"
+        "完整可直接使用，不要占位符、不要只写摘要。\n"
+        "3. 除此之外产生的辅助文件，也放在上述文件所在目录内。\n"
+        "4. 如果你无法写文件，则把完整成果原样打印到标准输出。\n"
+        "5. 不要询问额外问题，基于现有信息做出合理判断。\n"
     )
     return "\n".join(parts)
 
 
 async def _run_client(adapter: ClientAdapter, prompt: str, result_file: Path,
-                      cwd: Path, timeout: int = 600) -> tuple[str, str, int]:
-    """启动一个客户端执行任务，stdout 写入 result_file。
+                      cwd: Path, timeout: int = 600) -> tuple[str, str, int, str]:
+    """启动一个客户端执行任务。
 
-    返回 (stdout, stderr, returncode)。
+    指令中已告知客户端把成果写入 result_file；运行结束后：
+    - 客户端自己写了 result_file 且非空 → 成品即文件内容（优先）；
+    - 否则把 stdout 落盘到 result_file（兼容无法写文件的客户端）。
+
+    返回 (成品文本, stderr, returncode, 成品来源 file/stdout)。
     """
-    bin_path = _which(adapter.bin_name) or _which(adapter.windows_bin)
+    bin_path, source = _resolve_bin(adapter)
     if not bin_path:
+        if source == "custom":
+            raise RuntimeError(
+                f"客户端 {adapter.name} 的自定义位置不可用，请在 Cowork Studio 客户端面板重新设置"
+            )
         raise RuntimeError(f"客户端 {adapter.name} 不可用（未在 PATH 中找到）")
 
     # 组装命令：bin [arg_flag] "prompt" [extra_args]
@@ -374,9 +450,18 @@ async def _run_client(adapter: ClientAdapter, prompt: str, result_file: Path,
 
     stdout = stdout_b.decode("utf-8", errors="replace") if stdout_b else ""
     stderr = stderr_b.decode("utf-8", errors="replace") if stderr_b else ""
-    # 把 stdout 落盘为结果文件（满足"输出返回一个文件"的要求）
+
+    # 成品判定：客户端自写的文件优先，其次 stdout
+    file_content = ""
+    try:
+        if result_file.exists():
+            file_content = result_file.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        file_content = ""
+    if file_content:
+        return file_content, stderr, proc.returncode or 0, "file"
     result_file.write_text(stdout, encoding="utf-8")
-    return stdout, stderr, proc.returncode or 0
+    return stdout, stderr, proc.returncode or 0, "stdout"
 
 
 async def _qc_review(task: Task, skills: list[Skill], profile: str) -> tuple[bool, str, str]:
@@ -512,15 +597,14 @@ async def dispatch_task(
         task.round = round_num
         _emit({"type": "status", "stage": "dispatch", "message": f"第 {round_num} 轮派发", "round": round_num})
 
-        prompt = _build_prompt(task, skills, profile, qc_feedback)
-        prompt_file = tdir / f"task-r{round_num}.md"
-        prompt_file.write_text(prompt, encoding="utf-8")
-
-        # 重置本轮 assignments
+        # 重置本轮 assignments；每个客户端的指令里指明它自己的成果文件（路径+格式）
         task.assignments = []
         tasks = []
         for adapter in adapters:
             result_file = tdir / f"result-r{round_num}-{adapter.id}.md"
+            prompt_file = tdir / f"task-r{round_num}-{adapter.id}.md"
+            p = _build_prompt(task, skills, profile, result_file, qc_feedback)
+            prompt_file.write_text(p, encoding="utf-8")
             a = Assignment(
                 client_id=adapter.id,
                 client_name=adapter.name,
@@ -531,7 +615,7 @@ async def dispatch_task(
             )
             task.assignments.append(a)
             _emit({"type": "client_start", "client_id": adapter.id, "client_name": adapter.name})
-            tasks.append(_run_client(adapter, prompt, result_file, tdir, timeout=timeout_per_client))
+            tasks.append(_run_client(adapter, p, result_file, tdir, timeout=timeout_per_client))
 
         # 并行等待所有客户端
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -544,16 +628,30 @@ async def dispatch_task(
                 _emit({"type": "client_done", "client_id": adapter.id,
                        "status": "failed", "elapsed": a.elapsed, "error": a.error})
             else:
-                stdout, stderr, rc = res
-                a.result = stdout
-                a.status = "done" if rc == 0 and stdout.strip() else "failed"
-                if rc != 0 and not stdout.strip():
-                    a.error = (stderr or f"退出码 {rc}")[:500]
+                final_text, stderr, rc, origin = res
+                a.result = final_text
+                a.status = "done" if rc == 0 and final_text.strip() else "failed"
+                if a.status == "failed":
+                    a.error = (stderr or f"退出码 {rc}，且无有效产出")[:500]
                 _emit({"type": "client_done", "client_id": adapter.id,
                        "status": a.status, "elapsed": a.elapsed,
-                       "result_preview": stdout[:200]})
+                       "result_preview": final_text[:200],
+                       "result_file": a.result_file, "origin": origin})
 
-        # 品控
+        # 汇总本轮全部客户端产出（一个文件收纳不同客户端的结果，供中央 AI 直接阅读）
+        outputs_parts = [
+            f"# 任务产出汇总 · 第 {round_num} 轮\n",
+            f"> 任务：{task.instruction.strip()[:200]}\n",
+        ]
+        for a in task.assignments:
+            outputs_parts.append(f"\n---\n\n## {a.client_name} 的产出\n")
+            outputs_parts.append(f"成果文件：{a.result_file}\n\n")
+            outputs_parts.append((a.result.strip() or "（无产出）") + "\n")
+        outputs_file = tdir / f"outputs-r{round_num}.md"
+        outputs_file.write_text("\n".join(outputs_parts), encoding="utf-8")
+        _emit({"type": "status", "stage": "collect", "message": f"产出已汇总至 {outputs_file.name}", "round": round_num})
+
+        # 品控（直接读取各成果文件内容）
         _emit({"type": "status", "stage": "qc", "message": "中央 AI 品控中…", "round": round_num})
         try:
             passed, review, feedback = await _qc_review(task, skills, profile)
@@ -624,3 +722,134 @@ def list_recent_tasks(limit: int = 20) -> list[dict]:
             "final_preview": (final_file.read_text(encoding="utf-8")[:120] if final_file.exists() else ""),
         })
     return tasks
+
+
+# ---- 人工协作：任务看板 + 指定本地文件提取 ----
+# 参考 Hannsonus 的模式：任务发起者指定本机文件路径，执行者按提取要求读取该文件并回填结果。
+
+_HUMAN_TASKS_FILE = _COWORK_DIR / "human_tasks.json"
+
+# 支持提取的文件扩展名（与 document_extract 能力对齐）
+_HUMAN_EXTRACT_EXTS = {
+    ".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif", ".tiff", ".heic", ".heif",
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".md", ".csv", ".rtf",
+}
+
+
+@dataclass
+class HumanTask:
+    id: str
+    title: str
+    assignee: str = "未分配"
+    status: str = "todo"          # todo / doing / done
+    note: str = ""
+    # 指定本地文件提取（搬运自 Hannsonus 的 filePath 模式）
+    file_path: str = ""           # 发起者指定的本机文件绝对路径
+    extract_note: str = ""        # 提取要求：要拿什么（逗号/顿号分隔的字段，或自由描述）
+    extract_text: str = ""        # 提取出的全文
+    extract_fields: dict = field(default_factory=dict)   # 结构化字段结果
+    extract_method: str = ""
+    extracted_at: float = 0
+    created_at: float = field(default_factory=time.time)
+
+
+def _load_human_tasks() -> list[HumanTask]:
+    _ensure_dirs()
+    if not _HUMAN_TASKS_FILE.exists():
+        return []
+    try:
+        data = json.loads(_HUMAN_TASKS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            return []
+        return [HumanTask(**{k: v for k, v in item.items() if k in HumanTask.__dataclass_fields__})
+                for item in data if isinstance(item, dict)]
+    except Exception:
+        return []
+
+
+def _save_human_tasks(tasks: list[HumanTask]) -> None:
+    _ensure_dirs()
+    _HUMAN_TASKS_FILE.write_text(
+        json.dumps([asdict(t) for t in tasks], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def list_human_tasks() -> list[dict]:
+    return [asdict(t) for t in _load_human_tasks()]
+
+
+def save_human_task(task: dict) -> dict:
+    tasks = _load_human_tasks()
+    tid = task.get("id") or uuid.uuid4().hex[:12]
+    existing = next((t for t in tasks if t.id == tid), None)
+    if existing:
+        for k in ("title", "assignee", "status", "note", "file_path", "extract_note"):
+            if k in task:
+                setattr(existing, k, str(task.get(k, getattr(existing, k))))
+        saved = existing
+    else:
+        saved = HumanTask(
+            id=tid,
+            title=task.get("title", "未命名任务"),
+            assignee=task.get("assignee", "未分配") or "未分配",
+            status=task.get("status", "todo"),
+            note=task.get("note", ""),
+            file_path=task.get("file_path", ""),
+            extract_note=task.get("extract_note", ""),
+        )
+        tasks.insert(0, saved)
+    _save_human_tasks(tasks)
+    return asdict(saved)
+
+
+def delete_human_task(task_id: str) -> bool:
+    tasks = _load_human_tasks()
+    before = len(tasks)
+    tasks = [t for t in tasks if t.id != task_id]
+    if len(tasks) < before:
+        _save_human_tasks(tasks)
+        return True
+    return False
+
+
+def get_human_task(task_id: str) -> HumanTask | None:
+    return next((t for t in _load_human_tasks() if t.id == task_id), None)
+
+
+def set_human_task_extract(task_id: str, text: str, fields: dict, method: str) -> HumanTask | None:
+    tasks = _load_human_tasks()
+    t = next((x for x in tasks if x.id == task_id), None)
+    if not t:
+        return None
+    t.extract_text = text or ""
+    t.extract_fields = fields or {}
+    t.extract_method = method or ""
+    t.extracted_at = time.time()
+    _save_human_tasks(tasks)
+    return t
+
+
+def parse_extract_note(note: str) -> list[str]:
+    """把提取要求拆成字段列表：按换行/逗号/顿号/分号分隔，过滤空项。"""
+    if not note:
+        return []
+    import re
+    return [s.strip() for s in re.split(r"[，,、;；\n]+", note) if s.strip()][:20]
+
+
+def check_human_extract_file(file_path: str) -> tuple[Path, str]:
+    """校验指定的本地文件可提取。返回 (Path, 错误消息)。"""
+    p = Path(file_path.strip().strip('"'))
+    if not file_path.strip():
+        return p, "未指定文件路径"
+    if not p.is_file():
+        return p, f"文件不存在：{p}"
+    if p.suffix.lower() not in _HUMAN_EXTRACT_EXTS:
+        return p, f"不支持的文件类型：{p.suffix or '（无扩展名）'}"
+    size = p.stat().st_size
+    if size > 30 * 1024 * 1024:
+        return p, f"文件过大（{size / 1024 / 1024:.0f}MB > 30MB）"
+    if size == 0:
+        return p, "文件为空"
+    return p, ""

@@ -80,6 +80,9 @@ import type {
   AppMode,
   AppSettings,
   ApplicantRecord,
+  ArchiveDoc,
+  ArchivePayload,
+  ArchiveRecord,
   BatchResult,
   BatchStatus,
   DocCompareEntry,
@@ -133,6 +136,7 @@ import ElementSelectBar, { type PickTarget, type CustomTextEntry } from "./compo
 import ResultsPanel from "./components/ResultsPanel";
 import type { ExtractSummaryItem } from "./components/ResultsPanel";
 import SettingsModal from "./components/SettingsModal";
+import ArchiveDialog from "./components/ArchiveDialog";
 import OfficecliRequiredModal from "./components/OfficecliRequiredModal";
 import DocFillDialog from "./components/DocFillDialog";
 import SkillPanel from "./components/SkillPanel";
@@ -1148,6 +1152,7 @@ export default function App() {
     }
   }, [switchTaskType]);
   const [showSettings, setShowSettings] = useState(false);
+  const [showArchive, setShowArchive] = useState(false);
   const [leftPanelOpen, setLeftPanelOpen] = useState(true);
   const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
   const [hasRunOnce, setHasRunOnce] = useState(false);
@@ -2775,6 +2780,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       || getRecordFieldValue(rec, "student_id")
       || rec.record_id;
   }, [getRecordFieldValue]);
+
   /** 后端自动识别的列映射（原始列名 -> 标准字段名），用于过滤Excel表头中的别名列和自动初始化fieldColumnMap */
   const [detectedColumnMap, setDetectedColumnMap] = useState<Record<string, string>>({});
 
@@ -2916,6 +2922,124 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setQueueSignal((s) => s + 1); // 自动切换到队列tab让用户看到
     rlog(`[queue] 添加任务: ${newTask.name}, 卡片数=${snapshotRecords.length}, rightUrl=${rightUrl}`);
   }, [cardRecords, workflowTemplate, appMode, leftUrl, rightUrl, taskQueue.length]);
+
+  // ============ 任务归档（一键导出 ZIP / 导入还原） ============
+  /** blob URL / dataURL → 无前缀 base64（导出时内联图片用） */
+  const mediaUrlToB64 = async (url: string): Promise<string> => {
+    if (!url) return "";
+    try {
+      const blob = await (await fetch(url)).blob();
+      return await new Promise<string>((resolve) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result || "").replace(/^data:[^,]*,/, ""));
+        fr.onerror = () => resolve("");
+        fr.readAsDataURL(blob);
+      });
+    } catch {
+      return "";
+    }
+  };
+
+  /** 收集全部卡片 + LOOP 绑定 + 执行进度 + 报告 + 图片 → 归档 payload（发后端打包 ZIP） */
+  const buildArchivePayload = useCallback(async (): Promise<ArchivePayload> => {
+    const outRecords: ArchiveRecord[] = [];
+    for (const r of cardRecords) {
+      const extracts = docExtractsByRecord[r.record_id] || [];
+      const docs: ArchiveDoc[] = [];
+      for (const ex of extracts) {
+        docs.push({
+          filename: ex.filename,
+          method: ex.method,
+          ocr_backend: ex.ocr_backend,
+          text: ex.text || "",
+          fields: { ...ex.fields },
+          source: ex.source || "",
+          mrz_warnings: ex.mrz_warnings || [],
+          image_b64: ex.processed_image ? await mediaUrlToB64(ex.processed_image) : "",
+        });
+      }
+      outRecords.push({
+        record_id: r.record_id,
+        source: r.source,
+        display_name: getRecordDisplayName(r),
+        fields: { ...r.fields },
+        university_url: r.university_url ?? null,
+        university_name: r.university_name ?? null,
+        has_passport: r.has_passport,
+        passport_fields: { ...(r.passport_fields || {}) },
+        overall: recordResults[r.record_id] || null,
+        loop: cardLoopMap[r.record_id] || null,
+        avatar_b64: (r.avatar || "").replace(/^data:[^,]*,/, ""),
+        card_image_b64: cardImages[r.record_id] ? await mediaUrlToB64(cardImages[r.record_id]) : "",
+        docs,
+      });
+    }
+    return {
+      version: 1,
+      exported_at: new Date().toISOString(),
+      task_name: cardRecords[0]?.university_name || "网页任务",
+      run_cursor: runCursor,
+      records: outRecords,
+      // 报告剥离截图（体积大；导入后截图不再展示）
+      reports: loopReports.map((rp) => ({
+        ...rp,
+        entries: (rp.entries || []).map((e) => ({ ...e, screenshot: null })),
+      })),
+    };
+  }, [cardRecords, cardLoopMap, recordResults, runCursor, loopReports, docExtractsByRecord, cardImages, getRecordDisplayName]);
+
+  /** 导入归档 → 还原当时的卡片、LOOP 绑定、执行进度、报告与提取文件 */
+  const restoreArchive = useCallback((payload: ArchivePayload) => {
+    const restored: ApplicantRecord[] = (payload.records || []).map((ar) => ({
+      record_id: ar.record_id,
+      source: ar.source,
+      fields: { ...ar.fields },
+      university_url: ar.university_url ?? null,
+      university_name: ar.university_name ?? null,
+      avatar: ar.avatar_b64 || null,
+      has_passport: ar.has_passport,
+      passport_fields: { ...ar.passport_fields },
+    }));
+    setCardPool(restored);
+    setCardsGenerated(true);
+    const loopMap: Record<string, { loopId: string; loopName: string; setAt: number }> = {};
+    const results: Record<string, Overall> = {};
+    const extracts: Record<string, DocExtractState[]> = {};
+    for (const ar of payload.records || []) {
+      if (ar.loop) loopMap[ar.record_id] = { ...ar.loop };
+      if (ar.overall) results[ar.record_id] = ar.overall;
+      if (ar.docs?.length) {
+        extracts[ar.record_id] = ar.docs.map((d) => ({
+          filename: d.filename,
+          method: d.method,
+          ocr_backend: d.ocr_backend,
+          text: d.text || "",
+          fields: { ...d.fields },
+          entries: [],
+          source: d.source || "",
+          mrz_warnings: d.mrz_warnings || [],
+          processed_image: d.image_b64 ? `data:image/jpeg;base64,${d.image_b64}` : null,
+        }));
+      }
+      // 卡片自定义图片走 setCardImage（写 IndexedDB 持久化）
+      if (ar.card_image_b64) setCardImage(ar.record_id, `data:image/jpeg;base64,${ar.card_image_b64}`);
+    }
+    setCardLoopMap(loopMap);
+    setRecordResults(results);
+    setRunCursor(payload.run_cursor ?? null);
+    setLoopReports((payload.reports || []) as VerificationReport[]);
+    setDocExtractsByRecord(extracts);
+    if (restored[0]) setSelectedId(restored[0].record_id);
+    setSuccessToast(`已还原归档「${payload.task_name}」：${restored.length} 张卡片、${payload.reports?.length || 0} 份报告`);
+  }, [setCardImage, setSuccessToast]);
+
+  /** 归档面板概览统计 */
+  const archiveStats = useMemo(() => ({
+    cards: cardRecords.length,
+    done: Object.keys(recordResults).length,
+    files: Object.values(docExtractsByRecord).reduce((n, ds) => n + ds.length, 0),
+    reports: loopReports.length,
+  }), [cardRecords, recordResults, docExtractsByRecord, loopReports]);
 
   // 删除队列项
   const removeFromQueue = useCallback((id: string) => {
@@ -14426,14 +14550,14 @@ type: info.type,
   useEffect(() => {
     const api = window.electronAPI;
     if (!api) return;
-    const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel || showApplyLoop || !!showCredentialsPanel || !!showBlockPanel;
+    const anyModalOpen = showSettings || showArchive || !!docFillData || showSaveSkill || showSkillPanel || showApplyLoop || !!showCredentialsPanel || !!showBlockPanel;
     if (anyModalOpen) {
       api.modalOverlayEnter();
       return () => {
         api.modalOverlayExit();
       };
     }
-  }, [showSettings, docFillData, showSaveSkill, showSkillPanel, showApplyLoop, showCredentialsPanel, showBlockPanel]);
+  }, [showSettings, showArchive, docFillData, showSaveSkill, showSkillPanel, showApplyLoop, showCredentialsPanel, showBlockPanel]);
 
   // ============ 核验 ============
   const start = async () => {
@@ -14738,6 +14862,15 @@ type: info.type,
   }
 
   // 设置弹窗（web 与 ppt 两种全屏视图下都可弹出，故在早返回前提取为变量复用）
+  const archiveDialog = showArchive ? (
+    <ArchiveDialog
+      stats={archiveStats}
+      buildPayload={buildArchivePayload}
+      onImported={restoreArchive}
+      onClose={() => setShowArchive(false)}
+    />
+  ) : null;
+
   const settingsModal = showSettings ? (
     <SettingsModal
       initial={{ ...settings, ui_scale: uiScale }}
@@ -14830,7 +14963,7 @@ type: info.type,
   }
 
   // 是否有模态/覆盖面板打开（此时需要隐藏 BrowserView，显示毛玻璃背景）
-  const anyModalOpen = showSettings || !!docFillData || showSaveSkill || showSkillPanel || showApplyLoop || !!showCredentialsPanel || !!showBlockPanel;
+  const anyModalOpen = showSettings || showArchive || !!docFillData || showSaveSkill || showSkillPanel || showApplyLoop || !!showCredentialsPanel || !!showBlockPanel;
 
   return (
     <div className="flex h-full flex-col">
@@ -15238,6 +15371,14 @@ type: info.type,
             <Play className="h-3 w-3" /> 已登录，继续
           </button>
         )}
+
+        <button
+          onClick={() => setShowArchive(true)}
+          className="rounded-md p-1 text-slate-400 hover:bg-white/70 hover:text-slate-600"
+          title="任务归档：一键导出全部卡片与进度为 ZIP / 导入还原"
+        >
+          <Archive className="h-3.5 w-3.5" />
+        </button>
 
         <button
           onClick={() => setShowSettings(true)}
@@ -16329,6 +16470,9 @@ type: info.type,
 
       {/* 设置弹窗（与 ppt 视图共用同一 settingsModal 变量） */}
       {settingsModal}
+
+      {/* 任务归档弹窗（与 ppt 视图共用同一 archiveDialog 变量） */}
+      {archiveDialog}
 
       {/* 功能2：本地文档提取审核弹窗（确认后填入右侧网页输入框） */}
       <input

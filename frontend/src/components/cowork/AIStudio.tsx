@@ -20,6 +20,7 @@ import {
     Shield,
     ChevronDown,
     ChevronRight,
+    FolderCog,
 } from "lucide-react";
 import { api } from "../../api/client";
 import type { CoworkSkill, CoworkClient, CoworkDispatchEvent, CoworkTask } from "../../types";
@@ -43,6 +44,11 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
     const [profile, setProfile] = useState("");
     const [profileEditing, setProfileEditing] = useState(false);
     const [profileDraft, setProfileDraft] = useState("");
+
+    // 客户端位置设置
+    const [pathEditingId, setPathEditingId] = useState<string | null>(null);
+    const [pathDraft, setPathDraft] = useState("");
+    const [pathSaving, setPathSaving] = useState(false);
 
     // 技能编辑
     const [editingSkill, setEditingSkill] = useState<CoworkSkill | null>(null);
@@ -142,6 +148,28 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
         });
     };
 
+    // ---- 客户端位置设置 ----
+    const startEditPath = (c: CoworkClient) => {
+        setPathEditingId(c.id);
+        setPathDraft(c.custom_path || "");
+    };
+
+    const saveClientPath = async (clear = false) => {
+        if (!pathEditingId || pathSaving) return;
+        setPathSaving(true);
+        try {
+            const res = await api.coworkSetClientPath(pathEditingId, clear ? "" : pathDraft);
+            setClients(res.clients);
+            setSelectedClients(new Set(res.clients.filter((c) => c.available).map((c) => c.id)));
+            setPathEditingId(null);
+            setPathDraft("");
+        } catch (e) {
+            setError(e instanceof Error ? e.message : "保存位置失败");
+        } finally {
+            setPathSaving(false);
+        }
+    };
+
     const saveProfile = async () => {
         const res = await api.coworkUpdateProfile(profileDraft, false);
         setProfile(res.profile);
@@ -187,7 +215,9 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
                         addLog({
                             kind: "client_done",
                             label: ev.client_id,
-                            detail: ev.status === "done" ? `完成（${ev.elapsed.toFixed(1)}s）${ev.result_preview ? "— " + ev.result_preview.slice(0, 60) : ""}` : `失败：${ev.error || ""}`,
+                            detail: ev.status === "done"
+                                ? `完成（${ev.elapsed.toFixed(1)}s · 成品${ev.origin === "file" ? "已写入成果文件" : "取自标准输出"}）${ev.result_preview ? "— " + ev.result_preview.slice(0, 60) : ""}`
+                                : `失败：${ev.error || ""}`,
                             status: ev.status === "done" ? "ok" : "fail",
                         });
                     } else if (ev.type === "qc") {
@@ -316,20 +346,69 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
 
                         {sideTab === "clients" && (
                             <div className="ais-clients">
-                                <p className="ais-side-hint">选择要派发任务的本机编码客户端。中央 AI 会并行向它们发送任务。</p>
+                                <p className="ais-side-hint">
+                                    选择要派发任务的本机编码客户端。未检测到时可用「设置位置」手动指定可执行文件路径，设置后优先于 PATH 自动检测。
+                                </p>
                                 {clients.map((c) => (
-                                    <div
-                                        key={c.id}
-                                        className={`ais-client-item ${c.available ? "available" : "unavailable"} ${selectedClients.has(c.id) ? "selected" : ""}`}
-                                        onClick={() => c.available && toggleClient(c.id)}
-                                    >
-                                        <div className="ais-client-status">
-                                            {c.available ? <CheckCircle2 size={16} className="ais-ok" /> : <XCircle size={16} className="ais-no" />}
+                                    <div key={c.id} className="ais-client-wrap">
+                                        <div
+                                            className={`ais-client-item ${c.available ? "available" : "unavailable"} ${selectedClients.has(c.id) ? "selected" : ""}`}
+                                            onClick={() => c.available && toggleClient(c.id)}
+                                        >
+                                            <div className="ais-client-status">
+                                                {c.available ? <CheckCircle2 size={16} className="ais-ok" /> : <XCircle size={16} className="ais-no" />}
+                                            </div>
+                                            <div className="ais-client-info">
+                                                <div className="ais-client-name">
+                                                    {c.name}
+                                                    <span className={`ais-src-badge ${c.source === "custom" ? "custom" : ""}`}>
+                                                        {c.source === "custom" ? "手动" : c.source === "path" ? "PATH" : "未找到"}
+                                                    </span>
+                                                </div>
+                                                <div className="ais-client-path">
+                                                    {c.available
+                                                        ? (c.version || c.path)
+                                                        : c.source === "custom"
+                                                            ? `自定义位置不可用：${c.custom_path}`
+                                                            : `未检测到 · ${c.hint}`}
+                                                </div>
+                                            </div>
+                                            <button
+                                                className={`ais-icon-btn ais-path-btn ${c.custom_path ? "active" : ""}`}
+                                                title="设置可执行文件位置"
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    pathEditingId === c.id ? setPathEditingId(null) : startEditPath(c);
+                                                }}
+                                            >
+                                                <FolderCog size={14} />
+                                            </button>
                                         </div>
-                                        <div className="ais-client-info">
-                                            <div className="ais-client-name">{c.name}</div>
-                                            <div className="ais-client-path">{c.available ? (c.version || c.path) : `未检测到 · ${c.hint}`}</div>
-                                        </div>
+                                        {pathEditingId === c.id && (
+                                            <div className="ais-path-editor">
+                                                <input
+                                                    value={pathDraft}
+                                                    onChange={(e) => setPathDraft(e.target.value)}
+                                                    placeholder="可执行文件完整路径，如 C:\Tools\codex.cmd"
+                                                    autoFocus
+                                                />
+                                                <div className="ais-editor-actions">
+                                                    {c.custom_path && (
+                                                        <button onClick={() => saveClientPath(true)} disabled={pathSaving}>
+                                                            恢复自动检测
+                                                        </button>
+                                                    )}
+                                                    <button onClick={() => setPathEditingId(null)}>取消</button>
+                                                    <button
+                                                        className="ais-primary"
+                                                        onClick={() => saveClientPath(false)}
+                                                        disabled={pathSaving || !pathDraft.trim()}
+                                                    >
+                                                        {pathSaving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} 保存位置
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
                                 ))}
                                 <button className="ais-redetect" onClick={loadAll}>
@@ -642,22 +721,50 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
 
                 /* 客户端 */
                 .ais-clients { display: flex; flex-direction: column; gap: 8px; }
+                .ais-client-wrap {
+                    border: 1px solid #f1f5f9;
+                    border-radius: 11px;
+                    overflow: hidden;
+                    transition: border-color 0.15s;
+                }
+                .ais-client-wrap:has(.ais-client-item.selected) { border-color: #a78bfa; }
                 .ais-client-item {
                     display: flex;
                     align-items: center;
                     gap: 10px;
                     padding: 12px;
-                    border: 1px solid #f1f5f9;
-                    border-radius: 11px;
                     cursor: default;
                 }
                 .ais-client-item.available { cursor: pointer; }
                 .ais-client-item.available:hover { background: #f8fafc; }
-                .ais-client-item.selected { border-color: #a78bfa; background: #faf5ff; }
+                .ais-client-item.selected { background: #faf5ff; }
                 .ais-ok { color: #10b981; }
                 .ais-no { color: #cbd5e1; }
-                .ais-client-name { font-size: 13px; font-weight: 600; color: #1e293b; }
+                .ais-client-name {
+                    font-size: 13px; font-weight: 600; color: #1e293b;
+                    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+                }
+                .ais-src-badge {
+                    font-size: 10px; font-weight: 600; color: #94a3b8;
+                    background: #f1f5f9; padding: 1px 7px; border-radius: 999px;
+                }
+                .ais-src-badge.custom { color: #b45309; background: #fef3c7; }
                 .ais-client-path { font-size: 11px; color: #94a3b8; margin-top: 2px; word-break: break-all; }
+                .ais-path-btn { width: 28px; height: 28px; color: #94a3b8; }
+                .ais-path-btn.active { color: #b45309; }
+                .ais-path-btn.active:hover { background: #fef3c7; }
+                .ais-path-editor {
+                    display: flex; flex-direction: column; gap: 7px;
+                    padding: 10px 12px;
+                    background: #fffbeb;
+                    border-top: 1px dashed #fde68a;
+                }
+                .ais-path-editor input {
+                    border: 1px solid #fde68a; border-radius: 8px;
+                    padding: 7px 10px; font-size: 12px; outline: none;
+                    color: #1e293b; background: #fff; font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+                }
+                .ais-path-editor input:focus { border-color: #f59e0b; }
                 .ais-redetect {
                     display: inline-flex; align-items: center; gap: 5px;
                     font-size: 12px; color: #64748b; background: #f1f5f9;

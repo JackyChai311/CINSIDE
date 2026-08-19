@@ -51,7 +51,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import settings
-from .routers import config, cowork, document, plugin, ppt, upload, verify, ws
+from .routers import config, cowork, document, plugin, ppt, upload, verify, ws, archive
 
 app = FastAPI(title="CINSIDE 核验平台", version="0.1.0")
 
@@ -71,6 +71,7 @@ app.include_router(document.router)
 app.include_router(plugin.router)
 app.include_router(ppt.router)
 app.include_router(cowork.router)
+app.include_router(archive.router)
 
 
 @app.on_event("startup")

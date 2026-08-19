@@ -952,6 +952,10 @@ export interface CoworkClient {
   path: string;
   version: string;
   hint: string;
+  /** 用户手动设置的可执行文件位置（空 = 自动检测 PATH） */
+  custom_path: string;
+  /** 实际使用的位置来源：custom=手动设置 / path=PATH 检测 / none=未找到 */
+  source: "custom" | "path" | "none";
 }
 
 export type CoworkDispatchEvent =
@@ -963,6 +967,9 @@ export type CoworkDispatchEvent =
       status: "done" | "failed";
       elapsed: number;
       result_preview?: string;
+      result_file?: string;
+      /** 成品来源：file=客户端自写成果文件 / stdout=标准输出 */
+      origin?: "file" | "stdout";
       error?: string;
     }
   | { type: "qc"; review: string; passed: boolean; feedback: string; round: number }
@@ -996,6 +1003,68 @@ export interface CoworkTask {
   round: number;
   final_result: string;
   created_at: number;
+}
+
+/** 人工协作看板任务（支持指定本地文件提取） */
+export interface HumanCoworkTask {
+  id: string;
+  title: string;
+  assignee: string;
+  status: "todo" | "doing" | "done";
+  note: string;
+  /** 发起者指定的本机文件绝对路径（提取要求的目标） */
+  file_path: string;
+  /** 提取要求：要拿什么（逗号/顿号分隔的字段，或自由描述） */
+  extract_note: string;
+  /** 提取出的全文 */
+  extract_text: string;
+  /** 结构化字段结果 */
+  extract_fields: Record<string, unknown>;
+  extract_method: string;
+  extracted_at: number;
+  created_at: number;
+}
+
+// ============ 网页任务归档（一键导出 ZIP / 导入还原） ============
+
+/** 归档内单个提取文件（导出/导入共用；image_b64 为无前缀 base64） */
+export interface ArchiveDoc {
+  filename: string;
+  method: string;
+  ocr_backend?: string;
+  text: string;
+  fields: Record<string, string>;
+  source: string;
+  mrz_warnings?: string[];
+  image_b64?: string;
+}
+
+/** 归档内单个人员卡片（含图片二进制与 LOOP/执行进度） */
+export interface ArchiveRecord {
+  record_id: string;
+  source: ApplicantRecord["source"];
+  display_name: string;
+  fields: Record<string, string>;
+  university_url?: string | null;
+  university_name?: string | null;
+  has_passport?: boolean;
+  passport_fields: Record<string, string>;
+  overall: Overall | null;
+  loop: { loopId: string; loopName: string; setAt: number } | null;
+  avatar_b64?: string;
+  card_image_b64?: string;
+  docs: ArchiveDoc[];
+}
+
+/** 归档 payload：导出时由前端收集，导入时由后端从 ZIP 还原 */
+export interface ArchivePayload {
+  version: number;
+  exported_at?: string;
+  task_name: string;
+  run_cursor: number | null;
+  records: ArchiveRecord[];
+  /** 验证报告（entries 已剥离截图） */
+  reports: VerificationReport[];
 }
 
 export interface PPTFileSlides {

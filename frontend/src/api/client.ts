@@ -2,6 +2,7 @@ import type {
   AppConfig,
   AppSettings,
   ApplicantRecord,
+  ArchivePayload,
   CoworkClient,
   CoworkDispatchEvent,
   CoworkSkill,
@@ -10,6 +11,7 @@ import type {
   DocumentExtractResult,
   DocumentPreviewResult,
   GpuInfo,
+  HumanCoworkTask,
   PPTFileSlides,
   PPTOutlineSlide,
   PPTProgressEvent,
@@ -775,6 +777,14 @@ export const api = {
   coworkDetectClients: () =>
     jsonFetch<{ clients: CoworkClient[] }>(`${BASE}/cowork/clients`),
 
+  /** 设置/清除客户端可执行文件位置（path 为空恢复自动检测），返回最新客户端列表 */
+  coworkSetClientPath: (clientId: string, path: string) =>
+    jsonFetch<{ ok: boolean; clients: CoworkClient[] }>(`${BASE}/cowork/clients/path`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: clientId, path }),
+    }),
+
   /** 读取用户风格画像 */
   coworkGetProfile: () =>
     jsonFetch<{ profile: string }>(`${BASE}/cowork/profile`),
@@ -841,6 +851,74 @@ export const api = {
     jsonFetch<{ id: string; dir: string; files: string[]; final: string }>(
       `${BASE}/cowork/tasks/${taskId}`
     ),
+
+  // ============ 人工协作（看板 + 指定本地文件提取） ============
+
+  /** 人工协作任务列表 */
+  coworkHumanListTasks: () =>
+    jsonFetch<{ tasks: HumanCoworkTask[] }>(`${BASE}/cowork/human/tasks`),
+
+  /** 保存（新增/更新）人工协作任务 */
+  coworkHumanSaveTask: (task: Partial<HumanCoworkTask>) =>
+    jsonFetch<{ task: HumanCoworkTask }>(`${BASE}/cowork/human/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(task),
+    }),
+
+  /** 删除人工协作任务 */
+  coworkHumanDeleteTask: (id: string) =>
+    jsonFetch<{ ok: boolean }>(`${BASE}/cowork/human/tasks/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }),
+
+  /** 按任务里指定的本机文件路径执行提取，结果回填任务 */
+  coworkHumanExtract: (taskId: string) =>
+    jsonFetch<{ task: HumanCoworkTask }>(`${BASE}/cowork/human/tasks/extract`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: taskId }),
+    }),
+
+  // ============ 任务归档（一键导出 ZIP / 导入还原） ============
+
+  /** 导出：全部卡片 + 进度 + 报告 + 图片 → ZIP 下载 */
+  archiveExport: async (payload: ArchivePayload): Promise<void> => {
+    const resp = await fetch(`${BASE}/archive/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      let msg = "导出失败";
+      try { const j = await resp.json(); msg = j.detail || msg; } catch { /* ignore */ }
+      throw new Error(msg);
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get("content-disposition") || "";
+    const m = /filename=([^;]+)/.exec(cd);
+    const filename = m ? decodeURIComponent(m[1].trim().replace(/^"|"$/g, "")) : "任务归档.zip";
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  },
+
+  /** 导入：上传 ZIP → 还原 payload（图片重新内联 base64） */
+  archiveImport: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return jsonFetch<ArchivePayload>(`${BASE}/archive/import`, {
+      method: "POST",
+      body: fd,
+    }, 120000);
+  },
 };
 
 export type VerifyEvent =
