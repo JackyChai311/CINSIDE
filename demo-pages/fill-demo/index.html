@@ -403,7 +403,7 @@ function renderStep2(){
         </div>
       </div>
     </div>`;
-  buildSel('f_nat',['中国','日本','韩国','新加坡','马来西亚','泰国','美国','英国','加拿大','澳大利亚'],'nationality');
+  buildSel('f_nat',['中国','日本','韩国','新加坡','马来西亚','泰国','越南','俄罗斯','美国','加拿大'],'nationality');
 }
 
 // 步骤3：申请信息
@@ -596,7 +596,8 @@ function selOpt(id,field,val){
 // 日历
 let calState={};
 // field 是 DOM 元素 id 前缀（如 f_birth），formData 键名去掉 f_ 前缀（如 birth）
-function fk(field){return field.replace(/^f_/,'')}
+// 特例：f_pissue/f_pexp 对应 passportIssue/passportExpiry（历史 id 与数据键不一致，直接映射，保持 DOM id 不变以免失效已保存的选择器）
+function fk(field){const m={f_pissue:'passportIssue',f_pexp:'passportExpiry'};return m[field]||field.replace(/^f_/,'')}
 function toggleCal(field){
   closeAllPop(field);
   const el=$(field+'_cal');

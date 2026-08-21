@@ -175,9 +175,6 @@ export interface AppSettings {
   // 整体UI缩放比例（0.6~1.6）
   ui_scale?: number;
 
-  // 新手模式：开启时显示步骤仪表引导，关闭时直接用字段对比面板且三面板常开
-  beginner_mode?: boolean;
-
   // 模拟网页：开启后右侧网页默认载入内置 DEMO 演示站点（模拟学校系统）并显示 DEMO 快捷入口；默认关闭
   demo_site_enabled?: boolean;
 
@@ -188,6 +185,10 @@ export interface AppSettings {
 
   // BrowserPane 网页亮度（0.3~2.0，1.0=原始）
   browser_brightness?: number;
+
+  // 高手模式：开启后步骤设置功能按钮移至顶部工具栏并标注快捷键（玩快捷键）；
+  // 关闭=默认模式，按钮在字段对比面板各分组标题行内
+  expert_mode?: boolean;
 }
 
 // 显卡 / 核显检测结果（GET /api/config/gpu-info）
@@ -374,6 +375,8 @@ export interface FieldMapping {
   web_side?: "left" | "right";
   /** 点击展开型控件（存在时，录入/审查走控件脚本而非普通填值/读值） */
   widget?: WidgetDef | null;
+  /** 创建时间戳：步骤卡片「最新步骤」定位用（旧数据无此字段按 0 处理） */
+  createdAt?: number;
 }
 
 /** 提取元素面板条目：自定义文本 / 文件提取送来的字段，可关联网页元素用于审查/录入 */

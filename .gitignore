@@ -18,6 +18,9 @@ frontend/dist/
 .env
 .env.local
 
+# ZCode configuration
+.zcode/
+
 # IDE
 .vscode/
 .idea/

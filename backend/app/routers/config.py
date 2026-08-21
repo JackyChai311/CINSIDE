@@ -48,7 +48,6 @@ class AppSettings(BaseModel):
     umi_ocr_host: str = "127.0.0.1"
     umi_ocr_port: int = 1224
     umi_ocr_exe_path: str = ""
-    beginner_mode: bool = False
     demo_site_enabled: bool = False
     prevent_accidental_close: bool = False
     loop_keep_awake: bool = False
@@ -58,6 +57,7 @@ class AppSettings(BaseModel):
     theme: str = "light"
     accent: str = "indigo"
     browser_brightness: float = 1.0
+    expert_mode: bool = False
 
 
 # 1x1 透明 PNG，用来检测模型是否接受 image_url

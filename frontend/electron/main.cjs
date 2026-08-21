@@ -360,60 +360,94 @@ function createBrowserViews() {
 
 // ============ 滚轮兜底：部分网站（透明遮罩吞滚轮事件）无法直接滚动页面 ============
 // passive 监听 + 下一帧校验：页面自己滚动了就不插手；没滚动才手动滚动鼠标位置下最深的可滚动元素
+// 支持纵向 + 横向（deltaX 占优或 Shift+滚轮）；宽松兜底允许 overflow:hidden 容器
+//（niceScroll 类自定义滚动插件被屏蔽/折叠 CSS 干扰后 wheel 失效：它 preventDefault 了默认滚动
+//  自己却不滚——程序方式给 hidden 容器赋 scrollTop/scrollLeft 仍然有效，可救回）
 const SCROLL_ASSIST_SCRIPT = `
 (function () {
   if (window.__cinsideScrollAssistInstalled) return;
   window.__cinsideScrollAssistInstalled = true;
-  function scrollableRoom(el, delta) {
+  // 严格模式：只认 overflow 为 auto/scroll/overlay 的可滚动元素
+  function roomStrict(el, delta, horizontal) {
     try {
-      if (el.scrollHeight <= el.clientHeight + 2) return false;
-      var oy = getComputedStyle(el).overflowY;
-      if (oy !== 'auto' && oy !== 'scroll' && oy !== 'overlay') return false;
-      if (delta > 0) return el.scrollTop + el.clientHeight < el.scrollHeight - 1;
-      return el.scrollTop > 1;
+      var room = horizontal ? el.scrollWidth - el.clientWidth : el.scrollHeight - el.clientHeight;
+      if (room <= 2) return false;
+      var o = getComputedStyle(el)[horizontal ? 'overflowX' : 'overflowY'];
+      if (o !== 'auto' && o !== 'scroll' && o !== 'overlay') return false;
+      var pos = horizontal ? el.scrollLeft : el.scrollTop;
+      if (delta > 0) return pos + (horizontal ? el.clientWidth : el.clientHeight) < (horizontal ? el.scrollWidth : el.scrollHeight) - 1;
+      return pos > 1;
+    } catch (e) { return false; }
+  }
+  // 宽松模式：overflow:hidden 的容器程序赋值也能滚动（仅兜底路径对非根元素使用）
+  function roomLoose(el, delta, horizontal) {
+    try {
+      var room = horizontal ? el.scrollWidth - el.clientWidth : el.scrollHeight - el.clientHeight;
+      if (room <= 2) return false;
+      var pos = horizontal ? el.scrollLeft : el.scrollTop;
+      if (delta > 0) return pos + (horizontal ? el.clientWidth : el.clientHeight) < (horizontal ? el.scrollWidth : el.scrollHeight) - 1;
+      return pos > 1;
     } catch (e) { return false; }
   }
   window.addEventListener('wheel', function (e) {
     if (e.ctrlKey) return; // Ctrl+滚轮走缩放
-    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return; // 只管纵向滚动
-    var delta = e.deltaY;
+    // 横向：deltaX 占优（触控板横滑）或 Shift+滚轮（浏览器约定的横向滚动）
+    var horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY) || (e.shiftKey && e.deltaY !== 0);
+    var delta = horizontal ? (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY) : e.deltaY;
     if (e.deltaMode === 1) delta *= 16;
-    else if (e.deltaMode === 2) delta *= window.innerHeight;
+    else if (e.deltaMode === 2) delta *= (horizontal ? window.innerWidth : window.innerHeight);
     if (!delta) return;
-    // 快照事件路径上可滚动元素的当前位置
+    // 快照事件路径上可滚动元素的当前位置（双向都记录，页面任一轴滚了都算页面自理）
     var watched = [];
     try {
       var path = e.composedPath ? e.composedPath() : [];
       for (var i = 0; i < path.length && watched.length < 15; i++) {
         var n = path[i];
         if (!n || n.nodeType !== 1) continue;
-        if (n.scrollHeight > n.clientHeight + 2) watched.push({ el: n, top: n.scrollTop });
+        if (n.scrollHeight > n.clientHeight + 2 || n.scrollWidth > n.clientWidth + 2) watched.push({ el: n, top: n.scrollTop, left: n.scrollLeft });
       }
     } catch (err) {}
     var root = document.scrollingElement || document.documentElement;
-    var rootBefore = root ? root.scrollTop : 0;
+    var rootBefore = root ? (horizontal ? root.scrollLeft : root.scrollTop) : 0;
     var cx = e.clientX, cy = e.clientY;
     requestAnimationFrame(function () {
       try {
         // 页面自己滚了（路径上的可滚动元素或根滚动条位置变化）→ 不插手
+        // 轴感知：横向意图只认 scrollLeft 变化——niceScroll 半失效时常把 Shift+滚轮
+        // 错误映射成纵向微动，若两轴混查会被误判「页面已自理」从而放弃横向兜底
         for (var j = 0; j < watched.length; j++) {
-          if (watched[j].el.scrollTop !== watched[j].top) return;
+          if (horizontal ? (watched[j].el.scrollLeft !== watched[j].left) : (watched[j].el.scrollTop !== watched[j].top)) return;
         }
-        if (root && root.scrollTop !== rootBefore) return;
+        if (root && (horizontal ? root.scrollLeft : root.scrollTop) !== rootBefore) return;
         // 从鼠标位置向下找最深的可滚动元素（含被透明遮罩压在下面的内容）
         var stack = [];
         try { stack = document.elementsFromPoint(cx, cy) || []; } catch (err) {}
-        for (var s = 0; s < stack.length; s++) {
-          var cur = stack[s];
-          var depth = 0;
-          while (cur && cur.nodeType === 1 && depth < 12) {
-            depth++;
-            if (scrollableRoom(cur, delta)) { cur.scrollTop += delta; return; }
-            cur = cur.parentElement;
+        // 两遍扫描：先严格（overflow 可滚），再宽松（hidden 也程序滚动，救 niceScroll 失效容器）
+        for (var pass = 0; pass < 2; pass++) {
+          var roomFn = pass === 0 ? roomStrict : roomLoose;
+          for (var s = 0; s < stack.length; s++) {
+            var cur = stack[s];
+            var depth = 0;
+            while (cur && cur.nodeType === 1 && depth < 12) {
+              depth++;
+              if (roomFn(cur, delta, horizontal)) {
+                if (horizontal) cur.scrollLeft += delta; else cur.scrollTop += delta;
+                return;
+              }
+              cur = cur.parentElement;
+            }
           }
         }
-        // 兜底滚根元素（overflowY 为 hidden 时尊重网站锁滚动，跳过）
-        if (root && scrollableRoom(root, delta)) root.scrollTop += delta;
+        // 根/html/body 兜底：宽松模式——niceScroll 常把根容器锁成 overflow:hidden，
+        // 此时它是全页唯一有横向余量的元素，严格模式会漏掉；程序赋值仍然可滚
+        var roots = [root, document.body, document.documentElement];
+        for (var ri = 0; ri < roots.length; ri++) {
+          var rel = roots[ri];
+          if (rel && roomLoose(rel, delta, horizontal)) {
+            if (horizontal) rel.scrollLeft += delta; else rel.scrollTop += delta;
+            return;
+          }
+        }
       } catch (err) {}
     });
   }, { passive: true });
@@ -754,62 +788,27 @@ const blockCssBySide = { left: "", right: "" };
 let blockCssKey = { left: null, right: null };
 // 折叠规则的 JS key，用于移除旧脚本
 let blockJsKey = { left: null, right: null };
-// BrowserPane 亮度（0.3~2.0），导航/重载后自动重新应用
-const browserBrightness = { left: 1.0, right: 1.0 };
-
-function applyBrightness(view, side) {
-  if (!view || !view.webContents || view.webContents.isDestroyed()) return;
-  const val = browserBrightness[side] ?? 1.0;
-  const filter = Math.abs(val - 1.0) < 0.001 ? "" : `brightness(${val})`;
-  // 应用到 body 而非 documentElement，避免在 <html> 上创建新的合成层导致根滚动器滚轮事件失效
-  view.webContents.executeJavaScript(
-    `document.body.style.filter=${JSON.stringify(filter)};void 0;`
-  ).catch(() => {});
+// 屏蔽规则按 host 持久化到 userData：preload 在 document_start 就要拿到 CSS，
+// 等前端 renderer 启动再推送就来不及（跳转/刷新时侧边栏会先闪现一帧）
+const BLOCK_RULES_FILE = path.join(app.getPath("userData"), "block-rules.json");
+let persistedBlockRules = {};
+try {
+  const parsed = JSON.parse(fs.readFileSync(BLOCK_RULES_FILE, "utf8"));
+  if (parsed && typeof parsed === "object") persistedBlockRules = parsed;
+} catch (_) {}
+let blockRulesSaveTimer = null;
+function schedulePersistBlockRules() {
+  if (blockRulesSaveTimer) clearTimeout(blockRulesSaveTimer);
+  blockRulesSaveTimer = setTimeout(() => {
+    try { fs.writeFileSync(BLOCK_RULES_FILE, JSON.stringify(persistedBlockRules)); } catch (_) {}
+  }, 300);
 }
-
-function applyBlockRules(side) {
-  const view = side === "left" ? leftBrowserView : rightBrowserView;
-  if (!view) return;
-  var oldCssKey = blockCssKey[side];
-  blockCssKey[side] = null;
-  const rules = blockRulesBySide[side];
-  if (!rules || rules.length === 0) {
-    // 无规则：移除旧CSS（insertCSS + style标签），并注入清理JS恢复被折叠的元素
-    blockCssBySide[side] = "";
-    if (oldCssKey) view.webContents.removeInsertedCSS(oldCssKey).catch(() => {});
-    view.webContents.executeJavaScript(
-      "(function(){var s=document.getElementById('cinside-block-style');if(s)s.remove();})();"
-    ).catch(() => {});
-    var cleanupJs = "(function() {\n" +
-      "  document.querySelectorAll('.cinside-sidebar-hidden, .cinside-collapsed').forEach(function(el) {\n" +
-      "    el.classList.remove('cinside-sidebar-hidden', 'cinside-sidebar-left', 'cinside-sidebar-right', 'cinside-collapsed', 'cinside-expanded');\n" +
-      "    el.style.removeProperty('width');\n" +
-      "    el.style.removeProperty('min-width');\n" +
-      "    el.style.removeProperty('max-width');\n" +
-      "    el.style.removeProperty('overflow');\n" +
-      "    el.style.removeProperty('transform');\n" +
-      "    el.style.removeProperty('opacity');\n" +
-      "    el.style.removeProperty('pointer-events');\n" +
-      "    el.style.removeProperty('padding');\n" +
-      "    el.style.removeProperty('margin');\n" +
-      "    el.style.removeProperty('border');\n" +
-      "    el.style.removeProperty('flex');\n" +
-      "    delete el.dataset.cinsideAutoMarked;\n" +
-      "    delete el.dataset.cinsideCollapsed;\n" +
-      "    delete el.dataset.cinsideForceCollapsed;\n" +
-      "    delete el.dataset.cinsideCollapse;\n" +
-      "    delete el.dataset.cinsideBtnAttached;\n" +
-      "  });\n" +
-      "  document.querySelectorAll('.cinside-expand-btn').forEach(function(b) { b.remove(); });\n" +
-      "})();";
-    view.webContents.executeJavaScript(cleanupJs).catch(() => {});
-    return;
-  }
-
+// 由规则数组计算屏蔽/折叠 CSS（applyBlockRules 与 preload 的 document_start 注入共用）
+function computeBlockCss(rules) {
   var hideSelectors = [];
   var collapseSelectors = [];
   var autoSidebarDetect = false;
-  rules.forEach(function (r) {
+  (rules || []).forEach(function (r) {
     if (r.mode === "collapse") {
       collapseSelectors.push(r.selector);
       // 自动侧边栏折叠选择器特征：包含 [class*= 或 aside 标签
@@ -821,7 +820,6 @@ function applyBlockRules(side) {
     }
   });
 
-  // 合并所有 CSS（hide + collapse）一次注入
   var cssParts = [];
   if (hideSelectors.length > 0) {
     cssParts.push(hideSelectors.join(",\n") + " { display: none !important; }");
@@ -853,9 +851,67 @@ function applyBlockRules(side) {
       cssParts.push(autoCollapseCss.join("\n"));
     }
   }
+  return { css: cssParts.join("\n"), hideSelectors, collapseSelectors, manualCollapseSels, autoSidebarDetect };
+}
+// BrowserPane 亮度（0.3~2.0），导航/重载后自动重新应用
+const browserBrightness = { left: 1.0, right: 1.0 };
 
-  if (cssParts.length > 0) {
-    var fullCss = cssParts.join("\n");
+function applyBrightness(view, side) {
+  if (!view || !view.webContents || view.webContents.isDestroyed()) return;
+  const val = browserBrightness[side] ?? 1.0;
+  const filter = Math.abs(val - 1.0) < 0.001 ? "" : `brightness(${val})`;
+  // 应用到 body 而非 documentElement，避免在 <html> 上创建新的合成层导致根滚动器滚轮事件失效
+  view.webContents.executeJavaScript(
+    `document.body.style.filter=${JSON.stringify(filter)};void 0;`
+  ).catch(() => {});
+}
+
+function applyBlockRules(side) {
+  const view = side === "left" ? leftBrowserView : rightBrowserView;
+  if (!view) return;
+  var oldCssKey = blockCssKey[side];
+  blockCssKey[side] = null;
+  const rules = blockRulesBySide[side];
+  if (!rules || rules.length === 0) {
+    // 无规则：移除旧CSS（insertCSS + style标签），并注入清理JS恢复被折叠的元素
+    blockCssBySide[side] = "";
+    if (oldCssKey) view.webContents.removeInsertedCSS(oldCssKey).catch(() => {});
+    view.webContents.executeJavaScript(
+      "(function(){['cinside-block-style','cinside-block-early'].forEach(function(id){var s=document.getElementById(id);if(s)s.remove();});})();"
+    ).catch(() => {});
+    var cleanupJs = "(function() {\n" +
+      "  document.querySelectorAll('.cinside-sidebar-hidden, .cinside-collapsed').forEach(function(el) {\n" +
+      "    el.classList.remove('cinside-sidebar-hidden', 'cinside-sidebar-left', 'cinside-sidebar-right', 'cinside-collapsed', 'cinside-expanded');\n" +
+      "    el.style.removeProperty('width');\n" +
+      "    el.style.removeProperty('min-width');\n" +
+      "    el.style.removeProperty('max-width');\n" +
+      "    el.style.removeProperty('overflow');\n" +
+      "    el.style.removeProperty('transform');\n" +
+      "    el.style.removeProperty('opacity');\n" +
+      "    el.style.removeProperty('pointer-events');\n" +
+      "    el.style.removeProperty('padding');\n" +
+      "    el.style.removeProperty('margin');\n" +
+      "    el.style.removeProperty('border');\n" +
+      "    el.style.removeProperty('flex');\n" +
+      "    delete el.dataset.cinsideAutoMarked;\n" +
+      "    delete el.dataset.cinsideCollapsed;\n" +
+      "    delete el.dataset.cinsideForceCollapsed;\n" +
+      "    delete el.dataset.cinsideCollapse;\n" +
+      "    delete el.dataset.cinsideBtnAttached;\n" +
+      "  });\n" +
+      "  document.querySelectorAll('.cinside-expand-btn').forEach(function(b) { b.remove(); });\n" +
+      "})();";
+    view.webContents.executeJavaScript(cleanupJs).catch(() => {});
+    return;
+  }
+
+  var computed = computeBlockCss(rules);
+  var collapseSelectors = computed.collapseSelectors;
+  var manualCollapseSels = computed.manualCollapseSels;
+  var autoSidebarDetect = computed.autoSidebarDetect;
+
+  if (computed.css) {
+    var fullCss = computed.css;
     // 缓存 CSS 字符串（调试/备份用）
     blockCssBySide[side] = fullCss;
     // 方式1：executeJavaScript 同步注入 <style> 标签 —— 比 insertCSS 更快生效，
@@ -863,6 +919,8 @@ function applyBlockRules(side) {
     var styleInjectJs = "(function(){\n" +
       "  var existing = document.getElementById('cinside-block-style');\n" +
       "  if (existing) existing.remove();\n" +
+      "  var early = document.getElementById('cinside-block-early');\n" +
+      "  if (early) early.remove();\n" +
       "  var style = document.createElement('style');\n" +
       "  style.id = 'cinside-block-style';\n" +
       "  style.textContent = " + JSON.stringify(fullCss) + ";\n" +
@@ -882,13 +940,22 @@ function applyBlockRules(side) {
   } else if (oldCssKey) {
     view.webContents.removeInsertedCSS(oldCssKey).catch(() => {});
     view.webContents.executeJavaScript(
-      "(function(){var s=document.getElementById('cinside-block-style');if(s)s.remove();})();"
+      "(function(){['cinside-block-style','cinside-block-early'].forEach(function(id){var s=document.getElementById(id);if(s)s.remove();});})();"
     ).catch(() => {});
   }
 
   // 折叠 JS：手动选择器折叠 + 可选的自动几何检测
   if (collapseSelectors.length > 0) {
-    var collapseJs = "(function() {\n" +
+    view.webContents.executeJavaScript(buildCollapseJs(manualCollapseSels, autoSidebarDetect)).catch(() => {});
+  }
+}
+
+// 折叠 JS 构建器：applyBlockRules（dom-ready 注入）与 preload（document_start 注入）共用。
+// document_start 时 body 可能尚未创建，观察者挂在 documentElement 上（subtree 覆盖后续整个 body）。
+// 幂等性由 DOM dataset 守卫保证（cinsideCollapsed/cinsideAutoMarked/cinsideBtnAttached/cinsideToggled 跨 JS 世界共享），
+// 因此 preload（隔离世界）与 dom-ready（主世界）各跑一遍不会重复折叠或重复挂按钮。
+function buildCollapseJs(manualCollapseSels, autoSidebarDetect) {
+  return "(function() {\n" +
       "  var manualSels = " + JSON.stringify(manualCollapseSels) + ";\n" +
       "  var autoDetect = " + (autoSidebarDetect ? "true" : "false") + ";\n" +
       "  var scanTimer = null;\n" +
@@ -1306,12 +1373,20 @@ function applyBlockRules(side) {
       "  }\n" +
       "  doScan();\n" +
       "  var mo = new MutationObserver(function() { scheduleScan(); });\n" +
-      "  mo.observe(document.body, { childList: true, subtree: true });\n" +
+      "  // document_start 时 body 可能未创建：先观察 documentElement（其 subtree 涵盖后续整个 body）；\n" +
+      "  // 连 documentElement 都没有时，等它出现再挂观察并补一次扫描\n" +
+      "  function startMo() {\n" +
+      "    var t = document.body || document.documentElement;\n" +
+      "    if (t) { mo.observe(t, { childList: true, subtree: true }); return; }\n" +
+      "    var boot = new MutationObserver(function() {\n" +
+      "      if (document.documentElement) { boot.disconnect(); startMo(); doScan(); }\n" +
+      "    });\n" +
+      "    boot.observe(document, { childList: true });\n" +
+      "  }\n" +
+      "  startMo();\n" +
       "  window.addEventListener('resize', function() { scheduleScan(); });\n" +
       "  window.addEventListener('beforeunload', function() { mo.disconnect(); if (scanTimer) clearTimeout(scanTimer); });\n" +
       "})();";
-    view.webContents.executeJavaScript(collapseJs).catch(() => {});
-  }
 }
 
 function loadView(side, url) {
@@ -2488,6 +2563,14 @@ app.whenReady().then(async () => {
     debugLog("[proxy] bypass rules set for localhost/127.0.0.1");
   } catch (e) { debugLog(`[proxy] setProxy failed: ${e.message}`); }
 
+  // 注册会话级 preload：document_start 即注入屏蔽 CSS + 折叠 JS，消除跳转/刷新时侧边栏闪现
+  try {
+    const bp = path.join(__dirname, "preload-blockcss.cjs");
+    const existing = session.defaultSession.getPreloads();
+    if (!existing.includes(bp)) session.defaultSession.setPreloads([...existing, bp]);
+    debugLog(`[blockcss] preload registered: ${bp} (total=${session.defaultSession.getPreloads().length})`);
+  } catch (e) { debugLog(`[blockcss] register preload failed: ${e.message}`); }
+
   createSplashWindow();
   // 清理历史下载临时文件（>24h）：LOOP 捕获的原始文件只在本轮使用，跨轮残留会持续占磁盘
   try {
@@ -3482,11 +3565,50 @@ ipcMain.handle("view-go-forward", (_event, side) => {
   return { ok: false, reason: "cannot-go-forward" };
 });
 
-// 设置元素屏蔽规则（side, rules[{selector, mode}]）—— 立即注入 CSS/JS，导航后自动重注入
-ipcMain.handle("view-set-block-rules", (_event, side, rules) => {
+// 设置元素屏蔽规则（side, rules[{selector, mode}], host?）—— 立即注入 CSS/JS，导航后自动重注入
+ipcMain.handle("view-set-block-rules", (_event, side, rules, hostArg) => {
   blockRulesBySide[side] = Array.isArray(rules) ? rules : [];
+  // 按 host 持久化规则：preload 在下次导航的 document_start 直接读取，
+  // 不等前端推送，消除侧边栏闪现。host 由前端显式传入（view URL 时序不可靠）；
+  // 缺省时回退从 view 当前 URL 推导
+  try {
+    let host = typeof hostArg === "string" && hostArg ? hostArg : "";
+    if (!host) {
+      const view = side === "left" ? leftBrowserView : rightBrowserView;
+      const u = view ? view.webContents.getURL() : "";
+      host = u ? new URL(u).hostname : "";
+    }
+    if (host) {
+      if (blockRulesBySide[side].length > 0) {
+        persistedBlockRules[host] = blockRulesBySide[side].map((r) => ({ selector: r.selector, mode: r.mode }));
+      } else {
+        delete persistedBlockRules[host];
+      }
+      schedulePersistBlockRules();
+      debugLog(`[blockcss] persist host=${host} rules=${blockRulesBySide[side].length}`);
+    }
+  } catch (_) {}
   applyBlockRules(side);
   return { ok: true };
+});
+
+// preload 在 document_start 同步查询该 host 的屏蔽 CSS + 折叠 JS（无规则返回空）
+ipcMain.on("cinside-block-css-sync", (event, host) => {
+  try {
+    const rules = typeof host === "string" ? persistedBlockRules[host] : null;
+    if (!rules || !rules.length) {
+      event.returnValue = null;
+      return;
+    }
+    const computed = computeBlockCss(rules);
+    const js = computed.collapseSelectors.length > 0
+      ? buildCollapseJs(computed.manualCollapseSels, computed.autoSidebarDetect)
+      : "";
+    debugLog(`[blockcss] early-inject host=${host} css=${computed.css.length}B js=${js.length}B`);
+    event.returnValue = { css: computed.css, js };
+  } catch (e) {
+    event.returnValue = null;
+  }
 });
 
 // ============ 账号密码两段式粘贴 ============

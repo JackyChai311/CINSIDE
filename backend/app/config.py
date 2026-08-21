@@ -111,7 +111,6 @@ SETTING_KEYS = {
     "umi_ocr_host": "UMI_OCR_HOST",
     "umi_ocr_port": "UMI_OCR_PORT",
     "umi_ocr_exe_path": "UMI_OCR_EXE_PATH",
-    "beginner_mode": "BEGINNER_MODE",
     "demo_site_enabled": "DEMO_SITE_ENABLED",
     "prevent_accidental_close": "PREVENT_ACCIDENTAL_CLOSE",
     "loop_keep_awake": "LOOP_KEEP_AWAKE",
@@ -121,6 +120,7 @@ SETTING_KEYS = {
     "theme": "THEME",
     "accent": "ACCENT",
     "browser_brightness": "BROWSER_BRIGHTNESS",
+    "expert_mode": "EXPERT_MODE",
 }
 
 # theme 允许值
@@ -130,7 +130,6 @@ VALID_ACCENTS = {"indigo", "sky", "emerald", "rose", "violet", "amber"}
 
 # 非字符串类型字段的类型映射（.env 中统一存字符串，读取时转换）
 _SETTING_TYPES: dict[str, type] = {
-    "beginner_mode": bool,
     "demo_site_enabled": bool,
     "prevent_accidental_close": bool,
     "loop_keep_awake": bool,
@@ -141,6 +140,7 @@ _SETTING_TYPES: dict[str, type] = {
     "ui_scale": float,
     "browser_brightness": float,
     "umi_ocr_port": int,
+    "expert_mode": bool,
 }
 
 
@@ -223,8 +223,6 @@ class Settings:
     frontend_origin: str = field(default_factory=lambda: _env("FRONTEND_ORIGIN", "http://localhost:5173"))
 
     # === UI 偏好（前端设置面板） ===
-    # 新手模式：true=显示步骤引导，false=直接使用字段对比面板
-    beginner_mode: bool = field(default_factory=lambda: _env_bool("BEGINNER_MODE", False))
     # 模拟网页：true=右侧网页默认载入内置 DEMO 演示站点并显示 DEMO 快捷入口；默认关闭
     demo_site_enabled: bool = field(default_factory=lambda: _env_bool("DEMO_SITE_ENABLED", False))
     # 防误关：true=关闭按钮最小化到托盘
@@ -245,6 +243,8 @@ class Settings:
     accent: str = field(default_factory=lambda: _env("ACCENT", "indigo"))
     # BrowserPane 网页亮度（0.3~2.0，1.0=原始亮度）
     browser_brightness: float = field(default_factory=lambda: _env_float("BROWSER_BRIGHTNESS", 1.0))
+    # 高手模式：true=步骤设置功能按钮移至顶部工具栏并标注快捷键；false=默认模式（按钮在字段对比面板分组标题行）
+    expert_mode: bool = field(default_factory=lambda: _env_bool("EXPERT_MODE", False))
 
     # === LOOP 卡片分享（GitHub Gist）===
     # GitHub Personal Access Token，需 gist 权限；留空则只能用离线分享码
@@ -275,7 +275,6 @@ class Settings:
             "umi_ocr_host": self.umi_ocr_host,
             "umi_ocr_port": self.umi_ocr_port,
             "umi_ocr_exe_path": self.umi_ocr_exe_path,
-            "beginner_mode": self.beginner_mode,
             "demo_site_enabled": self.demo_site_enabled,
             "prevent_accidental_close": self.prevent_accidental_close,
             "loop_keep_awake": self.loop_keep_awake,
@@ -285,6 +284,7 @@ class Settings:
             "theme": self.theme,
             "accent": self.accent,
             "browser_brightness": self.browser_brightness,
+            "expert_mode": self.expert_mode,
         }
 
     def effective_text_llm(self) -> tuple[str, str, str]:

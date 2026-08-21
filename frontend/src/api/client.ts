@@ -74,6 +74,16 @@ function docTimeout(_filename?: string): number {
   return 240000;
 }
 
+/** 目标字段清洗：滤掉明显是 CSS 选择器的"字段名"（提取元素面板历史数据里，
+ *  doc 条目的 name 可能存成了控件 selector，后端会把它当字段名让 LLM 匹配 → 全部落空）。
+ *  含空格/>/. /#/: /[ /( /* 或超长的一律视为 selector，不下发给后端。 */
+function sanitizeTargetFields(fields?: string[]): string[] | undefined {
+  if (!fields || fields.length === 0) return fields;
+  const looksLikeSelector = (s: string) => /[ >.#:[(*]/.test(s) || s.length > 40;
+  const clean = fields.filter((f) => f && !looksLikeSelector(f));
+  return clean;
+}
+
 /** OCR 引擎回退通知：提取结果带 fallback（所选引擎失败自动切换另一引擎）时
  * 派发全局事件，App 层监听后弹琥珀色警告提示（引擎选择必须让用户知晓） */
 function notifyEngineFallback<T extends { fallback?: { from: string; to: string; reason: string } | null }>(res: T): T {
@@ -397,7 +407,8 @@ export const api = {
   extractDocumentFile: (file: File, fields?: string[], engine?: string, forceAiOrient?: boolean, forceViz?: boolean) => {
     const fd = new FormData();
     fd.append("file", file);
-    if (fields && fields.length > 0) fd.append("fields", fields.join(","));
+    const clean = sanitizeTargetFields(fields);
+    if (clean && clean.length > 0) fd.append("fields", clean.join(","));
     if (engine) fd.append("engine", engine);
     if (forceAiOrient) fd.append("force_ai_orient", "true");
     if (forceViz) fd.append("force_viz", "true");
@@ -420,19 +431,21 @@ export const api = {
   },
 
   /** 从网页 URL 下载 PDF/图片并提取文字 + 字段；engine 可临时指定 "umi" 或 "vision"；forceAiOrient 强制 Vision 精判转正；forceViz 强制识图AI缺字段补提 */
-  extractDocumentUrl: (url: string, fields?: string[], filename?: string, engine?: string, forceAiOrient?: boolean, forceViz?: boolean) =>
-    jsonFetch<DocumentExtractResult>(`${BASE}/document/extract-url`, {
+  extractDocumentUrl: (url: string, fields?: string[], filename?: string, engine?: string, forceAiOrient?: boolean, forceViz?: boolean) => {
+    const clean = sanitizeTargetFields(fields);
+    return jsonFetch<DocumentExtractResult>(`${BASE}/document/extract-url`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         url,
         filename: filename || null,
-        fields: fields && fields.length > 0 ? fields.join(",") : null,
+        fields: clean && clean.length > 0 ? clean.join(",") : null,
         engine: engine || null,
         force_ai_orient: forceAiOrient || false,
         force_viz: forceViz || false,
       }),
-    }, docTimeout(filename)).then(notifyEngineFallback),
+    }, docTimeout(filename)).then(notifyEngineFallback);
+  },
 
   /** 文件格式转换 + 压缩到目标大小（文件处理面板「导出」用）；sourceUrl 为远端文件时后端先下载再转换 */
   convertDocument: (dataB64: string, filename: string, targetFormat: string, targetKb: number, sourceUrl?: string) =>

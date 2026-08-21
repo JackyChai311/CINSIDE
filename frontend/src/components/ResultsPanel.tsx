@@ -8,10 +8,10 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Circle,
   CirclePause,
   AlertOctagon,
-  Columns2,
   Crop,
   Crosshair,
   Database,
@@ -20,7 +20,6 @@ import {
   ExternalLink,
   FileText,
   Globe,
-  Keyboard,
   Layers,
   List,
   Loader2,
@@ -28,7 +27,6 @@ import {
   MousePointerClick,
   MoveRight,
   Play,
-  Plus,
   RotateCcw,
   RotateCw,
   Save,
@@ -43,6 +41,8 @@ import {
   X,
   XCircle,
   FolderOpen,
+  Keyboard,
+  Plus,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -71,6 +71,32 @@ import { extractMethodLabel, isUmiMethod, isVisionMethod } from "../utils/format
 /** 报告卡片展开状态的模块级缓存（key=record_id）：组件因查看定位/报告替换重挂载后保持展开 */
 const personCardExpandedCache = new Map<string, boolean>();
 
+/**
+ * 步骤卡片横向滚动容器「自动跟随最新」hook：
+ * 监听列表长度，新增卡片时平滑滚动到末尾（scroll-smooth 自带缓动，先快后慢有质感）。
+ * 用户手动滚离末尾后不打断（仅当接近末尾或新增时才跟随）。
+ */
+function useFollowScrollToEnd(itemCount: number) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const prevCountRef = useRef(itemCount);
+  useEffect(() => {
+    const el = ref.current;
+    const prev = prevCountRef.current;
+    prevCountRef.current = itemCount;
+    if (!el) return;
+    // 仅在卡片数增加时跟随（避免删除/重排时突兀跳动）
+    if (itemCount <= prev) return;
+    // 等浏览器完成新卡片布局后再滚（配合入场动画，滚动与动画衔接更顺）
+    const raf = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        el.scrollTo({ left: el.scrollWidth, behavior: "smooth" });
+      });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [itemCount]);
+  return ref;
+}
+
 /** 提取元素汇总项：字段对比设置态「提取元素」小卡片（文件提取步骤 + 自定义文本 + 控件，按设置时间 FIFO） */
 export interface ExtractSummaryItem {
   id: string;
@@ -86,6 +112,8 @@ export interface ExtractSummaryItem {
   /** 关联的网页元素选择器（点击卡片定位预览用，可空） */
   selector?: string;
   side?: "left" | "right";
+  /** 绑定的 Excel 列名（来源是 Excel 时，悬停/点击卡片定位到对应列） */
+  excelField?: string;
 }
 
 /** 执行步骤项：统一表达前置点击/输入/审查字段/收尾点击 */
@@ -158,6 +186,8 @@ interface Props {
   processClickMarks?: PickedMark[];
   /** 字段对比设置模式数据：收尾点击 marks */
   postClickMarks?: PickedMark[];
+  /** 高手模式：true=功能按钮在顶部工具栏（面板内分组标题按钮隐藏）；false=默认模式（按钮在分组标题行） */
+  expertMode?: boolean;
   /** 开始添加前置点击 */
   onStartAddPreClick?: () => void;
   /** 开始绑定输入框 */
@@ -206,6 +236,8 @@ interface Props {
   onRemoveExtractStep?: (id: string, kind: "doc" | "custom" | "widget") => void;
   /** 点击卡片预览：在对应网页高亮显示元素位置 */
   onPreviewMark?: (mark: PickedMark) => void;
+  /** 悬停卡片预览：悬停期间持续高亮对应网页元素（自动滚动到视野内），null 表示移出清除 */
+  onHoverMark?: (mark: PickedMark | null) => void;
   /** 保存当前步骤配置到这批勾选的卡片（分割批次用） */
   onSaveToBatch?: () => void;
   /** 命名保存为 LOOP 模板 */
@@ -244,6 +276,8 @@ interface Props {
   widgetPassportPickingKey?: string | null;
   /** 用户在「提取结果」点击某个护照字段 → 完成控件绑定 */
   onResolvePassportField?: (fieldKey: string) => void;
+  /** 提取结果字段框的录入/审查按钮：进入对应模式并注入该字段为左侧来源 */
+  onPickExtractResultField?: (mode: "entry" | "review", field: string, value: string) => void;
   /** 取消护照字段拾取 */
   onCancelPassportPicking?: () => void;
   /** 控件 TAB 列表：每个控件一个 TAB（浏览器标签页风格） */
@@ -346,11 +380,7 @@ export default function ResultsPanel({
   preClickMarks = [],
   processClickMarks = [],
   postClickMarks = [],
-  reviewMappings = [],
-  onRemoveMark,
-  onRemoveMapping,
-  onRemoveExtractStep,
-  onPreviewMark,
+  expertMode = false,
   onStartAddPreClick,
   onStartBindInputs,
   bindInputActive = false,
@@ -361,6 +391,12 @@ export default function ResultsPanel({
   onStartAddPostClick,
   postClickActive = false,
   onStartAddDocExtract,
+  reviewMappings = [],
+  onRemoveMark,
+  onRemoveMapping,
+  onRemoveExtractStep,
+  onPreviewMark,
+  onHoverMark,
   onAutoOpenDocChoose,
   onChooseDocWeb,
   onChooseDocLocal,
@@ -389,6 +425,7 @@ export default function ResultsPanel({
   widgetResultFields = [],
   widgetPassportPickingKey = null,
   onResolvePassportField,
+  onPickExtractResultField,
   onCancelPassportPicking,
   widgetTabs = [],
   onAddWidget,
@@ -481,11 +518,7 @@ export default function ResultsPanel({
           preClickMarks={preClickMarks}
           processClickMarks={processClickMarks}
           postClickMarks={postClickMarks}
-          reviewMappings={reviewMappings}
-          onRemoveMark={onRemoveMark}
-          onRemoveMapping={onRemoveMapping}
-          onRemoveExtractStep={onRemoveExtractStep}
-          onPreviewMark={onPreviewMark}
+          expertMode={expertMode}
           onStartAddPreClick={onStartAddPreClick}
           onStartBindInputs={onStartBindInputs}
           bindInputActive={bindInputActive}
@@ -496,11 +529,17 @@ export default function ResultsPanel({
           onStartAddPostClick={onStartAddPostClick}
           postClickActive={postClickActive}
           onStartAddDocExtract={onStartAddDocExtract}
+          onSwitchStepMode={onSwitchStepMode}
+          reviewMappings={reviewMappings}
+          onRemoveMark={onRemoveMark}
+          onRemoveMapping={onRemoveMapping}
+          onRemoveExtractStep={onRemoveExtractStep}
+          onPreviewMark={onPreviewMark}
+          onHoverMark={onHoverMark}
           docExtractActive={docExtractActive}
           onAutoOpenDocChoose={onAutoOpenDocChoose}
           onChooseDocWeb={onChooseDocWeb}
           onChooseDocLocal={onChooseDocLocal}
-          onSwitchStepMode={onSwitchStepMode}
           onExitAddingStepMode={onExitAddingStepMode}
           onFieldPanelActive={onFieldPanelActive}
           canSaveMapping={canSaveMapping}
@@ -524,6 +563,7 @@ export default function ResultsPanel({
           widgetResultFields={widgetResultFields}
           widgetPassportPickingKey={widgetPassportPickingKey}
           onResolvePassportField={onResolvePassportField}
+          onPickExtractResultField={onPickExtractResultField}
           onCancelPassportPicking={onCancelPassportPicking}
           widgetTabs={widgetTabs}
           onAddWidget={onAddWidget}
@@ -868,11 +908,7 @@ function ReportTab({
   preClickMarks = [],
   processClickMarks = [],
   postClickMarks = [],
-  reviewMappings = [],
-  onRemoveMark,
-  onRemoveMapping,
-  onRemoveExtractStep,
-  onPreviewMark,
+  expertMode = false,
   onStartAddPreClick,
   onStartBindInputs,
   bindInputActive = false,
@@ -883,6 +919,12 @@ function ReportTab({
   onStartAddPostClick,
   postClickActive = false,
   onStartAddDocExtract,
+  reviewMappings = [],
+  onRemoveMark,
+  onRemoveMapping,
+  onRemoveExtractStep,
+  onPreviewMark,
+  onHoverMark,
   onAutoOpenDocChoose,
   onChooseDocWeb,
   onChooseDocLocal,
@@ -911,6 +953,7 @@ function ReportTab({
   widgetResultFields = [],
   widgetPassportPickingKey = null,
   onResolvePassportField,
+  onPickExtractResultField,
   onCancelPassportPicking,
   widgetTabs = [],
   onAddWidget,
@@ -993,6 +1036,8 @@ function ReportTab({
   processClickMarks?: PickedMark[];
   /** 字段对比设置模式数据：收尾点击 marks */
   postClickMarks?: PickedMark[];
+  /** 高手模式：true=功能按钮在顶部工具栏（面板内分组标题按钮隐藏）；false=默认模式（按钮在分组标题行） */
+  expertMode?: boolean;
   /** 开始添加前置点击 */
   onStartAddPreClick?: () => void;
   /** 开始绑定输入框 */
@@ -1041,6 +1086,8 @@ function ReportTab({
   onRemoveExtractStep?: (id: string, kind: "doc" | "custom" | "widget") => void;
   /** 点击卡片预览：在对应网页高亮显示元素位置 */
   onPreviewMark?: (mark: PickedMark) => void;
+  /** 悬停卡片预览：悬停期间持续高亮对应网页元素（自动滚动到视野内），null 表示移出清除 */
+  onHoverMark?: (mark: PickedMark | null) => void;
   /** 保存当前步骤配置到这批勾选的卡片（分割批次用） */
   onSaveToBatch?: () => void;
   /** 命名保存为 LOOP 模板 */
@@ -1079,6 +1126,8 @@ function ReportTab({
   widgetPassportPickingKey?: string | null;
   /** 用户在「提取结果」点击某个护照字段 → 完成控件绑定 */
   onResolvePassportField?: (fieldKey: string) => void;
+  /** 提取结果字段框的录入/审查按钮：进入对应模式并注入该字段为左侧来源 */
+  onPickExtractResultField?: (mode: "entry" | "review", field: string, value: string) => void;
   /** 取消护照字段拾取 */
   onCancelPassportPicking?: () => void;
   /** 控件 TAB 列表：每个控件一个 TAB（浏览器标签页风格） */
@@ -1180,6 +1229,8 @@ function ReportTab({
   /** 内嵌文件预览的旋转和缩放（切换文件时重置） */
   const [filePreviewRotation, setFilePreviewRotation] = useState(0);
   const [filePreviewZoom, setFilePreviewZoom] = useState(1);
+  /** 文件预览区折叠（提取完成后可收起预览，聚焦下方提取结果面板） */
+  const [filePreviewCollapsed, setFilePreviewCollapsed] = useState(false);
   /** 框选区域识别：当前正在框选的字段（非 null 时预览图进入框选模式） */
   const [regionPickField, setRegionPickField] = useState<string | null>(null);
   /** 框选橡皮筋（client 坐标） */
@@ -1274,36 +1325,20 @@ function ReportTab({
   const [activeCategory, setActiveCategory] = useState<"doc" | "custom" | "widget">("custom");
   /** 控件提取内部当前激活的控件 TAB id（用于 scroll spy 高亮 + 滚动定位） */
   const [activeWidgetTabId, setActiveWidgetTabId] = useState<string | null>(null);
-  /** 提取元素面板左右分栏模式：true=左半显示文件/自定义文本，右半显示控件提取 */
-  const [splitWidgetMode, setSplitWidgetMode] = useState(false);
   /** 用户主动点击「控件提取」按钮时强制显示控件面板（即使暂无控件内容，也显示空状态以引导添加） */
   const [forceWidgetView, setForceWidgetView] = useState(false);
-  /** 左右分栏时左侧宽度百分比（默认 50%） */
-  const [splitLeftPct, setSplitLeftPct] = useState(50);
-  /** 控件提取模式下手动展开文件处理面板（docSplitView 由外部控制，此状态为用户在面板内手动展开） */
-  const [filePanelManuallyOpen, setFilePanelManuallyOpen] = useState(false);
   /** 提取元素滚动容器 ref + widget节 ref（用于控件子TAB滚动定位） */
   const extractScrollRef = useRef<HTMLDivElement | null>(null);
   const extractSectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  /** 左右分栏拖拽相关 ref */
+  /** 提取元素面板容器 ref（原左右分栏容器，分屏废弃后仅作布局容器） */
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
-  const splitDraggingRef = useRef(false);
 
   // 两侧是否有实际内容：文件/自定义字段、控件提取
   const fieldCount = (extractCounts?.doc ?? 0) + (extractCounts?.custom ?? 0);
   const hasFields = fieldCount > 0;
   const hasWidget = !!(widgetExtractContent || widgetTabs.length > 0 || widgetSetupSignal);
-  // 真正进入左右分栏的前提：两侧都有内容；否则即使请求了分栏也回退为单栏
-  const effectiveSplit = splitWidgetMode && hasFields && hasWidget;
-
-  // 外部 docSplitView 为 true 时同步展开文件面板（保证分屏中控件提取时文件面板可见）
-  // 用户可在面板内手动收起/展开，filePanelManuallyOpen 作为唯一控制面板可见性的状态
-  useEffect(() => {
-    if (docSplitView) setFilePanelManuallyOpen(true);
-  }, [docSplitView]);
-
-  // 文件处理面板是否实际可见（手动展开状态）
-  const filePanelVisible = filePanelManuallyOpen;
+  // 已废弃左右分屏：提取元素面板改为「字段 / 控件提取」单栏切换两页，effectiveSplit 恒为 false
+  const effectiveSplit = false;
 
   // 确定当前实际显示的大分类：
   // - 用户明确切到 widget 且有控件内容（或强制查看控件面板）→ widget
@@ -1319,38 +1354,21 @@ function ReportTab({
   // 记录用户是否手动切换过分类（手动切换后不再自动跳回 widget）
   const userPickedCategoryRef = useRef(false);
 
-  /**
-   * 标题栏「控件提取」按钮的切换逻辑：
-   * - 分栏中 → 收起分栏，回到文本面板
-   * - 控件单栏 → 切回文本面板
-   * - 文本单栏 + 两侧都有内容 → 进入分栏
-   * - 文本单栏 + 仅一侧有内容（或都没有）→ 切到控件面板（空状态也显示，引导添加）
-   */
-  const toggleWidgetPanel = useCallback(() => {
+  /** 两态切换：直接切到指定分类（字段 / 控件提取），供 segmented 按钮使用 */
+  const switchCategory = useCallback((cat: "custom" | "widget") => {
     userPickedCategoryRef.current = true;
-    if (effectiveSplit) {
-      setSplitWidgetMode(false);
-      setActiveCategory("custom");
-      setForceWidgetView(false);
-    } else if (currentCategory === "widget") {
-      setActiveCategory("custom");
-      setForceWidgetView(false);
-    } else {
-      // 当前在文本面板
+    if (cat === "widget") {
       setShowExtractPanel(true);
       setExtractSetupMode(true);
-      if (hasFields && hasWidget) {
-        // 两侧都有实际内容 → 分栏
-        setSplitWidgetMode(true);
-      } else {
-        // 仅一侧有内容或都没有 → 切到控件单栏（forceWidgetView 允许空状态显示）
-        setActiveCategory("widget");
-        setForceWidgetView(true);
-        const container = extractScrollRef.current;
-        if (container) container.scrollTo({ top: 0, behavior: "auto" });
-      }
+      setActiveCategory("widget");
+      setForceWidgetView(true);
+      const container = extractScrollRef.current;
+      if (container) container.scrollTo({ top: 0, behavior: "auto" });
+    } else {
+      setActiveCategory("custom");
+      setForceWidgetView(false);
     }
-  }, [effectiveSplit, currentCategory, hasFields, hasWidget]);
+  }, []);
 
   // 当没有字段内容但出现了控件内容时，自动切到 widget 单栏（避免空面板占位）；
   // 用户手动切回 custom（如想添加文本）后不再自动跳回
@@ -1374,42 +1392,6 @@ function ReportTab({
     container.scrollTo({ top: container.scrollTop + delta, behavior: "smooth" });
   }, []);
 
-  /** 左右分栏拖拽分隔条 */
-  const onSplitDividerMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    splitDraggingRef.current = true;
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    const container = splitContainerRef.current;
-    if (!container) return;
-    const startX = e.clientX;
-    const startPct = splitLeftPct;
-    const rect = container.getBoundingClientRect();
-    const onMove = (ev: MouseEvent) => {
-      if (!splitDraggingRef.current) return;
-      const dx = ev.clientX - startX;
-      const pctDelta = (dx / rect.width) * 100;
-      const newPct = Math.min(80, Math.max(20, startPct + pctDelta));
-      setSplitLeftPct(newPct);
-    };
-    const onUp = () => {
-      splitDraggingRef.current = false;
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }, [splitLeftPct]);
-
-  // 进入左右分栏模式时，如果当前在 widget 分类，自动将左侧切到 doc 或 custom
-  useEffect(() => {
-    if (effectiveSplit && activeCategory === "widget") {
-      if (docFieldsContent !== undefined) setActiveCategory("doc");
-      else if (customTextContent !== undefined) setActiveCategory("custom");
-    }
-  }, [effectiveSplit, activeCategory, docFieldsContent, customTextContent]);
   // 聚焦字段对比面板时（用户正在添加前置/收尾点击或审查步骤），自动切换到设置模式
   useEffect(() => {
     if (focusPanel === "field" || focusPanel === "field-doc") setFieldSetupMode(true);
@@ -1437,21 +1419,14 @@ function ReportTab({
   useEffect(() => {
     if (widgetSetupSignal) setExtractSetupMode(true);
   }, [widgetSetupSignal]);
-  // 外部请求进入左右分栏（控件绑定左网页取值时）：仅当两侧都有内容时才分栏；
-  // 若文件/自定义没有内容，则只切到控件单栏，避免留一个空白面板
+  // 外部请求查看控件提取（控件绑定左网页取值时）：已废弃分屏，统一切到控件单栏
   useEffect(() => {
     if (!splitWidgetRequest) return;
     setShowExtractPanel(true);
     setExtractSetupMode(true);
-    const fieldsHasContent = (extractCounts?.doc ?? 0) + (extractCounts?.custom ?? 0) > 0;
-    const widgetHasContent = widgetTabs.length > 0 || !!widgetSetupSignal;
-    if (fieldsHasContent && widgetHasContent) {
-      setSplitWidgetMode(true);
-    } else {
-      setSplitWidgetMode(false);
-      setActiveCategory("widget");
-    }
-  }, [splitWidgetRequest, extractCounts, widgetTabs.length, widgetSetupSignal]);
+    setActiveCategory("widget");
+    setForceWidgetView(true);
+  }, [splitWidgetRequest]);
   // 外部请求切换提取元素 TAB/控件：切换分类，若指定控件则滚动定位
   useEffect(() => {
     if (!extractTabRequest) return;
@@ -2669,10 +2644,10 @@ function ReportTab({
       : (isImageFile && fileUrl) ? fileUrl : null;
     if (docExtract) {
       if (previewImgSrc) {
-        // 图片预览（预处理后或原始图片）：支持旋转和缩放
+        // 图片预览（预处理后或原始图片）：支持旋转和缩放；收起后只占工具条一行并挪到提取结果下方
         const isRotated = filePreviewRotation === 90 || filePreviewRotation === 270;
         filePreview = (
-          <div className="mb-2 flex min-h-[300px] flex-1 flex-col">
+          <div className={filePreviewCollapsed ? "mt-2 flex shrink-0 flex-col" : "mb-2 flex min-h-[300px] flex-1 flex-col"}>
             <div className="mb-1 flex items-center gap-0.5 self-end rounded bg-slate-100/80 p-0.5">
               <button
                 onClick={() => setFilePreviewRotation((r) => (r - 90 + 360) % 360)}
@@ -2734,7 +2709,17 @@ function ReportTab({
                   </button>
                 </>
               )}
+              <div className="mx-0.5 h-3 w-px bg-slate-300" />
+              <button
+                onClick={() => setFilePreviewCollapsed((c) => !c)}
+                className="flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium text-slate-600 hover:bg-white hover:text-slate-800"
+                title={filePreviewCollapsed ? "展开预览" : "收起预览，聚焦下方提取结果"}
+              >
+                {filePreviewCollapsed ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
+                {filePreviewCollapsed ? "展开预览" : "收起预览"}
+              </button>
             </div>
+            {!filePreviewCollapsed && (
             <div
               ref={filePreviewBoxRef}
               className={[
@@ -2841,6 +2826,7 @@ function ReportTab({
                 </div>
               )}
             </div>
+            )}
           </div>
         );
       } else if (isPdfFile) {
@@ -2969,7 +2955,8 @@ function ReportTab({
     const missingFields = expectedAll
       .filter((f) => !String(docExtract?.fields?.[f] || "").trim())
       .sort(byFieldOrder);
-    const widgetFields = widgetResultFields.filter((w) => w.value && String(w.value).trim());
+    // 提取结果不再混入控件提取元素（控件只在提取元素面板管理，这里只显示文件提取字段）
+    const widgetFields: Array<{ key: string; label: string; value: string; kind: "option" | "calendar" }> = [];
     const hasExtractText = !!(docExtract?.text && docExtract.text.trim().length > 0);
     const totalFieldCount = extractFields.length + widgetFields.length;
     const hasExtractResult = docExtract ? (extractFields.length > 0 || hasExtractText || missingFields.length > 0) : widgetFields.length > 0;
@@ -3079,7 +3066,28 @@ function ReportTab({
                   >
                     <div className="flex items-center justify-between gap-0.5 text-[9px] font-medium text-slate-400">
                       <span className="truncate">{FIELD_LABELS[field] || field}</span>
-                      {regionPickBtn(field)}
+                      <span className="flex shrink-0 items-center gap-0.5">
+                        {/* 录入/审查快捷按钮：直接把该提取字段作为对应步骤的来源值 */}
+                        {onPickExtractResultField && !widgetPassportPickingKey && !editExtractMode && value && String(value).trim() && (
+                          <>
+                            <button
+                              onClick={(ev) => { ev.stopPropagation(); onPickExtractResultField("entry", field, String(value)); }}
+                              className="rounded px-0.5 text-[8px] font-semibold text-sky-500 transition-colors hover:bg-sky-50 hover:text-sky-600"
+                              title={`录入：把「${FIELD_LABELS[field] || field}」作为来源值，选右侧输入框`}
+                            >
+                              录
+                            </button>
+                            <button
+                              onClick={(ev) => { ev.stopPropagation(); onPickExtractResultField("review", field, String(value)); }}
+                              className="rounded px-0.5 text-[8px] font-semibold text-indigo-500 transition-colors hover:bg-indigo-50 hover:text-indigo-600"
+                              title={`审查：把「${FIELD_LABELS[field] || field}」作为来源值，选右侧核对元素`}
+                            >
+                              审
+                            </button>
+                          </>
+                        )}
+                        {regionPickBtn(field)}
+                      </span>
                     </div>
                     {editExtractMode ? (
                       <input
@@ -3175,14 +3183,22 @@ function ReportTab({
     fileProcessContent = (
       <div className="flex h-full min-h-0 flex-col">
         {fileInfo}
-        {filePreview}
+        {/* 预览收起时与提取结果对换位置：提取结果上挪占满主视野，预览工具条沉底 */}
+        {!filePreviewCollapsed && filePreview}
         {(extractResultBlock || compareBlock || shotsBlock) && (
-          <div className={`shrink-0 space-y-2 ${filePreview ? "max-h-[45%] overflow-auto" : ""}`}>
+          <div
+            className={
+              filePreview && filePreviewCollapsed
+                ? "min-h-0 flex-1 space-y-2 overflow-auto"
+                : `shrink-0 space-y-2 ${filePreview ? "max-h-[45%] overflow-auto" : ""}`
+            }
+          >
             {extractResultBlock}
             {compareBlock}
             {shotsBlock}
           </div>
         )}
+        {filePreviewCollapsed && filePreview}
         {!fileInfo && !extractResultBlock && !compareBlock && !shotsBlock && (
           <div className="flex h-full min-h-[140px] flex-col items-center justify-center gap-2 text-center text-[11px] text-slate-400">
             <FileText className="h-8 w-8 text-slate-200" />
@@ -3336,10 +3352,6 @@ function ReportTab({
   const isDocExtractFocus = focusPanel === "doc-extract";
   const isFieldDocFocus = focusPanel === "field-doc";
   const isAll = !focusPanel;
-  // 控件提取模式：处于控件提取激活态（widgetSetupSignal=widgetExtractMode）时隐藏文件处理面板，
-  // 只显示字段对比+提取元素两栏。仅保存过控件（widgetExtractContent 非空）但不在提取模式时，
-  // 文件处理面板应正常显示，避免面板开启后变成空白区域
-  const isWidgetMode = !!widgetSetupSignal;
   // 提取元素面板显示逻辑：
   // - 非步骤设置模式（结果查看）：始终显示（三栏布局）
   // - 步骤设置模式：按用户手动开关控制（默认隐藏，给步骤卡片更多空间，可手动展开）
@@ -3351,9 +3363,8 @@ function ReportTab({
     ? (!isSetupMode || showExtractPanel || !!customTextContent || !!widgetExtractContent || !!docFieldsContent || extractSetupMode)
     : isDocExtractFocus;
 
-  // 文件处理面板在布局中是否实际可见（综合 focus 状态、三栏模式、控件模式、手动展开）
-  const filePanelActuallyVisible = isDocFocus || isDocExtractFocus || isFieldDocFocus
-    || (isAll && !(isWidgetMode && !isDocExtractFocus && !filePanelVisible));
+  // 文件处理面板在布局中是否实际可见（综合 focus 状态、三栏模式）
+  const filePanelActuallyVisible = isDocFocus || isDocExtractFocus || isFieldDocFocus || isAll;
 
   // 横向滚动容器的滚轮处理：垂直滚轮 → 水平滚动
   const handleHorizontalWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
@@ -3365,16 +3376,69 @@ function ReportTab({
     }
   }, []);
 
+  // 全局「最新步骤」：5 类步骤卡片中 createdAt/ts 最大的那一条，文字部分以「高光笔」黄色高亮涂出（hl-latest，带画出动画）便于定位。
+  // 新增步骤后旧「最新」自动恢复、新卡片涂高光。extract 项 ts=MAX_SAFE_INTEGER 是「无时间戳」哨兵，不参与比较。
+  const latestStepKey = useMemo(() => {
+    let bestKey: string | null = null;
+    let bestTs = -Infinity;
+    const consider = (key: string, ts?: number | null) => {
+      if (ts == null || !Number.isFinite(ts) || ts <= 0) return;
+      if (ts > bestTs) {
+        bestTs = ts;
+        bestKey = key;
+      }
+    };
+    preClickMarks.forEach((m) => consider(`mark:${m.id}`, m.createdAt));
+    processClickMarks.forEach((m) => consider(`mark:${m.id}`, m.createdAt));
+    postClickMarks.forEach((m) => consider(`mark:${m.id}`, m.createdAt));
+    reviewMappings.forEach((mp, i) => consider(`mapping:${i}`, mp.createdAt));
+    extractStepSummary.forEach((item) => consider(`extract:${item.id}`, item.ts));
+    return bestKey;
+  }, [preClickMarks, processClickMarks, postClickMarks, reviewMappings, extractStepSummary]);
+
+  // 步骤卡片「自动跟随最新」：新增卡片时对应分组横向平滑滚动到末尾
+  const preClickScrollRef = useFollowScrollToEnd(preClickMarks.length);
+  const reviewScrollRef = useFollowScrollToEnd(reviewMappings.length);
+  const processClickScrollRef = useFollowScrollToEnd(processClickMarks.length);
+  const extractScrollRef2 = useFollowScrollToEnd(extractStepSummary.length);
+  const postClickScrollRef = useFollowScrollToEnd(postClickMarks.length);
+
+  // 纵向「自动跟随最新」：小窗口下新步骤落在视野外分组时，纵向平滑滚动到该卡片（block:nearest 最小滚动，已在视野内不动）
+  const fieldSetupScrollRef = useRef<HTMLDivElement | null>(null);
+  const followMountedRef = useRef(false);
+  useEffect(() => {
+    // 首次挂载只记录不滚动，避免打开面板时视野被拽到最新卡片
+    if (!followMountedRef.current) {
+      followMountedRef.current = true;
+      return;
+    }
+    if (!latestStepKey) return;
+    const container = fieldSetupScrollRef.current;
+    if (!container) return;
+    // 等浏览器完成新卡片布局/入场动画首帧后再判定与滚动
+    const raf = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const el = container.querySelector<HTMLElement>('[data-latest-step="true"]');
+        if (!el) return;
+        const cRect = container.getBoundingClientRect();
+        const eRect = el.getBoundingClientRect();
+        const visible = eRect.top >= cRect.top && eRect.bottom <= cRect.bottom;
+        if (!visible) el.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+      });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [latestStepKey]);
+
   // 字段对比设置模式内容：三大分组纵向排列，每组内部元素横向排列成玻璃质感小卡片
   const fieldSetupContent = (
-    <div className="flex h-full flex-col gap-2 overflow-y-auto p-1.5">
+    <div ref={fieldSetupScrollRef} className="flex h-full flex-col gap-2 overflow-y-auto p-1.5">
       {/* 前置设置分组 —— 小卡片从左到右排列（含步骤2绑定输入框 + 步骤3前置点击） */}
       <div className="shrink-0">
         <div className="mb-0 flex items-center gap-1.5 border-b-2 border-slate-200 pb-1.5 text-[11px] font-bold text-slate-700">
           <MousePointerClick className="h-3.5 w-3.5 text-slate-500" />
           前置设置
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{preClickMarks.length}</span>
-          {fieldSetupMode && onStartBindInputs && !running && (
+          {!expertMode && fieldSetupMode && onStartBindInputs && !running && (
             <button
               onClick={(e) => { e.stopPropagation(); onStartBindInputs(); }}
               className={[
@@ -3399,7 +3463,7 @@ function ReportTab({
               )}
             </button>
           )}
-          {fieldSetupMode && onStartAddPreClick && !running && (
+          {!expertMode && fieldSetupMode && onStartAddPreClick && !running && (
             <button
               onClick={(e) => { e.stopPropagation(); onStartAddPreClick(); }}
               className={[
@@ -3435,26 +3499,30 @@ function ReportTab({
             </div>
           </div>
         ) : (
-          <div className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
+          <div ref={preClickScrollRef} className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
             {preClickMarks.map((m) => {
               const isInput = m.action === "input";
               const actionWord = isInput ? (m.workflow === "entry" ? "录入" : "审查") : "点击";
               const displayLabel = (m.label || "").replace(/^输入/, m.workflow === "entry" ? "录入" : "审查");
+              const isLatest = latestStepKey === `mark:${m.id}`;
               return (
                 <div
                   key={m.id}
+                  data-latest-step={isLatest ? "true" : undefined}
                   onClick={() => onPreviewMark?.(m)}
-                  className="group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm"
+                  onMouseEnter={() => onHoverMark?.(m)}
+                  onMouseLeave={() => onHoverMark?.(null)}
+                  className={`group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}`}
                   title={`${actionWord} · ${displayLabel}（点击在网页定位）`}
                 >
                   <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-[12px] font-bold text-white shadow-sm">
                     {m.order}
                   </span>
                   <div className="flex min-w-0 flex-1 flex-col gap-0.5 pr-5">
-                    <span className="text-[10px] font-bold text-slate-500">
-                      {actionWord}
+                    <span className={`text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>
+                      {isLatest ? <span className="hl-latest">{actionWord}</span> : actionWord}
                     </span>
-                    <span className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-700">{displayLabel}</span>
+                    <span className={`line-clamp-2 text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{displayLabel}</span> : displayLabel}</span>
                   </div>
                   {onRemoveMark && (
                     <button
@@ -3485,7 +3553,7 @@ function ReportTab({
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{reviewMappings.length}</span>
           {fieldSetupMode && !running && (
             <>
-              {onSwitchStepMode && (
+              {!expertMode && onSwitchStepMode && (
                 <div className="ml-1 flex shrink-0 items-center gap-0 rounded-md bg-slate-100 p-0.5 ring-1 ring-slate-200">
                   <button
                     onClick={(e) => { e.stopPropagation(); onSwitchStepMode("review"); }}
@@ -3562,15 +3630,31 @@ function ReportTab({
             </div>
           </div>
         ) : (
-          <div className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
+          <div ref={reviewScrollRef} className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
             {reviewMappings.map((mp, i) => {
               const isEntry = appMode === "entry";
               const webSide = mp.web_side || "right";
+              const isLatest = latestStepKey === `mapping:${i}`;
+              const previewMark: PickedMark = {
+                id: `mapping-${i}`,
+                order: i + 1,
+                side: webSide,
+                source: "web",
+                selector: mp.right_selector,
+                label: mp.right_label || mp.right_selector,
+                workflow: "review",
+                createdAt: 0,
+                // 来源是 Excel 列时带上列名：悬停/点击卡片自动切到 Excel 面板并定位该列
+                excelField: mp.left_source === "excel" ? mp.left_field : undefined,
+              };
               return (
                 <div
                   key={i}
-                  onClick={() => onPreviewMark?.({ id: `mapping-${i}`, order: i + 1, side: webSide, source: "web", selector: mp.right_selector, label: mp.right_label || mp.right_selector, workflow: "review", createdAt: 0 })}
-                  className="group relative flex shrink-0 min-w-[100px] max-w-[160px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm"
+                  data-latest-step={isLatest ? "true" : undefined}
+                  onClick={() => onPreviewMark?.(previewMark)}
+                  onMouseEnter={() => onHoverMark?.(previewMark)}
+                  onMouseLeave={() => onHoverMark?.(null)}
+                  className={`group relative flex shrink-0 min-w-[100px] max-w-[160px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}`}
                   title={`${mp.left_field || "—"} ${isEntry ? "→" : "←"} ${mp.right_label || mp.right_selector}（${webSide === "left" ? "左" : "右"}侧网页，点击定位）`}
                 >
                   <div className="flex shrink-0 flex-col items-center gap-1">
@@ -3584,14 +3668,14 @@ function ReportTab({
                     )}
                   </div>
                   <div className="flex min-w-0 flex-1 flex-col pr-5">
-                    <span className="text-[10px] font-bold text-slate-500">
-                      {isEntry ? "填入" : "对比"}
+                    <span className={`text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>
+                      {isLatest ? <span className="hl-latest">{isEntry ? "填入" : "对比"}</span> : (isEntry ? "填入" : "对比")}
                       {webSide === "left" && (
                         <span className="ml-1 rounded bg-slate-200/80 px-1 py-px text-[8px] font-semibold text-slate-500">左网页</span>
                       )}
                     </span>
-                    <div className="truncate py-0.5 text-[10px] font-medium leading-tight text-slate-500">{mp.left_field || "—"}</div>
-                    <div className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-700">{mp.right_label || mp.right_selector}</div>
+                    <div className={`truncate py-0.5 text-[10px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-500"}`}>{isLatest ? <span className="hl-latest">{mp.left_field || "—"}</span> : (mp.left_field || "—")}</div>
+                    <div className={`line-clamp-2 text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{mp.right_label || mp.right_selector}</span> : (mp.right_label || mp.right_selector)}</div>
                   </div>
                   {onRemoveMapping && (
                     <button
@@ -3620,7 +3704,7 @@ function ReportTab({
           <MousePointerClick className="h-3.5 w-3.5 text-slate-500" />
           过程点击
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{processClickMarks.length}</span>
-          {fieldSetupMode && onStartAddProcessClick && !running && (
+          {!expertMode && fieldSetupMode && onStartAddProcessClick && !running && (
             <button
               onClick={(e) => { e.stopPropagation(); onStartAddProcessClick(); }}
               className={[
@@ -3654,18 +3738,23 @@ function ReportTab({
             </div>
           </div>
         ) : (
-          <div className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
-            {processClickMarks.map((m) => (
+          <div ref={processClickScrollRef} className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
+            {processClickMarks.map((m) => {
+              const isLatest = latestStepKey === `mark:${m.id}`;
+              return (
               <div
                 key={m.id}
+                data-latest-step={isLatest ? "true" : undefined}
                 onClick={() => onPreviewMark?.(m)}
-                className="group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm"
+                onMouseEnter={() => onHoverMark?.(m)}
+                onMouseLeave={() => onHoverMark?.(null)}
+                className={`group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}`}
                 title={`点击 · ${m.label}（点击在网页定位）`}
               >
                 <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-[12px] font-bold text-white shadow-sm">{m.order}</span>
                 <div className="flex min-w-0 flex-1 flex-col gap-0.5 pr-5">
-                  <span className="text-[10px] font-bold text-slate-500">点击</span>
-                  <span className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-700">{m.label}</span>
+                  <span className={`text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>{isLatest ? <span className="hl-latest">点击</span> : "点击"}</span>
+                  <span className={`line-clamp-2 text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{m.label}</span> : m.label}</span>
                 </div>
                 {onRemoveMark && (
                   <button
@@ -3682,7 +3771,8 @@ function ReportTab({
                   </button>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -3708,7 +3798,7 @@ function ReportTab({
             </div>
           </div>
         ) : (
-          <div className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
+          <div ref={extractScrollRef2} className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
             {extractStepSummary.map((item, idx) => {
               let typeLabel = "提取";
               if (item.kind === "doc") {
@@ -3724,42 +3814,53 @@ function ReportTab({
                   typeLabel = "控件";
                 }
               }
+              const isLatest = latestStepKey === `extract:${item.id}`;
+              const previewMark: PickedMark = {
+                id: item.id,
+                order: idx + 1,
+                side: item.side || "right",
+                source: "web",
+                selector: item.selector || "",
+                label: item.detail,
+                workflow: "review",
+                createdAt: 0,
+                // 绑定 Excel 列的提取元素：悬停/点击卡片自动切到 Excel 面板并定位该列
+                excelField: item.excelField,
+              };
+              const canPreview = !!item.selector || !!item.excelField;
               return (
                 <div
                   key={item.id}
+                  data-latest-step={isLatest ? "true" : undefined}
                   onClick={() => {
-                    if (item.selector) {
-                      onPreviewMark?.({
-                        id: item.id,
-                        order: idx + 1,
-                        side: item.side || "right",
-                        source: "web",
-                        selector: item.selector,
-                        label: item.detail,
-                        workflow: "review",
-                        createdAt: 0,
-                      });
+                    if (canPreview) {
+                      onPreviewMark?.(previewMark);
                     }
                   }}
+                  onMouseEnter={() => {
+                    if (canPreview) onHoverMark?.(previewMark);
+                  }}
+                  onMouseLeave={() => onHoverMark?.(null)}
                   className={[
                     "group relative flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all",
-                    item.selector ? "cursor-pointer hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm" : "",
+                    canPreview ? "cursor-pointer hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm" : "",
+                    isLatest ? "animate-step-card-in" : "",
                   ].join(" ")}
-                  title={`${item.name} · ${item.detail}${item.selector ? "（点击在网页定位）" : ""}`}
+                  title={`${item.name} · ${item.detail}${canPreview ? "（点击在网页定位）" : ""}`}
                 >
                   <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-[12px] font-bold text-white shadow-sm">
                     {idx + 1}
                   </span>
                   <div className="flex min-w-0 flex-1 flex-col gap-0.5 pr-5">
                     <div className="flex items-center justify-between">
-                      <span className="text-[10px] font-bold text-slate-500">{typeLabel}</span>
+                      <span className={`text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>{isLatest ? <span className="hl-latest">{typeLabel}</span> : typeLabel}</span>
                       <span
                         className={`h-1.5 w-1.5 shrink-0 rounded-full ${
                           item.saved ? "bg-emerald-400" : "bg-amber-400"
                         }`}
                       />
                     </div>
-                    <span className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-700">{item.detail}</span>
+                    <span className={`line-clamp-2 text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{item.detail}</span> : item.detail}</span>
                   </div>
                   {onRemoveExtractStep && (
                     <button
@@ -3788,7 +3889,7 @@ function ReportTab({
           <MousePointerClick className="h-3.5 w-3.5 text-slate-500" />
           收尾点击
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{postClickMarks.length}</span>
-          {fieldSetupMode && onStartAddPostClick && !running && (
+          {!expertMode && fieldSetupMode && onStartAddPostClick && !running && (
             <button
               onClick={(e) => { e.stopPropagation(); onStartAddPostClick(); }}
               className={[
@@ -3822,18 +3923,23 @@ function ReportTab({
             </div>
           </div>
         ) : (
-          <div className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
-            {postClickMarks.map((m) => (
+          <div ref={postClickScrollRef} className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
+            {postClickMarks.map((m) => {
+              const isLatest = latestStepKey === `mark:${m.id}`;
+              return (
               <div
                 key={m.id}
+                data-latest-step={isLatest ? "true" : undefined}
                 onClick={() => onPreviewMark?.(m)}
-                className="group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm"
+                onMouseEnter={() => onHoverMark?.(m)}
+                onMouseLeave={() => onHoverMark?.(null)}
+                className={`group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}`}
                 title={`点击 · ${m.label}（点击在网页定位）`}
               >
                 <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-[12px] font-bold text-white shadow-sm">{m.order}</span>
                 <div className="flex min-w-0 flex-1 flex-col gap-0.5 pr-5">
-                  <span className="text-[10px] font-bold text-slate-500">点击</span>
-                  <span className="line-clamp-2 text-[11px] font-medium leading-tight text-slate-700">{m.label}</span>
+                  <span className={`text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>{isLatest ? <span className="hl-latest">点击</span> : "点击"}</span>
+                  <span className={`line-clamp-2 text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{m.label}</span> : m.label}</span>
                 </div>
                 {onRemoveMark && (
                   <button
@@ -3850,7 +3956,8 @@ function ReportTab({
                   </button>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -4013,44 +4120,29 @@ function ReportTab({
           )}
         </div>
 
-        {/* 左/中 拖拽分隔条 —— 聚焦模式或控件提取模式下隐藏（文件面板可见时仍显示） */}
+        {/* 左/中 拖拽分隔条 —— 聚焦模式下隐藏 */}
         <div
           className={[
             "group relative hidden shrink-0 cursor-col-resize items-center justify-center lg:flex",
             "transition-opacity duration-200",
-            ((isAll && (!isWidgetMode || filePanelVisible)) || isFieldDocFocus) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
+            (isAll || isFieldDocFocus) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
           ].join(" ")}
-          style={{ width: ((isAll && (!isWidgetMode || filePanelVisible)) || isFieldDocFocus) ? 6 : 0 }}
+          style={{ width: (isAll || isFieldDocFocus) ? 6 : 0 }}
           onMouseDown={onMouseDown("left")}
         >
           <div className="panel-divider h-full w-px" />
           <div className="absolute h-8 w-1 rounded-full bg-slate-400 opacity-0 transition-opacity group-hover:opacity-100" />
         </div>
 
-        {/* 控件模式下文件面板收起时的展开按钮 */}
-        {isWidgetMode && !isDocExtractFocus && !filePanelVisible && (
-          <button
-            onClick={() => setFilePanelManuallyOpen(true)}
-            className="group relative z-20 flex shrink-0 cursor-pointer items-center justify-center lg:flex"
-            style={{ width: 10 }}
-            title="展开文件处理面板"
-          >
-            <div className="h-full w-px bg-slate-200 transition-colors group-hover:bg-slate-400" />
-            <div className="absolute flex h-10 w-4 items-center justify-center rounded-r bg-slate-100 text-slate-500 opacity-60 shadow-sm ring-1 ring-slate-200 transition-all group-hover:opacity-100">
-              <ChevronRight className="h-3 w-3" />
-            </div>
-          </button>
-        )}
-
-        {/* 文件处理卡片 —— 2面板时在右半向左展开/向右回收；3面板时在中间左右展开/向中心回收；控件提取模式下隐藏（手动展开或doc-extract分屏中除外） */}
+        {/* 文件处理卡片 —— 2面板时在右半向左展开/向右回收；3面板时在中间左右展开/向中心回收 */}
         <div
           className={[
             "relative flex min-w-0 max-h-[55vh] flex-col overflow-hidden bg-white lg:h-full lg:max-h-none",
             dragging ? "" : "transition-[flex-basis,opacity,max-width] duration-300 ease-out",
-            (isDocFocus || isDocExtractFocus || isFieldDocFocus) ? "flex-1" : (isAll && !(isWidgetMode && !isDocExtractFocus && !filePanelVisible)) ? "" : "lg:border-0 lg:px-0 lg:mx-0",
+            (isDocFocus || isDocExtractFocus || isFieldDocFocus) ? "flex-1" : isAll ? "" : "lg:border-0 lg:px-0 lg:mx-0",
           ].join(" ")}
           style={{
-            flexBasis: isFieldFocus || (isWidgetMode && !isDocExtractFocus && !filePanelVisible)
+            flexBasis: isFieldFocus
               ? "0%"
               : isDocFocus
                 ? undefined
@@ -4062,10 +4154,7 @@ function ReportTab({
                       ? (showExtract ? `${midWidth}%` : undefined)
                       : "0%",
             flexShrink: 0,
-            flexGrow: (isDocFocus || isDocExtractFocus || isFieldDocFocus || (isAll && !(isWidgetMode && !isDocExtractFocus && !filePanelVisible) && !showExtract)) ? 1 : 0,
-            opacity: (isWidgetMode && !isDocExtractFocus && !filePanelVisible) ? 0 : 1,
-            maxWidth: (isWidgetMode && !isDocExtractFocus && !filePanelVisible) ? 0 : undefined,
-            pointerEvents: (isWidgetMode && !isDocExtractFocus && !filePanelVisible) ? "none" : undefined,
+            flexGrow: (isDocFocus || isDocExtractFocus || isFieldDocFocus || (isAll && !showExtract)) ? 1 : 0,
             willChange: "opacity, max-width",
             contain: "layout style",
           }}
@@ -4169,23 +4258,11 @@ function ReportTab({
                     {docBreakpoint === "always" ? "强制断点" : docBreakpoint === "on-error" ? "条件断点" : "断点"}
                   </button>
                 )}
-                {/* 控件提取模式下手动收起文件处理面板（非choose模式） */}
-                {isWidgetMode && !isDocExtractFocus && filePanelManuallyOpen && !docConfigChooseMode && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setFilePanelManuallyOpen(false); }}
-                    className="ml-auto flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
-                    title="收起文件处理面板"
-                  >
-                    <ChevronLeft className="h-3 w-3" />
-                    收起
-                  </button>
-                )}
                 {/* 设置/结果切换按钮：choose 模式和普通模式都显示 */}
                 <button
                   onClick={() => setDocSetupMode((v) => !v)}
                   className={[
-                    (isWidgetMode && !isDocExtractFocus && filePanelManuallyOpen && !docConfigChooseMode) ? "" : "ml-auto",
-                    "flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
+                    "ml-auto flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
                     docSetupMode
                       ? "bg-slate-200 text-slate-700"
                       : "text-slate-400 hover:bg-slate-100 hover:text-slate-600",
@@ -4265,21 +4342,21 @@ function ReportTab({
           )}
         </div>
 
-        {/* 中/右 拖拽分隔条 —— 仅三栏模式（showExtract且非doc-extract聚焦、非控件提取模式）下显示；文件面板可见时控件提取也显示 */}
+        {/* 中/右 拖拽分隔条 —— 仅三栏模式（showExtract且非doc-extract聚焦）下显示 */}
         <div
           className={[
             "group relative hidden shrink-0 cursor-col-resize items-center justify-center lg:flex",
             "transition-opacity duration-200",
-            (showExtract && isAll && (!isWidgetMode || filePanelVisible)) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
+            (showExtract && isAll) ? "opacity-100" : "opacity-0 lg:w-0 lg:px-0",
           ].join(" ")}
-          style={{ width: (showExtract && isAll && (!isWidgetMode || filePanelVisible)) ? 6 : 0 }}
+          style={{ width: (showExtract && isAll) ? 6 : 0 }}
           onMouseDown={onMouseDown("right")}
         >
           <div className="panel-divider h-full w-px" />
           <div className="absolute h-8 w-1 rounded-full bg-slate-400 opacity-0 transition-opacity group-hover:opacity-100" />
         </div>
 
-        {/* 提取元素卡片 —— 最右侧，向左展开/向右回收（默认隐藏，通过文件处理面板左侧按钮开启）；控件提取模式下和字段对比平分空间 */}
+        {/* 提取元素卡片 —— 最右侧，向左展开/向右回收（默认隐藏，通过文件处理面板左侧按钮开启）；控件提取时也保持三栏，不再扩到50% */}
         <div
           className={[
             "flex max-h-[55vh] min-w-0 flex-col overflow-hidden bg-white lg:h-full lg:max-h-none",
@@ -4293,9 +4370,7 @@ function ReportTab({
                 ? "0%"
                 : isDocExtractFocus
                   ? "50%"
-                  : (isWidgetMode && !filePanelVisible)
-                    ? (showExtract ? "50%" : "0%")
-                    : showExtract ? "30%" : "0%",
+                  : showExtract ? "30%" : "0%",
             flexShrink: 0,
             flexGrow: showExtract ? 1 : 0,
             willChange: "opacity, max-width",
@@ -4306,25 +4381,30 @@ function ReportTab({
             <Database className="h-3.5 w-3.5 shrink-0 text-slate-500" />
             <span className="shrink-0">提取元素</span>
             {extractSetupMode && (
-              <div className="ml-1 flex shrink-0 items-center gap-1">
-                {/* 控件提取切换按钮：始终显示，点击切换面板；两侧都有内容时进入分屏 */}
+              <div className="ml-1 flex shrink-0 items-center gap-0 rounded-md bg-slate-100 p-0.5 ring-1 ring-slate-200">
+                {/* 两态切换：字段 / 控件提取，直观显示当前所在页，点哪边切哪边 */}
                 <button
-                  onClick={toggleWidgetPanel}
+                  onClick={() => switchCategory("custom")}
                   className={[
-                    "flex items-center gap-0.5 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all",
+                    "flex items-center gap-0.5 rounded px-2 py-0.5 text-[10px] font-medium transition-all",
+                    currentCategory !== "widget" && !effectiveSplit
+                      ? "bg-slate-900 text-white shadow-sm"
+                      : "text-slate-500 hover:bg-white/60",
+                  ].join(" ")}
+                  title="文件提取 + 自定义文本字段"
+                >
+                  <Database className="h-3 w-3 shrink-0" />
+                  <span className="truncate">字段</span>
+                </button>
+                <button
+                  onClick={() => switchCategory("widget")}
+                  className={[
+                    "flex items-center gap-0.5 rounded px-2 py-0.5 text-[10px] font-medium transition-all",
                     currentCategory === "widget" || effectiveSplit
                       ? "bg-slate-900 text-white shadow-sm"
-                      : "bg-white/80 text-slate-600 hover:bg-white ring-1 ring-slate-200",
+                      : "text-slate-500 hover:bg-white/60",
                   ].join(" ")}
-                  title={
-                    effectiveSplit
-                      ? "收起分栏，回到文本面板"
-                      : currentCategory === "widget"
-                        ? "切换回文件/自定义字段"
-                        : hasFields && hasWidget
-                          ? "切换到控件提取（两侧有内容，将分屏显示）"
-                          : "切换到控件提取"
-                  }
+                  title="控件提取（下拉选项 / 日历）"
                 >
                   <MousePointerClick className="h-3 w-3 shrink-0" />
                   <span className="truncate">控件提取</span>
@@ -4342,7 +4422,7 @@ function ReportTab({
                 </button>
               </div>
             )}
-            {extractSetupMode && !effectiveSplit && onSwitchStepMode && (
+            {!expertMode && extractSetupMode && !effectiveSplit && onSwitchStepMode && (
               <div className="ml-2 flex shrink-0 items-center gap-0 rounded-md bg-slate-100 p-0.5 ring-1 ring-slate-200">
                 <button
                   onClick={() => onSwitchStepMode("review")}
@@ -4373,21 +4453,6 @@ function ReportTab({
                 </button>
               </div>
             )}
-            {extractSetupMode && hasFields && hasWidget && (
-              <button
-                onClick={() => setSplitWidgetMode((v) => !v)}
-                className={[
-                  "ml-1 flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors",
-                  effectiveSplit
-                    ? "bg-red-500 text-white shadow-sm animate-pulse"
-                    : "text-slate-400 hover:bg-slate-100 hover:text-slate-600",
-                ].join(" ")}
-                title={effectiveSplit ? "取消左右分栏" : "左右分栏：左侧显示文件/自定义文本，右侧显示控件提取"}
-              >
-                <Columns2 className="h-3 w-3" />
-                {effectiveSplit ? "合并" : "分栏"}
-              </button>
-            )}
             <button
               onClick={() => setExtractSetupMode((v) => !v)}
               className={[
@@ -4407,117 +4472,7 @@ function ReportTab({
             className="min-h-0 flex-1 flex min-w-[200px] overflow-hidden"
           >
             {extractSetupMode ? (
-              effectiveSplit ? (
-                /* ===== 左右分栏模式：左侧文件/自定义文本，右侧控件提取 ===== */
-                <>
-                  {/* 左侧：统一字段面板（文件提取紫色 + 自定义文本蓝色，不再切换 TAB） */}
-                  <div
-                    className="flex min-h-0 min-w-0 flex-col overflow-hidden"
-                    style={{ width: `${splitLeftPct}%` }}
-                  >
-                    <div className="min-h-0 flex-1 overflow-hidden">
-                      {unifiedFieldsContent}
-                    </div>
-                  </div>
-                  {/* 拖拽分隔条 */}
-                  <div
-                    className="group relative flex w-1.5 shrink-0 cursor-col-resize items-center justify-center"
-                    onMouseDown={onSplitDividerMouseDown}
-                  >
-                    <div className="h-full w-px bg-slate-200 transition-colors group-hover:bg-slate-300" />
-                    <div className="absolute h-8 w-1 rounded-full bg-slate-300 opacity-0 transition-opacity group-hover:opacity-100" />
-                  </div>
-                  {/* 右侧：控件提取 */}
-                  <div
-                    className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-l border-slate-100"
-                  >
-                    <div className="flex shrink-0 items-center gap-1 border-b border-slate-100 bg-slate-50/60 px-1 py-0.5">
-                      <span className="flex items-center gap-0.5 rounded bg-slate-900 px-1.5 py-0.5 text-[9px] font-medium text-white shadow-sm">
-                        <MousePointerClick className="h-2.5 w-2.5 shrink-0" />
-                        控件提取
-                        {widgetTabs.length > 0 && (
-                          <span className="ml-0.5 inline-flex h-3 min-w-3 shrink-0 items-center justify-center rounded-full bg-white/25 px-0.5 text-[8px] font-bold text-white">
-                            {widgetTabs.length}
-                          </span>
-                        )}
-                      </span>
-                    </div>
-                    <div
-                      ref={(el) => { extractSectionRefs.current["widget"] = el; extractScrollRef.current = el; }}
-                      className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-1.5 scroll-smooth"
-                    >
-                      <div className="flex flex-col gap-1.5">
-                        {widgetTabs.length > 0 && (
-                          <div className="flex shrink-0 items-center gap-1 overflow-x-auto rounded-md bg-slate-50 px-1 py-1">
-                            {widgetTabs.map((wt, wtIdx) => {
-                              const active = activeWidgetTabId === wt.id;
-                              const WidgetIcon = wt.kind === "calendar" ? CalendarDays : List;
-                              const dotColor = wt.isBound
-                                ? "bg-emerald-500 text-white"
-                                : wt.isDraft
-                                  ? "bg-violet-500 text-white animate-pulse"
-                                  : "bg-violet-200 text-violet-700";
-                              return (
-                                <button
-                                  key={wt.id}
-                                  onClick={() => scrollToWidgetTab(wt.id)}
-                                  className={[
-                                    "flex min-w-0 shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium transition-all",
-                                    active
-                                      ? "bg-violet-600 text-white shadow-sm"
-                                      : wt.isDraft
-                                        ? "bg-violet-100 text-violet-700 hover:bg-violet-200 ring-1 ring-violet-300"
-                                        : "bg-white text-violet-600 hover:bg-violet-100",
-                                  ].join(" ")}
-                                  title={`${wt.kind === "calendar" ? "日历控件" : "选项控件"}：${wt.label}`}
-                                >
-                                  <span
-                                    className={`inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full text-[8px] font-bold ${
-                                      active ? "bg-white/25 text-white" : dotColor
-                                    }`}
-                                  >
-                                    {wtIdx + 1}
-                                  </span>
-                                  <WidgetIcon className="h-3 w-3 shrink-0" />
-                                  <span className="truncate max-w-[80px]">{wt.label}</span>
-                                  {wt.isDraft && (
-                                    <span className="text-[8px] opacity-70">·新</span>
-                                  )}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-                        {widgetExtractContent || (
-                          <div className="flex min-h-[100px] flex-col items-center justify-center gap-1 rounded-2xl bg-slate-50/60 py-4 text-center text-[10px] text-slate-400">
-                            <MousePointerClick className="h-5 w-5 text-slate-300" />
-                            <div className="text-slate-500">暂无提取的控件</div>
-                            {onAddWidget ? (
-                              <div className="flex items-center gap-1">
-                                <button
-                                  onClick={() => onAddWidget("option")}
-                                  className="rounded bg-slate-900 px-2 py-0.5 text-[9px] font-medium text-white transition-colors hover:bg-slate-700"
-                                >
-                                  + 选项控件
-                                </button>
-                                <button
-                                  onClick={() => onAddWidget("calendar")}
-                                  className="rounded bg-white/70 px-2 py-0.5 text-[9px] font-medium text-slate-600 ring-1 ring-slate-200 transition-colors hover:bg-slate-100 hover:text-slate-900"
-                                >
-                                  + 日历控件
-                                </button>
-                              </div>
-                            ) : (
-                              <div>点击上方「+ 选项控件」或「日历控件」快照</div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </>
-              ) : (
-                /* ===== 普通模式：非控件时显示统一字段面板，控件模式时显示控件提取 ===== */
+              /* ===== 普通模式：非控件时显示统一字段面板，控件模式时显示控件提取 ===== */
                 <div
                   ref={extractScrollRef}
                   className={`min-h-0 flex-1 overflow-x-hidden scroll-smooth ${currentCategory === "widget" ? "overflow-y-auto" : "overflow-hidden"}`}
@@ -4623,7 +4578,6 @@ function ReportTab({
                     unifiedFieldsContent
                   )}
                 </div>
-              )
             ) : (
               <div
                 ref={extractScrollRef}

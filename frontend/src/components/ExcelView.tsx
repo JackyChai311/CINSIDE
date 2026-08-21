@@ -263,6 +263,8 @@ interface Props {
   activeFieldStatus?: "pending" | "match" | "mismatch" | "missing" | null;
   /** LOOP 审查期：当前记录已完成比对的列→结果（保持单元格着色） */
   fieldResults?: Record<string, "match" | "mismatch" | "missing">;
+  /** 步骤卡片悬停/点击定位的列名：变化时平滑滚动到该列表头并短暂高亮 */
+  focusColumn?: string | null;
   /** 数据侧（left/right）：底部状态条显示「导出」按钮，把修正后的数据写回 Excel */
   side?: "left" | "right";
 }
@@ -294,6 +296,7 @@ export default function ExcelView({
   activeField = null,
   activeFieldStatus = null,
   fieldResults,
+  focusColumn = null,
   side,
 }: Props) {
   const [filter, setFilter] = useState("");
@@ -373,6 +376,19 @@ export default function ExcelView({
       cell.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
     }
   }, [activeRecordId, activeField]);
+
+  // ===== 步骤卡片悬停/点击定位：平滑滚动到指定列的表头并短暂高亮（brand 色闪烁） =====
+  const [flashColumn, setFlashColumn] = useState<string | null>(null);
+  useEffect(() => {
+    if (!focusColumn) return;
+    const table = tbodyRef.current?.closest("table");
+    const th = table?.querySelector(`thead th[data-column="${CSS.escape(focusColumn)}"]`);
+    if (!th) return;
+    th.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+    setFlashColumn(focusColumn);
+    const timer = setTimeout(() => setFlashColumn(null), 1600);
+    return () => clearTimeout(timer);
+  }, [focusColumn]);
 
   // record_id → records 数组索引（行范围基于完整 records 顺序，与搜索过滤无关）
   const recordIndexMap = useMemo(() => {
@@ -736,19 +752,23 @@ export default function ExcelView({
                 </th>
                 {columns.map((c) => {
                   const isSelected = selectedColumn === c;
+                  const isFlashed = flashColumn === c;
                   const stdKey = colToStandard.get(c);
                   const stdField = stdKey ? STANDARD_FIELDS.find((f) => f.key === stdKey) : null;
                   const isBound = boundSet.has(c);
                   return (
                     <th
                       key={c}
+                      data-column={c}
                       onClick={() => onSelectColumn?.(isSelected ? null : c)}
                       onContextMenu={(e) => handleHeaderContextMenu(e, c)}
                       className={[
                         "group border-b border-slate-200 px-2 py-1.5 text-left font-semibold whitespace-nowrap transition-all",
                         onSelectColumn || onFieldColumnMapChange ? "cursor-pointer" : "",
                         "hover:bg-slate-100",
-                        isSelected
+                        isFlashed
+                          ? "bg-brand-100 text-brand-700 ring-1 ring-brand-300"
+                          : isSelected
                           ? "bg-brand-100 text-brand-700 ring-1 ring-brand-300"
                           : isBound
                           ? "bg-violet-100 text-violet-700 ring-1 ring-violet-300"

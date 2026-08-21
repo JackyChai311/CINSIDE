@@ -304,6 +304,19 @@ function BindingRow({
             <Crosshair className="h-2.5 w-2.5" />
             {pickingThis ? "点击左侧网页元素…" : binding.leftField ? "重选左网页元素" : "拾取左网页元素"}
           </button>
+          {/* 左网页来源也支持直接从「提取结果」选字段（选定后来源自动转为护照取值，LOOP 从提取结果读取） */}
+          <button
+            onClick={() => onPickPassportField(pickKey)}
+            className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] transition-colors ${
+              passportPickingThis
+                ? "animate-pulse bg-violet-500 text-white"
+                : "bg-slate-100 text-slate-500 hover:bg-slate-200"
+            }`}
+            title="从文件处理面板「提取结果」里选一个字段作为来源值"
+          >
+            <Database className="h-2.5 w-2.5" />
+            {passportPickingThis ? "点击提取结果字段…" : "从提取结果选"}
+          </button>
           {binding.leftField && !pickingThis && (
             <span className="truncate text-[9px] text-emerald-600" title={binding.leftField}>
               {binding.leftLabel || binding.leftField}
@@ -1106,12 +1119,12 @@ export default function WidgetExtractPanel(props: Props) {
           </div>
         </div>
       )}
-      {/* 提取入口（TAB 栏已作为标题，这里不再重复标题） */}
+      {/* 提取入口：统一黑白胶囊按钮；点击一个进入对应布置模式，布置好（保存/放弃）后恢复未点击态，可接着布置下一个 */}
       <div className="flex items-center gap-1.5">
         {pickingKind ? (
           <button
             onClick={onCancelPick}
-            className="inline-flex flex-1 items-center justify-center gap-1 rounded-md bg-violet-500 px-2 py-1 text-[10px] font-medium text-white animate-pulse"
+            className="inline-flex flex-1 items-center justify-center gap-1 rounded-full bg-slate-900 px-2.5 py-1 text-[10px] font-medium text-white ring-1 ring-slate-900 animate-pulse transition-all"
           >
             <Crosshair className="h-3 w-3" />
             请在网页上点击{pickingKind === "option" ? "可展开选项的框框" : "日历框框"}…（点击取消）
@@ -1121,7 +1134,7 @@ export default function WidgetExtractPanel(props: Props) {
             <button
               onClick={() => onStartPick("option")}
               disabled={snapshotBusy}
-              className="inline-flex flex-1 items-center justify-center gap-1 rounded-md bg-emerald-500 px-2 py-1 text-[10px] font-medium text-white transition-colors hover:bg-emerald-600 disabled:opacity-40"
+              className="inline-flex flex-1 items-center justify-center gap-1 rounded-full bg-white px-2.5 py-1 text-[10px] font-medium text-slate-800 ring-1 ring-slate-300 transition-all hover:bg-slate-100 hover:ring-slate-400 disabled:opacity-40"
               title="提取点击后展开选项列表的控件（下拉框/展开卡片）"
             >
               <Plus className="h-3 w-3" />
@@ -1130,7 +1143,7 @@ export default function WidgetExtractPanel(props: Props) {
             <button
               onClick={() => onStartPick("calendar")}
               disabled={snapshotBusy}
-              className="inline-flex flex-1 items-center justify-center gap-1 rounded-md bg-amber-500 px-2 py-1 text-[10px] font-medium text-white transition-colors hover:bg-amber-600 disabled:opacity-40"
+              className="inline-flex flex-1 items-center justify-center gap-1 rounded-full bg-white px-2.5 py-1 text-[10px] font-medium text-slate-800 ring-1 ring-slate-300 transition-all hover:bg-slate-100 hover:ring-slate-400 disabled:opacity-40"
               title="提取点击后展开日历的日期控件"
             >
               <CalendarDays className="h-3 w-3" />

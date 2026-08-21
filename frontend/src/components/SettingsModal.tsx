@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Compass, Cpu, Download, Eye, EyeOff, Film, FolderOpen, Globe, Loader2, Maximize2, Minus, MonitorCheck, MonitorOff, Moon, Package, Palette, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, Sparkles, Sun, Target, X, XCircle, Zap } from "lucide-react";
+import { CheckCircle2, Cpu, Download, Eye, EyeOff, Film, FolderOpen, Globe, Loader2, Maximize2, Minus, MonitorCheck, MonitorOff, Moon, Package, Palette, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, Sparkles, Sun, Target, X, XCircle, Zap } from "lucide-react";
 import { api } from "../api/client";
 import type { AppSettings, DepsStatus, GpuInfo } from "../types";
 
@@ -34,11 +34,11 @@ const DEFAULTS: AppSettings = {
   high_speed_mode: false,
   igpu_acceleration: false,
   ui_scale: 1.0,
-  beginner_mode: false,
   demo_site_enabled: false,
   theme: "light",
   accent: "indigo",
   browser_brightness: 1.0,
+  expert_mode: false,
 };
 
 // 可选主色调：名称 → 展示色（与 index.css 中 [data-accent] 对应）
@@ -904,42 +904,42 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
 
           {/* 高速模式已并入上方「文件识别档位」第4档（OCR+无转正·高速） */}
 
-        {/* 进入新手村 */}
+          {/* 高手模式 */}
           <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
             <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-700">
-              <Compass className="h-3.5 w-3.5 text-brand-600" />
-              进入新手村
+              <Zap className={`h-3.5 w-3.5 ${settings.expert_mode === true ? "text-amber-500" : "text-slate-400"}`} />
+              高手模式
             </div>
             <label className="flex cursor-pointer items-start gap-2.5">
               <button
                 type="button"
                 role="switch"
-                aria-checked={settings.beginner_mode !== false}
-                onClick={() => update({ beginner_mode: settings.beginner_mode === false })}
+                aria-checked={settings.expert_mode === true}
+                onClick={() => update({ expert_mode: settings.expert_mode !== true })}
                 className={[
                   "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors",
-                  settings.beginner_mode !== false ? "bg-brand-500" : "bg-slate-300",
+                  settings.expert_mode === true ? "bg-amber-500" : "bg-slate-300",
                 ].join(" ")}
               >
                 <span
                   className={[
                     "inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform",
-                    settings.beginner_mode !== false ? "translate-x-[18px]" : "translate-x-0.5",
+                    settings.expert_mode === true ? "translate-x-[18px]" : "translate-x-0.5",
                   ].join(" ")}
                 />
               </button>
               <div className="text-xs text-slate-500">
                 <div className="font-medium text-slate-700">
-                  {settings.beginner_mode !== false ? "已开启" : "已关闭"}
+                  {settings.expert_mode === true ? "已开启" : "已关闭（默认模式）"}
                 </div>
                 <p className="mt-0.5 leading-relaxed">
-                  开启时显示步骤仪表引导，按步骤逐步配置；关闭后直接使用字段对比面板，三个功能区常开无需切换，适合熟练用户。
+                  开启后，步骤设置的功能按钮（绑定输入框、前置/过程/收尾点击、录入/审查步骤、文件提取、自定义文本、控件提取）集中到顶部工具栏并标注快捷键，适合熟练使用快捷键操作；关闭为默认模式，按钮显示在字段对比面板各分组标题行内。默认关闭。
                 </p>
               </div>
             </label>
           </div>
 
-          {/* 模拟网页 */}
+        {/* 模拟网页 */}
           <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
             <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-700">
               <Globe className="h-3.5 w-3.5 text-brand-600" />

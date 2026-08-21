@@ -98,6 +98,8 @@ interface Props {
   onSwitchWebTab?: (tab: "primary" | "alt") => void;
   /** 用另一引擎重新提取 */
   onReExtractAlt?: () => void;
+  /** 用指定引擎重新提取（OCR 或 AI Vision 各自重试） */
+  onReExtractEngine?: (engine: "umi" | "vision") => void;
   /** 备用引擎正在提取中 */
   webAltExtracting?: boolean;
   onCloseWebResult?: () => void;
@@ -105,6 +107,8 @@ interface Props {
   webFindingSameName?: boolean;
   onFindSameName?: () => void;
   onExtractFields?: (fields: Record<string, string>) => void;
+  /** 提取结果字段框的录入/审查按钮：以该字段为左侧来源进入对应模式并激活网页拾取光标 */
+  onPickField?: (mode: "entry" | "review", field: string, value: string) => void;
   onExportDoc?: () => void;
   onBindUploadDoc?: () => void;
   onQuickUploadDoc?: (fileData: { dataUrl: string; filename: string }) => void;
@@ -177,12 +181,14 @@ export default function DocLocalExtractConfig({
   webActiveTab = "primary",
   onSwitchWebTab,
   onReExtractAlt,
+  onReExtractEngine,
   webAltExtracting = false,
   onCloseWebResult,
   webSameNameImages = null,
   webFindingSameName = false,
   onFindSameName,
   onExtractFields,
+  onPickField,
   onExportDoc,
   onBindUploadDoc,
   onQuickUploadDoc,
@@ -1784,12 +1790,14 @@ const handlePreviewWheel = (e: React.WheelEvent<HTMLDivElement>) => {
                 activeTab={webActiveTab}
                 onSwitchTab={onSwitchWebTab}
                 onReExtractAlt={onReExtractAlt}
+                onReExtractEngine={onReExtractEngine}
                 altExtracting={webAltExtracting}
                 onClose={onCloseWebResult}
                 sameNameImages={webSameNameImages}
                 findingSameName={webFindingSameName}
                 onFindSameName={onFindSameName}
                 onExtractFields={onExtractFields}
+                onPickField={onPickField}
                 onToast={onToast}
                 onError={onError}
               />
@@ -2219,12 +2227,14 @@ function WebExtractResultView({
   activeTab,
   onSwitchTab,
   onReExtractAlt,
+  onReExtractEngine,
   altExtracting,
   onClose,
   sameNameImages,
   findingSameName,
   onFindSameName,
   onExtractFields,
+  onPickField,
   onToast,
   onError,
 }: {
@@ -2253,12 +2263,15 @@ function WebExtractResultView({
   activeTab?: "primary" | "alt";
   onSwitchTab?: (tab: "primary" | "alt") => void;
   onReExtractAlt?: () => void;
+  onReExtractEngine?: (engine: "umi" | "vision") => void;
   altExtracting?: boolean;
   onClose?: () => void;
   sameNameImages?: { left: string[]; right: string[] } | null;
   findingSameName?: boolean;
   onFindSameName?: () => void;
   onExtractFields?: (fields: Record<string, string>) => void;
+  /** 提取结果字段框的录入/审查按钮 */
+  onPickField?: (mode: "entry" | "review", field: string, value: string) => void;
   onToast?: (msg: string) => void;
   onError?: (msg: string) => void;
 }) {
@@ -2289,6 +2302,16 @@ function WebExtractResultView({
   };
   const checkedCount = Array.from(checkedFields).filter((f) => cur.fields[f]).length;
   const allChecked = fieldEntries.length > 0 && checkedCount === fieldEntries.filter(([, v]) => v).length;
+
+  // 勾选的字段排在上方，未勾选的挪到下方（重点字段段与其他字段段各自内部排序）
+  const sortCheckedFirst = (entries: [string, string][]) =>
+    [...entries].sort((a, b) => {
+      const ca = checkedFields.has(a[0]) ? 0 : 1;
+      const cb = checkedFields.has(b[0]) ? 0 : 1;
+      return ca - cb;
+    });
+  const sortedKeyEntries = sortCheckedFirst(keyEntries);
+  const sortedOtherEntries = sortCheckedFirst(otherEntries);
 
   // 判断当前主结果使用的引擎，决定备用引擎名称
   const primaryIsUmi = isUmiMethod(result.method);
@@ -2372,8 +2395,41 @@ function WebExtractResultView({
           {cur.filename}
         </span>
 
-        {/* 用另一引擎重新提取按钮（仅有主结果、无备用结果时显示） */}
-        {!hasAlt && onReExtractAlt && (
+        {/* 引擎重试按钮组：分别用 OCR / AI Vision 重新提取（同引擎替换主结果，异引擎生成对比） */}
+        {onReExtractEngine && (
+          <div className="ml-auto flex items-center gap-1">
+            <button
+              onClick={() => onReExtractEngine("umi")}
+              disabled={altExtracting}
+              className={[
+                "flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
+                altExtracting
+                  ? "cursor-wait bg-slate-100 text-slate-400"
+                  : "bg-emerald-100 text-emerald-700 hover:bg-emerald-200",
+              ].join(" ")}
+              title="用 OCR 重新提取（本地引擎，免费）"
+            >
+              {altExtracting ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <ScanLine className="h-2.5 w-2.5" />}
+              重试 OCR
+            </button>
+            <button
+              onClick={() => onReExtractEngine("vision")}
+              disabled={altExtracting}
+              className={[
+                "flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
+                altExtracting
+                  ? "cursor-wait bg-slate-100 text-slate-400"
+                  : "bg-violet-100 text-violet-700 hover:bg-violet-200",
+              ].join(" ")}
+              title="用 AI Vision 重新提取（识别更强，耗 API）"
+            >
+              {altExtracting ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Sparkles className="h-2.5 w-2.5" />}
+              重试 AI Vision
+            </button>
+          </div>
+        )}
+        {/* 兼容旧逻辑：无 onReExtractEngine 时保留单按钮「用另一引擎提取」 */}
+        {!onReExtractEngine && !hasAlt && onReExtractAlt && (
           <button
             onClick={onReExtractAlt}
             disabled={altExtracting}
@@ -2443,7 +2499,7 @@ function WebExtractResultView({
               </button>
             </div>
             <div className="grid grid-cols-2 gap-1">
-              {keyEntries.map(([f, v]) => (
+              {sortedKeyEntries.map(([f, v]) => (
                 <div
                   key={f}
                   onClick={() => v && toggleField(f)}
@@ -2466,13 +2522,28 @@ function WebExtractResultView({
                       {checkedFields.has(f) && <Check className="h-1.5 w-1.5" />}
                     </span>
                     <span className="truncate">{FIELD_LABELS[f] || f}</span>
+                    {/* 录入/审查：直接以该字段为左侧来源进入对应模式并激活网页拾取光标 */}
+                    {onPickField && v && String(v).trim() !== "" && (
+                      <span className="ml-auto flex shrink-0 items-center gap-0.5">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onPickField("entry", f, v); }}
+                          className="rounded px-0.5 text-[8px] font-semibold text-blue-600 hover:bg-blue-50"
+                          title={`录入：将「${FIELD_LABELS[f] || f}」作为左侧来源，点击网页上的填入目标`}
+                        >录</button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onPickField("review", f, v); }}
+                          className="rounded px-0.5 text-[8px] font-semibold text-blue-600 hover:bg-blue-50"
+                          title={`审查：将「${FIELD_LABELS[f] || f}」作为左侧来源，点击网页上的对比目标`}
+                        >审</button>
+                      </span>
+                    )}
                   </div>
                   <div className={["truncate text-[10px] font-semibold", v ? "text-slate-800" : "text-slate-300"].join(" ")} title={v}>
                     {v || "未提取到"}
                   </div>
                 </div>
               ))}
-              {otherEntries.map(([f, v]) => (
+              {sortedOtherEntries.map(([f, v]) => (
                 <div
                   key={f}
                   onClick={() => v && toggleField(f)}
@@ -2492,6 +2563,21 @@ function WebExtractResultView({
                       {checkedFields.has(f) && <Check className="h-1.5 w-1.5" />}
                     </span>
                     <span className="truncate">{FIELD_LABELS[f] || f}</span>
+                    {/* 录入/审查：直接以该字段为左侧来源进入对应模式并激活网页拾取光标 */}
+                    {onPickField && v && String(v).trim() !== "" && (
+                      <span className="ml-auto flex shrink-0 items-center gap-0.5">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onPickField("entry", f, v); }}
+                          className="rounded px-0.5 text-[8px] font-semibold text-blue-600 hover:bg-blue-50"
+                          title={`录入：将「${FIELD_LABELS[f] || f}」作为左侧来源，点击网页上的填入目标`}
+                        >录</button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onPickField("review", f, v); }}
+                          className="rounded px-0.5 text-[8px] font-semibold text-blue-600 hover:bg-blue-50"
+                          title={`审查：将「${FIELD_LABELS[f] || f}」作为左侧来源，点击网页上的对比目标`}
+                        >审</button>
+                      </span>
+                    )}
                   </div>
                   <div className={["truncate text-[10px]", v ? "text-slate-700" : "text-slate-300"].join(" ")} title={v}>
                     {v || "—"}

@@ -1,0 +1,35 @@
+{
+  "appId": "com.cinside.app",
+  "productName": "CINSIDE",
+  "forceCodeSigning": false,
+  "directories": { "output": "../dist-electron-073" },
+  "files": ["dist/**/*", "electron/**/*", "../assets/**/*"],
+  "extraResources": [
+    { "from": "../backend/dist/cinside-backend", "to": "backend", "filter": ["**/*"] },
+    { "from": "../mock-university", "to": "mock-university", "filter": ["**/*"] },
+    { "from": "../demo-pages", "to": "demo-pages", "filter": ["**/*"] },
+    { "from": "../samples", "to": "samples", "filter": ["**/*"] },
+    { "from": "node_modules/@officecli/officecli/vendor", "to": "officecli", "filter": ["**/*"] }
+  ],
+  "win": {
+    "icon": "../assets/app-icon.ico",
+    "target": [
+      { "target": "nsis", "arch": ["x64"] },
+      { "target": "portable", "arch": ["x64"] }
+    ]
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "CINSIDE",
+    "installerIcon": "../assets/app-icon.ico",
+    "uninstallerIcon": "../assets/app-icon.ico",
+    "installerHeaderIcon": "../assets/app-icon.ico",
+    "deleteAppDataOnUninstall": false
+  },
+  "publish": [
+    { "provider": "github", "owner": "JackyChai311", "repo": "CINSIDE" }
+  ]
+}
