@@ -274,6 +274,8 @@ interface Props {
   fieldResults?: Record<string, "match" | "mismatch" | "missing">;
   /** 步骤卡片悬停/点击定位的列名：变化时平滑滚动到该列表头并短暂高亮 */
   focusColumn?: string | null;
+  /** 步骤卡片悬停期间持续点亮的列名（悬停多久亮多久，离开卡片即熄灭）：列头保持高亮色 */
+  hoverColumn?: string | null;
   /** 数据侧（left/right）：底部状态条显示「导出」按钮，把修正后的数据写回 Excel */
   side?: "left" | "right";
 }
@@ -306,6 +308,7 @@ export default function ExcelView({
   activeFieldStatus = null,
   fieldResults,
   focusColumn = null,
+  hoverColumn = null,
   side,
 }: Props) {
   const [filter, setFilter] = useState("");
@@ -774,6 +777,7 @@ export default function ExcelView({
                 {columns.map((c) => {
                   const isSelected = selectedColumn === c;
                   const isFlashed = flashColumn === c;
+                  const isHovered = hoverColumn === c;
                   const stdKey = colToStandard.get(c);
                   const stdField = stdKey ? STANDARD_FIELDS.find((f) => f.key === stdKey) : null;
                   const isBound = boundSet.has(c);
@@ -788,7 +792,9 @@ export default function ExcelView({
                         "group border-b border-slate-200 px-2 py-1.5 text-left font-semibold whitespace-nowrap transition-all",
                         onSelectColumn || onFieldColumnMapChange ? "cursor-pointer" : "",
                         "hover:bg-slate-100",
-                        isFlashed
+                        isHovered
+                          ? "bg-amber-100 text-amber-800 ring-2 ring-amber-400"
+                          : isFlashed
                           ? "bg-brand-100 text-brand-700 ring-1 ring-brand-300"
                           : isSelected
                           ? "bg-brand-100 text-brand-700 ring-1 ring-brand-300"

@@ -1165,6 +1165,8 @@ selectedExcelColumnRef.current = selectedExcelColumn;
 
 // 步骤卡片悬停/点击定位的 Excel 列：非空时 Excel 面板滚动到该列并短暂高亮表头
 const [excelFocusColumn, setExcelFocusColumn] = useState<string | null>(null);
+// 步骤卡片悬停期间持续点亮的 Excel 列（悬停多久亮多久，离开即熄灭）：列头保持琥珀高亮
+const [excelHoverColumn, setExcelHoverColumn] = useState<string | null>(null);
 
 // 右侧网页绑定输入时使用的 Excel 列（null = 跟随 LOOP 列）
 // 左侧网页绑定输入始终用 LOOP 列；右侧学习系统可能搜同一行的其他列（如护照号）
@@ -1364,6 +1366,8 @@ const sourceFieldLabelRef = useRef<string>("");
   const [leftPicked, setLeftPicked] = useState<PickedElementInfo | null>(null);
   const rightPickedRef = useRef<PickedElementInfo | null>(null);
   rightPickedRef.current = rightPicked;
+  const leftPickedRef = useRef<PickedElementInfo | null>(null);
+  leftPickedRef.current = leftPicked;
   // 右侧 Excel 数据源模式：右面板显示 Excel、左面板显示学校系统网页。
   // 此模式下「比对目标」元素在左网页，映射保存时 web_side="left"。
   const rightExcelMode = rightRecords.length > 0 && rightViewMode === "excel" && !rightBlankExcel && leftViewMode === "web";
@@ -3957,9 +3961,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setPendingAction("none");
     setInputTarget(null);
     setNextClickLabel(null);
-    // 右侧Excel模式：来源在右侧 Excel（单元格点击拾取），目标输入框在左网页
-    const fromRightExcel = rightExcelModeRef.current;
-    setPickTarget(fromRightExcel ? "right" : "left");
+    // 录入一律先选左侧（标准布局=左Excel来源；右侧Excel布局=左网页输入框），
+    // 与审查的「先右后左」形成固定区分，不随布局改变顺序
+    setPickTarget("left");
     setRightPicked(null);
     setLeftPicked(null);
     setError(null);
@@ -3967,7 +3971,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setTimeout(() => {
       window.electronAPI?.viewStopPicking("right").catch(() => {});
       window.electronAPI?.viewStopPicking("left").catch(() => {});
-      if (!fromRightExcel && leftViewModeRef.current === "web") {
+      // 左侧是网页时注入拾取光标（右侧Excel布局：先选左网页输入框）；
+      // 左侧是 Excel 时靠 ExcelView 的 picking 属性激活单元格拾取（标准布局：先选左Excel来源列）
+      if (leftViewModeRef.current === "web") {
         window.electronAPI?.viewStartPicking("left");
       }
     }, 300);
@@ -13275,12 +13281,13 @@ if (info.value || info.text) {
   sourceFieldValueRef.current = String(info.value || info.text).trim();
   sourceFieldLabelRef.current = info.label || info.selector || "";
 }
-// 审查模式（先右后左）：标准布局两侧已完成等待保存；右侧 Excel 布局=左网页核对目标已选、下一轮回到右侧 Excel 字段
-// 录入模式（先左后右）：标准布局左源拾取完成后继续拾取右侧元素；右侧 Excel 模式=两侧完成
+// 审查模式（先右后左）：标准布局两侧已完成等待保存；右侧 Excel 布局=左网页核对目标已选、回到右侧 Excel 字段
+// 录入模式（先左后右）：标准布局继续拾取右侧元素；右侧 Excel 布局=左网页输入框已选，
+// Excel 来源未选则切到右侧 Excel 继续选，已选（乱序）则两侧完成等待保存
 // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
 setPickTarget(
   rightExcelModeRef.current
-    ? (addingStepModeRef.current === "entry" ? null : "right")
+    ? (addingStepModeRef.current === "entry" ? (leftPickedRef.current ? null : "right") : "right")
     : (addingStepModeRef.current === "entry" ? "right" : null)
 );
 // addingStepMode 下不添加 pick mark，保存映射时才添加 input mark
@@ -13322,21 +13329,24 @@ type: info.type,
     // 录入流：把提取字段值写入来源字段 ref，选右侧输入框时立即填入（与「绑定输入框」一致）
     sourceFieldValueRef.current = String(value || "").trim();
     sourceFieldLabelRef.current = label;
-    // 审查模式：若右侧已选则两侧完成（等待保存）；否则切到右侧选核对元素
-    // 录入模式：左侧来源已选，切到右侧选要填入的输入框
+    // 审查模式：若网页侧已选则两侧完成（等待保存）；否则切到网页侧选核对元素/输入框
+    // 录入模式：左侧来源已选，切到网页侧选要填入的输入框
+    // 网页在哪一侧由布局决定：右侧Excel布局网页在左，标准布局网页在右
     const alreadyHasRight = !!rightPickedRef.current;
-    setPickTarget(alreadyHasRight ? null : "right");
+    const webPickSide: "left" | "right" = rightExcelModeRef.current ? "left" : "right";
+    setPickTarget(alreadyHasRight ? null : webPickSide);
     // 停止左侧网页拾取（合成值不需要网页点击）
     window.electronAPI?.viewStopPicking("left").catch(() => {});
-    // 若右侧还没选，启动右侧拾取光标，让用户可以在 BrowserPane 中点选元素
+    // 若网页侧还没选，启动网页拾取光标，让用户可以在 BrowserPane 中点选元素
     if (!alreadyHasRight) {
       // 320ms：必须晚于 startAddingEntrySteps/ReviewSteps 内部的 300ms 复位定时器
-      //（它会先停双侧再按初始 pickTarget 重启），否则右侧拾取光标刚启动就被它停掉
+      //（它会先停双侧再按初始 pickTarget 重启），否则网页拾取光标刚启动就被它停掉
       //（提取结果「录/审」按钮点了 BrowserPane 没光标的根因）
       setTimeout(() => {
         window.electronAPI?.viewStopPicking("left").catch(() => {});
-        if (rightViewModeRef.current === "web") {
-          window.electronAPI?.viewStartPicking("right");
+        const webIsWeb = webPickSide === "left" ? leftViewModeRef.current === "web" : rightViewModeRef.current === "web";
+        if (webIsWeb) {
+          window.electronAPI?.viewStartPicking(webPickSide);
         }
       }, 320);
     }
@@ -13408,11 +13418,8 @@ type: info.type,
     setRightPicked(null);
     setLeftPicked(null);
     rightPickedSideRef.current = "right";
-    // 标准：审查→右侧核对元素 / 录入→左侧来源；右侧Excel模式：审查→右侧Excel字段 / 录入→右侧Excel来源
-    // 两种模式下录入/审查的第一步都在右侧（右侧Excel布局：先选右侧具体字段/来源，再选左侧对应字段）
-    const nextTarget: PickTarget = rightExcelModeRef.current
-      ? "right"
-      : (addingStepModeRef.current === "entry" ? "left" : "right");
+    // 录入→左侧、审查→右侧（两种布局统一：录入先左后右、审查先右后左，与 startAdding* 的初始侧一致）
+    const nextTarget: PickTarget = addingStepModeRef.current === "entry" ? "left" : "right";
     setPickTarget(nextTarget);
     setTimeout(() => {
       // 只在对应侧显示网页时才启动 webview 拾取（显示 Excel 时靠单元格点击拾取）
@@ -14803,11 +14810,13 @@ type: info.type,
       sourceFieldLabelRef.current = info.field || "";
     }
     // 审查流（先右后左）：右侧 Excel 具体字段已选（占来源槽位），切到左侧网页选核对目标；
-    // 录入流：来源确定后切到左网页选目标输入框
+    // 录入流（先左后右）：右侧 Excel 是第二步来源——左网页输入框已选则两侧完成等待保存，
+    // 未选（乱序先点了 Excel）则切到左侧网页继续选输入框
     // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
     const inStepMode = !!addingStepModeRef.current;
-    setPickTarget(inStepMode ? "left" : null);
-    if (inStepMode && leftViewMode === "web") {
+    const entryBothDone = addingStepModeRef.current === "entry" && !!rightPickedRef.current;
+    setPickTarget(inStepMode ? (entryBothDone ? null : "left") : null);
+    if (inStepMode && !entryBothDone && leftViewMode === "web") {
       window.electronAPI?.viewStartPicking("left");
     }
     // 仅在录入/审查步骤设置阶段打标（与左侧 onExcelPicked 对称）；平时点格子不打标
@@ -15331,7 +15340,7 @@ type: info.type,
         className="flex shrink-0 items-center justify-between border-b border-slate-200/60 bg-white/80 px-3 py-1"
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
       >
-        <div className="flex items-center gap-2" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+        <div className="flex items-center gap-1" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
           <img
             src={appIconPng}
             alt="CINSIDE icon"
@@ -16182,6 +16191,7 @@ type: info.type,
                       activeFieldStatus={excelActiveFieldStatus}
                       fieldResults={excelFieldResults}
                       focusColumn={excelFocusColumn}
+                      hoverColumn={excelHoverColumn}
                       side="left"
                     />
                   )}
@@ -16406,6 +16416,7 @@ type: info.type,
                       onPickedField={onRightExcelPicked}
                       boundFields={boundExcelFields}
                       focusColumn={excelFocusColumn}
+                      hoverColumn={excelHoverColumn}
                       side="right"
                     />
                   )}
@@ -16699,10 +16710,11 @@ type: info.type,
                   }}
                   onHoverMark={(mark) => {
                     if (!mark) {
-                      // 鼠标移出：清除两侧网页高亮 + Excel 列定位
+                      // 鼠标移出：清除两侧网页高亮 + Excel 列定位与列头高亮
                       window.electronAPI?.viewHighlightBoxes("left", []).catch(() => {});
                       window.electronAPI?.viewHighlightBoxes("right", []).catch(() => {});
                       setExcelFocusColumn(null);
+                      setExcelHoverColumn(null);
                       return;
                     }
                     // Excel 来源：切到 Excel 面板并定位到对应列
@@ -16711,6 +16723,8 @@ type: info.type,
                       if (rightExcelMode) setRightViewMode("excel");
                       else if (records.length > 0 && !excelDetached) setLeftViewMode("excel");
                       setExcelFocusColumn(excelField);
+                      // 悬停期间该列表头持续亮起（琥珀色），离开卡片才熄灭
+                      setExcelHoverColumn(excelField);
                     }
                     // 网页元素：悬停期间持续高亮（无自动清除）；元素不在视野内时先滚动过去
                     const side = mark.side || "right";

@@ -237,6 +237,32 @@ function createWindow() {
     } catch {}
   });
 
+  // === 临时插桩：进入/切回 WEB 视图后第一次点击被吞问题的定位（CINSIDE_CLICK_DEBUG=1 启用） ===
+  if (process.env.CINSIDE_CLICK_DEBUG === "1") {
+    const _t0 = Date.now();
+    const _ts = () => `+${Date.now() - _t0}ms`;
+    mainWindow.on("focus", () => debugLog(`[clickdbg] ${_ts()} WIN focus`));
+    mainWindow.on("blur", () => debugLog(`[clickdbg] ${_ts()} WIN blur`));
+    mainWindow.webContents.on("focus", () => debugLog(`[clickdbg] ${_ts()} mainWC focus`));
+    mainWindow.webContents.on("blur", () => debugLog(`[clickdbg] ${_ts()} mainWC blur`));
+    const _hookViews = () => {
+      for (const [nm, v] of [["leftView", leftBrowserView], ["rightView", rightBrowserView]]) {
+        if (!v || v._clickdbgHooked) continue;
+        v._clickdbgHooked = true;
+        v.webContents.on("focus", () => debugLog(`[clickdbg] ${_ts()} ${nm} focus`));
+        v.webContents.on("blur", () => debugLog(`[clickdbg] ${_ts()} ${nm} blur`));
+      }
+    };
+    _hookViews();
+    const _hookTimer = setInterval(() => {
+      _hookViews();
+      if (leftBrowserView && rightBrowserView && leftBrowserView._clickdbgHooked && rightBrowserView._clickdbgHooked) {
+        clearInterval(_hookTimer);
+      }
+    }, 500);
+    setTimeout(() => clearInterval(_hookTimer), 30000);
+  }
+
   // === 渲染进程崩溃/无响应自动恢复：白屏时自动重载主窗口（LOOP 状态在后端，重载可继续操作） ===
   mainWindow.webContents.on("render-process-gone", (_e, details) => {
     debugLog(`[main] ⚠️ 主窗口渲染进程崩溃: reason=${details?.reason} exitCode=${details?.exitCode} — 3 秒后自动重载`);
@@ -1456,6 +1482,9 @@ function showView(side, bounds, _url) {
   const view = side === "left" ? leftBrowserView : rightBrowserView;
   if (!mainWindow || !view) return;
   if (bounds) view.setBounds(bounds);
+  if (process.env.CINSIDE_CLICK_DEBUG === "1") {
+    debugLog(`[clickdbg] view-show side=${side} bounds=${JSON.stringify(bounds)} newlyMounted=${!mainWindow.getBrowserViews().includes(view)}`);
+  }
   if (!mainWindow.getBrowserViews().includes(view)) {
     mainWindow.addBrowserView(view);
     // 重新挂载后强制合成器重绘：removeBrowserView→addBrowserView 后视图经常保持
@@ -3727,6 +3756,15 @@ ipcMain.handle("view-set-block-rules", (_event, side, rules, hostArg) => {
 // preload 在 document_start 同步查询该 host 的屏蔽 CSS + 折叠 JS（无规则返回空）
 ipcMain.on("cinside-block-css-sync", (event, host) => {
   try {
+    // 防误伤自身：dev 下主窗口(localhost:5173)与目标站点(localhost:8000)同 host，
+    // 折叠脚本会把应用左侧栏当网页侧边栏去点击（清空/脱离按钮被合成点击）。
+    // 应用自身页面（主窗口、脱离面板）一律不注入，只服务 BrowserView 里的目标网页。
+    const senderUrl = event.sender && event.sender.getURL ? event.sender.getURL() : "";
+    const appUrl = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.getURL() : "";
+    if (appUrl && senderUrl && senderUrl.split("?")[0] === appUrl.split("?")[0]) {
+      event.returnValue = null;
+      return;
+    }
     const rules = typeof host === "string" ? persistedBlockRules[host] : null;
     if (!rules || !rules.length) {
       event.returnValue = null;
@@ -4045,13 +4083,6 @@ ipcMain.on("renderer-log", (_event, msg) => {
 });
 
 ipcMain.handle("panel-detach", (event, side) => {
-  // 诊断日志：记录发起分离请求的渲染进程来源（主窗口 / 弹窗 / 其他），
-  // 用于定位"开发模式下启动自动分离面板"的根因。
-  try {
-    const senderUrl = event && event.sender ? (event.sender.getURL() || "") : "";
-    debugLog(`[panel-detach] 请求 side=${side} sender=${senderUrl} isPackaged=${app.isPackaged}`);
-  } catch (_) {}
-
   if (detachedPanels[side] && !detachedPanels[side].isDestroyed()) {
     detachedPanels[side].focus();
     return true;

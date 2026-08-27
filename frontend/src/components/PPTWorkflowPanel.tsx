@@ -1015,7 +1015,7 @@ export default function PPTWorkflowPanel({
         className="flex shrink-0 items-center justify-between border-b border-slate-200/60 bg-white/80 px-3 py-1 relative z-20"
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
       >
-        <div className="flex items-center gap-2" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+        <div className="flex items-center gap-1" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
           <img
             src={appIconPng}
             alt="CINSIDE icon"

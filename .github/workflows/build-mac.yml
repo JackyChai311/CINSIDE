@@ -24,6 +24,9 @@ jobs:
           - os: macos-15-intel
             arch: x64
     runs-on: ${{ matrix.os }}
+    # macos-15-intel 上 DMG 构建后 hdiutil detach 偶发 "Resource busy"（产物已上传、
+    # 只是收尾清理失败导致退出码 1）——不让它把整个工作流标红、也不阻塞 Release 发布
+    continue-on-error: true
 
     steps:
       - name: Checkout
@@ -83,11 +86,9 @@ jobs:
           name: cinside-macos-${{ matrix.arch }}
           path: |
             dist-electron/*.dmg
-            dist-electron/*.zip
-            dist-electron/latest-mac.yml
           if-no-files-found: warn
 
-  # Windows x64：NSIS 安装包 + 便携版（主更新渠道）
+  # Windows x64：NSIS 安装包（主更新渠道：Setup + blockmap + latest.yml 驱动 electron-updater 自动更新）
   build-win:
     name: Windows x64
     runs-on: windows-latest

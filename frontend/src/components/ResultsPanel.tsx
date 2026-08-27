@@ -3588,7 +3588,7 @@ function ReportTab({
                         ? "bg-red-500 text-white shadow-sm animate-pulse"
                         : "text-slate-500 hover:bg-white/60",
                     ].join(" ")}
-                    title={addingStepMode === "entry" ? "录入模式激活中（再次点击关闭）" : "录入模式：字段用于从左侧Excel填入右侧网页"}
+                    title={addingStepMode === "entry" ? "录入模式激活中（再次点击关闭）" : "录入模式：先选左侧字段/输入框，再选右侧完成填入映射"}
                   >
                     <MoveRight className="h-2.5 w-2.5" />
                     录入

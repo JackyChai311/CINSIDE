@@ -1264,10 +1264,9 @@ export default function BrowserPane({
                       onKeyDown={(e) => {
                         if (e.key === "Enter") openPage();
                       }}
-                      onFocus={() => setShowFavorites(true)}
+                      onClick={() => setShowFavorites(true)}
                       placeholder="输入网址或搜索词，按回车访问"
                       className="flex-1 bg-transparent text-sm text-slate-700 outline-none placeholder:text-slate-400"
-                      autoFocus
                     />
                     {inputUrl && (
                       <button
