@@ -107,6 +107,15 @@
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "../assets/app-icon.icns",
+      "publish": [
+        {
+          "provider": "github",
+          "owner": "JackyChai311",
+          "repo": "CINSIDE",
+          "releaseType": "release",
+          "publishAutoUpdate": false
+        }
+      ],
       "target": [
         {
           "target": "dmg",
