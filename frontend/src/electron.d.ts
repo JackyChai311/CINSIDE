@@ -31,7 +31,7 @@ export interface ViewMessage {
 /** 高亮框定义 */
 export interface HighlightBox {
   selector: string;
-  status: "match" | "mismatch" | "missing" | "partial" | "pending" | "unknown";
+  status: "match" | "mismatch" | "missing" | "partial" | "pending" | "unknown" | "entry" | "review";
   label?: string;
 }
 

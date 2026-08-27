@@ -599,6 +599,8 @@ export interface WorkflowTemplate {
   updatedAt?: number;
   /** 来源记录 ID（教 AI 时用的那张卡片） */
   sourceRecordId?: string;
+  /** 所属分组（GROUP）：同组 LOOP 在流程图中并列展示为分支，核验按钮可按组筛选运行 */
+  group?: string;
   /** 应用模式：审查流 / 录入流 */
   mode: AppMode;
   /** 数据源处理阶段的节点 */

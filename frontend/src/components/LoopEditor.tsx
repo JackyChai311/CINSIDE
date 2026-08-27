@@ -2,7 +2,7 @@ import { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import {
   X, Plus, Scissors, Copy, Clipboard, Trash2, ChevronDown, ChevronRight,
   GitBranch, Split, Repeat, MessageSquare, Save, RotateCcw, CornerDownRight,
-  ZoomIn, ZoomOut, MousePointer2, CirclePause, AlertOctagon,
+  ZoomIn, ZoomOut, MousePointer2, CirclePause, AlertOctagon, FolderOpen,
 } from "lucide-react";
 import type { WorkflowTemplate, FlowGraph, FlowNode, FlowBranch } from "../types";
 import {
@@ -224,6 +224,8 @@ interface LoopEditorProps {
 }
 
 export default function LoopEditor({ template, allTemplates, onClose, onSave }: LoopEditorProps) {
+  // 当前编辑的模板（GROUP 分支切换时会在组内成员间切换；初始为外部传入的 template）
+  const [activeTpl, setActiveTpl] = useState<WorkflowTemplate>(template);
   const [graph, setGraph] = useState<FlowGraph>(() => ensureGraph(template));
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [rangeStart, setRangeStart] = useState<string | null>(null);
@@ -657,8 +659,8 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
     });
   };
 
-  const handleSave = () => {
-    // 同步流程图断点到 PickedMark：遍历所有 step 节点，按 markId 写回 breakpoint
+  /** 把当前图（含节点断点）同步回指定模板的 marks 并入库，返回更新后的模板 */
+  const persistGraphToTpl = useCallback((g: FlowGraph, tpl: WorkflowTemplate): WorkflowTemplate => {
     const bpMap = new Map<string, "always" | "on-error" | undefined>();
     const collectBp = (nodes: FlowNode[]) => {
       for (const n of nodes) {
@@ -666,21 +668,49 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
         if (n.branches) for (const b of n.branches) collectBp(b.nodes);
       }
     };
-    collectBp(graph.nodes);
+    collectBp(g.nodes);
 
     const syncMark = (m: { id: string; breakpoint?: "always" | "on-error" }) => {
       if (bpMap.has(m.id)) m.breakpoint = bpMap.get(m.id);
     };
-    const tpl: WorkflowTemplate = JSON.parse(JSON.stringify(template));
-    tpl.dataSourceMarks?.forEach(syncMark);
-    tpl.reviewMarks?.forEach(syncMark);
-    tpl.entryMarks?.forEach(syncMark);
+    const copy: WorkflowTemplate = JSON.parse(JSON.stringify(tpl));
+    copy.dataSourceMarks?.forEach(syncMark);
+    copy.reviewMarks?.forEach(syncMark);
+    copy.entryMarks?.forEach(syncMark);
 
-    const updated: WorkflowTemplate = { ...tpl, flowGraph: graph, updatedAt: Date.now() };
+    const updated: WorkflowTemplate = { ...copy, flowGraph: g, updatedAt: Date.now() };
     saveSkill(updated);
+    return updated;
+  }, []);
+
+  const handleSave = () => {
+    const updated = persistGraphToTpl(graph, activeTpl);
     onSave(updated);
     onClose();
   };
+
+  // GROUP 分支：同组模板按创建时间排序（不含未分组的）
+  const groupMembers = useMemo(() => {
+    const g = activeTpl.group?.trim();
+    if (!g) return [];
+    return allTemplates
+      .filter((t) => t.group?.trim() === g)
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  }, [activeTpl, allTemplates]);
+
+  /** 切换到组内另一个分支：先静默保存当前分支，再加载目标模板的图 */
+  const switchBranch = useCallback((next: WorkflowTemplate) => {
+    if (next.id === activeTpl.id) return;
+    persistGraphToTpl(graph, activeTpl);
+    setHistory([]);
+    setSelectedId(null);
+    setRangeStart(null);
+    setCutAnchor(null);
+    setSubloopPicker(null);
+    setTool("select");
+    setActiveTpl(next);
+    setGraph(ensureGraph(next));
+  }, [activeTpl, graph, persistGraphToTpl]);
 
   useEffect(() => {
     (window as any).__cinsideFlowEditorOpen = true;
@@ -741,7 +771,7 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
       <div className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-4 py-2 shadow-sm">
         <GitBranch className="h-4 w-4 text-indigo-600" />
         <span className="text-sm font-semibold text-slate-800">流程图编辑</span>
-        <span className="text-[11px] text-slate-400">· {template.name} · {countNodes(graph.nodes)} 个节点</span>
+        <span className="text-[11px] text-slate-400">· {activeTpl.name} · {countNodes(graph.nodes)} 个节点</span>
         <div className="mx-2 h-5 w-px bg-slate-200" />
 
         <div className="flex items-center gap-0.5 rounded-lg bg-slate-100 p-0.5">
@@ -781,12 +811,45 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
         )}
 
         <div className="ml-auto flex items-center gap-2">
-          <button onClick={() => { if (!confirm("重置流程图？")) return; setGraph(buildLinearGraph(template)); setHistory([]); setSelectedId(null); setTool("select"); }}
+          <button onClick={() => { if (!confirm("重置流程图？")) return; setGraph(buildLinearGraph(activeTpl)); setHistory([]); setSelectedId(null); setTool("select"); }}
             className="rounded-md px-2 py-1 text-[11px] text-slate-500 hover:bg-slate-100">重置为线性</button>
           <button onClick={onClose} className="rounded-md px-3 py-1 text-[11px] text-slate-600 hover:bg-slate-100">取消</button>
           <button onClick={handleSave} className="flex items-center gap-1 rounded-md bg-indigo-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-indigo-700"><Save className="h-3.5 w-3.5" /> 保存</button>
         </div>
       </div>
+
+      {/* GROUP 分支条：同组 LOOP 并列展示为分支，点击切换编辑（切换前自动保存当前分支） */}
+      {groupMembers.length > 1 && (
+        <div className="flex shrink-0 items-center gap-2.5 border-b border-indigo-100 bg-gradient-to-r from-indigo-50/70 via-white to-indigo-50/70 px-4 py-1.5">
+          <span className="flex shrink-0 items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-indigo-500" title="同一 GROUP 的 LOOP 在此并列展示为分支，点击切换编辑">
+            <FolderOpen className="h-3 w-3" />
+            分组：{activeTpl.group}
+          </span>
+          <div className="flex flex-1 items-center gap-1.5 overflow-x-auto scrollbar-thin">
+            {groupMembers.map((m, i) => {
+              const active = m.id === activeTpl.id;
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => switchBranch(m)}
+                  className={[
+                    "flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-all",
+                    active
+                      ? "border-indigo-500 bg-indigo-600 font-medium text-white shadow-sm"
+                      : "border-indigo-200 bg-white text-slate-600 hover:border-indigo-400 hover:text-indigo-600",
+                  ].join(" ")}
+                  title={active ? "当前编辑的分支" : `切换编辑分支：${m.name}`}
+                >
+                  <span className={`text-[9px] font-bold ${active ? "text-indigo-200" : "text-indigo-400"}`}>分支{i + 1}</span>
+                  <span className="text-xs leading-none">{m.icon || "🔍"}</span>
+                  <span className="max-w-[180px] truncate">{m.name}</span>
+                </button>
+              );
+            })}
+          </div>
+          <span className="shrink-0 text-[10px] text-slate-400">{groupMembers.length} 个分支 · 点击切换</span>
+        </div>
+      )}
 
       <div className="flex shrink-0 items-center gap-3 border-b border-slate-200 bg-white/60 px-4 py-1.5 text-[10px] text-slate-500">
         {cutAnchor ? (
@@ -873,7 +936,7 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
       </div>
 
       {subloopPicker && (
-        <SubloopPicker templates={allTemplates.filter((t) => t.id !== template.id)}
+        <SubloopPicker templates={allTemplates.filter((t) => t.id !== activeTpl.id)}
           onPick={doInsertSubloop}
           onClose={() => setSubloopPicker(null)}
         />

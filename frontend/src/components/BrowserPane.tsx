@@ -153,6 +153,22 @@ const STATUS_BAR: Record<NonNullable<Props["verifyStatus"]>, { text: string; cls
   mismatch: { text: "存在不一致", cls: "bg-rose-500/90 text-white" },
 };
 
+// —— 左右面板互换 API 注册表 ——
+// App 层通过 getPaneExchangeApi(side) 获取各面板的 webTabs 读写能力，
+// 实现「数据源 ⇄ 学校系统」一键互换（当前网页或全部 TAB）。
+export interface PaneExchangeApi {
+  getWebTabs: () => BrowserTab[];
+  getActiveTabId: () => string;
+  /** 外部写入 tabs（id 会重新分配避免冲突），activeTabId 传旧 id */
+  setWebTabsState: (tabs: BrowserTab[], activeTabId: string) => void;
+}
+const paneExchangeRegistry: Record<"left" | "right", PaneExchangeApi | null> = {
+  left: null,
+  right: null,
+};
+export const getPaneExchangeApi = (side: "left" | "right"): PaneExchangeApi | null =>
+  paneExchangeRegistry[side];
+
 export default function BrowserPane({
   side,
   title,
@@ -221,7 +237,7 @@ export default function BrowserPane({
   const [newFavName, setNewFavName] = useState("");
   const [newFavUrl, setNewFavUrl] = useState("");
   const [excelZoom, setExcelZoom] = useState(1.0);
-  const lastBoundsRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  const lastBoundsRef = useRef<{ x: number; y: number; width: number; height: number } | "hidden" | null>(null);
   const loadedUrlRef = useRef<string>("");
 
   // 多标签页状态（web模式和excel模式各自独立tabs）
@@ -230,6 +246,33 @@ export default function BrowserPane({
   const [isAddingTab, setIsAddingTab] = useState(false);
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const tabIdCounter = useRef(1);
+
+  // 注册互换 API（App 层实现左右内容互换时读写本面板的 webTabs）
+  const webTabsSnapshotRef = useRef(webTabs);
+  webTabsSnapshotRef.current = webTabs;
+  const activeTabIdSnapshotRef = useRef(activeTabId);
+  activeTabIdSnapshotRef.current = activeTabId;
+  useEffect(() => {
+    paneExchangeRegistry[side] = {
+      getWebTabs: () => webTabsSnapshotRef.current,
+      getActiveTabId: () => activeTabIdSnapshotRef.current,
+      setWebTabsState: (tabs, oldActiveId) => {
+        // 重新分配 id，避免两个面板的 tab id 冲突（都有 tab-0 起）
+        const idMap: Record<string, string> = {};
+        const remapped = tabs.map((t) => {
+          const nid = `tab-${tabIdCounter.current++}`;
+          idMap[t.id] = nid;
+          return { ...t, id: nid };
+        });
+        loadedUrlRef.current = ""; // 让显式加载 effect 重新加载新激活 tab 的 URL
+        setWebTabs(remapped.length > 0 ? remapped : [{ id: `tab-${tabIdCounter.current++}`, url: "" }]);
+        setActiveTabId(idMap[oldActiveId] || remapped[0]?.id || "tab-0");
+      },
+    };
+    return () => {
+      paneExchangeRegistry[side] = null;
+    };
+  }, [side]);
 
   // Excel模式的tabs从props派生：有数据时显示一个tab，无数据时空数组
   const excelTabs: BrowserTab[] = hasExcelData
@@ -262,7 +305,8 @@ export default function BrowserPane({
     }
     if (!isWebMode) return;
     // tabs web模式：如果父组件设置了url（如DEMO按钮），同步到activeTab
-    if (url && activeTab && url !== activeTab.url) {
+    // 只接受合法网址：防止文件名等非 URL 字符串污染 tab（会触发无效导航 → 白屏）
+    if (url && /^(https?:\/\/|file:\/\/)/i.test(url) && activeTab && url !== activeTab.url) {
       setWebTabs((prev) => prev.map((t) => (t.id === activeTabId ? { ...t, url } : t)));
       setInputUrl(url);
     }
@@ -333,16 +377,19 @@ export default function BrowserPane({
     }
     const viewSide = detachedSide || side;
     const api = window.electronAPI;
+    // lastBoundsRef 用 "hidden" 哨兵标记「已知已隐藏」：
+    // 不能依赖 null 判断——null 只在初始/模态重置后出现，若用它判断会漏发 viewHide，
+    // 导致切到 Excel 后 BrowserView 残留（切回网页时白屏/显示旧页面）
     if (w <= 0 || h <= 0 || !inViewRef.current || !urlRef.current || searchTransitionRef.current === "showing") {
-      if (lastBoundsRef.current !== null) {
+      if (lastBoundsRef.current !== "hidden") {
         if (detachedSide) api.detachedViewHide(detachedSide);
         else api.viewHide(side);
-        lastBoundsRef.current = null;
+        lastBoundsRef.current = "hidden";
       }
       return;
     }
     const last = lastBoundsRef.current;
-    if (last && last.x === x && last.y === y && last.width === w && last.height === h) {
+    if (last && last !== "hidden" && last.x === x && last.y === y && last.width === w && last.height === h) {
       return;
     }
     lastBoundsRef.current = { x, y, width: w, height: h };
@@ -794,7 +841,11 @@ export default function BrowserPane({
     setEditingTabId(null);
     onViewModeChange(mode);
     if (mode === "web") {
-      onUrlChange(activeTab?.url || "");
+      // 此时 activeTab 还是 Excel tab，其 url 字段是文件名（如「参考Excel」），
+      // 直接回传会把 App 的 url 污染、进而覆盖 web tab 的 url → viewLoad 无效地址 → 白屏。
+      // 目标 tab 必须从 webTabs 里选（与下方 viewMode effect 的 firstWeb 选择逻辑一致）。
+      const target = webTabs.find((t) => t.url && t.url.trim() !== "") || webTabs[0];
+      onUrlChange(target?.url || "");
     } else {
       onUrlChange("");
     }

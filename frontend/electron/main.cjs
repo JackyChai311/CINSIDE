@@ -74,6 +74,7 @@ app.setAppUserModelId("com.cinside.app");
 
 let mainWindow = null;
 let splashWindow = null;
+let dockWindow = null;
 // 左右两个 BrowserView：left = 数据源网页 / right = 学校系统网页
 let leftBrowserView = null;
 let rightBrowserView = null;
@@ -100,10 +101,19 @@ if (!gotSingleInstanceLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    if (mainWindow) {
+    debugLog(`[second-instance] 触发, detachedPanels keys=[${Object.keys(detachedPanels).join(",")}], 所有窗口数=${BrowserWindow.getAllWindows().length}`);
+    // 兜底清理：销毁所有残留分离面板窗口（含未在 detachedPanels 中的孤儿窗口），
+    // 否则旧进程被唤起时前端 detached 状态仍为 true，导致"数据源面板自动分离"（奇偶交替现象）
+    destroyDetachedPanels();
+    if (mainWindow && !mainWindow.isDestroyed()) {
       if (!mainWindow.isVisible()) mainWindow.show();
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
+      // 强制前端把所有 detached 状态复位为 false，主窗口重新渲染所有面板
+      const sides = ["left", "bottom", "browser-left", "browser-right", "browser-excel"];
+      for (const s of sides) {
+        try { mainWindow.webContents.send("panel-reattached", s); } catch (_) {}
+      }
     }
   });
 }
@@ -141,7 +151,9 @@ function createSplashWindow() {
 function closeSplashWindow() {
   if (splashWindow && !splashWindow.isDestroyed()) {
     splashWindow.close();
-    splashWindow = null;
+    // 不要在这里把 splashWindow 设为 null；
+    // close() 是异步的，closed 事件触发时才会真正从 BrowserWindow.getAllWindows() 中移除。
+    // 在 close() 和 closed 之间，启动兜底扫描可能误把它当成分离窗口销毁。
   }
 }
 
@@ -238,6 +250,7 @@ function createWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
     destroyDockWindow();
+    destroyDetachedPanels();
   });
 
   // === 防误关拦截：开启时点关闭改为最小化到托盘 ===
@@ -264,13 +277,24 @@ function createWindow() {
 function createTray() {
   // 托盘只在需要时创建一次
   if (tray) return;
-  const iconPath = path.join(__dirname, "../../assets/app-icon.ico");
-  let trayIcon;
-  try {
-    trayIcon = nativeImage.createFromPath(iconPath);
-    if (trayIcon.isEmpty()) trayIcon = nativeImage.createEmpty();
-  } catch (e) {
-    trayIcon = nativeImage.createEmpty();
+
+  // 托盘图标在 dev（项目根 assets）与打包版（app.asar 内 assets）下路径不同，
+  // 逐一尝试，避免打包版取到空图标导致托盘图标不可见、右键菜单（含“退出 CINSIDE”）无法访问。
+  const iconCandidates = [
+    path.join(__dirname, "../../assets/app-icon.ico"),          // dev: d:\CINSIDE\assets
+    path.join(app.getAppPath(), "assets", "app-icon.ico"),      // 打包: app.asar/assets
+    path.join(process.resourcesPath, "assets", "app-icon.ico"), // 兜底: resources/assets
+  ];
+  let trayIcon = nativeImage.createEmpty();
+  for (const iconPath of iconCandidates) {
+    try {
+      if (!fs.existsSync(iconPath)) continue;
+      const img = nativeImage.createFromPath(iconPath);
+      if (!img.isEmpty()) { trayIcon = img; break; }
+      const buf = fs.readFileSync(iconPath);
+      const imgBuf = nativeImage.createFromBuffer(buf);
+      if (!imgBuf.isEmpty()) { trayIcon = imgBuf; break; }
+    } catch (_) {}
   }
 
   tray = new Tray(trayIcon);
@@ -1410,6 +1434,9 @@ function showView(side, bounds, _url) {
   if (bounds) view.setBounds(bounds);
   if (!mainWindow.getBrowserViews().includes(view)) {
     mainWindow.addBrowserView(view);
+    // 重新挂载后强制合成器重绘：removeBrowserView→addBrowserView 后视图经常保持
+    // 白屏（内容未重绘），直到下一次 loadURL 才恢复（即「切Excel再切回网页白屏」）
+    try { view.webContents.invalidate(); } catch (_) {}
   }
   // 确保 BrowserView 在最上层（HTML 层之上），否则 HTML 层可能拦截鼠标滚轮事件。
   // 弹窗（popup BrowserView）打开时 addBrowserView 会在主 view 之上，无需额外处理。
@@ -1424,6 +1451,8 @@ function showView(side, bounds, _url) {
     setTimeout(() => {
       if (ver === view._cinsideBoundsVer && !view.webContents.isDestroyed()) {
         try { view.setBounds(bounds); } catch (_) {}
+        // 补一次强制重绘（与 addBrowserView 后的 invalidate 同理）
+        try { view.webContents.invalidate(); } catch (_) {}
       }
     }, 100);
   }
@@ -2255,6 +2284,8 @@ function buildHighlightScript(boxes) {
     missing: "#f59e0b",
     partial: "#f59e0b",
     pending: "#38bdf8",
+    entry: "#8b5cf6",
+    review: "#f59e0b",
     unknown: "#94a3b8",
   };
   const entries = boxes
@@ -2550,10 +2581,59 @@ function stopBackend() {
   }
 }
 
+// ============ 启动阶段拦截：Windows「重启应用」会在 app ready 前后陆续恢复残留窗口 ============
+// 这些恢复的分离窗口可能在 destroyDetachedPanels() 首次扫描之后才创建出来，
+// 用 browser-window-created 事件在启动窗口期内（主窗口显示前）立即拦截销毁。
+// 注意：必须在 app.whenReady() 之前注册，才能捕获 ready 前后最早一批恢复的窗口。
+let startupPhase = true;
+const detachTitlesEarly = [
+  "CINSIDE · 数据源", "CINSIDE · 数据源网页", "CINSIDE · 学校系统",
+  "CINSIDE · Excel 视图", "CINSIDE · 核验结果",
+  "数据源", "数据源网页", "学校系统", "Excel 视图", "核验结果"
+];
+function startupWindowHandler(_e, w) {
+  if (!startupPhase) return;
+  // 给窗口两帧时间加载 URL/标题，再判断是否为分离窗口
+  setTimeout(() => {
+    if (!w || w.isDestroyed()) return;
+    // 白名单：启动阶段只允许主窗口、启动页、dock 窗口存在
+    // 任何其他窗口都视为 Windows 会话恢复出来的残留分离窗口，立即销毁
+    if (w === mainWindow || w === splashWindow || w === dockWindow) return;
+
+    let isDetach = false;
+    try {
+      const url = w.webContents.getURL() || "";
+      if (/[?&]detach=/.test(url)) isDetach = true;
+    } catch (_) {}
+    if (!isDetach) {
+      try {
+        const t = w.getTitle() || "";
+        if (detachTitlesEarly.some((dt) => t === dt || t.startsWith(dt))) isDetach = true;
+      } catch (_) {}
+    }
+    // 即使标题/URL都识别不出，只要出现在启动阶段且不是白名单窗口，也强制销毁
+    // 这是为了兜住 Windows 恢复窗口 URL/标题延迟极慢或恢复的是空窗口壳的情况
+    if (isDetach || true) {
+      try {
+        debugLog(`[startup-intercept] 拦截并销毁非白名单窗口 title=${w.getTitle()} url=${w.webContents.getURL().slice(0, 80)}`);
+        w.destroy();
+      } catch (_) {}
+    }
+  }, 100);
+}
+app.on("browser-window-created", startupWindowHandler);
+
 app.whenReady().then(async () => {
   // 单实例锁失败时 app.quit() 在 ready 后才生效，whenReady 仍会触发——
   // 必须立刻返回，否则 startBackend 的端口清理会杀掉第一实例的后端
   if (!gotSingleInstanceLock) return;
+
+  // ============ 启动兜底清理：销毁上一次异常退出残留的孤儿分离窗口 ============
+  // 异常退出（崩溃/任务管理器结束/关机强制结束）不会走 closed/before-quit，
+  // Windows「重启应用」功能甚至可能把分离窗口单独恢复出来——必须在创建任何新窗口前扫一遍，
+  // 否则残留窗口会让用户看到「启动就自动分离面板」的诡异现象。
+  destroyDetachedPanels();
+
   // 清空 Windows 任务栏跳转列表，移除默认的 "Electron" 分类
   try { app.setJumpList([]); } catch (e) { debugLog(`[jumplist] clear failed: ${e.message}`); }
 
@@ -2589,6 +2669,25 @@ app.whenReady().then(async () => {
   startBackend();
   createWindow();
   createBrowserViews();
+
+  // 主窗口加载完成后：通知前端所有面板均已吸附（复位 detached 状态），
+  // 并再做两次延迟清理（300ms + 2000ms），兜住 Windows 恢复窗口晚到的边界情况。
+  // startupPhase 保留到最终清理完成前，确保这段时间内创建的异常窗口仍被拦截。
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.once("did-finish-load", () => {
+      debugLog("[startup] 主窗口加载完成，发送 panel-reattached 复位前端状态");
+      const sides = ["left", "bottom", "browser-left", "browser-right", "browser-excel"];
+      for (const s of sides) {
+        try { mainWindow.webContents.send("panel-reattached", s); } catch (_) {}
+      }
+      setTimeout(() => { destroyDetachedPanels(); }, 300);
+      setTimeout(() => {
+        destroyDetachedPanels();
+        startupPhase = false;
+        debugLog("[startup] 启动清理全部完成，关闭拦截");
+      }, 2000);
+    });
+  }
 
   // ============ 下载拦截：文件提取模式下捕获网页下载的文件 ============
   // downloadCapture[side] = true 时，该 side 的 BrowserView 触发的下载会被拦截
@@ -3324,12 +3423,15 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
+  destroyDetachedPanels();
   destroyBrowserViews();
   stopBackend();
   if (process.platform !== "darwin") app.quit();
 });
 
 app.on("before-quit", () => {
+  isQuitting = true;
+  destroyDetachedPanels();
   destroyBrowserViews();
   stopBackend();
 });
@@ -3907,7 +4009,14 @@ ipcMain.on("renderer-log", (_event, msg) => {
   debugLog(`[renderer] ${msg}`);
 });
 
-ipcMain.handle("panel-detach", (_event, side) => {
+ipcMain.handle("panel-detach", (event, side) => {
+  // 诊断日志：记录发起分离请求的渲染进程来源（主窗口 / 弹窗 / 其他），
+  // 用于定位"开发模式下启动自动分离面板"的根因。
+  try {
+    const senderUrl = event && event.sender ? (event.sender.getURL() || "") : "";
+    debugLog(`[panel-detach] 请求 side=${side} sender=${senderUrl} isPackaged=${app.isPackaged}`);
+  } catch (_) {}
+
   if (detachedPanels[side] && !detachedPanels[side].isDestroyed()) {
     detachedPanels[side].focus();
     return true;
@@ -3955,15 +4064,38 @@ ipcMain.handle("panel-detach", (_event, side) => {
 
   detachedPanels[side] = win;
 
+  // 监听窗口关闭事件：确保关闭时正确通知主窗口并清理资源
+  win.on("close", (e) => {
+    // 非浏览器面板（left/bottom）的 BrowserView 不存在，不需要处理
+    // 浏览器面板的 BrowserView 需要先从窗口移除，避免关闭时出错
+    const v = detachedPanels[side + "_view"];
+    if (v && !win.isDestroyed()) {
+      try { win.removeBrowserView(v); } catch (_) {}
+    }
+  });
+
   win.on("closed", () => {
-    // 关闭该 side 的弹窗（如果有）
-    const actualSide = side === "browser-left" ? "left" : "right";
-    closePopupView(actualSide);
-    if (detachedPanels[side + "_view"]) {
-      try { detachedPanels[side + "_view"].webContents.destroy(); } catch (_) {}
+    debugLog(`[detach-closed] 分离窗口关闭: side=${side}`);
+    // 关闭该 side 的弹窗（如果有）——只有浏览器/Excel面板才有弹窗
+    let popupSide = null;
+    if (side === "browser-left") popupSide = "left";
+    else if (side === "browser-right") popupSide = "right";
+    else if (side === "browser-excel") popupSide = "left";
+    if (popupSide) {
+      try { closePopupView(popupSide); } catch (_) {}
+    }
+    // 清理关联的 BrowserView
+    const v = detachedPanels[side + "_view"];
+    if (v) {
+      try {
+        if (!v.webContents.isDestroyed()) v.webContents.destroy();
+      } catch (_) {}
       detachedPanels[side + "_view"] = null;
+      delete detachedPanels[side + "_view"];
     }
     detachedPanels[side] = null;
+    delete detachedPanels[side];
+    // 通知主窗口重新吸附面板
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("panel-reattached", side);
     }
@@ -3992,6 +4124,8 @@ ipcMain.handle("detached-view-show", (_event, side, bounds, _url) => {
     setTimeout(() => {
       if (ver === view._cinsideBoundsVer && !view.webContents.isDestroyed()) {
         try { view.setBounds(bounds); } catch (_) {}
+        // 补一次强制重绘（与 addBrowserView 后的 invalidate 同理）
+        try { view.webContents.invalidate(); } catch (_) {}
       }
     }, 100);
   }
@@ -4214,7 +4348,6 @@ ipcMain.on("panel-action", (_event, action, payload) => {
 // 独立于主窗口的小条，挂到屏幕边缘；两个按钮「提取源」「操作页」，
 // AI 通过后端体外循环从提取源抓数据并自动填写操作页。
 
-let dockWindow = null;
 let dockMode = "strip"; // 'strip' | 'picker' | 'collapsed'
 let dockEdge = "right"; // 'left' | 'right'
 const DOCK_STRIP = { w: 240, h: 520 };
@@ -4302,6 +4435,120 @@ function destroyDockWindow() {
   }
   dockWindow = null;
 }
+
+// 销毁所有脱离面板窗口：主窗口关闭时必须一并销毁，否则 detach 窗口残留会
+// 阻止 window-all-closed 触发，导致程序无法真正退出、下次启动出现「侧边栏自动分离」。
+function destroyDetachedPanels() {
+  debugLog(`[detach-destroy] 开始销毁分离面板, keys=[${Object.keys(detachedPanels).join(",")}]`);
+
+  // 第一步：先把所有 BrowserView 从父窗口移除，避免带 view 的窗口 destroy 失败
+  for (const key of Object.keys(detachedPanels)) {
+    if (!key.endsWith("_view")) continue;
+    const v = detachedPanels[key];
+    if (!v) continue;
+    const parentKey = key.slice(0, -5); // 去掉 "_view" 后缀
+    const parentWin = detachedPanels[parentKey];
+    if (parentWin && !parentWin.isDestroyed()) {
+      try { parentWin.removeBrowserView(v); } catch (_) {}
+    }
+    try {
+      if (!v.webContents.isDestroyed()) v.webContents.destroy();
+    } catch (_) {}
+    detachedPanels[key] = null;
+    delete detachedPanels[key];
+  }
+
+  // 第二步：销毁所有分离面板窗口
+  for (const key of Object.keys(detachedPanels)) {
+    if (key.endsWith("_view")) continue; // 已在第一步清理
+    const w = detachedPanels[key];
+    // 立即清除引用，防止窗口关闭过程中被意外 focus 或重复创建
+    detachedPanels[key] = null;
+    delete detachedPanels[key];
+
+    if (w && !w.isDestroyed()) {
+      // 关闭该 side 的弹窗（如果有）
+      let popupSide = null;
+      if (key === "browser-left") popupSide = "left";
+      else if (key === "browser-right") popupSide = "right";
+      else if (key === "browser-excel") popupSide = "left";
+      if (popupSide) {
+        try { closePopupView(popupSide); } catch (_) {}
+      }
+      try {
+        // 启动兜底清理时直接 destroy()，避免 close() 异步、被事件阻止或恢复窗口死灰复燃
+        w.destroy();
+      } catch (e) {
+        debugLog(`[detach-destroy] destroy() 失败: side=${key} err=${e}`);
+      }
+    }
+  }
+
+  // 兜底：扫描所有窗口，销毁所有不是主窗口/启动页/托盘窗口的 CINSIDE 窗口。
+  // 识别方式（双重保险）：
+  //   1) URL 包含 ?detach= 或 &detach= 参数（最可靠，分离窗口统一用这个参数标识）
+  //   2) 标题匹配分离窗口标题（兼容页面还没加载完、URL 拿不到的极端情况）
+  //   3) 标题为空或 "CINSIDE"（Windows 恢复的窗口壳可能还没加载 URL 标题）
+  // 异常退出（崩溃/任务管理器结束/关机强制结束）不会走 closed/before-quit，
+  // Windows「重启应用」功能甚至可能把分离窗口单独恢复出来——这里必须全部扫掉，
+  // 否则残留窗口会让用户看到「启动就自动分离面板」的诡异现象。
+  const detachTitles = [
+    "CINSIDE · 数据源", "CINSIDE · 数据源网页", "CINSIDE · 学校系统",
+    "CINSIDE · Excel 视图", "CINSIDE · 核验结果",
+    // 分离窗口加载后 document.title 会被改成短标题，也要匹配
+    "数据源", "数据源网页", "学校系统", "Excel 视图", "核验结果"
+  ];
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w === mainWindow) continue;
+    if (w === splashWindow) continue;
+    if (w === dockWindow) continue;
+    if (w.isDestroyed()) continue;
+
+    // 忽略 DevTools 窗口（标题为 "DevTools" 或以 "DevTools - " 开头）
+    try {
+      const title = w.getTitle() || "";
+      if (title === "DevTools" || title.startsWith("DevTools - ") || title.startsWith("Developer Tools")) continue;
+    } catch (_) {}
+
+    let isDetachWindow = false;
+    try {
+      // 方式1：检查URL是否包含detach参数（最可靠）
+      const url = w.webContents.getURL() || "";
+      if (/[?&]detach=/.test(url)) {
+        isDetachWindow = true;
+      }
+    } catch (_) {}
+    if (!isDetachWindow) {
+      try {
+        // 方式2：标题匹配（兜底）
+        const t = w.getTitle() || "";
+        if (detachTitles.some((dt) => t === dt || t.startsWith(dt))) {
+          isDetachWindow = true;
+        }
+      } catch (_) {}
+    }
+    // 方式3：启动阶段如果窗口标题为空或仅显示默认 "CINSIDE"，大概率是恢复出来的空壳
+    if (!isDetachWindow) {
+      try {
+        const t = w.getTitle() || "";
+        if (t === "" || t === "CINSIDE") isDetachWindow = true;
+      } catch (_) {}
+    }
+    if (isDetachWindow) {
+      try {
+        const t = w.getTitle();
+        const u = w.webContents.getURL();
+        debugLog(`[detach-destroy] 销毁孤儿分离窗口 title=${t} url=${u.slice(0, 100)}`);
+      } catch (_) {}
+      // 孤儿窗口直接 destroy() 而不是 close()：
+      // close() 是异步的、会触发 close 事件可能被阻止，且给窗口机会执行 unload 逻辑；
+      // 这些是异常退出残留的窗口，没有需要保存的状态，直接强制销毁最可靠。
+      try { w.destroy(); } catch (e) { debugLog(`[detach-destroy] destroy() 失败: ${e}`); }
+    }
+  }
+  debugLog(`[detach-destroy] 销毁完成, 残留=${Object.keys(detachedPanels).join(",") || "无"}`);
+}
+
 
 ipcMain.handle("dock-toggle", () => {
   if (dockWindow && !dockWindow.isDestroyed()) {

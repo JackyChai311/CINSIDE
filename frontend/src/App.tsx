@@ -9,6 +9,9 @@ import {
   BookMarked,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ClipboardCheck,
   ClipboardEdit,
   Clock,
@@ -18,6 +21,7 @@ import {
   FileDown,
   FileSpreadsheet,
   FileText,
+  FolderOpen,
   Globe,
   GraduationCap,
   KeyRound,
@@ -130,7 +134,7 @@ import {
 } from "./lib/widgetScripts";
 import LeftPanel from "./components/LeftPanel";
 import type { AISphereState } from "./components/AISphere";
-import BrowserPane, { type PickedElementInfo } from "./components/BrowserPane";
+import BrowserPane, { type PickedElementInfo, getPaneExchangeApi } from "./components/BrowserPane";
 import ExcelView, { type ExcelPickedField } from "./components/ExcelView";
 import BlankExcel from "./components/BlankExcel";
 import type { PickTarget, CustomTextEntry } from "./components/ElementSelectBar";
@@ -210,8 +214,21 @@ const deriveMappingsFromMarks = (marks: PickedMark[]): FieldMapping[] => {
 /** 运行展示用步骤标签：input 步骤的「输入」前缀按流程纠正为「审查/录入」（审查流不显示“输入”字样，用字严谨；兼容历史模板） */
 const markDisplayLabel = (m: PickedMark): string => {
   const raw = m.label || m.inputTarget || m.selector;
-  if (m.action === "input") return raw.replace(/^输入/, m.workflow === "entry" ? "录入" : "审查");
+  if (m.action === "input") return raw.replace(/^输入/, m.workflow === "entry" ? "录入" : m.workflow === "review" ? "审查" : "绑定输入");
   return raw;
+};
+
+/** 构建 selector → workflow(entry/review) 映射，供字段比对高亮区分录入(浅紫)/审查(深紫)颜色 */
+const buildWorkflowBySelector = (marks: PickedMark[]): Map<string, "entry" | "review"> => {
+  const map = new Map<string, "entry" | "review">();
+  for (const m of marks) {
+    if (m.clickPhase || m.action === "click") continue;
+    if (m.workflow !== "entry" && m.workflow !== "review") continue;
+    const wf = m.workflow as "entry" | "review";
+    if (m.selector) map.set(m.selector, wf);
+    if (m.inputTarget) map.set(m.inputTarget, wf);
+  }
+  return map;
 };
 
 /** 取模板有效映射：优先模板自带 mappings，缺失时从 marks 反推 */
@@ -267,6 +284,24 @@ function dataUrlToFile(dataUrl: string, filename: string): File {
 
 // 深度查询辅助函数（注入页面执行）：支持 ' >>> ' 分段穿透 shadowRoot / iframe contentDocument
 // 用法：在注入脚本开头拼接 ${DEEP_QUERY_HELPER}，然后用 __cinsideDeepQuery(sel) 替代 document.querySelector(sel)
+// 注入脚本共用片段：读取表单元素可见值。
+// SELECT 必须取选中项的可见文字（opt.text）而非 el.value——下拉选项的 value 常是内部序号
+// （如 gender 的 "2"、国籍的 "55"），与文字基准比对会误报不一致。
+const READ_VISIBLE_VALUE_JS = `
+function __cinsideReadVisibleValue(el) {
+  try {
+    var tag = el.tagName;
+    if (tag === 'SELECT') {
+      var opt = el.selectedOptions && el.selectedOptions[0];
+      return ((opt && (opt.text || opt.label)) || el.value || '').trim();
+    }
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return (el.value || '').trim();
+    if (el.isContentEditable) return (el.textContent || '').trim();
+    return ((el.textContent || el.innerText || '') + '').trim();
+  } catch (e) { return ((el && el.textContent) || '') + ''; }
+}
+`;
+
 const DEEP_QUERY_HELPER = `function __cinsideDeepQuery(sel) {
   if (!sel) return null;
   if (sel.indexOf('>>>') === -1) { try { return document.querySelector(sel); } catch (e) { return null; } }
@@ -1049,12 +1084,18 @@ export default function App() {
   const [bottomDetached, setBottomDetached] = useState(false);
   const [browserLeftDetached, setBrowserLeftDetached] = useState(false);
   const [browserRightDetached, setBrowserRightDetached] = useState(false);
+  const browserLeftDetachedRef = useRef(false);
+  const browserRightDetachedRef = useRef(false);
+  browserLeftDetachedRef.current = browserLeftDetached;
+  browserRightDetachedRef.current = browserRightDetached;
   // 聚焦下方：激活时隐藏上方两个 BrowserPane，下方审查面板三列铺满整屏
   const [focusBottomMode, setFocusBottomMode] = useState(false);
   // Excel 视图脱离
   const [excelDetached, setExcelDetached] = useState(false);
   // 弹窗（window.open 拦截）：记录哪个 side 的弹窗处于激活状态
   const [popupSide, setPopupSide] = useState<ViewSide | null>(null);
+  const popupSideRef = useRef<ViewSide | null>(null);
+  popupSideRef.current = popupSide;
   // 左侧视图模式：网页 / Excel
   const [leftViewMode, setLeftViewMode] = useState<"web" | "excel">("web");
   // 右侧视图模式：网页 / Excel
@@ -1132,6 +1173,79 @@ const sourceFieldLabelRef = useRef<string>("");
   // 两个浏览器面板的宽度比例（左侧面板百分比）
   const [leftPaneWidth, setLeftPaneWidth] = useState<number>(50);
   const draggingRef = useRef(false);
+
+  // —— 左右 BrowserPane 内容互换（中缝按钮）——
+  const [swapMenuOpen, setSwapMenuOpen] = useState(false);
+
+  // 互换菜单是 HTML 层，网页模式下会被原生 BrowserView 盖住点不到：
+  // 菜单打开期间走模态覆盖机制移除所有原生视图，关闭后由 modal-overlay-exited 事件触发恢复（含强制重绘）
+  useEffect(() => {
+    if (!swapMenuOpen) return;
+    if (!window.electronAPI?.modalOverlayEnter) return;
+    window.electronAPI.modalOverlayEnter();
+    return () => {
+      window.electronAPI?.modalOverlayExit?.();
+    };
+  }, [swapMenuOpen]);
+
+  /**
+   * scope="page"  只互换左右当前激活的网页 URL（各自 tab 里的地址对调）
+   * scope="all"   全量互换：所有 webTAB / 视图模式 / Excel 数据 / 空白Excel / 收藏 /
+   *               拾取标记与映射的左右归属（逻辑关系跟着内容换）
+   */
+  const swapPaneContents = (scope: "page" | "all") => {
+    const lApi = getPaneExchangeApi("left");
+    const rApi = getPaneExchangeApi("right");
+    setSwapMenuOpen(false);
+    if (scope === "page") {
+      if (!lApi || !rApi) return;
+      const lTabs = lApi.getWebTabs();
+      const rTabs = rApi.getWebTabs();
+      const lTab = lTabs.find((t) => t.id === lApi.getActiveTabId());
+      const rTab = rTabs.find((t) => t.id === rApi.getActiveTabId());
+      if (!lTab || !rTab) return;
+      const lu = lTab.url;
+      lApi.setWebTabsState(lTabs.map((t) => (t.id === lTab.id ? { ...t, url: rTab.url } : t)), lTab.id);
+      rApi.setWebTabsState(rTabs.map((t) => (t.id === rTab.id ? { ...t, url: lu } : t)), rTab.id);
+      setLeftUrl(rTab.url);
+      setRightUrl(lu);
+      return;
+    }
+    // —— 全量互换 ——
+    const lRec = records;
+    setRecords(rightRecords);
+    setRightRecords(lRec);
+    const lf = leftFavoriteSites;
+    setLeftFavoriteSites(rightFavoriteSites);
+    setRightFavoriteSites(lf);
+    try {
+      localStorage.setItem("cinside-favorite-sites-left", JSON.stringify(rightFavoriteSites));
+      localStorage.setItem("cinside-favorite-sites-right", JSON.stringify(leftFavoriteSites));
+    } catch {}
+    setLeftUrl(rightUrl);
+    setRightUrl(leftUrl);
+    setLeftViewMode(rightViewMode);
+    setRightViewMode(leftViewMode);
+    setLeftBlankExcel(rightBlankExcel);
+    setRightBlankExcel(leftBlankExcel);
+    // 绑定逻辑跟着内容走：拾取标记与映射的左右归属互换（Excel来源/网页目标的指向同时换）
+    setPickedMarks((prev) => prev.map((m) => ({ ...m, side: m.side === "left" ? "right" : "left" })));
+    setMappings((prev) => prev.map((m) => ({ ...m, web_side: m.web_side === "left" ? "right" : "left" })));
+    // 行范围/焦点列/LOOP变量属于原 Excel 数据集，随互换清空或对调
+    setRowRange(null);
+    setExcelFocusColumn(null);
+    setRightBindColumn(selectedExcelColumn);
+    setSelectedExcelColumn(rightBindColumn);
+    // 互换所有 webTAB
+    if (lApi && rApi) {
+      const lt = lApi.getWebTabs();
+      const rt = rApi.getWebTabs();
+      const li = lApi.getActiveTabId();
+      const ri = rApi.getActiveTabId();
+      lApi.setWebTabsState(rt, ri);
+      rApi.setWebTabsState(lt, li);
+    }
+  };
 
   // 底部审查面板的高度比例（百分比），审查流操作时自动收窄
   const [bottomPanelHeight, setBottomPanelHeight] = useState<number>(20);
@@ -1883,7 +1997,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   }, []);
 
   // pendingAction=click：执行真实点击（element.click()）
-  const performRealClick = useCallback(async (side: ViewSide, selector: string, inPopup?: boolean) => {
+  // 视觉确认由调用方通过 viewHighlightBoxes 统一处理（带 label 标签的高亮框）
+  const performRealClick = useCallback(async (side: ViewSide, selector: string, inPopup?: boolean, _highlight = true) => {
     if (!window.electronAPI) return;
     // 高速模式：滚动动画改瞬时（省 300~500ms 动画时间）、点击后等待压缩
     const hs = settingsRef.current.high_speed_mode === true;
@@ -1898,20 +2013,6 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(selector))}); } catch(e) { el = null; }
           if (!el) return { ok: false, reason: 'not_found' };
           try { el.scrollIntoView({ behavior: ${JSON.stringify(hs ? "auto" : "smooth")}, block: 'center', inline: 'nearest' }); } catch(e) {}
-          var orig = el.style.outline;
-          var origOffset = el.style.outlineOffset;
-          var origShadow = el.style.boxShadow;
-          var origTrans = el.style.transition;
-          el.style.transition = 'outline 0.15s ease-out, box-shadow 0.15s ease-out';
-          el.style.outline = '3px solid #10b981';
-          el.style.outlineOffset = '2px';
-          el.style.boxShadow = '0 0 0 6px rgba(16,185,129,0.2)';
-          setTimeout(function() {
-            el.style.outline = orig || '';
-            el.style.outlineOffset = origOffset || '';
-            el.style.boxShadow = origShadow || '';
-            el.style.transition = origTrans || '';
-          }, ${hs ? 400 : 800});
           el.click();
           return { ok: true, tag: el.tagName };
         })();
@@ -1929,9 +2030,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
   // pendingAction=input：把 value 填入目标输入框 selector
   // 返回 { ok, reason, foundValue } 便于调用方判断是否成功
-  const performInputValue = useCallback(async (targetSide: ViewSide, targetSelector: string, value: string, inPopup?: boolean): Promise<{ ok: boolean; reason?: string; [key: string]: unknown }> => {
+  const performInputValue = useCallback(async (targetSide: ViewSide, targetSelector: string, value: string, inPopup?: boolean, workflow?: string, label?: string): Promise<{ ok: boolean; reason?: string; [key: string]: unknown }> => {
     if (!window.electronAPI) return { ok: false, reason: "no-electron" };
     try {
+      const accentColor = workflow === "entry" ? "#8b5cf6" : workflow === "review" ? "#6d28d9" : "#22c55e";
+      const accentRgb = workflow === "entry" ? "139,92,246" : workflow === "review" ? "109,40,217" : "34,197,94";
       const script = `
         ${DEEP_QUERY_HELPER}
         (function() {
@@ -1940,6 +2043,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           if (!el) return { ok: false, reason: 'not_found', selector: ${JSON.stringify(sanitizeSelector(targetSelector))} };
 
           try { el.focus({ preventScroll: true }); } catch(e) {}
+          try { el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); } catch(e) {}
           var isContentEditable = el.contentEditable === 'true';
           var text = ${JSON.stringify(value)};
 
@@ -2004,21 +2108,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
           setOk = el.value === text || el.textContent === text;
 
-          // 视觉确认：绿色粗 outline（直接设在元素上，滚动时自动跟随）
-          var orig = el.style.outline;
-          var origOffset = el.style.outlineOffset;
-          var origShadow = el.style.boxShadow;
-          var origTrans = el.style.transition;
-          el.style.transition = 'outline 0.15s ease-out, box-shadow 0.15s ease-out';
-          el.style.outline = '4px solid #22c55e';
-          el.style.outlineOffset = '2px';
-          el.style.boxShadow = '0 0 0 6px rgba(34,197,94,0.2)';
-          setTimeout(function() {
-            el.style.outline = orig || '';
-            el.style.outlineOffset = origOffset || '';
-            el.style.boxShadow = origShadow || '';
-            el.style.transition = origTrans || '';
-          }, 2500);
+          // 视觉确认由 viewHighlightBoxes 统一处理（带 label 标签的高亮框）
+          // 此处不再设置 outline，避免与 viewHighlightBoxes 的高亮框重叠
           return { ok: true, reason: 'ok', tag: el.tagName, currentValue: el.value || el.textContent || '', setOk: setOk };
         })();
       `;
@@ -2161,8 +2252,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         // click 动作：真正触发 element.click()
         if (mark.action === "click") {
           const side: ViewSide = mark.side === "left" ? "left" : "right";
-          try {
-            const script = `
+    try {
+
+      const script = `
               ${DEEP_QUERY_HELPER}
               (function() {
                 var el = null;
@@ -2629,6 +2721,21 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const [cardLoopMap, setCardLoopMap] = useState<Record<string, { loopId: string; loopName: string; setAt: number }>>({});
   // 执行游标：控制"运行"按钮只跑前 N 张已设置 LOOP 的卡片；null 表示跑全部
   const [runCursor, setRunCursor] = useState<number | null>(null);
+  // 运行按钮的两级下拉（GROUP → LOOP）：选中 LOOP 后只跑绑定该 LOOP 的卡片
+  const [runLoopMenuOpen, setRunLoopMenuOpen] = useState(false);
+  const [runLoopGroup, setRunLoopGroup] = useState<string | null>(null);
+  // 连续设计链：保存 LOOP 后记住其分组，清空步骤再保存时自动预选同组（形成 GROUP）
+  const groupChainRef = useRef<string | null>(null);
+
+  // 下拉菜单是 HTML 层，会被原生 BrowserView 盖住：打开期间走模态覆盖机制移除所有原生视图
+  useEffect(() => {
+    if (!runLoopMenuOpen) return;
+    if (!window.electronAPI?.modalOverlayEnter) return;
+    window.electronAPI.modalOverlayEnter();
+    return () => {
+      window.electronAPI?.modalOverlayExit?.();
+    };
+  }, [runLoopMenuOpen]);
 
   /** 字段列手动映射：标准字段名 -> Excel 原始列 key（当 AI/别名识别失败时由用户手动指定） */
   const [fieldColumnMap, setFieldColumnMap] = useState<Record<string, string>>({});
@@ -2719,6 +2826,44 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     }
     return result;
   }, [cardPool, cardLoopMap]);
+
+  /** 运行指定 LOOP：只跑绑定了该 LOOP 的人物卡片 */
+  const handleRunLoopById = useCallback(async (loopId: string) => {
+    const targets = cardRecords.filter((r) => cardLoopMap[r.record_id]?.loopId === loopId);
+    setRunLoopMenuOpen(false);
+    if (targets.length === 0) {
+      setError("该 LOOP 还没有绑定任何卡片，请先在左侧群组面板设置");
+      return;
+    }
+    const tpl = getSkillById(loopId);
+    if (!tpl) {
+      setError("未找到该 LOOP 模板，可能已被删除");
+      return;
+    }
+    await runBatchRef.current?.(tpl, targets.map((r) => r.record_id));
+  }, [cardRecords, cardLoopMap]);
+
+  /** 切换绑定：把已适配到 groupName 组内各 LOOP 的卡片，全部改绑为 targetLoopId（保留原排序） */
+  const handleSwitchCardsToLoop = useCallback((groupName: string, targetLoopId: string) => {
+    const groupLoopIds = new Set(
+      loadSkills().filter((s) => s.group?.trim() === groupName).map((s) => s.id)
+    );
+    const target = getSkillById(targetLoopId);
+    if (!target) return;
+    setRunLoopMenuOpen(false);
+    setCardLoopMap((prev) => {
+      const next = { ...prev };
+      let changed = 0;
+      for (const [rid, info] of Object.entries(next)) {
+        if (info && groupLoopIds.has(info.loopId) && info.loopId !== targetLoopId) {
+          next[rid] = { loopId: targetLoopId, loopName: target.name, setAt: info.setAt };
+          changed++;
+        }
+      }
+      if (changed > 0) setRunCursor(null);
+      return next;
+    });
+  }, []);
 
   // 已设置 LOOP 的卡片数（用于游标范围上限）
   const loopCardCount = useMemo(
@@ -3638,8 +3783,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     exitAllSetupModes();
     const col = selectedExcelColumnRef.current;
     rlog("[startBindBothInputs] 开始灵活绑定, selectedExcelColumn=", col);
-    // 切到网页视图，否则左侧网页被 Excel 视图遮挡，用户无法点击输入框
-    setLeftViewMode("web");
+
     setBindInputSide("both");
     setPickTarget(null); // 不限定侧，左右网页都可点击
     setPendingAction("none");
@@ -3690,7 +3834,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   }, []);
 
   // 教学模式向导：添加审查步骤到 LOOP 循环体
-  // 审查映射流程（先右后左）：右侧选核对元素 → 左侧选来源（网页/Excel）→ 保存映射
+  // 审查映射流程（先右后左）：先选右侧具体字段 → 再选左侧对应字段（来源）→ 保存映射
+  // 右侧Excel模式下右侧是 Excel 列（先点右侧 Excel 具体字段，再点左侧网页核对目标），同样先右后左
   const startAddingReviewSteps = useCallback(() => {
     // Toggle：已在审查模式则退出
     if (addingStepModeRef.current === "review") {
@@ -3700,7 +3845,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     }
     // 先退出其他模式（前置/过程/收尾点击、录入步骤等），保证互斥
     exitAllSetupModes();
-    rlog("[startAddingReviewSteps] 进入审查步骤添加模式（先右后左）");
+    rlog("[startAddingReviewSteps] 进入审查步骤添加模式（先右后左：先选右侧具体字段）");
     setCurrentLoopStepType("review");
     setTeachingPhase("review");
     setAddingStepMode("review");
@@ -3708,9 +3853,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setPendingAction("none");
     setInputTarget(null);
     setNextClickLabel(null);
-    // 右侧Excel模式：比对目标在左网页，从左侧开始拾取
-    const targetSide = rightExcelModeRef.current ? "left" : "right";
-    setPickTarget(targetSide);
+    // 审查一律先选右侧具体字段：标准布局=右侧网页核对元素；右侧Excel布局=右侧 Excel 列
+    // （旧逻辑在右侧Excel模式下错误地从左侧网页开始拾取，与录入顺序混淆）
+    setPickTarget("right");
     setRightPicked(null);
     setLeftPicked(null);
     setError(null);
@@ -3718,9 +3863,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setTimeout(() => {
       window.electronAPI?.viewStopPicking("left").catch(() => {});
       window.electronAPI?.viewStopPicking("right").catch(() => {});
-      if (targetSide === "left" && leftViewModeRef.current === "web") {
-        window.electronAPI?.viewStartPicking("left");
-      } else if (targetSide === "right" && rightViewModeRef.current === "web") {
+      // 右侧是网页时注入拾取光标；右侧是 Excel 时由 ExcelView 的 picking 属性激活单元格拾取
+      if (rightViewModeRef.current === "web") {
         window.electronAPI?.viewStartPicking("right");
       }
     }, 300);
@@ -3778,6 +3922,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       setBindInputSide(null);
       setPendingAction("none");
       setError(null);
+      // 审查=先选右侧具体字段（右侧Excel布局下即右侧 Excel 列）；录入=从左侧开始
       const targetSide = type === "entry" ? "left" : "right";
       setPickTarget(targetSide as PickTarget);
       setTimeout(() => {
@@ -3786,7 +3931,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           window.electronAPI?.viewStartPicking("left");
         } else {
           window.electronAPI?.viewStopPicking("left").catch(() => {});
-          window.electronAPI?.viewStartPicking("right");
+          // 右侧是网页时注入光标；右侧是 Excel 时由 ExcelView 的 picking 属性激活单元格拾取
+          if (rightViewModeRef.current === "web") {
+            window.electronAPI?.viewStartPicking("right");
+          }
         }
       }, 200);
     }
@@ -3839,6 +3987,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // 确保点击卡片时文件处理面板显示该卡片绑定的提取文件和字段
   const handleSelectCard = useCallback((id: string) => {
     setSelectedId(id);
+    // 切换卡片时清空来源字段值：避免上一张卡片捕获的来源值残留到新卡片，
+    // 导致绑定输入时填入旧卡片的值而非当前选中卡片的值
+    sourceFieldValueRef.current = "";
+    sourceFieldLabelRef.current = "";
     setBottomPanelOpen(true);
     exitAddingStepMode();
     setDocExtractSplitView(false);
@@ -5909,12 +6061,15 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     };
   }, [pickedMarks, selected, appMode, mappings, customTextEntries]);
 
-  const handleSaveSkill = useCallback((name: string, icon: string, runAfter?: boolean) => {
+  const handleSaveSkill = useCallback((name: string, icon: string, runAfter?: boolean, group?: string) => {
     // 自动收纳「提取元素」面板中已配置但未保存的条目（FIFO，插在收尾点击之前），确保保存的 LOOP 模板包含全部步骤
     const { extraMarks, pendingEntries, marksWithExtras, pendingMappings } = collectPendingExtractMarks();
     const mergedMappings = mergeMappings(mappings, pendingMappings);
     const tpl = buildTemplateFromMarks(name, icon, { marks: marksWithExtras, mappings: mergedMappings });
+    if (group) tpl.group = group;
     const saved = saveSkill(tpl);
+    // 连续设计链：记住本次保存的分组，用户「清空步骤」后设计下一个并保存时自动预选同组
+    groupChainRef.current = group?.trim() || null;
     // 同步状态：marks 入库（含收尾点击重新编号）+ 条目标记已保存
     if (extraMarks.length > 0) {
       setPickedMarks(marksWithExtras);
@@ -6043,11 +6198,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setError(null);
     setSelectMode(true);
     setCardsGenerated(true);
-    // 已选中 LOOP 列时自动切到网页视图，方便拾取网页元素
-    if (selectedExcelColumnRef.current && leftViewMode === "excel") {
-      setLeftViewMode("web");
-      setTimeout(() => window.dispatchEvent(new Event("resize")), 50);
-    }
+  // 保持当前左侧视图模式（网页/Excel），不自动切换，让用户自行选择
     setPendingAction("none");
     setAvatarMode(false);
     setBindInputSide(null);
@@ -6766,6 +6917,56 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     return api.extractDocumentUrl(url, targetFields, filename, engine);
   }, []);
 
+  // 计算步骤高亮颜色状态
+  const getMarkHighlightStatus = useCallback((m: PickedMark): "match" | "mismatch" | "missing" | "partial" | "pending" | "entry" | "review" | "unknown" => {
+    if (m.action === "input") {
+      return m.workflow === "entry" ? "entry" : m.workflow === "review" ? "review" : "pending";
+    }
+    // click 动作：录入/审查用紫色/橙色，前置用蓝色，其他用绿色
+    if (m.workflow === "entry") return "entry";
+    if (m.workflow === "review") return "review";
+    return m.clickPhase === "pre" ? "pending" : "match";
+  }, []);
+
+  // 统一高亮：在正确的视图（主视图/弹窗/脱离面板）上显示步骤标签
+  const highlightMarkOnViews = useCallback((m: PickedMark) => {
+    if (!window.electronAPI) return;
+    const side: ViewSide = m.side === "left" ? "left" : "right";
+    const selector = m.action === "input" && m.inputTarget ? m.inputTarget : m.selector;
+    if (!selector) return;
+    const label = `${m.order} · ${markDisplayLabel(m)}`;
+    const status = getMarkHighlightStatus(m);
+    const box = { selector, status, label };
+
+    // 清除该侧所有视图的高亮
+    window.electronAPI.viewClearHighlight(side).catch(() => {});
+    if (side === "left" && browserLeftDetachedRef.current) {
+      window.electronAPI.detachedViewClearHighlight("browser-left").catch(() => {});
+    }
+    if (side === "right" && browserRightDetachedRef.current) {
+      window.electronAPI.detachedViewClearHighlight("browser-right").catch(() => {});
+    }
+    if (popupSideRef.current === side) {
+      window.electronAPI.popupClearHighlight(side).catch(() => {});
+    }
+
+    // 在正确的视图显示高亮
+    if (m.inPopup && popupSideRef.current === side) {
+      // 弹窗内元素 → 只在弹窗显示
+      window.electronAPI.popupHighlightBoxes(side, [box]).catch(() => {});
+    } else {
+      // 主视图显示
+      window.electronAPI.viewHighlightBoxes(side, [box]).catch(() => {});
+      // 脱离面板同步显示（如果面板脱离了）
+      if (side === "left" && browserLeftDetachedRef.current) {
+        window.electronAPI.detachedViewHighlightBoxes("browser-left", [box]).catch(() => {});
+      }
+      if (side === "right" && browserRightDetachedRef.current) {
+        window.electronAPI.detachedViewHighlightBoxes("browser-right", [box]).catch(() => {});
+      }
+    }
+  }, [getMarkHighlightStatus]);
+
   // ============ 在单个 view 上执行一个 mark（带变量替换） ============
   const executeMark = useCallback(async (
     mark: PickedMark,
@@ -6776,6 +6977,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       return;
     }
     const side: ViewSide = mark.side === "left" ? "left" : "right";
+    if (mark.widget) {
+      rlog(`[executeMark] 诊断动作入参: action=${mark.action}, widget=${mark.widget.kind}, inputTarget=${mark.inputTarget ? "有" : "无"}, workflow=${mark.workflow || "-"}, clickPhase=${mark.clickPhase || "-"}, label=${mark.label || mark.selector}`);
+    }
     // 文件处理按钮记录步骤：仅作流程展示，配置阶段已生效，执行时直接跳过
     if (mark.fileOp) {
       rlog(`[executeMark] 文件处理记录步骤（no-op）: ${mark.label}`);
@@ -6791,17 +6995,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const readElementValue = async (selector: string): Promise<string | null> => {
       const script = `
         ${DEEP_QUERY_HELPER}
+        ${READ_VISIBLE_VALUE_JS}
         (function() {
           var el = null;
           try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(selector))}); } catch(e) { el = null; }
           if (!el) return { ok: false, reason: 'not_found' };
-          var val = '';
-          try {
-            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') val = el.value || '';
-            else if (el.contentEditable === 'true') val = el.textContent || '';
-            else val = el.textContent || el.innerText || '';
-          } catch(e) { val = el.textContent || ''; }
-          return { ok: true, value: String(val).trim() };
+          return { ok: true, value: String(__cinsideReadVisibleValue(el) || '').trim() };
         })();
       `;
       try {
@@ -6831,21 +7030,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         }
         const readScript = `
           ${DEEP_QUERY_HELPER}
+          ${READ_VISIBLE_VALUE_JS}
           (function() {
             var el = null;
             try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(mark.sourceSelector))}); } catch(e) { el = null; }
             if (!el) return { ok: false, reason: 'not_found' };
-            var val = '';
-            try {
-              if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') {
-                val = el.value || '';
-              } else if (el.contentEditable === 'true') {
-                val = el.textContent || '';
-              } else {
-                val = el.textContent || el.innerText || '';
-              }
-            } catch(e) { val = el.textContent || ''; }
-            return { ok: true, value: val.trim() };
+            return { ok: true, value: String(__cinsideReadVisibleValue(el) || '').trim() };
           })();
         `;
         const readRes = await window.electronAPI.viewExecuteJS("left", readScript) as { ok: boolean; value?: string; reason?: string } | null;
@@ -6859,6 +7049,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
       // 控件映射：点击展开型控件（选项/日历）用专用脚本设定值，而非普通填值
       if (mark.widget) {
+        rlog(`[executeMark] 【控件填值】kind=${mark.widget.kind}, action=${mark.action}, inputTarget=${mark.inputTarget ? "有" : "无"}, value="${resolvedValue}"`);
         const w = mark.widget;
         if (!resolvedValue) {
           throw new Error(`控件取值失败: 左侧值为空 (${w.triggerLabel || w.triggerSelector})`);
@@ -6918,23 +7109,37 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       }
 
       // 4. 执行填值
-      let result = await performInputValue(side, mark.inputTarget, resolvedValue, inPopup);
+      let result = await performInputValue(side, mark.inputTarget, resolvedValue, inPopup, mark.workflow, markDisplayLabel(mark));
       rlog(`[executeMark] performInputValue 结果:`, result);
 
-      // 5. 如果失败，兜底重试一次（等待更长时间后重试）
-      if (!result?.ok) {
-        rlog(`[executeMark] 首次填入失败(${result?.reason})，等待后重试...`);
-        await new Promise((r) => setTimeout(r, 1000));
+      // 5. 如果失败或值未真正填入（框架受控组件state未同步），兜底重试
+      // setOk=false 说明 el.value !== text，常见于 React/Vue 受控组件 state 异步更新
+      const hsQuick = settingsRef.current.high_speed_mode === true;
+      if (!result?.ok || result?.setOk === false) {
+        const reason = !result?.ok ? result?.reason : "值未同步(setOk=false)";
+        rlog(`[executeMark] 首次填入问题(${reason})，等待框架state同步后重试...`);
+        // 高速模式下给框架足够的state同步时间（React/Vue 受控组件需要更长时间）
+        await new Promise((r) => setTimeout(r, hsQuick ? 800 : 1000));
         await waitElementAppear(side, mark.inputTarget, 5000, inPopup);
-        result = await performInputValue(side, mark.inputTarget, resolvedValue, inPopup);
+        result = await performInputValue(side, mark.inputTarget, resolvedValue, inPopup, mark.workflow, markDisplayLabel(mark));
         rlog(`[executeMark] 重试结果:`, result);
+        // 重试后仍未成功则再用更长时间等待后第三次尝试
+        if (!result?.ok || result?.setOk === false) {
+          rlog(`[executeMark] 重试仍未同步，增加等待时间第三次尝试...`);
+          await new Promise((r) => setTimeout(r, 1200));
+          await waitElementAppear(side, mark.inputTarget, 5000, inPopup);
+          result = await performInputValue(side, mark.inputTarget, resolvedValue, inPopup, mark.workflow, markDisplayLabel(mark));
+          rlog(`[executeMark] 第三次重试结果:`, result);
+        }
       }
       if (!result?.ok) {
         throw new Error(`输入失败: ${result?.reason || "未知原因"} (${mark.inputTarget})`);
       }
-      // 6. 回读输入框实际值：框架受控组件需短暂等待 state 同步后回读（失败回退为填入值）
-      await new Promise((r) => setTimeout(r, 100));
-      return { filledValue: (await readElementValue(mark.inputTarget!)) ?? resolvedValue };
+      // 录入/审查/绑定输入成功后显示高亮框 + label
+      highlightMarkOnViews(mark);
+      // 6. 使用 performInputValue 返回的 currentValue（避免额外 IPC 调用）
+      const filledValue = (result?.currentValue as string) || resolvedValue;
+      return { filledValue };
     }
 
     // click 动作：真实点击
@@ -7578,7 +7783,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         return;
       }
       console.log(`[executeMark] CLICK side=${side}, selector=${mark.selector}, label=${mark.label}`);
-      let result = await performRealClick(side, mark.selector, inPopup);
+      const isPreClick = mark.clickPhase === "pre";
+      // 前置/过程/收尾点击都要像绑定输入一样，点击前先显示字段说明高亮标签；
+      // 过程点击常在翻页后才有 NEXT 等按钮，元素此刻可能尚未渲染 → 若首击失败则等元素出现后再高亮一次再点击
+      highlightMarkOnViews(mark);
+      let result = await performRealClick(side, mark.selector, inPopup, !isPreClick);
       // 收尾点击（clickPhase=post）是清理动作，目标常不存在（弹窗已关/本就无需关），
       // 长等待纯浪费（实测每行白等 ~7s）→ 压缩到 1.5s 且不做兜底重试；失败由上层"视为已闭环跳过"
       const isPostClick = mark.clickPhase === "post" || !!mark.docExtractClick;
@@ -7586,16 +7795,58 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       if (result && typeof result === "object" && "ok" in result && result.ok === false) {
         rlog(`[executeMark] 元素未出现，等待加载: ${mark.selector}`);
         await waitElementAppear(side, mark.selector, isPostClick ? 1500 : 6000, inPopup);
-        result = await performRealClick(side, mark.selector, inPopup);
+        // 元素确认出现后立即高亮并短暂停顿，确保用户看到标签后再点击
+        highlightMarkOnViews(mark);
+        await new Promise((r) => setTimeout(r, settingsRef.current.high_speed_mode === true ? 100 : 260));
+        result = await performRealClick(side, mark.selector, inPopup, !isPreClick);
       }
       // 再兜底重试一次（收尾点击不重试，直接走上层跳过逻辑；高速模式重试间隔减半）
       if (!isPostClick && result && typeof result === "object" && "ok" in result && result.ok === false) {
         await new Promise((r) => setTimeout(r, settingsRef.current.high_speed_mode === true ? 400 : 800));
-        result = await performRealClick(side, mark.selector, inPopup);
+        result = await performRealClick(side, mark.selector, inPopup, !isPreClick);
+      }
+      // 选择器查不到时用按钮文本兜底：不同记录页面结构可能不同（容器ID/层级变化），
+      // 固定选择器会失效。用 mark.label 提取按钮文本（如"Update"），遍历页面所有 button/a 匹配点击
+      if (!isPreClick && result && typeof result === "object" && "ok" in result && result.ok === false) {
+        const btnText = (mark.label || "").replace(/^(前置|过程|收尾)点击\s*·\s*/, "").trim();
+        if (btnText && btnText.length <= 20) {
+          rlog(`[executeMark] 选择器未找到，尝试文本匹配兜底: "${btnText}"`);
+          const textClickScript = `(function() {
+            var btns = document.querySelectorAll('button, a, input[type="button"], input[type="submit"]');
+            for (var i = 0; i < btns.length; i++) {
+              var t = ((btns[i].textContent || '') + ' ' + (btns[i].value || '')).trim();
+              if (t === ${JSON.stringify(btnText)} || t.indexOf(${JSON.stringify(btnText)}) >= 0) {
+                try { btns[i].scrollIntoView({ block: 'center', inline: 'nearest' }); } catch(e) {}
+                var o = btns[i].style.outline, oO = btns[i].style.outlineOffset, oS = btns[i].style.boxShadow, oT = btns[i].style.transition;
+                btns[i].style.transition = 'outline 0.15s ease-out, box-shadow 0.15s ease-out';
+                btns[i].style.outline = '3px solid #10b981';
+                btns[i].style.outlineOffset = '2px';
+                btns[i].style.boxShadow = '0 0 0 6px rgba(16,185,129,0.2)';
+
+                setTimeout(function() { btns[i].style.outline = o || ''; btns[i].style.outlineOffset = oO || ''; btns[i].style.boxShadow = oS || ''; btns[i].style.transition = oT || ''; }, 800);
+                btns[i].click();
+                return { ok: true, tag: btns[i].tagName, text: t };
+              }
+            }
+            return { ok: false, reason: 'text_not_found' };
+          })();`;
+          try {
+            result = inPopup
+              ? await window.electronAPI.popupExecuteJS(side, textClickScript)
+              : await window.electronAPI.viewExecuteJS(side, textClickScript);
+            if (result && typeof result === "object" && "ok" in result && result.ok) {
+              rlog(`[executeMark] 文本匹配兜底成功: "${btnText}"`, result);
+            }
+          } catch (e) {
+            rlog(`[executeMark] 文本匹配兜底异常:`, e);
+          }
+        }
       }
       if (result && typeof result === "object" && "ok" in result && result.ok === false) {
         throw new Error(`点击失败: 元素未找到 (${mark.selector})`);
       }
+      // 点击成功后显示高亮框 + label（前置=蓝色，录入=紫色，审查=橙色，过程/收尾=绿色）
+      highlightMarkOnViews(mark);
       return;
     }
 
@@ -7609,7 +7860,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       return;
     }
 
-    // 普通 pick：仅滚动到元素
+    // 普通 pick：滚动到元素 + 高亮（审查映射 action=pick，运行时也要有光标/字段，
+    // 与录入标记 action=input 一致，否则运行时看不到审查字段的紫色光标）
+    if (mark.widget) {
+      rlog(`[executeMark] 【控件仅定位】widget=${mark.widget.kind}, action=${mark.action}, inputTarget=${mark.inputTarget ? "有" : "无"} —— 控件未走填值分支（疑似审查/取值语义，未真正填入）`);
+    }
     const script = `
       ${DEEP_QUERY_HELPER}
       (function() {
@@ -7621,7 +7876,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       })();
     `;
     await window.electronAPI.viewExecuteJS(side, script);
-  }, [performInputValue, performRealClick, mappings, waitElementAppear, getRecordDocFields, waitForDownload, triggerWebExtract, grabDirectPreviewFile, runDocExtractFallback, updateLiveStepDetail, computeDocTargetFields]);
+    // 滚动完成后显示高亮 + label（所有步骤都显示字段说明）
+    highlightMarkOnViews(mark);
+  }, [performInputValue, performRealClick, mappings, waitElementAppear, getRecordDocFields, waitForDownload, triggerWebExtract, grabDirectPreviewFile, runDocExtractFallback, updateLiveStepDetail, computeDocTargetFields, highlightMarkOnViews]);
 
   // ============ 前端字段比对：执行完workflow后，直接从右侧BrowserView读取字段值与期望比对 ============
   // 不调用后端 startConfigurableVerify（它会通过Playwright重新导航页面，破坏LOOP当前状态）
@@ -7660,6 +7917,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     recordIndex: number,
     mappingsOverride?: FieldMapping[],
     docEntriesOverride?: CustomTextEntry[],
+    workflowBySelector?: Map<string, "entry" | "review">,
   ): Promise<{ comparisons: FieldComparison[]; overall: "match" | "mismatch" }> => {
     const comparisons: FieldComparison[] = [];
     // 优先使用模板自带的 mappings（复用已保存 LOOP 模板时，会话 mappings 可能为空或不匹配）
@@ -7699,18 +7957,17 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 通用读取元素值的JS脚本工厂（清洗选择器中的 cinside-* 临时类）
     const makeReadScript = (selector: string) => `
       ${DEEP_QUERY_HELPER}
+      ${READ_VISIBLE_VALUE_JS}
       (function() {
         var el = null;
         try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(selector))}); } catch(e) { el = null; }
         if (!el) return { found: false, value: '' };
         var tag = el.tagName;
         var val = '';
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
-          val = el.value || '';
-        } else if (tag === 'IMG') {
+        if (tag === 'IMG') {
           val = el.src || '';
         } else {
-          val = (el.textContent || '').trim();
+          val = __cinsideReadVisibleValue(el);
         }
         return { found: true, value: val };
       })();
@@ -7735,16 +7992,18 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
       // 1. 先pending高亮当前字段（目标网页元素）
       const pendingLabel = `${mp.right_label || mp.left_field}：比对中…`;
+      // 录入/审查字段按 workflow 反查状态：录入→浅紫(entry)，审查→深紫(review)，无语义→天蓝(pending)
+      const wfStatus = workflowBySelector?.get(mp.right_selector);
       window.electronAPI?.viewHighlightBoxes(webSide, [{
         selector: mp.right_selector,
-        status: "pending",
+        status: wfStatus ?? "pending",
         label: pendingLabel,
       }]).catch(() => {});
       // 如果左侧是database源，也pending高亮左侧
       if (mp.left_source === "database") {
         window.electronAPI?.viewHighlightBoxes("left", [{
           selector: mp.left_field,
-          status: "pending",
+          status: wfStatus ?? "pending",
           label: `${mp.right_label || mp.left_field}：比对中…`,
         }]).catch(() => {});
       }
@@ -7844,8 +8103,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         evidence_source: mp.left_source === "passport" ? "passport" : mp.left_source === "database" ? "web" : mp.left_source === "manual" ? "manual" : "excel",
       });
 
-      // 2. 用结果颜色高亮当前字段（match=绿, mismatch=红, missing=黄灰）
-      const resultStatus = match === "match" ? "match" : match === "mismatch" ? "mismatch" : "missing";
+      // 2. 结果颜色高亮：匹配字段保持紫色(entry/review，与绑定输入一致)，不匹配→红，缺失→黄灰
+      const resultStatus = match === "match"
+        ? (workflowBySelector?.get(mp.right_selector) ?? "entry")
+        : match === "mismatch" ? "mismatch" : "missing";
       const resultLabel = `${mp.right_label || mp.left_field}: ${wv || "—"}${match === "match" ? " ✓" : match === "mismatch" ? " ✗" : " ?"}`;
       window.electronAPI?.viewHighlightBoxes(webSide, [{
         selector: mp.right_selector,
@@ -8110,6 +8371,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         rlog(`[batch] 控件录入兜底：模板缺 ${bump} 个控件步骤（映射已绑定但无步骤），已自动补入执行`);
       }
     }
+    // === 诊断：最终进入执行的步骤列表（含兜底，按 order 排序）——确认控件到底在不在、排在哪 ===
+    for (const m of allMarks) {
+      rlog(`[batch] 诊断执行序: order=${m.order}, action=${m.action}, clickPhase=${m.clickPhase || "-"}, inputTarget=${m.inputTarget ? "有" : "无"}, widget=${m.widget ? m.widget.kind : "-"}, label=${m.label || m.selector}`);
+    }
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
     // 通用recordKey查找：优先name字段，再找第一个非空字段，最后用record_id
@@ -8160,7 +8425,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       if (!options?.wrapWithVerify) return;
       // 模板未保存 mappings 时从审查 marks 兜底推导，保证字段对比有数据；
       // 比对范围仅限有审查步骤的字段（录入/控件绑定不产生比对，见 getTemplateCompareMappings）
-      const cmp = await compareFieldsForRecord(record, recordIndex, getTemplateCompareMappings(tpl), tpl.customTextEntries);
+      const cmp = await compareFieldsForRecord(record, recordIndex, getTemplateCompareMappings(tpl), tpl.customTextEntries, buildWorkflowBySelector([...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks]));
       comparisons = cmp.comparisons;
       verifyOverall = cmp.overall;
       // 条件断点：字段比对发现不匹配，且本次执行的 marks 中有 on-error 断点
@@ -8334,6 +8599,16 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             skippedErrors.push(`收尾点击「${mark.label || mark.selector}」失败：${errMsg}`);
             rlog(`[batch] 第 ${recordIndex + 1} 行收尾点击失败，继续执行剩余收尾步骤: ${errMsg}`);
           }
+          continue;
+        }
+        // 过程点击(mid)目标未出现 → 不中断整卡，标红记入报告，继续后续步骤(含收尾回主页)
+        // 目标未出现常因页面状态/数据差异(如记录不可更新不渲染按钮)，不应阻断整卡
+        if (mark.action === "click" && mark.clickPhase === "mid" && /元素未找到|元素未出现|not.?found|不存在/i.test(errMsg)) {
+          options?.onStepFail?.(recordIndex, mark, errMsg);
+          skippedErrors.push(`过程点击「${mark.label || mark.selector}」目标未出现，跳过继续：${errMsg}`);
+          const _diagUrl = typeof window !== "undefined" ? window.location.href : "n/a";
+          const _diagW5 = typeof document !== "undefined" ? (document.querySelector("#w5") ? "exists" : "missing") : "n/a";
+          rlog(`[batch] 第 ${recordIndex + 1} 行过程点击目标未出现，跳过继续执行剩余步骤: ${errMsg} | url=${_diagUrl} | #w5=${_diagW5}`);
           continue;
         }
         // 步骤行标记为失败（onStepStart 时已乐观打勾，这里纠正为失败态）
@@ -8560,6 +8835,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const entryCount = tpl.entryMarks.length;
     console.log(`[runBatch] 📋 marks统计: dataSource=${dataSourceCount}, review=${reviewCount}, entry=${entryCount}, mode=${tpl.mode}`);
     rlog(`[runBatch] 🚀 启动，共 ${cardRecords.length} 条记录，marks: dataSource=${dataSourceCount}, review=${reviewCount}, entry=${entryCount}`);
+    // === 诊断：控件/日历 vs 过程点击 的步骤结构与顺序（定位「控件没执行/顺序错乱」根因） ===
+    const wgRelevant = [...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks].filter((m) => m.widget || m.clickPhase === "mid");
+    for (const m of wgRelevant) {
+      rlog(`[batch] 诊断步骤: order=${m.order}, action=${m.action}, clickPhase=${m.clickPhase || "-"}, workflow=${m.workflow || "-"}, widget=${m.widget ? m.widget.kind : "-"}, inputTarget=${m.inputTarget ? "有" : "无"}, label=${m.label || m.selector}`);
+    }
 
     batchStopRef.current = false;
     // 每次启动 LOOP 重置暂停态（防止上一轮暂停残留到新一轮）
@@ -8700,11 +8980,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       setBatchMarkCursor({ recordIndex, markOrder: mark.order });
       // 记录当前步骤日志前缀，供文件提取等长耗时阶段实时回写 detail 进展
       liveStepPrefixRef.current = `LOOP [${recordIndex + 1}/${targets.length}] 步骤 ${mark.order}:`;
-      const side: ViewSide = mark.side === "left" ? "left" : "right";
-      const selector = mark.action === "input" && mark.inputTarget ? mark.inputTarget : mark.selector;
-      const label = `${mark.order} · ${markDisplayLabel(mark)}`;
-      window.electronAPI?.viewClearHighlight(side).catch(() => {});
-      window.electronAPI?.viewHighlightBoxes(side, [{ selector, status: "pending", label }]).catch(() => {});
+      // 在正确的视图（主视图/弹窗/脱离面板）上显示步骤高亮标签
+      highlightMarkOnViews(mark);
       setSteps((prev) => [
         ...prev,
         {
@@ -8942,7 +9219,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           let comparisons: FieldComparison[] = [];
           let verifyOverall: "match" | "mismatch" = "match";
           if (hasReviewSteps && pr.result.success) {
-            const cmp = await compareFieldsForRecord(record, i, getTemplateCompareMappings(tpl), tpl.customTextEntries);
+            const cmp = await compareFieldsForRecord(record, i, getTemplateCompareMappings(tpl), tpl.customTextEntries, buildWorkflowBySelector([...tpl.dataSourceMarks, ...tpl.reviewMarks, ...tpl.entryMarks]));
             comparisons = cmp.comparisons;
             verifyOverall = cmp.overall;
             // 条件断点：字段不匹配 + pass1 的 marks 带 on-error 断点
@@ -9392,7 +9669,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         void generateLoopAnalysis(collectedReports, Date.now() - Date.parse(startedAt));
       }
     }
-  }, [workflowTemplate, records, cardRecords, selectedId, executeTemplateForRecord, selectMode, avatarMode, exitSelectMode, exitAvatarMode, rightUrl, leftUrl, waitViewReady, generateLoopAnalysis, appendCardAnalysis, joinBgOcrForRecord, compareFieldsForRecord, markCardSkipped]);
+  }, [workflowTemplate, records, cardRecords, selectedId, executeTemplateForRecord, selectMode, avatarMode, exitSelectMode, exitAvatarMode, rightUrl, leftUrl, waitViewReady, generateLoopAnalysis, appendCardAnalysis, joinBgOcrForRecord, compareFieldsForRecord, markCardSkipped, highlightMarkOnViews]);
   // 始终把最新版本的 runBatch 写入 ref，供 finishTeachingAndRunBatch 直接调用
   runBatchRef.current = runBatch;
 
@@ -9576,11 +9853,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           // 执行该记录的步骤
           const result = await executeTemplateForRecord(task.workflowTemplate, record, ri, (recordIndex, mark) => {
             setBatchMarkCursor({ recordIndex, markOrder: mark.order });
-            const side: ViewSide = mark.side === "left" ? "left" : "right";
-            const selector = mark.action === "input" ? (mark.inputTarget || mark.selector) : mark.selector;
-            const label = markDisplayLabel(mark);
-            window.electronAPI?.viewClearHighlight(side).catch(() => {});
-            window.electronAPI?.viewHighlightBoxes(side, [{ selector, status: "pending", label }]).catch(() => {});
+            // 在正确的视图（主视图/弹窗/脱离面板）上显示步骤高亮标签
+            highlightMarkOnViews(mark);
             setSteps((prev) => [
               ...prev,
               {
@@ -9675,7 +9949,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               comparisons = result.comparisons || [];
               verifyOverall = result.verifyOverall || "match";
             } else {
-            const cmp = await compareFieldsForRecord(record, ri, getTemplateCompareMappings(task.workflowTemplate), task.workflowTemplate.customTextEntries);
+            const cmp = await compareFieldsForRecord(record, ri, getTemplateCompareMappings(task.workflowTemplate), task.workflowTemplate.customTextEntries, buildWorkflowBySelector([...task.workflowTemplate.dataSourceMarks, ...task.workflowTemplate.reviewMarks, ...task.workflowTemplate.entryMarks]));
             comparisons = cmp.comparisons;
             verifyOverall = cmp.overall;
             // 条件断点：字段比对发现不匹配且 pass1 的 marks 中有 on-error 断点
@@ -9806,7 +10080,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setBatchCursor(-1);
     setBatchMarkCursor(null);
     rlog("[runQueue] 🏁 队列执行完毕");
-  }, [taskQueue, queueRunning, executeTemplateForRecord, waitViewReady, joinBgOcrForRecord, compareFieldsForRecord, markCardSkipped]);
+  }, [taskQueue, queueRunning, executeTemplateForRecord, waitViewReady, joinBgOcrForRecord, compareFieldsForRecord, markCardSkipped, highlightMarkOnViews]);
 
   // 始终把最新版本的 runQueue 写入 ref
   runQueueRef.current = runQueue;
@@ -12297,7 +12571,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           side: "right",
           source: "web",
           selector: info.selector,
-          label: `${activePhase === "entry" ? "录入" : "审查"} · ${info.label || info.selector} ← Excel「${rightCol}」`,
+          label: `${activePhase === "entry" ? "录入" : activePhase === "review" ? "审查" : "绑定输入"} · ${info.label || info.selector} ← Excel「${rightCol}」`,
           value: info.value,
           workflow: activePhase || "data-source",
           action: "input",
@@ -12720,7 +12994,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           side: "left",
           source: "web",
           selector: info.selector,
-          label: `${activePhase === "entry" ? "录入" : "审查"} · ${info.label || info.selector} ← Excel「${currentExcelCol}」`,
+label: `${activePhase === "entry" ? "录入" : activePhase === "review" ? "审查" : "绑定输入"} · ${info.label || info.selector} ← Excel「${currentExcelCol}」`,
           value: info.value,
           workflow: activePhase || "data-source",
           action: "input",
@@ -12859,7 +13133,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     }
 
 // 普通映射流程：记录左侧拾取标记
-// 右侧 Excel 数据源模式：左网页是学校系统（比对目标），占 rightPicked 槽位
+// 右侧 Excel 数据源模式：左网页是学校系统（核对目标），占 rightPicked 槽位（审查先右后左的第二步）
 if (rightExcelModeRef.current) {
 setRightPicked(info);
 rightPickedSideRef.current = "left";
@@ -12872,8 +13146,8 @@ if (info.value || info.text) {
   sourceFieldValueRef.current = String(info.value || info.text).trim();
   sourceFieldLabelRef.current = info.label || info.selector || "";
 }
-// 审查模式（先右后左）：两侧已完成，等待保存；录入模式（先左后右）：左源拾取完成后继续拾取右侧元素
-// 右侧 Excel 模式：审查=继续点右侧 Excel 来源字段；录入=两侧完成
+// 审查模式（先右后左）：标准布局两侧已完成等待保存；右侧 Excel 布局=左网页核对目标已选、下一轮回到右侧 Excel 字段
+// 录入模式（先左后右）：标准布局左源拾取完成后继续拾取右侧元素；右侧 Excel 模式=两侧完成
 // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
 setPickTarget(
   rightExcelModeRef.current
@@ -12955,6 +13229,10 @@ type: info.type,
   const saveMapping = (m: FieldMapping) => {
     // 网页侧来源：显式传入优先；否则跟随本轮 rightPicked 槽位元素的实际所在侧
     const webSide: "left" | "right" = m.web_side ?? rightPickedSideRef.current ?? "right";
+    // 来源类型（供步骤打标与保存后高亮反馈共用）
+    const isExcelSource = m.left_source === "excel";
+    const isManualSource = m.left_source === "manual";
+    const isPassportSource = m.left_source === "passport";
     // createdAt：步骤卡片「最新步骤」定位用（重新保存同一 selector 时刷新为最新）
     const mappingToSave: FieldMapping = { ...m, web_side: webSide, createdAt: Date.now() };
     setMappings((prev) => [
@@ -12966,9 +13244,6 @@ type: info.type,
     const stepType = addingStepModeRef.current ?? currentLoopStepTypeRef.current;
     if (addingStepMode) {
       const isEntry = stepType === "entry";
-      const isExcelSource = m.left_source === "excel";
-      const isManualSource = m.left_source === "manual";
-      const isPassportSource = m.left_source === "passport";
       // 来源是左网页时，m.left_field 是左网页元素的 selector，需要运行时读取
       const leftWebSelector = (!isExcelSource && !isManualSource && !isPassportSource) ? m.left_field : undefined;
       // label中的来源描述
@@ -13004,10 +13279,10 @@ type: info.type,
     setRightPicked(null);
     setLeftPicked(null);
     rightPickedSideRef.current = "right";
-    // 标准：审查→右网页目标 / 录入→左侧来源；右侧Excel模式：审查→左网页目标 / 录入→右侧Excel来源
-    // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
+    // 标准：审查→右侧核对元素 / 录入→左侧来源；右侧Excel模式：审查→右侧Excel字段 / 录入→右侧Excel来源
+    // 两种模式下录入/审查的第一步都在右侧（右侧Excel布局：先选右侧具体字段/来源，再选左侧对应字段）
     const nextTarget: PickTarget = rightExcelModeRef.current
-      ? (addingStepModeRef.current === "entry" ? "right" : "left")
+      ? "right"
       : (addingStepModeRef.current === "entry" ? "left" : "right");
     setPickTarget(nextTarget);
     setTimeout(() => {
@@ -13020,13 +13295,27 @@ type: info.type,
         if (rightViewMode === "web") window.electronAPI?.viewStartPicking("right");
       }
     }, 200);
-    // 给被选网页元素加个临时高亮提示已保存
+    // 保存后给出双侧高亮反馈：目标网页元素 + 来源（Excel 列闪烁 / 左网页来源元素高亮）
     if (window.electronAPI) {
       window.electronAPI.viewHighlightBoxes(webSide, [
         { selector: m.right_selector, status: "pending", label: m.right_label || "已映射" },
       ]);
-      setTimeout(() => window.electronAPI?.viewClearHighlight(webSide), 1200);
+      // 来源是左网页元素（标准布局审查"先右后左"的第二步）时，左侧来源也高亮提示
+      const leftWebSourceSelector = (!isExcelSource && !isManualSource && !isPassportSource && webSide !== "left")
+        ? m.left_field
+        : undefined;
+      if (leftWebSourceSelector) {
+        window.electronAPI.viewHighlightBoxes("left", [
+          { selector: leftWebSourceSelector, status: "review", label: `来源 · ${leftPicked?.label || m.left_field}` },
+        ]);
+      }
+      setTimeout(() => {
+        window.electronAPI?.viewClearHighlight(webSide);
+        if (leftWebSourceSelector) window.electronAPI?.viewClearHighlight("left");
+      }, 1500);
     }
+    // Excel 来源列：闪烁该列表头并滚动定位（与网页侧高亮对称的即时反馈）
+    if (isExcelSource) setExcelFocusColumn(m.left_field);
   };
 
   const removeMapping = (index: number) => {
@@ -13165,6 +13454,8 @@ type: info.type,
         widget: draft,
       });
       rlog(`[commitWidgetDraft] 添加${stepType}步骤(控件): ${draft.triggerSelector} ← ${sourceLabel}(${leftFieldTrimmed})`);
+      // 诊断：确认控件 mark 的语义与创建条件（看不到此行=mark未建成功，是「控件没执行」的另一根因）
+      rlog(`[commitWidgetDraft] 诊断(步骤语义): action=${isEntry ? "input" : "pick"}, inputTarget=${isEntry ? "有" : "无"}, workflow=${stepType || "review"}, kind=${draft.kind}, createMark=${opts.createMark ? "是" : "否"}, leftField="${leftFieldTrimmed}"`);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -13806,16 +14097,12 @@ type: info.type,
         // database：从左侧网页实时读取
         const readScript = `
           ${DEEP_QUERY_HELPER}
+          ${READ_VISIBLE_VALUE_JS}
           (function() {
             var el = null;
             try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(binding.leftField))}); } catch(e) { el = null; }
             if (!el) return { ok: false, reason: 'not_found' };
-            var val = '';
-            try {
-              if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') val = el.value || '';
-              else val = (el.textContent || el.innerText || '').trim();
-            } catch(e) { val = el.textContent || ''; }
-            return { ok: true, value: String(val || '').trim() };
+            return { ok: true, value: String(__cinsideReadVisibleValue(el) || '').trim() };
           })();
         `;
         const r = (await window.electronAPI.viewExecuteJS("left", readScript)) as { ok: boolean; value?: string } | null;
@@ -14347,6 +14634,7 @@ type: info.type,
 
   // 右侧 Excel 拾取：右侧 Excel 作为数据源（左网页=学校系统，为比对目标）。
   // 与 onExcelPicked 对称：Excel 字段始终占 leftPicked 槽位（来源），区别仅在配对目标来自左网页。
+  // 审查映射（先右后左）：先点右侧 Excel 具体字段 → 再点左侧网页对应字段；录入：右 Excel 来源 → 左网页输入框。
   const onRightExcelPicked = (info: ExcelPickedField) => {
     const currentPendingAction = pendingActionRef.current;
     console.log("[onRightExcelPicked] 收到右侧 Excel 点击", { info, currentPendingAction });
@@ -14385,11 +14673,12 @@ type: info.type,
       sourceFieldValueRef.current = String(info.value).trim();
       sourceFieldLabelRef.current = info.field || "";
     }
-    // 录入流：来源确定后切到左网页选目标输入框；审查流：等待保存映射
+    // 审查流（先右后左）：右侧 Excel 具体字段已选（占来源槽位），切到左侧网页选核对目标；
+    // 录入流：来源确定后切到左网页选目标输入框
     // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
-    const isEntry = addingStepModeRef.current === "entry";
-    setPickTarget(isEntry ? "left" : null);
-    if (isEntry && leftViewMode === "web") {
+    const inStepMode = !!addingStepModeRef.current;
+    setPickTarget(inStepMode ? "left" : null);
+    if (inStepMode && leftViewMode === "web") {
       window.electronAPI?.viewStartPicking("left");
     }
     // 仅在录入/审查步骤设置阶段打标（与左侧 onExcelPicked 对称）；平时点格子不打标
@@ -14516,6 +14805,7 @@ type: info.type,
         const dbMappings = mappings.filter((m) => m.left_source === "database");
         const script = `
           ${DEEP_QUERY_HELPER}
+          ${READ_VISIBLE_VALUE_JS}
           (function() {
             const result = {};
             ${dbMappings
@@ -14523,7 +14813,7 @@ type: info.type,
                 (m) => `
             try {
               const el = __cinsideDeepQuery(${JSON.stringify(m.left_field)});
-              result[${JSON.stringify(m.left_field)}] = el ? (el.value || el.textContent || '') : '';
+              result[${JSON.stringify(m.left_field)}] = el ? __cinsideReadVisibleValue(el) : '';
             } catch (e) {
               result[${JSON.stringify(m.left_field)}] = '';
             }`
@@ -15305,21 +15595,131 @@ type: info.type,
           const anyRunning = running || singleRunning || batchRunning || queueRunning;
           if (loopCards.length > 0) {
             const cursorVal = Math.max(1, Math.min(runCursor ?? loopCards.length, loopCards.length));
+            // 两级下拉数据：第一级 GROUP 列表，第二级该 GROUP 的 LOOP（显示绑定卡片数）
+            const allSkills = loadSkills();
+            const groupSet = new Map<string, WorkflowTemplate[]>();
+            for (const s of allSkills) {
+              const g = s.group?.trim();
+              if (!g) continue;
+              if (!groupSet.has(g)) groupSet.set(g, []);
+              groupSet.get(g)!.push(s);
+            }
+            const boundGroupNames = new Set<string>();
+            for (const r of loopCards) {
+              const info = cardLoopMap[r.record_id];
+              const tpl = info ? allSkills.find((s) => s.id === info.loopId) : null;
+              if (tpl?.group?.trim()) boundGroupNames.add(tpl.group.trim());
+            }
+            const menuGroups = Array.from(groupSet.entries())
+              .sort(([ga], [gb]) => ga.localeCompare(gb))
+              .sort((a, b) => (boundGroupNames.has(b[0]) ? 1 : 0) - (boundGroupNames.has(a[0]) ? 1 : 0));
+            const boundCountOf = (tplId: string) => loopCards.filter((r) => cardLoopMap[r.record_id]?.loopId === tplId).length;
             return (
-              <button
-                onClick={handleRunLoopsWithCursor}
-                disabled={anyRunning}
-                className={[
-                  "flex items-center gap-1.5 rounded-md px-3 py-0.5 text-[11px] font-medium text-white transition-all",
-                  anyRunning
-                    ? "cursor-not-allowed bg-slate-400"
-                    : "bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] shadow-sm",
-                ].join(" ")}
-                title={anyRunning ? "核验/LOOP 执行中…" : `运行前 ${cursorVal} 张已设 LOOP 的卡片（与左侧 LOOP 面板游标联动）`}
-              >
-                {anyRunning ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
-                {anyRunning ? "运行中" : `运行 ${cursorVal}/${loopCards.length}`}
-              </button>
+              <div className="relative flex items-center">
+                <button
+                  onClick={handleRunLoopsWithCursor}
+                  disabled={anyRunning}
+                  className={[
+                    "flex items-center gap-1.5 rounded-l-md py-0.5 pl-3 pr-2 text-[11px] font-medium text-white transition-all",
+                    anyRunning ? "cursor-not-allowed bg-slate-400" : "bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] shadow-sm",
+                  ].join(" ")}
+                  title={anyRunning ? "核验/LOOP 执行中…" : `运行前 ${cursorVal} 张已设 LOOP 的卡片（与左侧 LOOP 面板游标联动）`}
+                >
+                  {anyRunning ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+                  {anyRunning ? "运行中" : `运行 ${cursorVal}/${loopCards.length}`}
+                </button>
+                <button
+                  onClick={() => { if (!anyRunning) { setRunLoopMenuOpen((v) => !v); setRunLoopGroup(null); } }}
+                  disabled={anyRunning}
+                  className={[
+                    "flex items-center rounded-r-md border-l border-white/25 px-1.5 py-0.5 text-white transition-all",
+                    anyRunning ? "cursor-not-allowed bg-slate-400" : "bg-indigo-600 hover:bg-indigo-700",
+                  ].join(" ")}
+                  title="按 GROUP 选择要运行的 LOOP（只跑绑定该 LOOP 的卡片）"
+                >
+                  <ChevronDown className={`h-3 w-3 transition-transform ${runLoopMenuOpen ? "rotate-180" : ""}`} />
+                </button>
+                {runLoopMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-[60]" onClick={() => setRunLoopMenuOpen(false)} />
+                    <div
+                      className="absolute right-0 top-full z-[61] mt-1.5 w-64 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {runLoopGroup === null ? (
+                        /* 第一级：选 GROUP */
+                        <div className="py-1">
+                          <div className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">选择分组</div>
+                          {menuGroups.length === 0 ? (
+                            <div className="px-3 py-3 text-[11px] text-slate-400">还没有分组。保存 LOOP 时可选「分组（GROUP）」</div>
+                          ) : (
+                            menuGroups.map(([g, tpls]) => (
+                              <button
+                                key={g}
+                                onClick={() => setRunLoopGroup(g)}
+                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-slate-700 hover:bg-indigo-50"
+                              >
+                                <FolderOpen className="h-3.5 w-3.5 shrink-0 text-indigo-500" />
+                                <span className="min-w-0 flex-1 truncate font-medium">{g}</span>
+                                <span className="shrink-0 text-[10px] text-slate-400">{tpls.length} 个LOOP{boundGroupNames.has(g) ? " · 已绑定" : ""}</span>
+                                <ChevronRight className="h-3 w-3 shrink-0 text-slate-300" />
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      ) : (
+                        /* 第二级：选该 GROUP 里的 LOOP */
+                        <div className="py-1">
+                          <button
+                            onClick={() => setRunLoopGroup(null)}
+                            className="flex w-full items-center gap-1 border-b border-slate-100 px-3 py-1.5 text-left text-[11px] text-slate-500 hover:bg-slate-50"
+                          >
+                            <ChevronLeft className="h-3 w-3" /> 返回分组
+                          </button>
+                          <div className="px-3 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">{runLoopGroup}</div>
+                          {(groupSet.get(runLoopGroup) || []).map((tpl) => {
+                            const cnt = boundCountOf(tpl.id);
+                            // 该组内已绑卡、但绑的不是这个 LOOP 的卡片数（>0 时可一键切换到本 LOOP）
+                            const switchable = loopCards.filter((r) => {
+                              const cur = cardLoopMap[r.record_id]?.loopId;
+                              return cur !== tpl.id && (groupSet.get(runLoopGroup) || []).some((t) => t.id === cur);
+                            }).length;
+                            return (
+                              <div key={tpl.id} className="flex items-center gap-1 pr-2">
+                                <button
+                                  onClick={() => handleRunLoopById(tpl.id)}
+                                  className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left text-[12px] text-slate-700 hover:bg-indigo-50 disabled:opacity-50"
+                                  disabled={cnt === 0}
+                                  title={cnt === 0 ? "该 LOOP 没有绑定任何卡片" : `运行绑定该 LOOP 的 ${cnt} 张卡片`}
+                                >
+                                  <span className="shrink-0 text-sm">{tpl.icon || "🔍"}</span>
+                                  <span className="min-w-0 flex-1 truncate font-medium">{tpl.name}</span>
+                                  <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] ${cnt > 0 ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-400"}`}>
+                                    {cnt} 张卡
+                                  </span>
+                                </button>
+                                <button
+                                  onClick={() => handleSwitchCardsToLoop(runLoopGroup, tpl.id)}
+                                  disabled={switchable === 0}
+                                  className={[
+                                    "flex shrink-0 items-center justify-center rounded-md p-1.5 transition-all",
+                                    switchable > 0
+                                      ? "text-indigo-600 hover:bg-indigo-100"
+                                      : "cursor-not-allowed text-slate-300",
+                                  ].join(" ")}
+                                  title={switchable > 0 ? `把组内 ${switchable} 张已适配卡片切换绑定到该 LOOP` : "没有可切换的卡片"}
+                                >
+                                  <ArrowLeftRight className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
             );
           }
           return (
@@ -15655,6 +16055,58 @@ type: info.type,
                 title="拖拽调整左右面板比例"
               >
                 <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-slate-200 hover:bg-brand-300" />
+                {/* 中缝互换按钮：数据源 ⇄ 学校系统（外层热区扩大点击范围，且不触发分隔条拖拽） */}
+                <div className="absolute left-1/2 top-1/2 z-40 -translate-x-1/2 -translate-y-1/2">
+                  <div
+                    className="-m-2 cursor-pointer p-2"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    title="互换左右面板内容"
+                    onClick={() => setSwapMenuOpen((v) => !v)}
+                  >
+                    <button
+                      className={[
+                        "flex h-4 w-4 items-center justify-center rounded-full border bg-white shadow-sm transition-all hover:shadow",
+                        swapMenuOpen
+                          ? "border-brand-300 text-brand-600"
+                          : "border-slate-200 text-slate-400 opacity-70 hover:border-brand-300 hover:text-brand-600 hover:opacity-100",
+                      ].join(" ")}
+                    >
+                      <ArrowLeftRight className="h-2.5 w-2.5" />
+                    </button>
+                  </div>
+                  {swapMenuOpen && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-40"
+                        onMouseDown={(e) => {
+                          e.stopPropagation(); // 不冒泡到分隔条，否则点遮罩会触发拖拽
+                          setSwapMenuOpen(false);
+                        }}
+                      />
+                      <div
+                        className="absolute left-7 top-0 z-50 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg"
+                        // 菜单是分隔条的子元素：mousedown 必须阻断冒泡，
+                        // 否则按下菜单项会启动分隔条拖拽，面板随之缩放导致 click 永远点不中
+                        onMouseDown={(e) => e.stopPropagation()}
+                      >
+                        <button
+                          onClick={() => swapPaneContents("page")}
+                          className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-slate-600 hover:bg-slate-50"
+                        >
+                          <Globe className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                          互换当前网页
+                        </button>
+                        <button
+                          onClick={() => swapPaneContents("all")}
+                          className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-slate-600 hover:bg-slate-50"
+                        >
+                          <ArrowLeftRight className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                          互换全部（所有TAB / Excel / 绑定）
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             )}
 
@@ -16303,9 +16755,15 @@ type: info.type,
       <SaveSkillDialog
         open={showSaveSkill}
         defaultName={`${appMode === "entry" ? "录入" : appMode === "review" ? "审查" : "LOOP"}技能 ${new Date().toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" })}`}
+        groups={(() => {
+          const set = new Set<string>();
+          loadSkills().forEach((s) => { if (s.group && s.group.trim()) set.add(s.group.trim()); });
+          return Array.from(set);
+        })()}
+        defaultGroup={groupChainRef.current ?? undefined}
         onClose={() => { setShowSaveSkill(false); setSaveSkillRunAfter(false); }}
-        onSave={(name, icon) => handleSaveSkill(name, icon, false)}
-        onSaveAndRun={(name, icon) => handleSaveSkill(name, icon, true)}
+        onSave={(name, icon, group) => handleSaveSkill(name, icon, false, group)}
+        onSaveAndRun={(name, icon, group) => handleSaveSkill(name, icon, true, group)}
       />
 
       {/* ============ 元素屏蔽：拾取中提示横幅 ============ */}

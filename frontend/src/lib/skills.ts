@@ -42,19 +42,46 @@ export function deleteSkill(id: string) {
   saveSkills(skills);
 }
 
-export function updateSkillMeta(id: string, patch: { name?: string; description?: string; icon?: string; iconImage?: string | null }) {
+export function updateSkillMeta(id: string, patch: { name?: string; description?: string; icon?: string; iconImage?: string | null; group?: string | null }) {
   const skills = loadSkills();
   const idx = skills.findIndex((s) => s.id === id);
   if (idx >= 0) {
-    // 先构建设置字段（不包含 null 的 iconImage）
-    const { iconImage, ...rest } = patch;
+    // 先构建设置字段（不包含 null 的 iconImage / group）
+    const { iconImage, group, ...rest } = patch;
     const next: WorkflowTemplate = { ...skills[idx], ...rest, updatedAt: Date.now() };
     if (typeof iconImage === "string") next.iconImage = iconImage;
     // iconImage 为 null 表示清除自定义图片
     if (iconImage === null) delete next.iconImage;
+    // group 为 null 表示移出分组；非空字符串表示加入分组
+    if (typeof group === "string" && group.trim()) next.group = group.trim();
+    else if (group === null) delete next.group;
     skills[idx] = next;
     saveSkills(skills);
   }
+}
+
+/** 批量设置分组：ids 中所有模板归入 group；group 为 null 表示移出分组 */
+export function setSkillsGroup(ids: string[], group: string | null) {
+  const skills = loadSkills();
+  const idSet = new Set(ids);
+  for (let i = 0; i < skills.length; i++) {
+    if (!idSet.has(skills[i].id)) continue;
+    const next: WorkflowTemplate = { ...skills[i], updatedAt: Date.now() };
+    if (typeof group === "string" && group.trim()) next.group = group.trim();
+    else if (group === null) delete next.group;
+    skills[i] = next;
+  }
+  saveSkills(skills);
+}
+
+/** 所有已使用的分组名（去重，按名称排序） */
+export function listSkillGroups(): string[] {
+  const set = new Set<string>();
+  for (const s of loadSkills()) {
+    const g = s.group?.trim();
+    if (g) set.add(g);
+  }
+  return Array.from(set).sort((a, b) => a.localeCompare(b));
 }
 
 export function getSkillById(id: string): WorkflowTemplate | null {

@@ -57,6 +57,8 @@ interface ExcelRowProps {
   canPick: boolean;
   /** 本行的拾取标记（field → mark），身份经 reconcile 缓存保持稳定 */
   rowMarks: Map<string, PickedMark> | undefined;
+  /** 录入/审查步骤已选列：这些列不打数字徽标，整列显示选中底色 */
+  stepPickedColumns: Set<string> | undefined;
   onRowNumClick: (realIdx: number) => void;
   onLoopCellClick: (realIdx: number) => void;
   onLoopCellMouseDown: (e: React.MouseEvent, realIdx: number) => void;
@@ -85,6 +87,7 @@ const ExcelRow = memo(function ExcelRow({
   picking,
   canPick,
   rowMarks,
+  stepPickedColumns,
   onRowNumClick,
   onLoopCellClick,
   onLoopCellMouseDown,
@@ -128,7 +131,9 @@ const ExcelRow = memo(function ExcelRow({
       {columns.map((c) => {
         const v = r.fields[c] || "";
         const display = v || "—";
-        const mark = rowMarks?.get(c);
+        // 录入/审查步骤列：抑制数字徽标，用整列选中底色表达
+        const inStepCol = !!stepPickedColumns?.has(c);
+        const mark = inStepCol ? undefined : rowMarks?.get(c);
         const justPicked = !!mark && Date.now() - mark.createdAt < 2500;
         const colSelected = selectedColumn === c;
         // 框选模式下，点击 LOOP 列单元格也能选择范围
@@ -176,8 +181,10 @@ const ExcelRow = memo(function ExcelRow({
                 : "",
               mark
                 ? "bg-blue-100/80 outline outline-2 outline-blue-500 -outline-offset-1 shadow-[0_0_0_3px_rgba(59,130,246,0.25),0_0_14px_rgba(59,130,246,0.55)]"
+                : inStepCol && !isLoopCol && !reviewCellCls
+                ? "bg-brand-50/70"
                 : "",
-              colSelected && !mark && !isLoopCol ? "bg-brand-50/60" : "",
+              colSelected && !mark && !inStepCol && !isLoopCol ? "bg-brand-50/60" : "",
               isLoopCol && inRange ? "bg-indigo-50/70" : "",
               isLoopCol && isAnchor ? "bg-indigo-200" : "",
               justPicked ? "animate-glow-pulse" : "",
@@ -191,6 +198,8 @@ const ExcelRow = memo(function ExcelRow({
                 ? `点击拾取字段「${c}」`
                 : mark
                 ? `第 ${mark.order} 个拾取 · ${mark.label}`
+                : inStepCol
+                ? `已选为录入/审查来源列「${c}」`
                 : display
             }
           >
@@ -520,6 +529,18 @@ export default function ExcelView({
     return reconciled;
   }, [pickedMarks]);
 
+  // 录入/审查步骤设置：Excel 来源字段不打数字徽标，改为整列选中效果（brand 底色）
+  // data-source 教学流程仍保留序号徽标（表示拾取顺序）
+  const stepPickedColumns = useMemo(() => {
+    const s = new Set<string>();
+    for (const mk of pickedMarks) {
+      if (mk.source === "excel" && (mk.workflow === "entry" || mk.workflow === "review") && mk.excelField) {
+        s.add(mk.excelField);
+      }
+    }
+    return s;
+  }, [pickedMarks]);
+
   // 表头右键菜单：阻止默认菜单，弹出自定义菜单
   const handleHeaderContextMenu = (e: React.MouseEvent, column: string) => {
     if (!onFieldColumnMapChange) return;
@@ -756,6 +777,7 @@ export default function ExcelView({
                   const stdKey = colToStandard.get(c);
                   const stdField = stdKey ? STANDARD_FIELDS.find((f) => f.key === stdKey) : null;
                   const isBound = boundSet.has(c);
+                  const inStepCol = stepPickedColumns.has(c);
                   return (
                     <th
                       key={c}
@@ -772,12 +794,15 @@ export default function ExcelView({
                           ? "bg-brand-100 text-brand-700 ring-1 ring-brand-300"
                           : isBound
                           ? "bg-violet-100 text-violet-700 ring-1 ring-violet-300"
+                          : inStepCol
+                          ? "bg-brand-50/80 text-brand-700"
                           : stdField
                           ? "bg-emerald-50 text-emerald-700"
                           : "text-slate-500",
                       ].join(" ")}
                       title={
                         (isBound ? `已绑定到提取元素/输入步骤 · LOOP 时逐行取「${c}」列的值\n` : "") +
+                        (inStepCol ? `已选为录入/审查来源列\n` : "") +
                         (onFieldColumnMapChange
                           ? `右键标记此列（姓名/护照/学号）${onSelectColumn ? "；左键点击选中为 LOOP 变量" : ""}`
                           : onSelectColumn ? (isSelected ? "点击取消选中该列" : "点击选中该列作为 LOOP 变量") : c)
@@ -839,6 +864,7 @@ export default function ExcelView({
                     picking={picking}
                     canPick={!!onPickedField}
                     rowMarks={marksByRecord.get(r.record_id)}
+                    stepPickedColumns={stepPickedColumns}
                     onRowNumClick={handleRowNumClick}
                     onLoopCellClick={handleLoopCellClick}
                     onLoopCellMouseDown={handleLoopCellMouseDown}

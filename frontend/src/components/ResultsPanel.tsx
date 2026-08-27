@@ -25,6 +25,7 @@ import {
   Loader2,
   MinusCircle,
   MousePointerClick,
+  MoveLeft,
   MoveRight,
   Play,
   RotateCcw,
@@ -643,14 +644,14 @@ function SideBySideCompare({
   const matchCount = rows.filter((r) => r.match === "match").length;
   return (
     <div>
-      {/* 方向指示：LOOP/审查=右侧网页→左侧/EXCEL；录入=左侧EXCEL→右侧网页 */}
+      {/* 方向指示：审查=右侧网页←左侧/EXCEL（箭头指向基准）；录入=左侧EXCEL→右侧网页 */}
       <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
         <span className="flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-600">
           {hint ?? (isReview ? (
             <>
-              <span className="text-emerald-700">右侧网页</span>
-              <MoveRight className="h-3 w-3 text-slate-400" />
               <span className="text-blue-700">左侧网页 / EXCEL</span>
+              <MoveLeft className="h-3 w-3 text-slate-400" />
+              <span className="text-emerald-700">右侧网页</span>
               <span className="text-slate-400">（{appMode === "loop" ? "LOOP" : "审查"}：以左侧为基准核对右侧）</span>
             </>
           ) : (
@@ -1927,7 +1928,12 @@ function ReportTab({
                       >
                         {p.leftValue || (p.status === "pending" ? "读取中…" : "—")}
                       </span>
-                      <MoveRight className="h-3 w-3 shrink-0 text-slate-400" />
+                      {/* 方向语义：录入=来源填入右侧网页（→）；审查=右侧网页核对左侧来源（←） */}
+                      {appMode === "entry" ? (
+                        <MoveRight className="h-3 w-3 shrink-0 text-slate-400" />
+                      ) : (
+                        <MoveLeft className="h-3 w-3 shrink-0 text-slate-400" />
+                      )}
                       <span
                         className={[
                           "truncate rounded px-1 py-0.5",
@@ -2208,7 +2214,7 @@ function ReportTab({
                       )}
                       <span
                         className="shrink-0 font-medium text-slate-700"
-                        title={row.leftLabel === row.rightLabel ? row.leftLabel : `${row.leftLabel} → ${row.rightLabel}`}
+                        title={row.leftLabel === row.rightLabel ? row.leftLabel : isEntry ? `${row.leftLabel} → ${row.rightLabel}` : `${row.leftLabel} ← ${row.rightLabel}`}
                       >
                         {row.leftLabel}
                       </span>
@@ -2219,7 +2225,12 @@ function ReportTab({
                         >
                           {row.leftValue || "—"}
                         </span>
-                        <MoveRight className="h-3 w-3 shrink-0 text-slate-400" />
+                        {/* 方向语义：录入=来源填入右侧网页（→）；审查=右侧网页核对左侧来源（←） */}
+                        {isEntry ? (
+                          <MoveRight className="h-3 w-3 shrink-0 text-slate-400" />
+                        ) : (
+                          <MoveLeft className="h-3 w-3 shrink-0 text-slate-400" />
+                        )}
                         <span
                           className={[
                             "truncate rounded px-1 py-0.5",
@@ -3563,7 +3574,7 @@ function ReportTab({
                         ? "bg-red-500 text-white shadow-sm animate-pulse"
                         : "text-slate-500 hover:bg-white/60",
                     ].join(" ")}
-                    title={addingStepMode === "review" ? "审核模式激活中（再次点击关闭）" : "审核模式：字段用于右侧网页与左侧Excel核对"}
+                    title={addingStepMode === "review" ? "审核模式激活中（再次点击关闭）" : "审核模式：先选右侧具体字段，再选左侧对应字段核对"}
                   >
                     <ArrowLeft className="h-2.5 w-2.5" />
                     审核
@@ -4432,7 +4443,7 @@ function ReportTab({
                       ? "bg-red-500 text-white shadow-sm animate-pulse"
                       : "text-slate-500 hover:bg-white/60",
                   ].join(" ")}
-                  title={addingStepMode === "review" ? "审核模式激活中（再次点击关闭）" : "审核模式：字段用于右侧网页与左侧Excel核对"}
+                  title={addingStepMode === "review" ? "审核模式激活中（再次点击关闭）" : "审核模式：先选右侧具体字段，再选左侧对应字段核对"}
                 >
                   <ArrowLeft className="h-2.5 w-2.5" />
                   审核

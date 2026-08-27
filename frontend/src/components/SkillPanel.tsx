@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ClipboardEvent, type ChangeEvent } from "react";
-import { Check, Play, Pencil, Trash2, X, Sparkles, GitBranch, ImagePlus, Search, Layers, Share2, KeyRound, Copy, Download, Loader2, Wifi, WifiOff, RefreshCw } from "lucide-react";
+import { Check, Play, Pencil, Trash2, X, Sparkles, GitBranch, ImagePlus, Search, Layers, Share2, KeyRound, Copy, Download, Loader2, Wifi, WifiOff, RefreshCw, FolderOpen, FolderPlus, CheckSquare } from "lucide-react";
 import type { WorkflowTemplate, AppMode } from "../types";
-import { loadSkills, deleteSkill, updateSkillMeta, getDefaultIcons, importSkill } from "../lib/skills";
+import { loadSkills, deleteSkill, updateSkillMeta, setSkillsGroup, listSkillGroups, getDefaultIcons, importSkill } from "../lib/skills";
 import { encodeShareCode, decodeShareCode } from "../lib/skillShare";
 import { api } from "../api/client";
 
@@ -69,6 +69,35 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
 
   // 刷新按钮的旋转反馈
   const [refreshSpin, setRefreshSpin] = useState(false);
+
+  // 批量分组模式：勾选多个 LOOP 归入同一个 GROUP
+  const [groupSelectMode, setGroupSelectMode] = useState(false);
+  const [groupSelIds, setGroupSelIds] = useState<Set<string>>(new Set());
+  const [newGroupName, setNewGroupName] = useState("");
+  const [showNewGroupInput, setShowNewGroupInput] = useState(false);
+
+  const toggleGroupSelectMode = () => {
+    setGroupSelectMode((v) => !v);
+    setGroupSelIds(new Set());
+    setShowNewGroupInput(false);
+    setNewGroupName("");
+  };
+
+  const toggleGroupSel = (id: string) => {
+    setGroupSelIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const applyGroup = (group: string | null) => {
+    if (groupSelIds.size === 0) return;
+    setSkillsGroup(Array.from(groupSelIds), group);
+    refresh();
+    toggleGroupSelectMode();
+  };
 
   const refresh = () => {
     setSkills(loadSkills());
@@ -392,6 +421,38 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
     );
   }, [skills, keyword]);
 
+  // 按 GROUP 分节：同组放一起（带标题），未分组的排在最后另起一行（无标题）
+  const skillSections = useMemo(() => {
+    const gmap = new Map<string, WorkflowTemplate[]>();
+    const ungrouped: WorkflowTemplate[] = [];
+    for (const s of filteredSkills) {
+      const g = s.group?.trim();
+      if (g) {
+        if (!gmap.has(g)) gmap.set(g, []);
+        gmap.get(g)!.push(s);
+      } else {
+        ungrouped.push(s);
+      }
+    }
+    const secs: { key: string; title: string | null; items: WorkflowTemplate[] }[] = Array.from(gmap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, items]) => ({ key: `g:${name}`, title: name, items }));
+    if (ungrouped.length > 0) secs.push({ key: "ungrouped", title: null, items: ungrouped });
+    return secs;
+  }, [filteredSkills]);
+
+  // 布局说明：从模板拾取标记推导左右两侧各是网页还是 Excel
+  const layoutOf = (t: WorkflowTemplate): string => {
+    const all = [...(t.dataSourceMarks || []), ...(t.reviewMarks || []), ...(t.entryMarks || [])];
+    const excelSide = all.find((m) => m.source === "excel")?.side;
+    if (excelSide === "left") return "左Excel · 右网页";
+    if (excelSide === "right") return "左网页 · 右Excel";
+    const webSide = all.find((m) => m.source === "web")?.side;
+    if (webSide === "left") return "仅左侧网页";
+    if (webSide === "right") return "仅右侧网页";
+    return "";
+  };
+
   if (!open) return null;
 
   return (
@@ -422,6 +483,21 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
               <RefreshCw className={`h-3.5 w-3.5 ${refreshSpin ? "animate-spin" : ""}`} />
               刷新
             </button>
+            {!applyMode && (
+              <button
+                onClick={toggleGroupSelectMode}
+                className={[
+                  "flex items-center gap-1.5 rounded-xl px-3 py-2 text-[12px] font-medium shadow-sm ring-1 backdrop-blur-sm transition-all",
+                  groupSelectMode
+                    ? "bg-indigo-600 text-white ring-indigo-500 hover:bg-indigo-700"
+                    : "bg-white/60 text-slate-600 ring-slate-200 hover:bg-white hover:text-slate-900 dark:bg-slate-900/40 dark:text-slate-300 dark:ring-white/5 dark:hover:bg-slate-800/60 dark:hover:text-slate-100",
+                ].join(" ")}
+                title="批量选择 LOOP 归入同一个 GROUP 分组"
+              >
+                <FolderOpen className="h-3.5 w-3.5" />
+                {groupSelectMode ? "退出分组" : "分组"}
+              </button>
+            )}
             <button
               onClick={openImport}
               className="flex items-center gap-1.5 rounded-xl bg-white/60 px-3 py-2 text-[12px] font-medium text-slate-600 shadow-sm ring-1 ring-slate-200 backdrop-blur-sm transition-all hover:bg-white hover:text-slate-900 dark:bg-slate-900/40 dark:text-slate-300 dark:ring-white/5 dark:hover:bg-slate-800/60 dark:hover:text-slate-100"
@@ -460,7 +536,84 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
           </div>
         </div>
 
-        <div className="max-h-[calc(86vh-150px)] overflow-y-auto p-5 scrollbar-thin">
+        {/* 批量分组操作栏 */}
+        {groupSelectMode && (
+          <div className="shrink-0 border-b border-indigo-100 bg-indigo-50/60 px-5 py-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="flex items-center gap-1.5 text-[12px] font-medium text-indigo-700">
+                <CheckSquare className="h-3.5 w-3.5" />
+                已选 {groupSelIds.size} 个 LOOP
+              </span>
+              <span className="h-4 w-px bg-indigo-200" />
+              <span className="text-[11px] text-slate-500">归入：</span>
+              {listSkillGroups().map((g) => (
+                <button
+                  key={g}
+                  onClick={() => applyGroup(g)}
+                  disabled={groupSelIds.size === 0}
+                  className="rounded-lg bg-white px-2.5 py-1 text-[11px] font-medium text-indigo-700 ring-1 ring-indigo-200 transition-all hover:bg-indigo-600 hover:text-white disabled:opacity-40"
+                  title={`将选中的 ${groupSelIds.size} 个 LOOP 归入分组「${g}」`}
+                >
+                  {g}
+                </button>
+              ))}
+              {showNewGroupInput ? (
+                <span className="flex items-center gap-1.5">
+                  <input
+                    autoFocus
+                    value={newGroupName}
+                    onChange={(e) => setNewGroupName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && newGroupName.trim()) applyGroup(newGroupName.trim());
+                      if (e.key === "Escape") { setShowNewGroupInput(false); setNewGroupName(""); }
+                    }}
+                    placeholder="输入新分组名"
+                    className="w-36 rounded-lg border border-indigo-300 px-2.5 py-1 text-[12px] focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-200"
+                  />
+                  <button
+                    onClick={() => { if (newGroupName.trim()) applyGroup(newGroupName.trim()); }}
+                    disabled={!newGroupName.trim() || groupSelIds.size === 0}
+                    className="rounded-lg bg-indigo-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-indigo-700 disabled:opacity-40"
+                  >
+                    确定
+                  </button>
+                  <button
+                    onClick={() => { setShowNewGroupInput(false); setNewGroupName(""); }}
+                    className="rounded-lg px-2 py-1 text-[11px] text-slate-500 hover:bg-slate-200/60"
+                  >
+                    取消
+                  </button>
+                </span>
+              ) : (
+                <button
+                  onClick={() => setShowNewGroupInput(true)}
+                  disabled={groupSelIds.size === 0}
+                  className="flex items-center gap-1 rounded-lg border border-dashed border-indigo-300 px-2.5 py-1 text-[11px] font-medium text-indigo-600 transition-all hover:bg-white disabled:opacity-40"
+                  title="新建分组并把选中的 LOOP 归入"
+                >
+                  <FolderPlus className="h-3.5 w-3.5" /> 新建分组
+                </button>
+              )}
+              <span className="h-4 w-px bg-indigo-200" />
+              <button
+                onClick={() => applyGroup(null)}
+                disabled={groupSelIds.size === 0}
+                className="rounded-lg px-2.5 py-1 text-[11px] font-medium text-slate-500 transition-all hover:bg-white hover:text-rose-600 disabled:opacity-40"
+                title="把选中的 LOOP 移出当前分组"
+              >
+                移出分组
+              </button>
+              <button
+                onClick={toggleGroupSelectMode}
+                className="ml-auto rounded-lg px-2.5 py-1 text-[11px] font-medium text-slate-500 transition-all hover:bg-white"
+              >
+                完成
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="max-h-[calc(86vh-150px)] overflow-y-auto bg-slate-50 p-5 scrollbar-thin dark:bg-slate-900/60">
           {filteredSkills.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-20 text-center">
               {keyword ? (
@@ -482,8 +635,32 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
               )}
             </div>
           ) : (
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              {filteredSkills.map((skill) => {
+            <div className="space-y-5">
+              {skillSections.map((sec) => (
+                <div key={sec.key}>
+                  {sec.title && (
+                    <div className="mb-2.5 flex items-center gap-1.5">
+                      <FolderOpen className="h-3.5 w-3.5 text-indigo-500" />
+                      <span className="text-[12px] font-semibold text-indigo-600 dark:text-indigo-300">{sec.title}</span>
+                      <span className="text-[10px] text-slate-400">{sec.items.length} 个LOOP</span>
+                      {(() => {
+                        const labels = Array.from(new Set(sec.items.map(layoutOf).filter(Boolean)));
+                        const label = labels.length === 1 ? labels[0] : labels.length > 1 ? "混合布局" : "";
+                        if (!label) return null;
+                        return (
+                          <span
+                            className="flex items-center gap-1 rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500 dark:bg-white/5 dark:text-slate-400"
+                            title="该组 LOOP 的面板布局（左侧 · 右侧）"
+                          >
+                            {label}
+                          </span>
+                        );
+                      })()}
+                      <div className="ml-2 h-px flex-1 bg-slate-200/80 dark:bg-white/5" />
+                    </div>
+                  )}
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              {sec.items.map((skill) => {
                 const modeInfo = MODE_LABELS[skill.mode];
                 const stepCount = skill.dataSourceMarks.length + skill.reviewMarks.length + skill.entryMarks.length;
                 const isEditing = editingId === skill.id;
@@ -504,9 +681,12 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                           : "border-slate-200/60 hover:border-slate-300 hover:shadow-lg hover:shadow-slate-900/5 hover:-translate-y-0.5 dark:border-white/5 dark:hover:border-white/20 dark:hover:shadow-black/20",
                       !isEditing && !applyMode && "cursor-grab active:cursor-grabbing",
                       isImgDragOver && !isEditing ? "ring-2 ring-slate-400/60 border-slate-400/60" : "",
+                      groupSelectMode && groupSelIds.has(skill.id) ? "ring-2 ring-indigo-500 border-indigo-400 dark:ring-indigo-400" : "",
+                      groupSelectMode && !isEditing ? "cursor-pointer" : "",
                     ].filter(Boolean).join(" ")}
-                    draggable={!isEditing && !applyMode}
-                    onDragStart={(e) => !isEditing && !applyMode && handleDragStart(e, skill)}
+                    draggable={!isEditing && !applyMode && !groupSelectMode}
+                    onClick={() => { if (groupSelectMode && !isEditing) toggleGroupSel(skill.id); }}
+                    onDragStart={(e) => !isEditing && !applyMode && !groupSelectMode && handleDragStart(e, skill)}
                     onDragOver={(e) => !applyMode && handleCardDragOver(e, skill.id)}
                     onDragLeave={(e) => !applyMode && handleCardDragLeave(e, skill.id)}
                     onDrop={(e) => !applyMode && handleCardDrop(e, skill.id)}
@@ -514,6 +694,19 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                     onDoubleClick={() => { if (applyMode && !isEditing && onApplySkill) { onApplySkill(skill); } }}
                     tabIndex={0}
                   >
+                    {/* 分组选择模式：右上角勾选指示 */}
+                    {groupSelectMode && !isEditing && (
+                      <div
+                        className={[
+                          "absolute right-2 top-2 z-10 flex h-5 w-5 items-center justify-center rounded-full border transition-all",
+                          groupSelIds.has(skill.id)
+                            ? "border-indigo-600 bg-indigo-600 text-white"
+                            : "border-slate-300 bg-white/80 text-transparent",
+                        ].join(" ")}
+                      >
+                        <Check className="h-3 w-3" />
+                      </div>
+                    )}
                     {/* 左侧自定义图标图片（非编辑态 + 有图） */}
                     {!isEditing && currentIconImage ? (
                       <div className="relative -my-0 -ml-0 w-24 shrink-0 overflow-hidden rounded-l-2xl">
@@ -658,6 +851,11 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                             <span className={`shrink-0 rounded-md px-2 py-0.5 text-[10px] font-semibold ${modeInfo.color} dark:bg-opacity-20 dark:text-opacity-90`}>
                               {modeInfo.label}
                             </span>
+                            {skill.group?.trim() && (
+                              <span className="shrink-0 rounded-md bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300" title={`分组：${skill.group.trim()}`}>
+                                {skill.group.trim()}
+                              </span>
+                            )}
                           </div>
                           <div className="mt-2 flex-1">
                             {skill.description ? (
@@ -670,7 +868,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                               <span className="opacity-50">·</span>
                               <span>{new Date(skill.updatedAt || skill.createdAt).toLocaleDateString("zh-CN")}</span>
                             </div>
-                            <div className="flex shrink-0 items-center gap-1">
+                            <div className={`flex shrink-0 items-center gap-1 ${groupSelectMode ? "pointer-events-none opacity-40" : ""}`}>
                               <button
                                 onClick={(e) => { e.stopPropagation(); handleShare(skill); }}
                                 className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-300 opacity-70 group-hover:opacity-100"
@@ -744,6 +942,11 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                             <span className={`shrink-0 rounded-md px-2 py-0.5 text-[10px] font-semibold ${modeInfo.color} dark:bg-opacity-20 dark:text-opacity-90`}>
                               {modeInfo.label}
                             </span>
+                            {skill.group?.trim() && (
+                              <span className="shrink-0 rounded-md bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300" title={`分组：${skill.group.trim()}`}>
+                                {skill.group.trim()}
+                              </span>
+                            )}
                           </div>
                           <div className="mt-1.5 flex-1">
                             {skill.description ? (
@@ -756,7 +959,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                               <span className="opacity-50">·</span>
                               <span>{new Date(skill.updatedAt || skill.createdAt).toLocaleDateString("zh-CN")}</span>
                             </div>
-                            <div className="flex shrink-0 items-center gap-1">
+                            <div className={`flex shrink-0 items-center gap-1 ${groupSelectMode ? "pointer-events-none opacity-40" : ""}`}>
                               <button
                                 onClick={(e) => { e.stopPropagation(); handleShare(skill); }}
                                 className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-300 opacity-70 group-hover:opacity-100"
@@ -813,6 +1016,9 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                   </div>
                 );
               })}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>
