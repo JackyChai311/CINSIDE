@@ -150,7 +150,7 @@
         "provider": "github",
         "owner": "JackyChai311",
         "repo": "CINSIDE",
-        "draft": false
+        "releaseType": "release"
       }
     ]
   }
