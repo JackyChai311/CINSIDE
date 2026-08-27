@@ -19,6 +19,7 @@ import {
   X,
 } from "lucide-react";
 import type { ViewSide } from "../electron";
+import { originColorClass } from "../lib/originColor";
 
 interface Props {
   side: ViewSide;
@@ -944,6 +945,15 @@ export default function BrowserPane({
                       const isEmpty = !tab.url;
                       const isActive = tab.id === activeTabId && !isAddingTab && editingTabId !== tab.id;
                       const isDimmed = isAddingTab || (editingTabId && editingTabId !== tab.id);
+                      // 网页 TAB 头部按站点配色（与 GROUP 标题行的网页名同色）：对色即对网页
+                      const tabOrigin = (() => {
+                        if (isEmpty) return "";
+                        try {
+                          const u = new URL(tab.url);
+                          return u.protocol.startsWith("http") ? u.origin : "";
+                        } catch { return ""; }
+                      })();
+                      const activeTabClass = tabOrigin ? originColorClass(tabOrigin) : "bg-white/90 text-slate-700 shadow-sm ring-1 ring-white/80";
                       return (
                         <div key={tab.id} className="flex shrink-0 items-center">
                           {editingTabId === tab.id ? (
@@ -980,7 +990,7 @@ export default function BrowserPane({
                               className={[
                                 "group flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all max-w-[160px]",
                                 isActive
-                                  ? "bg-white/90 text-slate-700 shadow-sm ring-1 ring-white/80"
+                                  ? activeTabClass
                                   : "bg-white/30 text-slate-500 hover:bg-white/50 hover:text-slate-600",
                                 isDimmed ? "opacity-40 pointer-events-none" : "",
                               ].join(" ")}
@@ -989,7 +999,7 @@ export default function BrowserPane({
                               {isEmpty ? (
                                 <Search className={`h-2.5 w-2.5 shrink-0 ${isActive ? "text-slate-600" : "text-slate-400"}`} />
                               ) : (
-                                <Globe className={`h-2.5 w-2.5 shrink-0 ${isActive ? "text-slate-600" : "text-slate-400"}`} />
+                                <Globe className={`h-2.5 w-2.5 shrink-0 ${isActive ? "opacity-80" : "text-slate-400"}`} />
                               )}
                               <span className="truncate">{getTabTitle(tab.url)}</span>
                               {!isEmpty && (

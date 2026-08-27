@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ClipboardEvent, type ChangeEvent } from "react";
-import { Check, Play, Pencil, Trash2, X, Sparkles, GitBranch, ImagePlus, Search, Layers, Share2, KeyRound, Copy, Download, Loader2, Wifi, WifiOff, RefreshCw, FolderOpen, FolderPlus, CheckSquare } from "lucide-react";
+import { Check, Play, Pencil, Trash2, X, Sparkles, GitBranch, ImagePlus, Search, Layers, Share2, KeyRound, Copy, Download, Loader2, Wifi, WifiOff, RefreshCw, FolderOpen, FolderPlus, CheckSquare, Globe, FileSpreadsheet } from "lucide-react";
 import type { WorkflowTemplate, AppMode } from "../types";
-import { loadSkills, deleteSkill, updateSkillMeta, setSkillsGroup, listSkillGroups, getDefaultIcons, importSkill } from "../lib/skills";
+import { loadSkills, deleteSkill, updateSkillMeta, setSkillsGroup, listSkillGroups, getDefaultIcons, importSkill, frameAlignedTemplate } from "../lib/skills";
+import { groupPaneSnapshot, originColorClass } from "../lib/paneLinks";
 import { encodeShareCode, decodeShareCode } from "../lib/skillShare";
 import { api } from "../api/client";
 
@@ -11,6 +12,8 @@ interface SkillPanelProps {
   onRunSkill: (tpl: WorkflowTemplate) => void;
   onEditFlow?: (tpl: WorkflowTemplate) => void;
   onSkillsChange?: () => void;
+  /** 会话左右互换状态：布局标签按当前物理帧显示（模板帧不一致时镜像文字） */
+  layoutFlipped?: boolean;
   /** 应用模式：显示"应用"按钮替代"执行"，点击后将模板步骤加载到当前设置 */
   applyMode?: boolean;
   /** 应用模式下点击"应用"按钮的回调 */
@@ -35,7 +38,7 @@ function readFileAsDataURL(file: File | Blob): Promise<string> {
   });
 }
 
-export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSkillsChange, applyMode, onApplySkill }: SkillPanelProps) {
+export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSkillsChange, applyMode, onApplySkill, layoutFlipped = false }: SkillPanelProps) {
   const [skills, setSkills] = useState<WorkflowTemplate[]>(() => loadSkills());
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -441,13 +444,19 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
     return secs;
   }, [filteredSkills]);
 
-  // 布局说明：从模板拾取标记推导左右两侧各是网页还是 Excel
+  // 布局说明：从模板拾取标记推导左右两侧各是网页还是 Excel（按当前互换帧对齐，互换后标签跟着翻转）
   const layoutOf = (t: WorkflowTemplate): string => {
     const all = [...(t.dataSourceMarks || []), ...(t.reviewMarks || []), ...(t.entryMarks || [])];
-    const excelSide = all.find((m) => m.source === "excel")?.side;
+    const excelSide0 = all.find((m) => m.source === "excel")?.side;
+    const excelSide = ((t.flipped ?? false) !== layoutFlipped && excelSide0)
+      ? (excelSide0 === "left" ? "right" : "left")
+      : excelSide0;
     if (excelSide === "left") return "左Excel · 右网页";
     if (excelSide === "right") return "左网页 · 右Excel";
-    const webSide = all.find((m) => m.source === "web")?.side;
+    const webSide0 = all.find((m) => m.source === "web")?.side;
+    const webSide = ((t.flipped ?? false) !== layoutFlipped && webSide0)
+      ? (webSide0 === "left" ? "right" : "left")
+      : webSide0;
     if (webSide === "left") return "仅左侧网页";
     if (webSide === "right") return "仅右侧网页";
     return "";
@@ -639,7 +648,7 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
               {skillSections.map((sec) => (
                 <div key={sec.key}>
                   {sec.title && (
-                    <div className="mb-2.5 flex items-center gap-1.5">
+                    <div className="mb-2.5 flex flex-wrap items-center gap-1.5">
                       <FolderOpen className="h-3.5 w-3.5 text-indigo-500" />
                       <span className="text-[12px] font-semibold text-indigo-600 dark:text-indigo-300">{sec.title}</span>
                       <span className="text-[10px] text-slate-400">{sec.items.length} 个LOOP</span>
@@ -656,7 +665,36 @@ export default function SkillPanel({ open, onClose, onRunSkill, onEditFlow, onSk
                           </span>
                         );
                       })()}
-                      <div className="ml-2 h-px flex-1 bg-slate-200/80 dark:bg-white/5" />
+                      {(() => {
+                        // GROUP 两侧面板标识：网页侧配色显示网页名（运行前校验网页名对不对），Excel 侧显示具体 Excel 文件名
+                        const raw = groupPaneSnapshot(sec.items);
+                        if (!raw || (!raw.left && !raw.right)) return null;
+                        const gFlip = (sec.items[0]?.flipped ?? false) !== layoutFlipped;
+                        const panes = { left: gFlip ? raw.right : raw.left, right: gFlip ? raw.left : raw.right };
+                        return (
+                          <span className="flex flex-wrap items-center gap-1" title="该 GROUP 绑定的两侧面板：运行 LOOP 前会校验网页是否已打开、左右是否反了">
+                            {(["left", "right"] as const).map((side) => {
+                              const p = panes[side];
+                              if (!p) return null;
+                              if (p.kind === "web" && p.origin) {
+                                return (
+                                  <span key={side} className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold ${originColorClass(p.origin)}`} title={`GROUP 网页：${p.label}（${side === "left" ? "左" : "右"}侧）· 运行前校验已打开`}>
+                                    <Globe className="h-2.5 w-2.5 shrink-0" />
+                                    <span className="max-w-[130px] truncate">{p.label}</span>
+                                  </span>
+                                );
+                              }
+                              return (
+                                <span key={side} className="flex items-center gap-1 rounded-md bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-300 dark:ring-emerald-500/30" title={`GROUP Excel：${p.label}（${side === "left" ? "左" : "右"}侧）`}>
+                                  <FileSpreadsheet className="h-2.5 w-2.5 shrink-0" />
+                                  <span className="max-w-[130px] truncate">{p.label}</span>
+                                </span>
+                              );
+                            })}
+                          </span>
+                        );
+                      })()}
+                      <div className="ml-2 h-px min-w-4 flex-1 bg-slate-200/80 dark:bg-white/5" />
                     </div>
                   )}
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

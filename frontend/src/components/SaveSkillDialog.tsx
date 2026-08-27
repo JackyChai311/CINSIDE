@@ -9,17 +9,20 @@ interface SaveSkillDialogProps {
   groups?: string[];
   /** 预选分组（连续设计链：清空步骤再保存时自动归入上一个 LOOP 的分组） */
   defaultGroup?: string;
+  /** 预填的网站链接（教学时学校系统侧激活 TAB 的网址，可改成主页 LINK） */
+  defaultSiteLink?: string;
   onClose: () => void;
-  onSave: (name: string, icon: string, group?: string) => void;
-  onSaveAndRun?: (name: string, icon: string, group?: string) => void;
+  onSave: (name: string, icon: string, group?: string, siteLink?: string) => void;
+  onSaveAndRun?: (name: string, icon: string, group?: string, siteLink?: string) => void;
 }
 
-export default function SaveSkillDialog({ open, defaultName, groups, defaultGroup, onClose, onSave, onSaveAndRun }: SaveSkillDialogProps) {
+export default function SaveSkillDialog({ open, defaultName, groups, defaultGroup, defaultSiteLink, onClose, onSave, onSaveAndRun }: SaveSkillDialogProps) {
   const [name, setName] = useState(defaultName);
   const [icon, setIcon] = useState("🔍");
   // group: undefined=不分组；""=正在新建（输入中）；非空=已选/已输入的分组名
   const [group, setGroup] = useState<string | undefined>(undefined);
   const [newGroup, setNewGroup] = useState("");
+  const [siteLink, setSiteLink] = useState("");
 
   useEffect(() => {
     if (open) {
@@ -27,17 +30,18 @@ export default function SaveSkillDialog({ open, defaultName, groups, defaultGrou
       setIcon("🔍");
       setGroup(defaultGroup || undefined);
       setNewGroup("");
+      setSiteLink(defaultSiteLink || "");
     }
-  }, [open, defaultName, defaultGroup]);
+  }, [open, defaultName, defaultGroup, defaultSiteLink]);
 
   if (!open) return null;
 
   const icons = getDefaultIcons();
   const effectiveGroup = group === "" ? newGroup.trim() : group;
 
-  const handleSave = (fn: (name: string, icon: string, group?: string) => void) => {
+  const handleSave = (fn: (name: string, icon: string, group?: string, siteLink?: string) => void) => {
     if (!name.trim()) return;
-    fn(name.trim(), icon, effectiveGroup || undefined);
+    fn(name.trim(), icon, effectiveGroup || undefined, siteLink.trim() || undefined);
   };
 
   return (
@@ -140,6 +144,18 @@ export default function SaveSkillDialog({ open, defaultName, groups, defaultGrou
             {group !== "" && group && group === defaultGroup && (
               <p className="mt-1.5 text-[10px] text-indigo-500">连续设计：已自动延续上一个 LOOP 的分组，点「不分组」可退出</p>
             )}
+          </div>
+
+          <div>
+            <label className="mb-1 block text-[11px] font-medium text-slate-600">网站主页链接（可选）</label>
+            <input
+              value={siteLink}
+              onChange={(e) => setSiteLink(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}
+              placeholder="投喂该网站主页 LINK，如 https://www.xxu.edu.cn"
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-200"
+            />
+            <p className="mt-1 text-[10px] text-slate-400">运行时按此网站识别「学校系统」开在哪一侧、自动对齐左右；只取 http(s) 网址主体，带不带子目录都行，留空则记录当前网页</p>
           </div>
         </div>
 

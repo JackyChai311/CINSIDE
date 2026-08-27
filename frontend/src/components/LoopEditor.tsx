@@ -10,7 +10,19 @@ import {
   makeSubloop, makeIfElse, makeCase, makeComment, addCaseBranch,
   removeBranch, countNodes,
 } from "../lib/flowGraph";
-import { saveSkill } from "../lib/skills";
+import { saveSkill, mirrorTemplateSides } from "../lib/skills";
+
+/** 流程图节点泳道镜像（左右互换帧对齐）：markSide 翻转，分支递归 */
+function mirrorGraphSides(g: FlowGraph): FlowGraph {
+  const walk = (nodes: FlowNode[]): FlowNode[] =>
+    nodes.map((n) => {
+      const nn = { ...n };
+      if (nn.markSide) nn.markSide = nn.markSide === "left" ? "right" : "left";
+      if (nn.branches) nn.branches = nn.branches.map((b) => ({ ...b, nodes: walk(b.nodes) }));
+      return nn;
+    });
+  return { ...g, nodes: walk(g.nodes) };
+}
 
 // ========== 布局常量（左右泳道） ==========
 const LANE_W = 280;                 // 单侧泳道卡片宽度
@@ -219,14 +231,23 @@ function readClipboard(): FlowNode[] | null {
 interface LoopEditorProps {
   template: WorkflowTemplate;
   allTemplates: WorkflowTemplate[];
+  /** 会话左右互换状态：展示时按当前物理帧镜像泳道，保存时反镜像回模板自身帧（往返稳定） */
+  layoutFlipped?: boolean;
   onClose: () => void;
   onSave: (updated: WorkflowTemplate) => void;
 }
 
-export default function LoopEditor({ template, allTemplates, onClose, onSave }: LoopEditorProps) {
+export default function LoopEditor({ template, allTemplates, layoutFlipped = false, onClose, onSave }: LoopEditorProps) {
   // 当前编辑的模板（GROUP 分支切换时会在组内成员间切换；初始为外部传入的 template）
   const [activeTpl, setActiveTpl] = useState<WorkflowTemplate>(template);
-  const [graph, setGraph] = useState<FlowGraph>(() => ensureGraph(template));
+  // 展示帧对齐：模板保存帧 ≠ 当前互换帧时镜像 marks 与已存图的泳道（落库数据不动）
+  const displayTpl = useCallback((t: WorkflowTemplate): WorkflowTemplate => {
+    if ((t.flipped ?? false) === layoutFlipped) return t;
+    const mirrored = mirrorTemplateSides(t);
+    if (mirrored.flowGraph?.nodes) mirrored.flowGraph = mirrorGraphSides(mirrored.flowGraph);
+    return mirrored;
+  }, [layoutFlipped]);
+  const [graph, setGraph] = useState<FlowGraph>(() => ensureGraph(displayTpl(template)));
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [rangeStart, setRangeStart] = useState<string | null>(null);
   const [tool, setTool] = useState<ToolMode>("select");
@@ -678,10 +699,12 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
     copy.reviewMarks?.forEach(syncMark);
     copy.entryMarks?.forEach(syncMark);
 
-    const updated: WorkflowTemplate = { ...copy, flowGraph: g, updatedAt: Date.now() };
+    // 图按展示帧编辑，落库前反镜像回模板自身帧（互换后再打开不会二次翻转）
+    const graphToStore = ((tpl.flipped ?? false) !== layoutFlipped) ? mirrorGraphSides(g) : g;
+    const updated: WorkflowTemplate = { ...copy, flowGraph: graphToStore, updatedAt: Date.now() };
     saveSkill(updated);
     return updated;
-  }, []);
+  }, [layoutFlipped]);
 
   const handleSave = () => {
     const updated = persistGraphToTpl(graph, activeTpl);
@@ -709,8 +732,8 @@ export default function LoopEditor({ template, allTemplates, onClose, onSave }: 
     setSubloopPicker(null);
     setTool("select");
     setActiveTpl(next);
-    setGraph(ensureGraph(next));
-  }, [activeTpl, graph, persistGraphToTpl]);
+    setGraph(ensureGraph(displayTpl(next)));
+  }, [activeTpl, graph, persistGraphToTpl, displayTpl]);
 
   useEffect(() => {
     (window as any).__cinsideFlowEditorOpen = true;

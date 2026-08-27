@@ -110,7 +110,7 @@ import type {
   WorkflowTemplate,
 } from "./types";
 import { FIELD_LABELS, OVERALL_LABELS, OVERALL_STYLES } from "./types";
-import type { CalendarRole, WidgetDef } from "./types";
+import type { CalendarRole, WidgetDef, PaneSnapshot } from "./types";
 import { normalizeText, parseDateCandidates, valuesEquivalent, isUmiMethod, extractMethodLabel } from "./utils/formatNormalize";
 import WidgetExtractPanel, { type WidgetBinding, type WidgetTestResult } from "./components/WidgetExtractPanel";
 import {
@@ -135,6 +135,7 @@ import {
 import LeftPanel from "./components/LeftPanel";
 import type { AISphereState } from "./components/AISphere";
 import BrowserPane, { type PickedElementInfo, getPaneExchangeApi } from "./components/BrowserPane";
+import { extractOrigin, collectPaneOrigins, sideFrameByOrigins, hostOf, templatePaneSnapshot, groupPaneSnapshot, checkGroupPanes, originColorClass } from "./lib/paneLinks";
 import ExcelView, { type ExcelPickedField } from "./components/ExcelView";
 import BlankExcel from "./components/BlankExcel";
 import type { PickTarget, CustomTextEntry } from "./components/ElementSelectBar";
@@ -150,7 +151,7 @@ import BreakpointDialog from "./components/BreakpointDialog";
 import SaveSkillDialog from "./components/SaveSkillDialog";
 import CredentialsPanel from "./components/CredentialsPanel";
 import DocLocalExtractConfig from "./components/DocLocalExtractConfig";
-import { saveSkill, getSkillById, loadSkills } from "./lib/skills";
+import { saveSkill, getSkillById, loadSkills, frameAlignedTemplate } from "./lib/skills";
 import { getBlockRules, addBlockRule, removeBlockRule, getHost, type BlockRule, SIDEBAR_AUTO_SELECTORS, getSidebarAutoCollapse, setSidebarAutoCollapse } from "./lib/blockRules";
 import { getAllCredentials, addCredential, removeCredential, type Credential } from "./lib/credentials";
 import type { ViewSide } from "./electron";
@@ -1106,6 +1107,13 @@ export default function App() {
   // 右侧Excel数据
   const [rightRecords, setRightRecords] = useState<ApplicantRecord[]>([]);
   const [rightExcelUploading, setRightExcelUploading] = useState(false);
+  // 左/右侧 Excel 的具体文件名（导入时记录）：GROUP 面板快照与 BrowserPane 的 Excel 标签展示用
+  const [leftExcelName, setLeftExcelName] = useState("");
+  const [rightExcelName, setRightExcelName] = useState("");
+  const leftExcelNameRef = useRef("");
+  leftExcelNameRef.current = leftExcelName;
+  const rightExcelNameRef = useRef("");
+  rightExcelNameRef.current = rightExcelName;
   const rightExcelInputRef = useRef<HTMLInputElement>(null);
   // 右侧 Excel 作为 LOOP 数据源：行范围框选 / 卡片已生成 / 选中列（LOOP 列拖拽框选用）
   const [rightRowRange, setRightRowRange] = useState<{ start: number; end: number } | null>(null);
@@ -1176,6 +1184,55 @@ const sourceFieldLabelRef = useRef<string>("");
 
   // —— 左右 BrowserPane 内容互换（中缝按钮）——
   const [swapMenuOpen, setSwapMenuOpen] = useState(false);
+  // 会话级左右互换状态：swap-all 时翻转。模板保存时记录自身帧（flipped），
+  // 运行/展示时按两帧是否一致决定是否镜像左右归属（见 frameAlignedTemplate）
+  const [layoutFlipped, setLayoutFlipped] = useState(false);
+  const layoutFlippedRef = useRef(false);
+
+  // 网站链接对齐：模板保存 siteOrigins（教学时左右两侧各是什么网站），
+  // 运行时看这些网站现在开在哪一侧来判定是否需要镜像——比帧标记可靠（手动换 TAB 也能识别）
+  const captureSiteOrigins = useCallback((): { left?: string; right?: string } => {
+    const activeOrigin = (side: "left" | "right"): string => {
+      const api = getPaneExchangeApi(side);
+      if (!api) return "";
+      const tab = (api.getWebTabs() || []).find((t) => t.id === api.getActiveTabId());
+      return extractOrigin(tab?.url);
+    };
+    return { left: activeOrigin("left"), right: activeOrigin("right") };
+  }, []);
+  const frameForTemplate = useCallback((tpl: WorkflowTemplate): boolean => {
+    const byLink = sideFrameByOrigins(tpl.siteOrigins, collectPaneOrigins());
+    if (byLink !== null) return byLink;
+    return layoutFlippedRef.current; // 目标网站都没开时回退会话互换标记
+  }, []);
+
+  // GROUP 两侧面板快照：Excel 侧记具体文件名，网页侧记 origin+主机名（按当前物理帧）。
+  // 用于 GROUP 标题行展示（彩色网页名 / Excel 名）与运行前「网页名对不对、左右反没反」校验
+  const captureGroupPanes = useCallback(
+    (marks: PickedMark[], origins: { left?: string; right?: string }): { left?: PaneSnapshot; right?: PaneSnapshot } => {
+      const excelSide = marks.find((m) => m.source === "excel")?.side;
+      // 网页侧 origin：激活 TAB 优先，激活页为空白/搜索页时回退该侧任一有内容的 TAB
+      const sideOrigin = (side: "left" | "right"): string => {
+        const active = extractOrigin(origins[side]);
+        if (active) return active;
+        const api = getPaneExchangeApi(side);
+        const all = (api?.getWebTabs() || []).map((t) => extractOrigin(t.url)).filter(Boolean);
+        return all[0] || "";
+      };
+      const out: { left?: PaneSnapshot; right?: PaneSnapshot } = {};
+      for (const side of ["left", "right"] as const) {
+        if (excelSide === side) {
+          const fileName = side === "left" ? leftExcelNameRef.current : rightExcelNameRef.current;
+          out[side] = { kind: "excel", label: fileName || (side === "left" ? "数据源 Excel" : "参考 Excel") };
+        } else {
+          const o = sideOrigin(side);
+          if (o) out[side] = { kind: "web", label: hostOf(o), origin: o };
+        }
+      }
+      return out;
+    },
+    []
+  );
 
   // 互换菜单是 HTML 层，网页模式下会被原生 BrowserView 盖住点不到：
   // 菜单打开期间走模态覆盖机制移除所有原生视图，关闭后由 modal-overlay-exited 事件触发恢复（含强制重绘）
@@ -1228,6 +1285,9 @@ const sourceFieldLabelRef = useRef<string>("");
     setRightViewMode(leftViewMode);
     setLeftBlankExcel(rightBlankExcel);
     setRightBlankExcel(leftBlankExcel);
+    // Excel 具体文件名跟内容一起对调（GROUP 面板快照与 Excel 标签展示用）
+    setLeftExcelName(rightExcelName);
+    setRightExcelName(leftExcelName);
     // 绑定逻辑跟着内容走：拾取标记与映射的左右归属互换（Excel来源/网页目标的指向同时换）
     setPickedMarks((prev) => prev.map((m) => ({ ...m, side: m.side === "left" ? "right" : "left" })));
     setMappings((prev) => prev.map((m) => ({ ...m, web_side: m.web_side === "left" ? "right" : "left" })));
@@ -1245,7 +1305,13 @@ const sourceFieldLabelRef = useRef<string>("");
       lApi.setWebTabsState(rt, ri);
       rApi.setWebTabsState(lt, li);
     }
+    // 记录会话互换帧翻转（已保存模板运行时按帧比对决定是否镜像左右）
+    layoutFlippedRef.current = !layoutFlippedRef.current;
+    setLayoutFlipped(layoutFlippedRef.current);
   };
+  // ref 持有最新版互换函数：runBatch（useCallback）里调用时避免拿到旧闭包的 Excel/视图状态
+  const swapPaneContentsRef = useRef(swapPaneContents);
+  swapPaneContentsRef.current = swapPaneContents;
 
   // 底部审查面板的高度比例（百分比），审查流操作时自动收窄
   const [bottomPanelHeight, setBottomPanelHeight] = useState<number>(20);
@@ -3108,6 +3174,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       // Electron 下 File.path 可用：登记本地路径，导出时原地写回原文件
       const fp = (file as File & { path?: string }).path;
       if (fp) api.setExcelSource("left", fp, file.name).catch(() => {});
+      setLeftExcelName(file.name);
       if (r.count === 0) {
         alert("Excel 文件为空或没有有效数据行，请检查文件内容。");
       } else {
@@ -3139,6 +3206,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       const r = await api.uploadExcelRight(file);
       const fp = (file as File & { path?: string }).path;
       if (fp) api.setExcelSource("right", fp, file.name).catch(() => {});
+      setRightExcelName(file.name);
       if (r.records.length === 0) {
         alert("Excel 文件为空或没有有效数据行，请检查文件内容。");
       } else {
@@ -5808,6 +5876,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       mappings: mappings.length > 0 ? mappings : undefined,
       hasSearchSteps,
       hasSubmitStep,
+      // 记录保存时的互换帧（工作区 marks 始终是当前物理帧，运行时按帧比对镜像）
+      flipped: layoutFlippedRef.current,
+      // 记录教学时左右两侧各是什么网站：运行时按「网站现在开在哪侧」自动对齐左右
+      siteOrigins: captureSiteOrigins(),
     };
     setWorkflowTemplate(tpl);
     workflowTemplateRef.current = tpl; // 同步更新 ref，确保立即可读
@@ -6061,12 +6133,32 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     };
   }, [pickedMarks, selected, appMode, mappings, customTextEntries]);
 
-  const handleSaveSkill = useCallback((name: string, icon: string, runAfter?: boolean, group?: string) => {
+  const handleSaveSkill = useCallback((name: string, icon: string, runAfter?: boolean, group?: string, siteLink?: string) => {
     // 自动收纳「提取元素」面板中已配置但未保存的条目（FIFO，插在收尾点击之前），确保保存的 LOOP 模板包含全部步骤
     const { extraMarks, pendingEntries, marksWithExtras, pendingMappings } = collectPendingExtractMarks();
     const mergedMappings = mergeMappings(mappings, pendingMappings);
     const tpl = buildTemplateFromMarks(name, icon, { marks: marksWithExtras, mappings: mergedMappings });
     if (group) tpl.group = group;
+    // 记录保存时的互换帧（工作区 marks 始终是当前物理帧，运行时按帧比对镜像）
+    tpl.flipped = layoutFlippedRef.current;
+    // 记录教学时左右两侧各是什么网站（自动捕获激活 TAB）；用户投喂的主页链接优先覆盖「学校系统侧」
+    const origins = captureSiteOrigins();
+    if (siteLink && siteLink.trim()) {
+      const fed = extractOrigin(siteLink.trim());
+      if (fed) {
+        // 学校系统侧 = 网页步骤（录入/审查）所在侧，无则取数据源网页步骤所在侧
+        const webMarks = [...marksWithExtras].filter((m) => m.source === "web");
+        const sysMarks = webMarks.filter((m) => m.workflow === "entry" || m.workflow === "review");
+        const sysSide = sysMarks[0]?.side || webMarks[0]?.side;
+        if (sysSide === "left") { origins.left = fed; }
+        else if (sysSide === "right") { origins.right = fed; }
+        else if (!origins.right) { origins.right = fed; }
+        else { origins.left = fed; }
+      }
+    }
+    tpl.siteOrigins = origins;
+    // GROUP 两侧面板快照：网页侧记 origin+主机名、Excel 侧记具体文件名（GROUP 标题展示 + 运行前校验/自动反转）
+    tpl.groupPanes = captureGroupPanes(marksWithExtras, origins);
     const saved = saveSkill(tpl);
     // 连续设计链：记住本次保存的分组，用户「清空步骤」后设计下一个并保存时自动预选同组
     groupChainRef.current = group?.trim() || null;
@@ -6100,7 +6192,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       runBatchRef.current(saved);
     }
     setSaveSkillRunAfter(false);
-  }, [buildTemplateFromMarks, selectMode, avatarMode, exitSelectMode, exitAvatarMode, saveSkillRunAfter, collectPendingExtractMarks, markPendingEntriesSaved]);
+  }, [buildTemplateFromMarks, selectMode, avatarMode, exitSelectMode, exitAvatarMode, saveSkillRunAfter, collectPendingExtractMarks, markPendingEntriesSaved, captureGroupPanes]);
 
   /** 快速保存 Loop：自动命名，不弹窗 */
   const handleQuickSaveLoop = useCallback(() => {
@@ -6142,16 +6234,20 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
    */
   const handleApplyLoop = useCallback((tpl: WorkflowTemplate) => {
     setShowApplyLoop(false);
+    // 左右互换对齐：优先按网站链接判定，无法判定时回退会话互换帧；
+    // 归一化副本 flipped=当前帧，后续保存/运行不再重复镜像
+    const src = frameAlignedTemplate(tpl, frameForTemplate(tpl));
+    const normalized: WorkflowTemplate = { ...src, flipped: frameForTemplate(tpl) };
     // 清空当前工作区（退出拾取模式、清空高光、步骤、映射等）
     refreshWorkspace();
     // 切换到模板对应的模式
-    setAppMode(tpl.mode);
+    setAppMode(normalized.mode);
     // 合并模板中的所有步骤，重新编号 order 和生成新 id（避免与历史状态冲突）
     const now = Date.now();
     const mergedMarks: PickedMark[] = [
-      ...tpl.dataSourceMarks,
-      ...tpl.reviewMarks,
-      ...tpl.entryMarks,
+      ...normalized.dataSourceMarks,
+      ...normalized.reviewMarks,
+      ...normalized.entryMarks,
     ].map((m, i) => ({
       ...m,
       id: `mk-${now}-${i}`,
@@ -6159,18 +6255,18 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     }));
     setPickedMarks(mergedMarks);
     // 恢复字段映射
-    if (tpl.mappings && tpl.mappings.length > 0) {
-      setMappings(tpl.mappings);
+    if (normalized.mappings && normalized.mappings.length > 0) {
+      setMappings(normalized.mappings);
     }
     // 恢复提取元素面板条目（自定义文本 + 文件提取字段，含 Excel 列绑定）
-    if (tpl.customTextEntries && tpl.customTextEntries.length > 0) {
-      setCustomTextEntries(tpl.customTextEntries);
+    if (normalized.customTextEntries && normalized.customTextEntries.length > 0) {
+      setCustomTextEntries(normalized.customTextEntries);
     }
     // 同步当前工作模板引用（便于后续保存/运行）
-    setWorkflowTemplate(tpl);
-    workflowTemplateRef.current = tpl;
-    lastTemplateRef.current = tpl;
-    setSuccessToast(`已应用 LOOP 模板：${tpl.name}（${mergedMarks.length} 个步骤）`);
+    setWorkflowTemplate(normalized);
+    workflowTemplateRef.current = normalized;
+    lastTemplateRef.current = normalized;
+    setSuccessToast(`已应用 LOOP 模板：${normalized.name}（${mergedMarks.length} 个步骤）`);
   }, [refreshWorkspace, setSuccessToast]);
 
   /**
@@ -8811,7 +8907,37 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       return;
     }
     runBatchInFlightRef.current = true;
-    const tpl = tplOverride ?? workflowTemplateRef.current ?? lastTemplateRef.current;
+    const tplRaw = tplOverride ?? workflowTemplateRef.current ?? lastTemplateRef.current;
+    // —— GROUP 网页校验与自动反转 ——
+    // 运行 GROUP 里的 LOOP 前：①模板记录的网页必须已在某个 BrowserPane 打开（网页没开/不对则不运行）；
+    // ②网页开对了、只是左右面板反了（互换帧与保存帧不一致）→ 自动「互换全部」反转回保存时的布局再运行
+    let groupAutoSwapped = false;
+    if (tplRaw?.group?.trim()) {
+      const panes = templatePaneSnapshot(tplRaw);
+      const check = checkGroupPanes(panes, collectPaneOrigins());
+      if (check.status === "missing") {
+        const names = check.missing.join("、");
+        const msg = `GROUP「${tplRaw.group.trim()}」的网页未打开（${names}）：请先在 BrowserPane 打开该网页再运行`;
+        console.warn(`[runBatch] ❌ ${msg}`);
+        rlog(`[runBatch] ❌ GROUP 网页未打开：${names}，中止运行`);
+        runBatchInFlightRef.current = false;
+        setError(msg);
+        return;
+      }
+      const frameMismatch = (tplRaw.flipped ?? false) !== layoutFlippedRef.current;
+      if (check.status === "swapped" && frameMismatch) {
+        rlog(`[runBatch] 🔄 GROUP 网页左右反了：自动互换全部面板回模板帧后运行`);
+        console.log("[runBatch] 🔄 GROUP 网页左右反了：自动互换全部面板");
+        // 走 ref 拿最新闭包：确保互换用当前 Excel/视图状态而非 runBatch 创建时的旧值
+        swapPaneContentsRef.current("all");
+        groupAutoSwapped = true;
+        // 等互换后的 webTabs/URL/Excel 状态重渲染生效（后续 frameForTemplate 需读到新物理帧）
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+    // 左右互换对齐：优先按模板记录的网站链接判定（网站开在哪侧就往哪侧对齐），
+    // 无法判定时回退会话互换帧。落库数据不动，仅运行镜像。
+    const tpl = tplRaw ? frameAlignedTemplate(tplRaw, frameForTemplate(tplRaw)) : tplRaw;
     console.log("[runBatch] 🚀 开始执行，tpl=", !!tpl, "records.length=", records.length, "selectedId=", selectedId, "targetIds=", targetIds?.length);
     if (!tpl) {
       console.warn("[runBatch] ❌ 无 workflowTemplate，退出");
@@ -8922,8 +9048,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
     // 快照教学时左右网页的 URL：每条 LOOP 开始前重置回这个搜索页，
     // 保证每条记录都从同一个初始页面状态开始（搜索框存在、无残留详情页）
-    const baseLeftUrl = leftUrl;
-    const baseRightUrl = rightUrl;
+    // 注：GROUP 自动反转后 setState 尚未反映到本闭包，取交换值（互换后左 URL = 原右 URL）
+    const baseLeftUrl = groupAutoSwapped ? rightUrl : leftUrl;
+    const baseRightUrl = groupAutoSwapped ? leftUrl : rightUrl;
 
     // 计算本次执行实际会用到哪些侧的网页（只重置用到的，避免无谓刷新）
     const hasReviewSteps = tpl.reviewMarks.length > 0;
@@ -9706,6 +9833,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       }
 
       const task = taskQueue[ti];
+      // 左右互换对齐：任务入队时的帧 ≠ 当前物理帧时镜像左右归属（就地替换运行副本，不改队列落库数据）
+      task.workflowTemplate = frameAlignedTemplate(task.workflowTemplate, layoutFlippedRef.current);
       setQueueCursor(ti);
       setTaskQueue((prev) => prev.map((t, i) => (i === ti ? { ...t, status: "running" } : t)));
 
@@ -15620,25 +15749,23 @@ type: info.type,
                   onClick={handleRunLoopsWithCursor}
                   disabled={anyRunning}
                   className={[
-                    "flex items-center gap-1.5 rounded-l-md py-0.5 pl-3 pr-2 text-[11px] font-medium text-white transition-all",
-                    anyRunning ? "cursor-not-allowed bg-slate-400" : "bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] shadow-sm",
+                    "flex items-center gap-1.5 py-0.5 pl-3 pr-2 text-[11px] font-medium text-white transition-all",
+                    anyRunning ? "cursor-not-allowed rounded-md bg-slate-400" : "rounded-l-md bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] shadow-sm",
                   ].join(" ")}
                   title={anyRunning ? "核验/LOOP 执行中…" : `运行前 ${cursorVal} 张已设 LOOP 的卡片（与左侧 LOOP 面板游标联动）`}
                 >
                   {anyRunning ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
                   {anyRunning ? "运行中" : `运行 ${cursorVal}/${loopCards.length}`}
                 </button>
+                {!anyRunning && (
                 <button
-                  onClick={() => { if (!anyRunning) { setRunLoopMenuOpen((v) => !v); setRunLoopGroup(null); } }}
-                  disabled={anyRunning}
-                  className={[
-                    "flex items-center rounded-r-md border-l border-white/25 px-1.5 py-0.5 text-white transition-all",
-                    anyRunning ? "cursor-not-allowed bg-slate-400" : "bg-indigo-600 hover:bg-indigo-700",
-                  ].join(" ")}
+                  onClick={() => { setRunLoopMenuOpen((v) => !v); setRunLoopGroup(null); }}
+                  className="flex items-center rounded-r-md border-l border-white/25 bg-indigo-600 px-1.5 py-0.5 text-white transition-all hover:bg-indigo-700"
                   title="按 GROUP 选择要运行的 LOOP（只跑绑定该 LOOP 的卡片）"
                 >
                   <ChevronDown className={`h-3 w-3 transition-transform ${runLoopMenuOpen ? "rotate-180" : ""}`} />
                 </button>
+                )}
                 {runLoopMenuOpen && (
                   <>
                     <div className="fixed inset-0 z-[60]" onClick={() => setRunLoopMenuOpen(false)} />
@@ -15653,18 +15780,48 @@ type: info.type,
                           {menuGroups.length === 0 ? (
                             <div className="px-3 py-3 text-[11px] text-slate-400">还没有分组。保存 LOOP 时可选「分组（GROUP）」</div>
                           ) : (
-                            menuGroups.map(([g, tpls]) => (
-                              <button
-                                key={g}
-                                onClick={() => setRunLoopGroup(g)}
-                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-slate-700 hover:bg-indigo-50"
-                              >
-                                <FolderOpen className="h-3.5 w-3.5 shrink-0 text-indigo-500" />
-                                <span className="min-w-0 flex-1 truncate font-medium">{g}</span>
-                                <span className="shrink-0 text-[10px] text-slate-400">{tpls.length} 个LOOP{boundGroupNames.has(g) ? " · 已绑定" : ""}</span>
-                                <ChevronRight className="h-3 w-3 shrink-0 text-slate-300" />
-                              </button>
-                            ))
+                            menuGroups.map(([g, tpls]) => {
+                              // GROUP 两侧面板标识：彩色网页名 + 具体 Excel 文件名（运行前可核对网页对不对）
+                              // 按当前互换帧翻转显示（用户现在看到左面板是什么就显示什么，与布局标签一致）
+                              const raw = groupPaneSnapshot(tpls);
+                              const gFlip = (tpls[0]?.flipped ?? false) !== layoutFlipped;
+                              const snap = raw ? { left: gFlip ? raw.right : raw.left, right: gFlip ? raw.left : raw.right } : undefined;
+                              return (
+                                <button
+                                  key={g}
+                                  onClick={() => setRunLoopGroup(g)}
+                                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-slate-700 hover:bg-indigo-50"
+                                >
+                                  <FolderOpen className="h-3.5 w-3.5 shrink-0 text-indigo-500" />
+                                  <span className="flex min-w-0 flex-1 flex-col">
+                                    <span className="flex min-w-0 items-center gap-1.5">
+                                      <span className="min-w-0 truncate font-medium">{g}</span>
+                                      <span className="shrink-0 text-[10px] text-slate-400">{tpls.length} 个LOOP{boundGroupNames.has(g) ? " · 已绑定" : ""}</span>
+                                    </span>
+                                    {snap && (snap.left || snap.right) && (
+                                      <span className="mt-1 flex min-w-0 items-center gap-1">
+                                        {(["left", "right"] as const).map((side) => {
+                                          const p = snap[side];
+                                          if (!p) return null;
+                                          return p.kind === "web" && p.origin ? (
+                                            <span key={side} className={`flex min-w-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium ${originColorClass(p.origin)}`} title={`GROUP 网页：${p.label}（运行前校验是否已打开）`}>
+                                              <Globe className="h-2.5 w-2.5 shrink-0" />
+                                              <span className="max-w-[110px] truncate">{p.label}</span>
+                                            </span>
+                                          ) : (
+                                            <span key={side} className="flex min-w-0 items-center gap-1 rounded-md bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-300 dark:ring-emerald-500/30" title={`GROUP Excel：${p.label}`}>
+                                              <FileSpreadsheet className="h-2.5 w-2.5 shrink-0" />
+                                              <span className="max-w-[110px] truncate">{p.label}</span>
+                                            </span>
+                                          );
+                                        })}
+                                      </span>
+                                    )}
+                                  </span>
+                                  <ChevronRight className="h-3 w-3 shrink-0 text-slate-300" />
+                                </button>
+                              );
+                            })
                           )}
                         </div>
                       ) : (
@@ -15923,6 +16080,7 @@ type: info.type,
                     setLeftViewMode(mode);
                   }}
                   excelTabTitle="数据源"
+                  excelFileName={leftExcelName || undefined}
                   newTabTitle="CINSIDE SEARCH"
                   favoriteSites={leftFavoriteSites}
                   onAddFavoriteSite={handleAddFavoriteSite("left")}
@@ -16127,6 +16285,7 @@ type: info.type,
                     setRightViewMode(mode);
                   }}
                   excelTabTitle="参考Excel"
+                  excelFileName={rightExcelName || undefined}
                   hasExcelData={rightRecords.length > 0 || rightBlankExcel}
                   onRequestAddExcel={() => rightExcelInputRef.current?.click()}
                   onNewBlankExcel={() => { setRightBlankExcel(true); setRightViewMode("excel"); }}
@@ -16736,6 +16895,7 @@ type: info.type,
         onApplySkill={handleApplyLoop}
         onEditFlow={(tpl) => { setEditingFlowTemplate(tpl); setShowSkillPanel(false); setShowApplyLoop(false); }}
         onSkillsChange={() => setSkillVersion((v) => v + 1)}
+        layoutFlipped={layoutFlipped}
       />
 
       {/* ============ 流程图编辑器 ============ */}
@@ -16743,6 +16903,7 @@ type: info.type,
         <LoopEditor
           template={editingFlowTemplate}
           allTemplates={loadSkills()}
+          layoutFlipped={layoutFlipped}
           onClose={() => setEditingFlowTemplate(null)}
           onSave={(updated) => { setEditingFlowTemplate(null); setSkillVersion((v) => v + 1); void updated; }}
         />
@@ -16761,9 +16922,20 @@ type: info.type,
           return Array.from(set);
         })()}
         defaultGroup={groupChainRef.current ?? undefined}
+        defaultSiteLink={(() => {
+          // 预填「学校系统侧」激活 TAB 的网址（录入/审查步骤所在侧），用户可改成主页 LINK 覆盖
+          const webMarks = pickedMarks.filter((m) => m.source === "web");
+          const sys = webMarks.filter((m) => m.workflow === "entry" || m.workflow === "review");
+          const side = sys[0]?.side || webMarks[0]?.side;
+          if (side !== "left" && side !== "right") return "";
+          const api = getPaneExchangeApi(side);
+          if (!api) return "";
+          const tab = (api.getWebTabs() || []).find((t) => t.id === api.getActiveTabId());
+          return tab?.url || "";
+        })()}
         onClose={() => { setShowSaveSkill(false); setSaveSkillRunAfter(false); }}
-        onSave={(name, icon, group) => handleSaveSkill(name, icon, false, group)}
-        onSaveAndRun={(name, icon, group) => handleSaveSkill(name, icon, true, group)}
+        onSave={(name, icon, group, siteLink) => handleSaveSkill(name, icon, false, group, siteLink)}
+        onSaveAndRun={(name, icon, group, siteLink) => handleSaveSkill(name, icon, true, group, siteLink)}
       />
 
       {/* ============ 元素屏蔽：拾取中提示横幅 ============ */}

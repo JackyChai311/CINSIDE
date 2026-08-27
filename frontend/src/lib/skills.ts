@@ -1,6 +1,30 @@
-import type { WorkflowTemplate } from "../types";
+import type { FieldMapping, PickedMark, WorkflowTemplate } from "../types";
 
 const STORAGE_KEY = "cinside_skills";
+
+/** 左右互换面板内容后，模板内记录的左右归属需要镜像翻转才能继续正确执行（marks.side 与 mappings.web_side 同步翻转） */
+export function mirrorTemplateSides(tpl: WorkflowTemplate): WorkflowTemplate {
+  const flipMark = (m: PickedMark): PickedMark => ({ ...m, side: m.side === "left" ? "right" : "left" });
+  return {
+    ...tpl,
+    dataSourceMarks: tpl.dataSourceMarks.map(flipMark),
+    reviewMarks: tpl.reviewMarks.map(flipMark),
+    entryMarks: tpl.entryMarks.map(flipMark),
+    mappings: tpl.mappings?.map((mp: FieldMapping) => ({ ...mp, web_side: mp.web_side === "left" ? "right" : "left" })),
+    // 网站记录也属于帧描述：左右镜像时两侧 origin 同步互换
+    siteOrigins: tpl.siteOrigins ? { left: tpl.siteOrigins.right, right: tpl.siteOrigins.left } : undefined,
+    // GROUP 面板快照同样属于帧描述：镜像时左右两侧身份互换
+    groupPanes: tpl.groupPanes ? { left: tpl.groupPanes.right, right: tpl.groupPanes.left } : undefined,
+  };
+}
+
+/**
+ * 运行/展示模板前按会话互换状态对齐左右帧：
+ * 模板保存时的互换标记（tpl.flipped）与当前会话互换状态（flipped）不一致 → 镜像返回（落库数据不动）
+ */
+export function frameAlignedTemplate(tpl: WorkflowTemplate, flipped: boolean): WorkflowTemplate {
+  return (tpl.flipped ?? false) !== flipped ? mirrorTemplateSides(tpl) : tpl;
+}
 
 const DEFAULT_ICONS = ["🔍", "📋", "✅", "📝", "🎓", "🏫", "📊", "🔑", "📧", "🖋️", "📄", "🗂️", "🎯", "⚡", "🔄", "📌"];
 

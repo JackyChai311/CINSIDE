@@ -173,6 +173,9 @@ function createWindow() {
     icon: path.join(__dirname, "../../assets/app-icon.ico"),
     // 无边框窗口：移除系统标题栏和菜单栏
     frame: false,
+    // macOS：点击未激活窗口时首个 mousedown 直接传给页面而不是只用于激活窗口
+    //（Windows 忽略此参数，配合下方 focus 焦点回收双保险）
+    acceptFirstMouse: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -217,7 +220,21 @@ function createWindow() {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.show();
       mainWindow.focus();
+      // 显示后把 webContents 焦点落在主页面（HTML 层），保证启动后第一次点击就生效
+      try { mainWindow.webContents.focus(); } catch {}
     }
+  });
+
+  // === 焦点修复：切回程序/启动后第一次点击被吞 ===
+  // 无边框主窗口上叠着原生 BrowserView（网页层）。窗口失活时 webContents 焦点会留在网页层，
+  // 重新激活窗口（任务栏/Alt+Tab/托盘/启动）后点击 HTML 层按钮，第一次 mousedown+mouseup
+  // 会被「焦点从网页层转回主页面」的过程打断，无法组合成 click 事件 → 表现为要点两次才生效。
+  // 对策：窗口每次获得焦点时主动把 webContents 焦点收回主页面。
+  // 用户直接点网页层回来的场景不受影响：点击本身会把焦点带回 BrowserView。
+  mainWindow.on("focus", () => {
+    try {
+      if (!mainWindow.webContents.isFocused()) mainWindow.webContents.focus();
+    } catch {}
   });
 
   // === 渲染进程崩溃/无响应自动恢复：白屏时自动重载主窗口（LOOP 状态在后端，重载可继续操作） ===
@@ -282,8 +299,9 @@ function createTray() {
   // 逐一尝试，避免打包版取到空图标导致托盘图标不可见、右键菜单（含“退出 CINSIDE”）无法访问。
   const iconCandidates = [
     path.join(__dirname, "../../assets/app-icon.ico"),          // dev: d:\CINSIDE\assets
+    path.join(__dirname, "../dist/app-icon.ico"),               // dev/打包通用: vite 将 public/ 拷入 dist（打包后在 app.asar/dist）
     path.join(app.getAppPath(), "assets", "app-icon.ico"),      // 打包: app.asar/assets
-    path.join(process.resourcesPath, "assets", "app-icon.ico"), // 兜底: resources/assets
+    path.join(process.resourcesPath, "assets", "app-icon.ico"), // 兜底: resources/assets（extraResources）
   ];
   let trayIcon = nativeImage.createEmpty();
   for (const iconPath of iconCandidates) {
@@ -298,6 +316,12 @@ function createTray() {
   }
 
   tray = new Tray(trayIcon);
+  // 终极兜底：所有 ico 路径都落空时，直接提取 exe 自身的内嵌图标（打包版必有效）
+  if (trayIcon.isEmpty() && process.platform === "win32" && app.getFileIcon) {
+    app.getFileIcon(process.execPath, { size: "normal" })
+      .then((img) => { if (tray && !tray.isDestroyed() && !img.isEmpty()) tray.setImage(img); })
+      .catch(() => {});
+  }
   tray.setToolTip("CINSIDE · 申请信息核验");
 
   const contextMenu = Menu.buildFromTemplate([
@@ -1437,6 +1461,12 @@ function showView(side, bounds, _url) {
     // 重新挂载后强制合成器重绘：removeBrowserView→addBrowserView 后视图经常保持
     // 白屏（内容未重绘），直到下一次 loadURL 才恢复（即「切Excel再切回网页白屏」）
     try { view.webContents.invalidate(); } catch (_) {}
+    // addBrowserView 会把 webContents 焦点抢给网页层：主窗口处于激活态时把焦点收回
+    // 主页面，否则启动/重新挂载后第一次点击 HTML 按钮会被焦点转移吞掉。
+    // 仅在「新挂载」分支执行——用户在网页层打字时视图保持挂载，不会走到这里。
+    try {
+      if (mainWindow.isFocused() && !mainWindow.webContents.isFocused()) mainWindow.webContents.focus();
+    } catch (_) {}
   }
   // 确保 BrowserView 在最上层（HTML 层之上），否则 HTML 层可能拦截鼠标滚轮事件。
   // 弹窗（popup BrowserView）打开时 addBrowserView 会在主 view 之上，无需额外处理。
@@ -3996,6 +4026,11 @@ view.webContents.on("console-message", (_e, level, message) => {
   });
 
   win.addBrowserView(view);
+  // addBrowserView 会把 webContents 焦点抢给网页层：面板窗口处于激活态时收回焦点到面板页面
+  //（与主窗口 showView 同款修复，避免挂载后第一次点击 HTML 被吞）
+  try {
+    if (win.isFocused() && !win.webContents.isFocused()) win.webContents.focus();
+  } catch (_) {}
   // 通知分离窗口的渲染进程：BrowserView 已就绪，可以重新触发 sync 和 loadURL
   // 解决 view 创建晚于渲染进程首次 sync 的时序竞态（分离后不显示内容）
   if (win && !win.isDestroyed()) {
@@ -4063,6 +4098,14 @@ ipcMain.handle("panel-detach", (event, side) => {
   }
 
   detachedPanels[side] = win;
+
+  // 与主窗口同款焦点修复：切回该面板窗口时把 webContents 焦点收回面板页面，
+  // 避免从其他应用切回来后第一次点击被焦点转移吞掉
+  win.on("focus", () => {
+    try {
+      if (!win.webContents.isFocused()) win.webContents.focus();
+    } catch (_) {}
+  });
 
   // 监听窗口关闭事件：确保关闭时正确通知主窗口并清理资源
   win.on("close", (e) => {

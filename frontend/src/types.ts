@@ -581,6 +581,16 @@ export interface BatchResult {
   failedOrder?: number;
 }
 
+/** GROUP 两侧面板的身份快照：网页（origin+主机名）或 Excel（具体文件名） */
+export interface PaneSnapshot {
+  /** 内容类型：web=网页 excel=Excel 表格 */
+  kind: "web" | "excel";
+  /** 显示名称：网页用主机名（如 xxx.edu.cn），Excel 用具体文件名（如 学生名单.xlsx） */
+  label: string;
+  /** 网页 origin（kind=web 时）：运行 GROUP LOOP 前按此校验网页是否已打开 */
+  origin?: string;
+}
+
 /** 流程模板：从教学记录保存而来，用于批量执行 */
 export interface WorkflowTemplate {
   /** 模板 ID */
@@ -601,6 +611,13 @@ export interface WorkflowTemplate {
   sourceRecordId?: string;
   /** 所属分组（GROUP）：同组 LOOP 在流程图中并列展示为分支，核验按钮可按组筛选运行 */
   group?: string;
+  /** 保存时面板左右是否处于互换状态（swap-all 后为 true）。运行/展示时与会话互换状态比对，不一致则镜像 marks.side 与 mappings.web_side（落库数据不动） */
+  flipped?: boolean;
+  /** 教学时左右两侧激活网页的 origin（如 https://xxx.edu.cn）：运行时按「网站现在开在哪一侧」自动对齐左右，比帧标记更可靠 */
+  siteOrigins?: { left?: string; right?: string };
+  /** GROUP 两侧面板快照（保存时自动捕获）：网页侧记 origin+主机名、Excel 侧记具体文件名；
+   * GROUP 标题行按此显示彩色网页名/Excel 名，运行 GROUP LOOP 前按此校验网页是否打开、左右是否反了 */
+  groupPanes?: { left?: PaneSnapshot; right?: PaneSnapshot };
   /** 应用模式：审查流 / 录入流 */
   mode: AppMode;
   /** 数据源处理阶段的节点 */

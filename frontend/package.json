@@ -1,7 +1,7 @@
 {
   "name": "cinside-frontend",
   "private": true,
-  "version": "0.7.6",
+  "version": "0.7.7",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
@@ -51,6 +51,14 @@
       "../assets/**/*"
     ],
     "extraResources": [
+      {
+        "from": "../assets",
+        "to": "assets",
+        "filter": [
+          "app-icon.ico",
+          "app-icon.png"
+        ]
+      },
       {
         "from": "../backend/dist/cinside-backend",
         "to": "backend",
