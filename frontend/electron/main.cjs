@@ -8,6 +8,19 @@ const https = require("https");
 const { spawn, execFile } = require("child_process");
 const { autoUpdater } = require("electron-updater");
 
+// === 开发版与正式版并存 ===
+// dev（未打包，!app.isPackaged）使用独立端口与用户数据目录，避免与已安装正式版冲突：
+// 单实例锁、后端端口(8000)、CDP(9222)、受控 Chrome(9223)。prod 全部保持原样。
+const isDev = !app.isPackaged;
+if (isDev) {
+  // 独立 userData → 单实例锁与正式版分离；dev 的日志/屏蔽规则也不写入正式版目录。
+  // 必须在 requestSingleInstanceLock() 之前设置。
+  app.setPath("userData", path.join(app.getPath("appData"), "CINSIDE-dev"));
+}
+const BACKEND_PORT = isDev ? 8001 : 8000;
+const CDP_PORT = isDev ? "9223" : "9222";
+const PLUGIN_CHROME_PORT = isDev ? "9224" : "9223";
+
 // 统一日志文件，供调试用。
 // 注意：部分环境的安全软件会拦截 electron.exe 对 AppData 目录的写入（open EPERM/EBADF），
 // 导致日志静默丢失。这里做 fallback 链——userData 不可写时轮流退回 LOCALAPPDATA、项目目录。
@@ -65,7 +78,7 @@ function resolveAssetPath(relativePath) {
 }
 
 // 开启 CDP，让后端 browser-use 能连接到这个 Electron 实例并控制 BrowserView
-app.commandLine.appendSwitch("remote-debugging-port", "9222");
+app.commandLine.appendSwitch("remote-debugging-port", CDP_PORT);
 
 // 设置 AppUserModelID，使 Windows 任务栏显示窗口自身图标（app-icon.ico）
 // 而不是 electron.exe 的默认图标。必须在 app.whenReady() 之前调用。
@@ -87,9 +100,6 @@ const detachedPanels = {};
 let preventAccidentalClose = false;
 let tray = null;
 let isQuitting = false;
-
-const isDev = !app.isPackaged;
-const BACKEND_PORT = 8000;
 
 // === 单实例锁：防误关把窗口最小化到托盘后，用户再从快捷方式启动 ===
 // 若不开锁会再起一整套 electron（6+ 进程）——旧实例还躺在托盘里，
@@ -2593,7 +2603,9 @@ function startBackend() {
       ...process.env,
       PYTHONIOENCODING: "utf-8",
       PYTHONUTF8: "1", // 让解释器所有默认编码（含文件读写/open()）都用 UTF-8，避免 charmap 编码错误
-      BROWSER_USE_CDP_URL: "http://localhost:9222",
+      // dev 的 CDP 在 9223、受控 Chrome 在 9224（与正式版的 9222/9223 错开，可并存）
+      BROWSER_USE_CDP_URL: "http://localhost:" + CDP_PORT,
+      CINSIDE_PLUGIN_CDP_URL: "http://localhost:" + PLUGIN_CHROME_PORT,
     },
   });
 
@@ -4688,7 +4700,7 @@ ipcMain.handle("dock-launch-chrome", async () => {
   try { fs.mkdirSync(profileDir, { recursive: true }); } catch (e) {}
   try {
     const child = spawn(exe, [
-      "--remote-debugging-port=9223",
+      "--remote-debugging-port=" + PLUGIN_CHROME_PORT,
       `--user-data-dir=${profileDir}`,
       "--no-first-run",
       "--no-default-browser-check",

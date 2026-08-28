@@ -167,6 +167,8 @@ interface Props {
   switchToDocSignal?: number;
   /** 外部信号：递增时切换字段对比面板的「步骤设置/结果显示」模式（L 快捷键） */
   fieldSetupToggleSignal?: number;
+  /** 外部信号：递增时强制下栏各面板切回「设置」态（点「新LOOP」时触发） */
+  newLoopSignal?: number;
   addingStepMode?: "review" | "entry" | null;
   onPickExtractedField?: (side: "left" | "right", field: string, value: string) => void;
   /** 本地文件提取配置内容（有值时"文件处理"卡片显示它，替代正常内容） */
@@ -231,6 +233,12 @@ interface Props {
   reviewMappings?: FieldMapping[];
   /** 删除一个 picked mark（前置/收尾点击） */
   onRemoveMark?: (id: string) => void;
+  /** 右键步骤卡：进入「重选替换」模式，用新拾取元素替换该步骤（保持原位置） */
+  onReplaceMark?: (mark: PickedMark) => void;
+  /** 当前正在被重选替换的步骤卡 id（用于高亮该卡片作为反馈） */
+  replacingMarkId?: string | null;
+  /** 左键步骤卡 / 节标题「运行本节」：顺序执行若干 mark（在当前选中卡片上） */
+  onRunSteps?: (marks: PickedMark[]) => Promise<{ ok: boolean; error?: string }> | void;
   /** 删除一个审查映射（按索引） */
   onRemoveMapping?: (index: number) => void;
   /** 删除一个提取元素步骤（按 id 和 kind） */
@@ -394,6 +402,9 @@ export default function ResultsPanel({
   onStartAddDocExtract,
   reviewMappings = [],
   onRemoveMark,
+  onReplaceMark,
+  replacingMarkId,
+  onRunSteps,
   onRemoveMapping,
   onRemoveExtractStep,
   onPreviewMark,
@@ -456,6 +467,7 @@ export default function ResultsPanel({
   fixRerunRecordId = null,
   switchToDocSignal,
   fieldSetupToggleSignal,
+  newLoopSignal,
   execPhase = "idle",
   currentMarkOrder = null,
   activeVerifyIdx = -1,
@@ -533,6 +545,9 @@ export default function ResultsPanel({
           onSwitchStepMode={onSwitchStepMode}
           reviewMappings={reviewMappings}
           onRemoveMark={onRemoveMark}
+          onReplaceMark={onReplaceMark}
+          replacingMarkId={replacingMarkId}
+          onRunSteps={onRunSteps}
           onRemoveMapping={onRemoveMapping}
           onRemoveExtractStep={onRemoveExtractStep}
           onPreviewMark={onPreviewMark}
@@ -594,6 +609,7 @@ export default function ResultsPanel({
           fixRerunRecordId={fixRerunRecordId}
           switchToDocSignal={switchToDocSignal}
           fieldSetupToggleSignal={fieldSetupToggleSignal}
+          newLoopSignal={newLoopSignal}
           execPhase={execPhase}
           currentMarkOrder={currentMarkOrder}
           activeVerifyIdx={activeVerifyIdx}
@@ -922,6 +938,9 @@ function ReportTab({
   onStartAddDocExtract,
   reviewMappings = [],
   onRemoveMark,
+  onReplaceMark,
+  replacingMarkId,
+  onRunSteps,
   onRemoveMapping,
   onRemoveExtractStep,
   onPreviewMark,
@@ -984,6 +1003,7 @@ function ReportTab({
   fixRerunRecordId = null,
   switchToDocSignal,
   fieldSetupToggleSignal,
+  newLoopSignal,
   execPhase = "idle",
   currentMarkOrder = null,
   activeVerifyIdx = -1,
@@ -1081,6 +1101,12 @@ function ReportTab({
   reviewMappings?: FieldMapping[];
   /** 删除一个 picked mark（前置/收尾点击） */
   onRemoveMark?: (id: string) => void;
+  /** 右键步骤卡：进入「重选替换」模式，用新拾取元素替换该步骤（保持原位置） */
+  onReplaceMark?: (mark: PickedMark) => void;
+  /** 当前正在被重选替换的步骤卡 id（用于高亮该卡片作为反馈） */
+  replacingMarkId?: string | null;
+  /** 左键步骤卡 / 节标题「运行本节」：顺序执行若干 mark（在当前选中卡片上） */
+  onRunSteps?: (marks: PickedMark[]) => Promise<{ ok: boolean; error?: string }> | void;
   /** 删除一个审查映射（按索引） */
   onRemoveMapping?: (index: number) => void;
   /** 删除一个提取元素步骤（按 id 和 kind） */
@@ -1187,6 +1213,8 @@ function ReportTab({
   switchToDocSignal?: number;
   /** 外部信号：递增时切换字段对比面板的「步骤设置/结果显示」模式（L 快捷键） */
   fieldSetupToggleSignal?: number;
+  /** 外部信号：递增时强制下栏各面板切回「设置」态（点「新LOOP」时触发） */
+  newLoopSignal?: number;
   // ============ 执行时光标动画相关 ============
   /** 执行阶段：idle=未执行，marks=执行点击/输入，verify=逐字段审查，done=完成 */
   execPhase?: "idle" | "marks" | "verify" | "done";
@@ -1453,9 +1481,18 @@ function ReportTab({
       setFieldSetupMode((v) => !v);
     }
   }, [fieldSetupToggleSignal]);
-  // 运行开始时，自动将所有面板切到"结果"态
+  // 「新LOOP」信号：强制下栏三个面板从「结果」态切回「设置」态
   useEffect(() => {
-    if (running) {
+    if (newLoopSignal != null && newLoopSignal > 0) {
+      setFieldSetupMode(true);
+      setDocSetupMode(true);
+      setExtractSetupMode(true);
+      setShowExtractPanel(true);
+    }
+  }, [newLoopSignal]);
+  // 运行开始时，自动将所有面板切到"结果"态（仅批量/队列运行：单步/单节执行不切换，保持在"设置"态）
+  useEffect(() => {
+    if (execRunning) {
       setFieldSetupMode(false);
       setDocSetupMode(false);
       setExtractSetupMode(false);
@@ -2054,7 +2091,9 @@ function ReportTab({
       setConfirmStageKeys((prev) => { const next = new Set(prev); if (next.has(key)) next.delete(key); else next.add(key); return next; });
       setFixStageKeys((prev) => { const next = new Set(prev); next.delete(key); return next; });
     };
-    const isEntry = appMode === "entry";
+    // 箭头/图标方向以报告自身 flow 为准（录入=→，审查=←），而非当前面板切换的 appMode，
+    // 避免「同一份审查报告在录入模式下看/录入报告在审查模式下看」箭头画反
+    const isEntry = r.flow ? r.flow === "entry" : appMode === "entry";
     const rows: SideCompareRow[] = r.entries.map((e, i) => ({
       key: `${e.left_field || e.right_label || "field"}-${i}`,
       leftLabel: FIELD_LABELS[e.left_field] || e.left_field || "左侧来源",
@@ -3449,6 +3488,16 @@ function ReportTab({
           <MousePointerClick className="h-3.5 w-3.5 text-slate-500" />
           前置设置
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{preClickMarks.length}</span>
+          {fieldSetupMode && !running && onRunSteps && preClickMarks.length > 0 && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onRunSteps(preClickMarks); }}
+              className="ml-auto order-last inline-flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-semibold text-indigo-600 ring-1 ring-indigo-200 hover:bg-indigo-50"
+              title="一次运行本节的 N 个步骤（在当前选中卡片上）"
+            >
+              <Play className="h-2.5 w-2.5" />
+              运行本节
+            </button>
+          )}
           {!expertMode && fieldSetupMode && onStartBindInputs && !running && (
             <button
               onClick={(e) => { e.stopPropagation(); onStartBindInputs(); }}
@@ -3520,10 +3569,11 @@ function ReportTab({
                 <div
                   key={m.id}
                   data-latest-step={isLatest ? "true" : undefined}
-                  onClick={() => onPreviewMark?.(m)}
+                  onClick={() => (onRunSteps ? onRunSteps([m]) : onPreviewMark?.(m))}
                   onMouseEnter={() => onHoverMark?.(m)}
                   onMouseLeave={() => onHoverMark?.(null)}
-                  className={`group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}`}
+                  onContextMenu={(e) => { e.preventDefault(); if (onReplaceMark) onReplaceMark(m); }}
+                  className={`group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}${replacingMarkId === m.id ? " ring-2 ring-indigo-400 bg-indigo-50" : ""}`}
                   title={`${actionWord} · ${displayLabel}（点击在网页定位）`}
                 >
                   <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-[12px] font-bold text-white shadow-sm">
@@ -3658,14 +3708,20 @@ function ReportTab({
                 // 来源是 Excel 列时带上列名：悬停/点击卡片自动切到 Excel 面板并定位该列
                 excelField: mp.left_source === "excel" ? mp.left_field : undefined,
               };
+              // 该映射对应的真实审查 mark（右键用它重选替换，保位置）
+              const reviewMark = allPickedMarks.find((mm) => mm.side === webSide && mm.selector === mp.right_selector && mm.workflow === "review");
               return (
                 <div
                   key={i}
                   data-latest-step={isLatest ? "true" : undefined}
-                  onClick={() => onPreviewMark?.(previewMark)}
+                  onClick={() => (reviewMark && onRunSteps ? onRunSteps([reviewMark]) : onPreviewMark?.(previewMark))}
                   onMouseEnter={() => onHoverMark?.(previewMark)}
                   onMouseLeave={() => onHoverMark?.(null)}
-                  className={`group relative flex shrink-0 min-w-[100px] max-w-[160px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}`}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    if (reviewMark && onReplaceMark) onReplaceMark(reviewMark);
+                  }}
+                  className={`group relative flex shrink-0 min-w-[100px] max-w-[160px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}${reviewMark && replacingMarkId === reviewMark.id ? " ring-2 ring-indigo-400 bg-indigo-50" : ""}`}
                   title={`${mp.left_field || "—"} ${isEntry ? "→" : "←"} ${mp.right_label || mp.right_selector}（${webSide === "left" ? "左" : "右"}侧网页，点击定位）`}
                 >
                   <div className="flex shrink-0 flex-col items-center gap-1">
@@ -3737,6 +3793,16 @@ function ReportTab({
               {processClickActive ? "过程点击中" : "添加过程点击"}
             </button>
           )}
+          {fieldSetupMode && !running && onRunSteps && processClickMarks.length > 0 && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onRunSteps(processClickMarks); }}
+              className="ml-auto order-last inline-flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-semibold text-indigo-600 ring-1 ring-indigo-200 hover:bg-indigo-50"
+              title="一次运行本节的 N 个步骤（在当前选中卡片上）"
+            >
+              <Play className="h-2.5 w-2.5" />
+              运行本节
+            </button>
+          )}
         </div>
         {processClickMarks.length === 0 ? (
           <div className="flex gap-2 pt-1.5">
@@ -3759,7 +3825,8 @@ function ReportTab({
                 onClick={() => onPreviewMark?.(m)}
                 onMouseEnter={() => onHoverMark?.(m)}
                 onMouseLeave={() => onHoverMark?.(null)}
-                className={`group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}`}
+                onContextMenu={(e) => { e.preventDefault(); if (onReplaceMark) onReplaceMark(m); }}
+                className={`group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}${replacingMarkId === m.id ? " ring-2 ring-indigo-400 bg-indigo-50" : ""}`}
                 title={`点击 · ${m.label}（点击在网页定位）`}
               >
                 <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-[12px] font-bold text-white shadow-sm">{m.order}</span>
@@ -3796,6 +3863,16 @@ function ReportTab({
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{extractStepSummary.length}</span>
           {fieldSetupMode && !running && extractStepSummary.length > 0 && (
             <span className="ml-1 text-[9px] font-normal text-slate-400">点击卡片可定位预览</span>
+          )}
+          {fieldSetupMode && !running && onRunSteps && allPickedMarks.some((mm) => mm.docExtract || mm.docSource || mm.docFileField || mm.widget) && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onRunSteps(allPickedMarks.filter((mm) => mm.docExtract || mm.docSource || mm.docFileField || mm.widget)); }}
+              className="ml-auto order-last inline-flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-semibold text-indigo-600 ring-1 ring-indigo-200 hover:bg-indigo-50"
+              title="一次运行本节的提取/控件步骤（在当前选中卡片上）"
+            >
+              <Play className="h-2.5 w-2.5" />
+              运行本节
+            </button>
           )}
         </div>
         {extractStepSummary.length === 0 ? (
@@ -3900,6 +3977,16 @@ function ReportTab({
           <MousePointerClick className="h-3.5 w-3.5 text-slate-500" />
           收尾点击
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{postClickMarks.length}</span>
+          {fieldSetupMode && !running && onRunSteps && postClickMarks.length > 0 && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onRunSteps(postClickMarks); }}
+              className="ml-auto order-last inline-flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-semibold text-indigo-600 ring-1 ring-indigo-200 hover:bg-indigo-50"
+              title="一次运行本节的 N 个步骤（在当前选中卡片上）"
+            >
+              <Play className="h-2.5 w-2.5" />
+              运行本节
+            </button>
+          )}
           {!expertMode && fieldSetupMode && onStartAddPostClick && !running && (
             <button
               onClick={(e) => { e.stopPropagation(); onStartAddPostClick(); }}
@@ -3944,7 +4031,8 @@ function ReportTab({
                 onClick={() => onPreviewMark?.(m)}
                 onMouseEnter={() => onHoverMark?.(m)}
                 onMouseLeave={() => onHoverMark?.(null)}
-                className={`group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}`}
+                onContextMenu={(e) => { e.preventDefault(); if (onReplaceMark) onReplaceMark(m); }}
+                className={`group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}${replacingMarkId === m.id ? " ring-2 ring-indigo-400 bg-indigo-50" : ""}`}
                 title={`点击 · ${m.label}（点击在网页定位）`}
               >
                 <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-[12px] font-bold text-white shadow-sm">{m.order}</span>
@@ -4093,6 +4181,22 @@ function ReportTab({
               >
                 <Layers className="h-2.5 w-2.5" />
                 应用LOOP
+              </button>
+            )}
+            {onRequestSaveLoop && !fieldSetupMode && (
+              <button
+                onClick={(e) => { e.stopPropagation(); if (!running) onRequestSaveLoop(); }}
+                disabled={running || !canSaveLoop}
+                className={[
+                  "flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold transition-all",
+                  (running || !canSaveLoop)
+                    ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                    : "bg-white/70 text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 hover:text-slate-900 shadow-sm",
+                ].join(" ")}
+                title="命名保存为 LOOP 模板（保存后可分配 GROUP）"
+              >
+                <Save className="h-2.5 w-2.5" />
+                保存为LOOP
               </button>
             )}
             {onExportExcel && !fieldSetupMode && (

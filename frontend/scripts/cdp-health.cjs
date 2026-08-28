@@ -13,7 +13,8 @@ function getJson(url) {
 }
 
 (async () => {
-  const targets = await getJson("http://127.0.0.1:9222/json");
+  // 开发版 Electron CDP 端口为 9223（与正式版的 9222 错开，见 electron/main.cjs）
+  const targets = await getJson("http://127.0.0.1:9223/json");
   const page = targets.find((t) => t.type === "page" && t.url.includes("localhost:5173"));
   if (!page) { console.log("NO_PAGE"); process.exit(1); }
   const WSImpl = globalThis.WebSocket; // node 22+ 原生 WebSocket

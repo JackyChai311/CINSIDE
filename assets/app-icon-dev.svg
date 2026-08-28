@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="500" height="500">
+  <!-- 开发版图标：黑灰衬底 + 白色 C 形 logo（与正式版 app-icon.svg 同构，仅换色，便于区分） -->
+  <rect width="500" height="500" fill="#343A40"/>
+  <g transform="translate(-53.75 -20) scale(1.35)">
+    <path fill="none" stroke="#FFFFFF" stroke-width="18"
+          stroke-linecap="round" stroke-linejoin="round"
+          d="M282 330 H146
+             A56 56 0 0 1 90 274 V126
+             A56 56 0 0 1 146 70 H304
+             A56 56 0 0 1 360 126
+             V170
+             H300 A26 26 0 0 0 274 196 V214
+             A26 26 0 0 0 300 240
+             H360 V274
+             A56 56 0 0 1 304 330
+             H282"/>
+    <rect x="276" y="270" width="12" height="120" fill="#343A40"
+          transform="rotate(36 282 330)"/>
+  </g>
+</svg>

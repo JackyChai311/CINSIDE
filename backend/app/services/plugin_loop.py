@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import uuid
 from datetime import datetime
@@ -30,8 +31,9 @@ import httpx
 
 from ..config import settings, _USER_DATA_DIR
 
-# 注意：Electron 主进程自身已占用 9222 做 CDP，外部 Chrome 用 9223
-DEFAULT_CDP_URL = "http://localhost:9223"
+# 注意：正式版 Electron 主进程占用 9222 做 CDP，外部 Chrome 用 9223；
+# 开发版由 main.cjs 注入 CINSIDE_PLUGIN_CDP_URL=http://localhost:9224，与正式版并存
+DEFAULT_CDP_URL = os.environ.get("CINSIDE_PLUGIN_CDP_URL", "http://localhost:9223")
 _PLUGIN_DIR = _USER_DATA_DIR / "_plugin"
 _RECORDS_FILE = _PLUGIN_DIR / "records.jsonl"
 _CONFIG_FILE = _PLUGIN_DIR / "config.json"

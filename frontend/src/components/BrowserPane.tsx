@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import type { ViewSide } from "../electron";
 import { originColorClass } from "../lib/originColor";
+import { BACKEND_ORIGIN, BACKEND_PORT } from "../lib/backendOrigin";
 
 interface Props {
   side: ViewSide;
@@ -647,16 +648,16 @@ export default function BrowserPane({
     const trimmed = raw.trim();
     if (!trimmed) return "";
     if (/^https?:\/\//i.test(trimmed)) return trimmed;
-    // localhost/127.0.0.1 无端口时默认使用后端 8000 端口
+    // localhost/127.0.0.1 无端口时默认使用后端端口（dev=8001 / 正式版=8000）
     if (/^localhost(\/|$)/i.test(trimmed)) {
       const rest = trimmed.slice("localhost".length);
-      if (!rest || rest === "/") return "http://localhost:8000/";
-      return "http://localhost" + (rest.startsWith(":") ? "" : ":8000") + rest;
+      if (!rest || rest === "/") return BACKEND_ORIGIN + "/";
+      return "http://localhost" + (rest.startsWith(":") ? "" : ":" + BACKEND_PORT) + rest;
     }
     if (/^127\.0\.0\.1(\/|$)/.test(trimmed)) {
       const rest = trimmed.slice("127.0.0.1".length);
-      if (!rest || rest === "/") return "http://127.0.0.1:8000/";
-      return "http://127.0.0.1" + (rest.startsWith(":") ? "" : ":8000") + rest;
+      if (!rest || rest === "/") return "http://127.0.0.1:" + BACKEND_PORT + "/";
+      return "http://127.0.0.1" + (rest.startsWith(":") ? "" : ":" + BACKEND_PORT) + rest;
     }
     // 已有端口号的 localhost
     if (/^localhost:\d+(\/|$)/i.test(trimmed) || /^127\.0\.0\.1:\d+(\/|$)/.test(trimmed)) {

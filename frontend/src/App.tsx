@@ -33,6 +33,7 @@ import {
   Maximize2,
   Minus,
   MousePointerClick,
+  MoveRight,
   PanelBottom,
   PanelLeft,
   PanelLeftClose,
@@ -57,6 +58,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { api, subscribeTask } from "./api/client";
+import { BACKEND_ORIGIN } from "./lib/backendOrigin";
 import appIconPng from "./assets/app-icon.png";
 import DocExportDialog from "./components/DocExportDialog";
 import PPTWorkflowPanel from "./components/PPTWorkflowPanel";
@@ -998,6 +1000,8 @@ export default function App() {
   const [fieldPanelActive, setFieldPanelActive] = useState(false);
   /** L 快捷键信号：递增时切换字段对比面板的「步骤设置/结果显示」模式 */
   const [fieldSetupToggleSignal, setFieldSetupToggleSignal] = useState(0);
+  /** 「新LOOP」信号：递增时强制下栏三个面板从「结果」态切回「设置」态 */
+  const [newLoopSignal, setNewLoopSignal] = useState(0);
   // LOOP 分段提取：Excel 行范围框选（0-based 闭区间）与人物卡片生成状态
   // 人物卡片只在用户框选好 LOOP 行范围后一键生成，而非上传 Excel 即全量生成
   const [rowRange, setRowRange] = useState<{ start: number; end: number } | null>(null);
@@ -1204,7 +1208,10 @@ const sourceFieldLabelRef = useRef<string>("");
   }, []);
   const frameForTemplate = useCallback((tpl: WorkflowTemplate): boolean => {
     const byLink = sideFrameByOrigins(tpl.siteOrigins, collectPaneOrigins());
-    if (byLink !== null) return byLink;
+    // byLink 是「当前是否相对保存帧被对换」。frameAlignedTemplate 会用它与 tpl.flipped 异或，
+    // 两套参考系必须一致（都相对保存帧），否则会把「对换后正确设置的步骤」镜像回对换前一侧。
+    // 故此处与 tpl.flipped 异或，还原成「当前帧相对默认帧」再交给 frameAlignedTemplate 判断。
+    if (byLink !== null) return byLink !== (tpl.flipped ?? false);
     return layoutFlippedRef.current; // 目标网站都没开时回退会话互换标记
   }, []);
 
@@ -1329,7 +1336,7 @@ const sourceFieldLabelRef = useRef<string>("");
   const [rightUrl, setRightUrl] = useState<string>("");
 
   // 内置演示站点 URL 前缀（demo-fill/demo-review/demo-entry/demo-admin/mock 均算模拟网页）
-  const DEMO_URL_PREFIXES = ["http://localhost:8000/demo-", "http://localhost:8000/mock"];
+  const DEMO_URL_PREFIXES = [BACKEND_ORIGIN + "/demo-", BACKEND_ORIGIN + "/mock"];
 
   // 模拟网页开关联动：关闭时若右侧停留在内置演示页则清空回空白态；开启且右侧为空时自动载入 DEMO 录入系统
   useEffect(() => {
@@ -1337,7 +1344,7 @@ const sourceFieldLabelRef = useRef<string>("");
     setRightUrl((cur) => {
       const isDemo = DEMO_URL_PREFIXES.some((p) => cur.startsWith(p));
       if (!enabled && isDemo) return "";
-      if (enabled && !cur) return "http://localhost:8000/demo-fill/";
+      if (enabled && !cur) return BACKEND_ORIGIN + "/demo-fill/";
       return cur;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1730,6 +1737,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // ref 始终持有最新 pickedMarks，供 recyclePickedMark 等回调读取，避免闭包陷阱
   const pickedMarksRef = useRef(pickedMarks);
   pickedMarksRef.current = pickedMarks;
+  // 「右键步骤卡→重选替换」：非空时，addPickedMark 会用新拾取的元素替换该 id 的步骤，而不是追加（保持原位置）
+  const [replaceMarkId, setReplaceMarkId] = useState<string | null>(null);
+  const replaceMarkIdRef = useRef<string | null>(null);
+  replaceMarkIdRef.current = replaceMarkId;
   // 每侧最近一次拾取是否来自弹窗（addPickedMark 据此打 inPopup 标记）
   const pickFromPopupRef = useRef<Record<ViewSide, boolean>>({ left: false, right: false });
   // 前置点击数量（步骤3：搜索/进入）
@@ -1759,17 +1770,24 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   }, []);
   const addPickedMark = useCallback(
     (mark: Omit<PickedMark, "id" | "order" | "createdAt">) => {
+      // 右键重选替换：用新拾取的元素替换指定步骤（保留其 id/order 位置），而非追加到底部
+      const replaceId = replaceMarkIdRef.current;
+      setReplaceMarkId(null);
       setPickedMarks((prev) => {
+        const mSide = mark.side === "left" ? "left" : "right";
+        // 弹窗内拾取的元素：打上 inPopup 标记（Excel 来源不打，执行时路由到弹窗 view）
+        const inPopup = mark.inPopup ?? (mark.source !== "excel" && pickFromPopupRef.current[mSide] ? true : undefined);
+        if (replaceId && prev.some((m) => m.id === replaceId)) {
+          return prev.map((m) => (m.id === replaceId ? { ...m, ...mark, inPopup, createdAt: Date.now() } : m));
+        }
         const order = prev.length + 1;
         const id = `mk-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-        // 弹窗内拾取的元素：打上 inPopup 标记（Excel 来源不打，执行时路由到弹窗 view）
-        const mSide = mark.side === "left" ? "left" : "right";
-        const inPopup = mark.inPopup ?? (mark.source !== "excel" && pickFromPopupRef.current[mSide] ? true : undefined);
         return [...prev, { ...mark, inPopup, id, order, createdAt: Date.now() }];
       });
     },
     []
   );
+
   const clearPickedMarks = useCallback(() => setPickedMarks([]), []);
   /** 文件处理按钮点击记录：作为外围步骤显示在字段对比 STEPS 与流程图中（执行时 no-op，仅步骤设置态记录） */
   const recordFileOp = useCallback(
@@ -2897,12 +2915,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     return result;
   }, [cardPool, cardLoopMap]);
 
-  /** 运行指定 LOOP：只跑绑定了该 LOOP 的人物卡片 */
+  /** 运行指定 LOOP：优先跑绑定了该 LOOP 的卡片，否则默认跑当前全部卡片 */
   const handleRunLoopById = useCallback(async (loopId: string) => {
-    const targets = cardRecords.filter((r) => cardLoopMap[r.record_id]?.loopId === loopId);
+    const bound = cardRecords.filter((r) => cardLoopMap[r.record_id]?.loopId === loopId);
+    const targets = bound.length > 0 ? bound : cardRecords;
     setRunLoopMenuOpen(false);
     if (targets.length === 0) {
-      setError("该 LOOP 还没有绑定任何卡片，请先在左侧群组面板设置");
+      setError("当前没有可运行的卡片：请先在 Excel 框选 LOOP 行范围并点击「一键生成卡片」");
       return;
     }
     const tpl = getSkillById(loopId);
@@ -3283,7 +3302,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     let configLoaded = false;
     const poll = setInterval(async () => {
       try {
-        const res = await fetch("http://localhost:8000/api/health", { signal: AbortSignal.timeout(2000) });
+        const res = await fetch(BACKEND_ORIGIN + "/api/health", { signal: AbortSignal.timeout(2000) });
         if (res.ok) {
           setBackendReady(true);
           if (!configLoaded) {
@@ -3812,6 +3831,35 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
   }, []);
 
+  /** 右键步骤卡：进入「重选替换」模式。新拾取的元素会替换该步骤（保持原位置 order），而非追加到末尾 */
+  const startReplaceMark = useCallback((mark: PickedMark) => {
+    if (running || singleRunning || batchRunning || queueRunning) return;
+    // 真正进入拾取态：退出其它设置模式、设 pickTarget、注入拾取光标（否则网页不亮、无光标）
+    exitAllSetupModes();
+    setReplaceMarkId(mark.id);
+    const wf = mark.workflow === "entry" ? "entry" : mark.workflow === "review" ? "review" : null;
+    setAddingStepMode(wf);
+    setTeachingPhase(wf === "entry" ? "entry" : wf === "review" ? "review" : "idle");
+    setBindInputSide(null);
+    setPendingAction("none");
+    setInputTarget(null);
+    setNextClickLabel(null);
+    setRightPicked(null);
+    setLeftPicked(null);
+    setError(null);
+    const side: ViewSide = mark.side || (wf === "entry" ? "left" : "right");
+    setPickTarget(side);
+    if (!selectMode) setSelectMode(true);
+    setTimeout(() => {
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
+      // 只在该侧是网页时注入拾取光标（Excel 侧由 ExcelView 的 picking 属性激活）
+      if (side === "left" && leftViewModeRef.current === "web") window.electronAPI?.viewStartPicking("left");
+      else if (side === "right" && rightViewModeRef.current === "web") window.electronAPI?.viewStartPicking("right");
+    }, 300);
+    setSuccessToast(`正在重选替换「${markDisplayLabel(mark)}」（步骤 ${mark.order}）：请在${side === "left" ? "左" : "右"}侧网页点选新元素`);
+  }, [running, singleRunning, batchRunning, queueRunning, exitAllSetupModes, selectMode, leftViewModeRef, rightViewModeRef]);
+
   /** 刷新工作区：清空网页高光/光标、步骤设置、字段对比，但不刷新 Excel 记录 */
   const refreshWorkspace = useCallback(() => {
     rlog("[refreshWorkspace] 清空光标/步骤/字段对比");
@@ -3837,8 +3885,16 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setReport(null);
     setLoopReports([]);
     setError(null);
+    // 回到教学示范卡：批量跑完后 selectedId 停在最后一张，不清的话重新绑定输入会填错人的值。
+    // 优先上个 LOOP 的 sourceRecordId（教学时那张卡），否则第一张——与「新LOOP」行为一致。
+    const demoId = lastTemplateRef.current?.sourceRecordId;
+    if (demoId && cardRecords.some((r) => r.record_id === demoId)) {
+      setSelectedId(demoId);
+    } else if (cardRecords[0]) {
+      setSelectedId(cardRecords[0].record_id);
+    }
     setSuccessToast("已清空光标、步骤设置和字段对比");
-  }, [exitAllSetupModes, setSuccessToast]);
+  }, [exitAllSetupModes, setSuccessToast, cardRecords]);
 
   // 教学模式向导：开始灵活绑定（左右侧皆可）
   // 进入「灵活绑定」模式后：点任意侧输入框 = 绑定选中的 Excel 列并真实填入第一行值；
@@ -3853,6 +3909,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     }
     // 先退出所有其他模式（互斥）
     exitAllSetupModes();
+    // 点击「绑定输入」即收起左侧卡片栏：绑定要在网页上点输入框，左侧栏让位
+    // （退出选择模式时仍按 savedLeftPanelOpenRef 原逻辑恢复，不受影响）
+    if (!leftDetached && leftPanelOpen) {
+      setLeftPanelOpen(false);
+    }
     const col = selectedExcelColumnRef.current;
     rlog("[startBindBothInputs] 开始灵活绑定, selectedExcelColumn=", col);
 
@@ -3876,7 +3937,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         window.electronAPI?.viewSetBindInputMode("right", true).catch(() => {});
       }
     }, 500);
-  }, [exitAllSetupModes]);
+  }, [exitAllSetupModes, leftDetached, leftPanelOpen]);
 
   // 退出灵活绑定模式
   const exitBindInputs = useCallback(() => {
@@ -4448,6 +4509,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setCustomTextEntries((prev) => prev.map((e) => (e.id === id ? { ...e, workflow } : e)));
   }, []);
 
+  /** 设置/解除条目的「网页值写入 Excel 列」方向（source="web"）：LOOP 运行时读取网页元素值写入绑定的 Excel 列 */
+  const setCustomTextSource = useCallback((id: string, source: "web" | undefined) => {
+    setCustomTextEntries((prev) => prev.map((e) => (e.id === id ? { ...e, source } : e)));
+  }, []);
+
   /** 进入/取消条目的 Excel 列绑定态：armed 后点击右侧 Excel 单元格即绑定该列 */
   const bindExcelForEntry = useCallback((id: string) => {
     setExcelBindEntryId((prev) => {
@@ -4481,14 +4547,23 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     let saved = 0;
     const newlySavedIds: string[] = [];
     customTextEntries.forEach((entry) => {
-      if (!entry.text || !entry.selector || entry.saved) return;
+      if (entry.saved) return;
+      // web→Excel 方向：值取自网页元素写入绑定的 Excel 列，属于数据绑定而非网页目标填入步骤，
+      // 保存时跳过 saveMapping（不生成网页目标映射），仅保留在本面板 customTextEntries（随模板持久化）
+      const isWebExcel = entry.source === "web" && !!(entry.excelField && entry.selector);
+      if (!isWebExcel && (!entry.text || !entry.selector)) return;
       // 每个条目按自身的 workflow 保存（未设置时跟随全局）
       const entryWorkflow = entry.workflow || savedStepType;
       currentLoopStepTypeRef.current = entryWorkflow;
+      if (isWebExcel) {
+        newlySavedIds.push(entry.id);
+        saved++;
+        return;
+      }
       // right_label 只用拾取到的元素标签；框框名字（entry.name）不参与保存，仅在 UI 显示
       // 绑定了 Excel 列时：来源改为 excel 列（LOOP 逐行取值，saveMapping 会自动转为 variableField）
       saveMapping({
-        right_selector: entry.selector,
+        right_selector: entry.selector!,
         right_label: entry.label || entry.selector,
         right_input_type: entry.type || null,
         left_source: entry.excelField ? "excel" : "manual",
@@ -4772,6 +4847,22 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               <FileSpreadsheet className="h-2.5 w-2.5" />
               {excelBindEntryId === entry.id ? "点Excel列…" : entry.excelField ? `已绑「${entry.excelField}」· 取消绑定` : "绑Excel"}
             </button>
+            {/* 网页值→Excel 方向开关：运行时读取该网页元素值写入绑定的 Excel 列（web→Excel 录入） */}
+            {entry.excelField && entry.selector && (
+              <button
+                onClick={(e) => { e.stopPropagation(); setCustomTextSource(entry.id, entry.source === "web" ? undefined : "web"); }}
+                disabled={!!customTextPickingId && customTextPickingId !== entry.id}
+                className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors disabled:opacity-40 ${
+                  entry.source === "web"
+                    ? "bg-violet-500 text-white hover:bg-violet-600"
+                    : "bg-slate-200 text-slate-600 hover:bg-slate-300"
+                }`}
+                title={entry.source === "web" ? "网页值 → Excel 列：运行时读取该网页元素写入绑定的 Excel 列 · 点击取消" : "网页值 → Excel 列：运行时读取该网页元素写入绑定的 Excel 列（需已拾取元素并绑定 Excel 列）"}
+              >
+                <MoveRight className="h-2.5 w-2.5" />
+                网页→Excel
+              </button>
+            )}
             <button
               onClick={(e) => { e.stopPropagation(); removeCustomTextEntry(entry.id); }}
               className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium text-slate-400 transition-colors hover:bg-rose-100 hover:text-rose-600"
@@ -5867,8 +5958,12 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     if (appMode === "entry" && !hasSubmitStep) {
       setError("警告：录入流教学未检测到点击保存/提交按钮的步骤，批量执行时不会自动提交。建议在教学末尾按空格+点保存按钮。");
     }
+    // 复用当前模板 id：重复运行/重复教学同一 LOOP 时更新原条目（saveSkill 按 id upsert），
+    // 避免每次运行都生成新 id、把「循环管理」面板越攒越多。
+    // 只有点了「新LOOP」（清空 workflowTemplate/lastTemplate refs）才生成全新 id。
+    const prevTplId = workflowTemplateRef.current?.id || lastTemplateRef.current?.id;
     const tpl: WorkflowTemplate = {
-      id: `tpl-${Date.now()}`,
+      id: prevTplId ?? `tpl-${Date.now()}`,
       name: `${appMode === "entry" ? "录入" : "LOOP"}模板 ${new Date().toLocaleString("zh-CN")}`,
       createdAt: Date.now(),
       sourceRecordId: selected?.record_id,
@@ -5907,12 +6002,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     window.electronAPI?.viewClearHighlight("left").catch(() => {});
     window.electronAPI?.viewClearHighlight("right").catch(() => {});
     if (avatarMode) exitAvatarMode();
-    // 若是从"自定义（勾选卡片）"入口进入的教学，完成后把 LOOP 关联到勾选的卡片
+    // 仅运行（finishTeaching 结束时）不再自动写入 LOOP 列表：用户没点「保存」就不该出现在循环管理。
+    // 只有显式点「保存 LOOP」（handleSaveSkill）才把模板持久化到 skills。
+    // 若是从"自定义（勾选卡片）"入口教学，仅把 LOOP 关联到勾选的卡片（运行直接使用 tpl，无需持久化）。
     if (checkedIds.size > 0) {
-      // 持久化保存 tpl 到 skills 列表，确保后续游标运行时 getSkillById 能找到
-      // （第二批教学完成会覆盖 workflowTemplateRef，第一批的 tpl 必须持久化才能保留）
-      saveSkill(tpl);
-      setSkillVersion((v) => v + 1);
       const now = Date.now();
       setCardLoopMap((prev) => {
         const next = { ...prev };
@@ -5953,11 +6046,18 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     pendingMappings: FieldMapping[];
   } => {
     const pendingEntries = customTextEntries
-      .filter((e) => !e.saved && e.text && e.selector)
+      .filter((e) => {
+        if (e.saved) return false;
+        // web→Excel 方向：只需网页元素 + 绑定 Excel 列，无需固定文案
+        if (e.source === "web") return !!(e.excelField && e.selector);
+        return !!(e.text && e.selector);
+      })
       .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
     if (pendingEntries.length === 0) {
       return { extraMarks: [], pendingEntries, marksWithExtras: pickedMarks, pendingMappings: [] };
     }
+    // web→Excel 绑定条目保留在 customTextEntries（随模板持久化），但不生成网页目标 mark/映射
+    const webExcelIds = new Set(pendingEntries.filter((e) => e.source === "web").map((e) => e.id));
     // 设置期以 addingStepModeRef 为准；非设置期回退 LOOP 运行时类型（保持原行为）
     const stepType = addingStepModeRef.current ?? currentLoopStepTypeRef.current;
     const isEntryStep = stepType === "entry";
@@ -5967,7 +6067,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const nonPost = pickedMarks.filter((m) => !isPostClick(m));
     const postMarks = pickedMarks.filter(isPostClick);
     const baseOrder = nonPost.reduce((max, m) => Math.max(max, m.order ?? 0), 0);
-    const extraMarks: PickedMark[] = pendingEntries.map((entry, i) => ({
+    const extraMarks: PickedMark[] = pendingEntries.filter((e) => !webExcelIds.has(e.id)).map((entry, i) => ({
       id: `mk-${nowTs}-auto-${i}-${Math.random().toString(36).slice(2, 7)}`,
       order: baseOrder + i + 1,
       createdAt: nowTs,
@@ -5992,7 +6092,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 收尾点击重新编号到新步骤之后（保持彼此相对顺序）
     const renumberedPosts = postMarks.map((m, j) => ({ ...m, order: baseOrder + extraMarks.length + j + 1 }));
     const marksWithExtras = [...nonPost, ...extraMarks, ...renumberedPosts];
-    const pendingMappings: FieldMapping[] = pendingEntries.map((entry) => ({
+    const pendingMappings: FieldMapping[] = pendingEntries.filter((e) => !webExcelIds.has(e.id)).map((entry) => ({
       right_selector: entry.selector!,
       right_label: entry.label || entry.selector!,
       right_input_type: entry.type || null,
@@ -6246,6 +6346,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const normalized: WorkflowTemplate = { ...src, flipped: frameForTemplate(tpl) };
     // 清空当前工作区（退出拾取模式、清空高光、步骤、映射等）
     refreshWorkspace();
+    // 应用哪个模板就选它的示范卡（refreshWorkspace 只能按旧模板还原，这里覆盖为当前模板的）
+    if (normalized.sourceRecordId && cardRecords.some((r) => r.record_id === normalized.sourceRecordId)) {
+      setSelectedId(normalized.sourceRecordId);
+    }
     // 切换到模板对应的模式
     setAppMode(normalized.mode);
     // 合并模板中的所有步骤，重新编号 order 和生成新 id（避免与历史状态冲突）
@@ -6273,7 +6377,26 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     workflowTemplateRef.current = normalized;
     lastTemplateRef.current = normalized;
     setSuccessToast(`已应用 LOOP 模板：${normalized.name}（${mergedMarks.length} 个步骤）`);
-  }, [refreshWorkspace, setSuccessToast]);
+  }, [refreshWorkspace, setSuccessToast, cardRecords]);
+
+  /**
+   * 运行菜单里点击某个 LOOP：不立刻执行。
+   * 只把它加载到「字段对比」设置态（供查看/调整），并把当前已生成的卡片绑定到该 LOOP，
+   * 让用户接下来点「运行 N/N」按钮才真正执行。
+   */
+  const handleApplyLoopForRunMenu = useCallback((tpl: WorkflowTemplate) => {
+    setRunLoopMenuOpen(false);
+    handleApplyLoop(tpl);
+    // 把当前卡片（Excel 生成的那些）绑定到该 LOOP，使「运行 N/N」能直接运行它
+    const now = Date.now();
+    setCardLoopMap((prev) => {
+      const next = { ...prev };
+      cardRecords.forEach((r) => { next[r.record_id] = { loopId: tpl.id, loopName: tpl.name, setAt: now }; });
+      return next;
+    });
+    // 强制下栏「字段对比」面板切到「设置」态
+    setNewLoopSignal((v) => v + 1);
+  }, [handleApplyLoop, cardRecords, setCardLoopMap, setNewLoopSignal]);
 
   /**
    * 勾选卡片后点"自定义"：进入「步骤设置 · 元素选择」模式
@@ -6489,6 +6612,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // 清空：模板、拾取节点、批量结果、报告、日志、核验状态、字段映射、选中卡片
   const startNewLoop = useCallback(() => {
     if (batchRunning) return; // 执行中不允许重置
+    // 清空前先取上个 LOOP 的示范卡（教学时那张卡），下面用它还原选中
+    const prevTpl = workflowTemplateRef.current || lastTemplateRef.current;
     setWorkflowTemplate(null);
     workflowTemplateRef.current = null;
     lastTemplateRef.current = null;
@@ -6507,7 +6632,16 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setVerifyStatus("idle");
     setRecordResults({});
     setMappings([]);
-    setSelectedId(null);
+    // 下栏三个面板自动从「结果」态切回「设置」态，方便直接配置新 LOOP
+    setNewLoopSignal((v) => v + 1);
+    // 回到教学示范卡：批量跑完后 selectedId 停在最后一张，直接绑定输入会填最后一个人的值。
+    // 优先上个 LOOP 的 sourceRecordId（教学时那张卡），否则第一张——第二个 LOOP 存入同一 GROUP 时示范卡一致。
+    const demoId = prevTpl?.sourceRecordId;
+    setSelectedId(
+      demoId && cardRecords.some((r) => r.record_id === demoId)
+        ? demoId
+        : cardRecords[0]?.record_id ?? null
+    );
     setPendingAction("none");
     setInputTarget(null);
     setBindInputSide(null);
@@ -6524,7 +6658,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     window.electronAPI?.viewClearHighlight("right").catch(() => {});
     window.electronAPI?.viewStopPicking("left").catch(() => {});
     window.electronAPI?.viewStopPicking("right").catch(() => {});
-  }, [batchRunning, selectMode, avatarMode]);
+  }, [batchRunning, selectMode, avatarMode, cardRecords]);
 
   // ============ 变量识别：检查 value 是否等于当前卡片的某个字段值 ============
   // 如果是，则记录该字段名，批量执行时自动替换为其他卡片的对应字段值
@@ -7235,6 +7369,39 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         }
       }
       if (!result?.ok) {
+        // 目标可能是只读展示元素（div.view-item-value 之类，无法写入）。
+        // 此时自动改为「读取网页元素值 → 写进绑定的 Excel 列」（web→Excel），而不是硬失败，
+        // 满足「从网页读出值存到 Excel」的场景。
+        try {
+          const probeScript = `
+            ${DEEP_QUERY_HELPER}
+            ${READ_VISIBLE_VALUE_JS}
+            (function() {
+              var el = null;
+              try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(mark.inputTarget))}); } catch(e) { el = null; }
+              if (!el) return { found: false };
+              var editable = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.contentEditable === 'true') && !el.readOnly && !el.disabled;
+              return { found: true, editable: editable, value: String(__cinsideReadVisibleValue(el) || '').trim() };
+            })();
+          `;
+          const probe = await execJS(probeScript) as { found?: boolean; editable?: boolean; value?: string } | null;
+          if (probe && probe.found && probe.editable === false && probe.value && mark.variableField) {
+            const col = mark.variableField;
+            const baseId = record.record_id.split("__")[0];
+            rlog(`[executeMark] 目标元素只读，改为读取网页值写入 Excel「${col}」: "${probe.value}"`);
+            setCardPool((prev) => prev.map((r) => (r.record_id === record.record_id ? { ...r, fields: { ...r.fields, [col]: probe.value! } } : r)));
+            setRecords((prev) => prev.map((r) => (r.record_id === baseId ? { ...r, fields: { ...r.fields, [col]: probe.value! } } : r)));
+            setRightRecords((prev) => prev.map((r) => (r.record_id === baseId ? { ...r, fields: { ...r.fields, [col]: probe.value! } } : r)));
+            try { await api.updateRecordFields(baseId, { [col]: probe.value! }); } catch (e) {
+              const err = e instanceof Error ? e.message : String(e);
+              if (!/404|not found/i.test(err)) rlog(`[executeMark] 读网页写Excel 后端更新失败: ${err}`);
+            }
+            highlightMarkOnViews(mark);
+            return { filledValue: probe.value };
+          }
+        } catch (e) {
+          rlog(`[executeMark] 只读回退探测失败:`, e);
+        }
         throw new Error(`输入失败: ${result?.reason || "未知原因"} (${mark.inputTarget})`);
       }
       // 录入/审查/绑定输入成功后显示高亮框 + label
@@ -8352,7 +8519,26 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         allMarks = [...postClicks, ...restMarks];
         postThenPreBoundary = postClicks.length; // post结束后等待页面加载
       } else {
-        allMarks = options?.preOnly ? [] : [...tpl.entryMarks];
+        // 录入模式除了录入填入/提交（entryMarks），还要执行数据源定位与前置点击（dataSourceMarks）。
+        // 此前只执行 entryMarks，会把「前置点击/绑定输入」静默丢弃——录入 LOOP 常需先点「新增/编辑」打开表单再填，
+        // 前置点击不执行就永远填不到正确页面。收尾点击（保存/返回）仍放最后。
+        const entryDataSourceInputs = tpl.dataSourceMarks.filter((m) => m.action !== "click" || !m.clickPhase);
+        const entryClickByPhase = (phase: "pre" | "mid" | "post") =>
+          tpl.dataSourceMarks.filter((m) => m.action === "click" && m.clickPhase === phase);
+        const entryPreClicks = entryClickByPhase("pre");
+        const entryMidClicks = entryClickByPhase("mid");
+        const entryPostClicks = entryClickByPhase("post");
+        if (options?.preOnly) {
+          allMarks = [...entryDataSourceInputs, ...entryPreClicks].sort((a, b) => a.order - b.order);
+        } else {
+          allMarks = [
+            ...entryDataSourceInputs,
+            ...entryPreClicks,
+            ...entryMidClicks,
+            ...tpl.entryMarks,
+            ...entryPostClicks,
+          ].sort((a, b) => a.order - b.order);
+        }
       }
     } else if (tpl.mode === "review") {
       allMarks = [...tpl.dataSourceMarks, ...tpl.reviewMarks];
@@ -8757,6 +8943,40 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     return { success: true, comparisons, verifyOverall, skippedErrors, fills };
   }, [executeMark, compareFieldsForRecord, checkViewOnline, waitNetworkRestore, waitPageSettled, getRecordDocFields, joinBgOcrForRecord]);
 
+  // 供「单步/单节执行」助手引用 executeMark，避免定义顺序导致的 TDZ
+  const executeMarkRef = useRef<((mark: PickedMark, record: ApplicantRecord) => Promise<{ filledValue?: string } | void>) | null>(null);
+  executeMarkRef.current = executeMark;
+
+  /** 单步/单节执行：在「当前选中卡片」上顺序执行若干 mark（左键卡片=跑该步；节标题按钮=跑整节）。返回是否成功 */
+  const executeStepsOnce = useCallback(async (marks: PickedMark[]): Promise<{ ok: boolean; error?: string }> => {
+    const rec = selected;
+    if (!rec) { setError("请先在卡片面板选中一张卡片，再做单步/单节执行"); return { ok: false, error: "无选中卡片" }; }
+    if (running || singleRunning || batchRunning || queueRunning) return { ok: false, error: "正在执行中，请稍候" };
+    const fn = executeMarkRef.current;
+    if (!fn) return { ok: false, error: "执行器未就绪" };
+    setSingleRunning(true);
+    setExecPhase("marks");
+    setVerifyFieldIdx(-1);
+    setSteps([]);
+    try {
+      for (const mk of marks) {
+        setSteps((prev) => [...prev, { step: prev.length + 1, action: "step", description: `单步 · ${markDisplayLabel(mk)}`, success: false, timestamp: new Date().toISOString(), recordId: rec.record_id }]);
+        try {
+          await fn(mk, rec);
+          setSteps((prev) => prev.map((s, i) => (i === prev.length - 1 ? { ...s, success: true } : s)));
+        } catch (e) {
+          const err = e instanceof Error ? e.message : String(e);
+          setSteps((prev) => prev.map((s, i) => (i === prev.length - 1 ? { ...s, success: false, detail: err } : s)));
+          setError(`单步执行失败：${err}`);
+          return { ok: false, error: err };
+        }
+      }
+      return { ok: true };
+    } finally {
+      setSingleRunning(false);
+    }
+  }, [selected, running, singleRunning, batchRunning, queueRunning, setError]);
+
   // ============ 执行分析：LOOP 运行中问题卡片实时追加 + 结束后总结段（球体进入处理态表明 AI 正在工作） ============
   /** 分段 upsert：card 分段已存在则原位更新（重新生成），不存在时插到总结段之前，总结段始终沉底 */
   const upsertAnalysisSegment = useCallback((seg: AnalysisSegment) => {
@@ -9033,12 +9253,18 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       : cardRecords.slice();
     let targets = baseTargets;
     let skippedDemo = false;
-    if (willRunEntry && baseTargets.length > 1) {
+    let demoRecord: ApplicantRecord | null = null;
+    // 只有「录入到网页」（Excel→网页填表）才跳过教学示范卡（它已在教学时填入网页）。
+    // 若是「录入到 EXCEL」（网页→Excel 记录），不跳过示范卡——第一张卡也要照常执行读取/写入，
+    // 否则会把本该记录的第一条数据漏掉。
+    const isWebToExcelRecording = (tpl.customTextEntries || []).some((e) => e.source === "web" && e.excelField);
+    if (willRunEntry && !isWebToExcelRecording && baseTargets.length > 1) {
       // 优先精确跳过教学示范卡（sourceRecordId）；老模板缺该字段时退化为跳过第一张
       const demoIdx = tpl.sourceRecordId
         ? baseTargets.findIndex((r) => r.record_id === tpl.sourceRecordId)
         : 0;
       if (demoIdx >= 0) {
+        demoRecord = baseTargets[demoIdx];
         targets = baseTargets.filter((_, i) => i !== demoIdx);
         skippedDemo = true;
       }
@@ -9089,6 +9315,57 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     const allComparisons: FieldComparison[] = [];
     // 本次执行的人物报告累积：供结束后 AI 执行分析使用（state 异步，finally 里读不到最新值）
     const collectedReports: VerificationReport[] = [];
+    // 示范卡（教学设置录入时已把值填入网页，批量执行跳过它）：结果仍要把它作为「已完成」卡片放第一位，
+    // 且要用示范卡自己记录的字段值来展示「已录入」（教学时填的就是这些值），而不是空占位。
+    if (skippedDemo && demoRecord) {
+      const demoEntries: VerificationReportEntry[] = [];
+      // 与真正执行过的卡片一致：结果里的「填入」项来自所有 input 步骤（数据源定位 + 录入）。
+      // 示范卡在教学设置录入时已把这些值填入，这里用示范卡记录里的字段值展示，避免空占位。
+      const demoInputFields = new Set<string>();
+      for (const em of [...(tpl.dataSourceMarks || []), ...(tpl.entryMarks || [])]) {
+        if (em.action !== "input" || !em.variableField || demoInputFields.has(em.variableField)) continue;
+        demoInputFields.add(em.variableField);
+        const f = em.variableField;
+        const val = String(demoRecord.fields[f] ?? demoRecord.passport_fields?.[f] ?? "").trim();
+        if (!val) continue;
+        demoEntries.push({
+          right_selector: em.inputTarget || "",
+          right_label: `${em.label || f}（填入）`,
+          left_source: "excel",
+          left_field: f,
+          left_value: val,
+          right_value: val,
+          match: "match",
+          reasoning: "示范卡：教学设置时已填入网页",
+          timestamp: new Date().toISOString(),
+        });
+      }
+      if (demoEntries.length === 0) {
+        // 兜底：演示卡没有任何已录字段值，仍给一条说明性条目，避免 0/0 空白卡
+        demoEntries.push({
+          right_selector: "", right_label: "示范卡（教学时已录入）", left_source: "excel",
+          left_field: "", left_value: "", right_value: "", match: "match",
+          reasoning: "该卡在教学设置录入时已填入网页，批量执行跳过、按已完成处理",
+          timestamp: new Date().toISOString(),
+        });
+      }
+      const demoReport: VerificationReport = {
+        task_id: `loop-demo-${demoRecord.record_id}-${Date.now()}`,
+        record_id: demoRecord.record_id,
+        record_name: getRecordDisplayName(demoRecord),
+        university_url: rightUrl,
+        entries: demoEntries,
+        overall: "pass",
+        flow: "entry",
+        summary: "示范卡已录入（教学时填入，未重复执行）",
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+      };
+      collectedReports.push(demoReport);
+      setLoopReports([demoReport]);
+      setRecordResults((prev) => ({ ...prev, [demoRecord.record_id]: "pass" }));
+      setBatchResults((prev) => ({ ...prev, [demoRecord.record_id]: { recordId: demoRecord.record_id, status: "success", startedAt: Date.now(), finishedAt: Date.now() } }));
+    }
     // 新一轮执行：清空上一轮分析分段，运行中即切换到执行分析视图——
     // 问题卡片完成后 AI 分析实时逐段追加，不等全部跑完
     setAnalysisSegments([]);
@@ -9406,6 +9683,61 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           allEntries.push(failEntry);
           currentRecordEntries.push(failEntry);
         } else {
+          // 网页值 → Excel 绑定列 录入（web→Excel）：读取网页元素值写入绑定的 Excel 列。
+          // 放通用成功路径（而非仅纯录入分支）：LOOP 即使带审查步骤也能回写 Excel；
+          // 读取时在网页上高亮来源元素，让右侧网页「有反应」，避免看似无动作。
+          const webExcelBindings = (tpl.customTextEntries || customTextEntriesRef.current || []).filter((e) => e.source === "web" && e.excelField && e.selector);
+          for (const wb of webExcelBindings) {
+            if (batchStopRef.current) break;
+            const side: "left" | "right" = wb.side || "right";
+            const col = wb.excelField!;
+            const baseId = record.record_id.split("__")[0];
+            const label = wb.label || wb.name || col;
+            let webVal = "";
+            window.electronAPI?.viewHighlightBoxes(side, [{ selector: wb.selector!, status: "entry", label: `读网页 → 写 Excel「${col}」` }]).catch(() => {});
+            try {
+              const readScript = `
+                ${DEEP_QUERY_HELPER}
+                ${READ_VISIBLE_VALUE_JS}
+                (function() {
+                  var el = null;
+                  try { el = __cinsideDeepQuery(${JSON.stringify(sanitizeSelector(wb.selector!))}); } catch(e) { el = null; }
+                  if (!el) return { found: false, value: '' };
+                  return { found: true, value: String(__cinsideReadVisibleValue(el) || '').trim() };
+                })();
+              `;
+              const rr = await window.electronAPI?.viewExecuteJS(side, readScript) as { found: boolean; value: string } | null;
+              if (rr && rr.found) webVal = rr.value || "";
+            } catch (e) {
+              webVal = "";
+            }
+            if (!webVal) {
+              const missEntry: VerificationReportEntry = {
+                right_selector: "", right_label: `${label}（Excel·${col}）`, left_source: "database",
+                left_field: col, left_value: "", right_value: String(record.fields[col] ?? ""),
+                match: "missing", timestamp: new Date().toISOString(),
+              };
+              allEntries.push(missEntry); currentRecordEntries.push(missEntry);
+              rlog(`[batch] web→Excel 读取失败（元素未找到/值为空）: ${wb.selector}`);
+              continue;
+            }
+            // 写入 Excel 列：前端记录状态立刻可见，后端持久化（404 容忍）
+            setCardPool((prev) => prev.map((r) => (r.record_id === record.record_id ? { ...r, fields: { ...r.fields, [col]: webVal } } : r)));
+            setRecords((prev) => prev.map((r) => (r.record_id === baseId ? { ...r, fields: { ...r.fields, [col]: webVal } } : r)));
+            setRightRecords((prev) => prev.map((r) => (r.record_id === baseId ? { ...r, fields: { ...r.fields, [col]: webVal } } : r)));
+            try { await api.updateRecordFields(baseId, { [col]: webVal }); } catch (e) {
+              const err = e instanceof Error ? e.message : String(e);
+              if (!/404|not found/i.test(err)) rlog(`[batch] web→Excel 后端写入失败: ${err}`);
+            }
+            window.electronAPI?.viewHighlightBoxes(side, [{ selector: wb.selector!, status: "match", label: `已写入 Excel「${col}」✓` }]).catch(() => {});
+            const okEntry: VerificationReportEntry = {
+              right_selector: "", right_label: `${label}（Excel·${col}）`, left_source: "database",
+              left_field: col, left_value: webVal, right_value: webVal,
+              match: "match", timestamp: new Date().toISOString(),
+            };
+            allEntries.push(okEntry); currentRecordEntries.push(okEntry);
+            rlog(`[batch] web→Excel 录入: ${label}[${col}] = ${webVal}`);
+          }
           if (hasReviewSteps) {
             // 有审查步骤：根据比对结果统计
             if (result.verifyOverall === "match") {
@@ -9840,7 +10172,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
       const task = taskQueue[ti];
       // 左右互换对齐：任务入队时的帧 ≠ 当前物理帧时镜像左右归属（就地替换运行副本，不改队列落库数据）
-      task.workflowTemplate = frameAlignedTemplate(task.workflowTemplate, layoutFlippedRef.current);
+      task.workflowTemplate = frameAlignedTemplate(task.workflowTemplate, frameForTemplate(task.workflowTemplate));
       setQueueCursor(ti);
       setTaskQueue((prev) => prev.map((t, i) => (i === ti ? { ...t, status: "running" } : t)));
 
@@ -15753,13 +16085,13 @@ type: info.type,
               .sort((a, b) => (boundGroupNames.has(b[0]) ? 1 : 0) - (boundGroupNames.has(a[0]) ? 1 : 0));
             const boundCountOf = (tplId: string) => loopCards.filter((r) => cardLoopMap[r.record_id]?.loopId === tplId).length;
             return (
-              <div className="relative flex items-center">
+              <div className="relative flex items-stretch">
                 <button
                   onClick={handleRunLoopsWithCursor}
                   disabled={anyRunning}
                   className={[
                     "flex items-center gap-1.5 py-0.5 pl-3 pr-2 text-[11px] font-medium text-white transition-all",
-                    anyRunning ? "cursor-not-allowed rounded-md bg-slate-400" : "rounded-l-md bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] shadow-sm",
+                    anyRunning ? "cursor-not-allowed rounded-md bg-slate-400" : "rounded-l-md bg-indigo-600 shadow-sm hover:bg-indigo-700 active:scale-[.98]",
                   ].join(" ")}
                   title={anyRunning ? "核验/LOOP 执行中…" : `运行前 ${cursorVal} 张已设 LOOP 的卡片（与左侧 LOOP 面板游标联动）`}
                 >
@@ -15769,10 +16101,13 @@ type: info.type,
                 {!anyRunning && (
                 <button
                   onClick={() => { setRunLoopMenuOpen((v) => !v); setRunLoopGroup(null); }}
-                  className="flex items-center rounded-r-md border-l border-white/25 bg-indigo-600 px-1.5 py-0.5 text-white transition-all hover:bg-indigo-700"
+                  className={[
+                    "flex items-center justify-center rounded-r-md border-l border-white/25 px-2 text-white shadow-sm transition-all active:scale-[.98]",
+                    runLoopMenuOpen ? "bg-indigo-700" : "bg-indigo-500 hover:bg-indigo-600",
+                  ].join(" ")}
                   title="按 GROUP 选择要运行的 LOOP（只跑绑定该 LOOP 的卡片）"
                 >
-                  <ChevronDown className={`h-3 w-3 transition-transform ${runLoopMenuOpen ? "rotate-180" : ""}`} />
+                  <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${runLoopMenuOpen ? "rotate-180" : ""}`} />
                 </button>
                 )}
                 {runLoopMenuOpen && (
@@ -15845,23 +16180,29 @@ type: info.type,
                           <div className="px-3 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">{runLoopGroup}</div>
                           {(groupSet.get(runLoopGroup) || []).map((tpl) => {
                             const cnt = boundCountOf(tpl.id);
-                            // 该组内已绑卡、但绑的不是这个 LOOP 的卡片数（>0 时可一键切换到本 LOOP）
-                            const switchable = loopCards.filter((r) => {
-                              const cur = cardLoopMap[r.record_id]?.loopId;
-                              return cur !== tpl.id && (groupSet.get(runLoopGroup) || []).some((t) => t.id === cur);
-                            }).length;
+                            // 未绑卡时默认可运行当前全部卡片，shown = 实际会跑的卡片数，canRun = 是否可点击
+                            const shownCnt = cnt > 0 ? cnt : cardRecords.length;
+                            const canRun = shownCnt > 0;
+                            const swapToHere = () => {
+                              // 该组内已绑卡、但绑的不是这个 LOOP 的卡片数（>0 时可一键切换到本 LOOP）
+                              return loopCards.filter((r) => {
+                                const cur = cardLoopMap[r.record_id]?.loopId;
+                                return cur !== tpl.id && (groupSet.get(runLoopGroup) || []).some((t) => t.id === cur);
+                              }).length;
+                            };
+                            const switchable = swapToHere();
                             return (
                               <div key={tpl.id} className="flex items-center gap-1 pr-2">
                                 <button
-                                  onClick={() => handleRunLoopById(tpl.id)}
+                                  onClick={() => handleApplyLoopForRunMenu(tpl)}
                                   className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left text-[12px] text-slate-700 hover:bg-indigo-50 disabled:opacity-50"
-                                  disabled={cnt === 0}
-                                  title={cnt === 0 ? "该 LOOP 没有绑定任何卡片" : `运行绑定该 LOOP 的 ${cnt} 张卡片`}
+                                  disabled={anyRunning}
+                                  title={cnt > 0 ? `把「${tpl.name}」加载到字段对比设置态（不运行），再点「运行 N/N」执行` : `把「${tpl.name}」加载到字段对比设置态（不运行），再点「运行 N/N」执行加载后默认运行全部卡片`}
                                 >
                                   <span className="shrink-0 text-sm">{tpl.icon || "🔍"}</span>
                                   <span className="min-w-0 flex-1 truncate font-medium">{tpl.name}</span>
-                                  <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] ${cnt > 0 ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-400"}`}>
-                                    {cnt} 张卡
+                                  <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] ${canRun ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-400"}`}>
+                                    {shownCnt} 张卡
                                   </span>
                                 </button>
                                 <button
@@ -16379,14 +16720,14 @@ type: info.type,
                       {rightViewMode === "web" && settings.demo_site_enabled === true && (
                         <>
                           <button
-                            onClick={() => setRightUrl("http://localhost:8000/demo-review/")}
+                            onClick={() => setRightUrl(BACKEND_ORIGIN + "/demo-review/")}
                             className="flex items-center rounded-md bg-white/70 px-1.5 py-0.5 text-[9px] font-medium text-slate-600 ring-1 ring-slate-200 transition-all hover:bg-slate-100 hover:text-slate-900"
                             title="审查流 DEMO：已提交申请表（含故意错误）"
                           >
                             审查DEMO
                           </button>
                           <button
-                            onClick={() => setRightUrl("http://localhost:8000/demo-entry/")}
+                            onClick={() => setRightUrl(BACKEND_ORIGIN + "/demo-entry/")}
                             className="flex items-center rounded-md bg-white/70 px-1.5 py-0.5 text-[9px] font-medium text-slate-600 ring-1 ring-slate-200 transition-all hover:bg-slate-100 hover:text-slate-900"
                             title="录入流 DEMO：空白申请表单"
                           >
@@ -16526,6 +16867,7 @@ type: info.type,
                   addingStepMode={addingStepMode}
                   onFieldPanelActive={() => setFieldPanelActive(true)}
                   fieldSetupToggleSignal={fieldSetupToggleSignal}
+                  newLoopSignal={newLoopSignal}
                   onPickExtractedField={onPickExtractedField}
                   onPickExtractResultField={pickExtractResultFieldAsSource}
                   docLocalConfigContent={(addingDocExtractMode && (docExtractSource === "choose" || docExtractSource === "local" || docExtractSource === "web")) || docFallbackActive ? (
@@ -16686,6 +17028,9 @@ type: info.type,
                   }}
                   reviewMappings={mappings}
                   onRemoveMark={removePickedMark}
+                  onReplaceMark={startReplaceMark}
+                  replacingMarkId={replaceMarkId}
+                  onRunSteps={executeStepsOnce}
                   onRemoveMapping={removeMapping}
                   onRemoveExtractStep={removeExtractStep}
                   onPreviewMark={(mark) => {
