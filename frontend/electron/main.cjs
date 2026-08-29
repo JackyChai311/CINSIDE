@@ -3152,6 +3152,109 @@ app.whenReady().then(async () => {
     return { canceled: false, rootPath: rootPath, files: files };
   });
 
+  // 本地文件提取：直接多选文件（不限定在根目录内），由渲染层推导根目录 + 路径模板
+  ipcMain.handle("pick-local-doc-files", async () => {
+    const { dialog } = require("electron");
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "选择文件或压缩包（可多选，自动识别其中 PDF/图片）",
+      properties: ["openFile", "multiSelections"],
+      filters: [
+        { name: "所有支持的文件", extensions: ["pdf", "jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff", "zip", "tar", "gz", "tgz", "bz2", "xz"] },
+        { name: "PDF / 图片", extensions: ["pdf", "jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"] },
+        { name: "压缩包（自动展开取其中文档）", extensions: ["zip", "tar", "gz", "tgz", "bz2", "xz"] },
+      ],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true, files: [] };
+    }
+    const files = result.filePaths.map((fp) => {
+      let size = 0;
+      try { size = fs.statSync(fp).size; } catch (e) { /* ignore */ }
+      return {
+        file_path: fp,
+        file_name: path.basename(fp),
+        size: size,
+        ext: path.extname(fp).toLowerCase(),
+      };
+    });
+    debugLog(`[local-doc] picked ${files.length} files directly`);
+    return { canceled: false, files: files };
+  });
+
+  // 本地文件提取：把「文件夹 / tar·zip 压缩包 / 散文件」混合输入展开为具体文件列表
+  // 只收集 PDF 与图片格式（用户明确要求只识别这些相关格式）；压缩包解压到临时目录后扫描
+  const DOC_DOC_EXTS = [".pdf", ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"];
+  const DOC_ARCHIVE_EXTS = [".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz"];
+  ipcMain.handle("expand-local-doc-paths", async (_e, rawPaths) => {
+    const paths = (Array.isArray(rawPaths) ? rawPaths : []).map((p) => String(p || "").trim()).filter(Boolean);
+    if (paths.length === 0) {
+      return { ok: false, files: [], extractedArchives: 0, warnings: [], message: "没有收到文件路径" };
+    }
+    const collected = [];
+    const warnings = [];
+    let extractedArchives = 0;
+    const { spawnSync } = require("child_process");
+    const scanDirInto = (dir, depth) => {
+      if (depth > 6) return; // 与 pick-local-directory 同样的深度限制
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) scanDirInto(full, depth + 1);
+        else if (entry.isFile()) {
+          const ext = path.extname(entry.name).toLowerCase();
+          if (DOC_DOC_EXTS.includes(ext)) collected.push(full);
+        }
+      }
+    };
+    const extractArchive = (archPath) => {
+      const base = path.basename(archPath).replace(/\.(zip|tar|tar\.gz|tgz|tar\.bz2|tar\.xz)$/i, "");
+      const dest = path.join(app.getPath("temp"), "cinside-doc-extract", `${base || "archive"}-${Date.now()}`);
+      try { fs.mkdirSync(dest, { recursive: true }); } catch (e) {
+        warnings.push(`无法创建解压目录：${path.basename(archPath)}`);
+        return;
+      }
+      // Windows 10+ 自带 bsdtar（System32\tar.exe，可解 zip/tar/tar.gz/tgz/tar.bz2）；macOS 自带 tar
+      const tarExe = process.platform === "win32"
+        ? path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe")
+        : "tar";
+      let res = spawnSync(tarExe, ["-xf", archPath, "-C", dest], { encoding: "utf8" });
+      if (res.status !== 0 && process.platform === "win32" && /\.zip$/i.test(archPath)) {
+        // 回退：PowerShell Expand-Archive（仅 zip）
+        const psPath = archPath.replace(/'/g, "''");
+        const psDest = dest.replace(/'/g, "''");
+        res = spawnSync("powershell.exe", ["-NoProfile", "-Command", `Expand-Archive -LiteralPath '${psPath}' -DestinationPath '${psDest}' -Force`], { encoding: "utf8" });
+      }
+      if (res.status !== 0) {
+        warnings.push(`解压失败：${path.basename(archPath)}`);
+        debugLog(`[local-doc] extract failed: ${archPath} → ${(res.stderr || res.error || "").toString().slice(0, 200)}`);
+        return;
+      }
+      extractedArchives++;
+      scanDirInto(dest, 0);
+    };
+    for (const p of paths) {
+      let st = null;
+      try { st = fs.statSync(p); } catch (e) { warnings.push(`无法访问：${path.basename(p)}`); continue; }
+      if (st.isDirectory()) {
+        scanDirInto(p, 0);
+      } else {
+        const lower = p.toLowerCase();
+        if (DOC_ARCHIVE_EXTS.some((ext) => lower.endsWith(ext))) extractArchive(p);
+        else if (DOC_DOC_EXTS.includes(path.extname(lower))) collected.push(p);
+        else warnings.push(`跳过不支持的文件：${path.basename(p)}`);
+      }
+    }
+    debugLog(`[local-doc] expand: ${paths.length} 项 → ${collected.length} 个文档（解压 ${extractedArchives} 个压缩包，警告 ${warnings.length} 条）`);
+    return {
+      ok: collected.length > 0,
+      files: collected,
+      extractedArchives,
+      warnings,
+      message: collected.length === 0 ? "未在所选内容中找到 PDF/JPG/JPEG/PNG 等文档格式" : "",
+    };
+  });
+
   // 幻灯片任务：选择多个 PPT 文件
   ipcMain.handle("pick-ppt-files", async () => {
     const { dialog } = require("electron");

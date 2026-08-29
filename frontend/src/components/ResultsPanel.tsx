@@ -217,6 +217,8 @@ interface Props {
   onChooseDocWeb?: () => void;
   /** 直接选择本地文件提取来源 */
   onChooseDocLocal?: () => void;
+  /** 「本地文件」卡片拖拽放置文件（推导根目录+路径模板）；返回是否接收成功 */
+  onDropLocalDocFiles?: (files: FileList | File[]) => boolean | Promise<boolean>;
   /** 是否正在文件提取模式 */
   docExtractActive?: boolean;
   /** 切换提取步骤的录入/审核模式（用于文件提取和自定义文本面板） */
@@ -412,6 +414,7 @@ export default function ResultsPanel({
   onAutoOpenDocChoose,
   onChooseDocWeb,
   onChooseDocLocal,
+  onDropLocalDocFiles,
   docExtractActive = false,
   onSwitchStepMode,
   onExitAddingStepMode,
@@ -556,6 +559,7 @@ export default function ResultsPanel({
           onAutoOpenDocChoose={onAutoOpenDocChoose}
           onChooseDocWeb={onChooseDocWeb}
           onChooseDocLocal={onChooseDocLocal}
+          onDropLocalDocFiles={onDropLocalDocFiles}
           onExitAddingStepMode={onExitAddingStepMode}
           onFieldPanelActive={onFieldPanelActive}
           canSaveMapping={canSaveMapping}
@@ -948,6 +952,7 @@ function ReportTab({
   onAutoOpenDocChoose,
   onChooseDocWeb,
   onChooseDocLocal,
+  onDropLocalDocFiles,
   docExtractActive = false,
   onSwitchStepMode,
   onExitAddingStepMode,
@@ -1085,6 +1090,8 @@ function ReportTab({
   onChooseDocWeb?: () => void;
   /** 直接选择本地文件提取来源 */
   onChooseDocLocal?: () => void;
+  /** 「本地文件」卡片拖拽放置文件（推导根目录+路径模板）；返回是否接收成功 */
+  onDropLocalDocFiles?: (files: FileList | File[]) => boolean | Promise<boolean>;
   /** 是否正在文件提取模式 */
   docExtractActive?: boolean;
   /** 切换提取步骤的录入/审核模式（用于文件提取和自定义文本面板） */
@@ -1235,6 +1242,9 @@ function ReportTab({
   const [showSample, setShowSample] = useState(false);
   const [showDocSample, setShowDocSample] = useState(false);
   const [filter, setFilter] = useState<"all" | "pass" | "fail" | "review">("all");
+  /** 「本地文件」选择卡片拖拽高亮 */
+  const [localCardDragOver, setLocalCardDragOver] = useState(false);
+  const localCardDragCountRef = useRef(0);
   /** 提取元素面板开关：默认关闭，下栏右侧一般只显示「文件处理」+「字段对比」两个面板 */
   const [showExtractPanel, setShowExtractPanel] = useState(false);
   /** 字段对比面板模式开关：true=步骤设置版，false=结果显示版 */
@@ -3404,11 +3414,12 @@ function ReportTab({
   const isAll = !focusPanel;
   // 提取元素面板显示逻辑：
   // - 非步骤设置模式（结果查看）：始终显示（三栏布局）
-  // - 步骤设置模式：按用户手动开关控制（默认隐藏，给步骤卡片更多空间，可手动展开）
+  // - 字段对比步骤设置模式：默认隐藏（给步骤卡片更多空间，可手动展开）
+  // - 文件处理切换设置态不再隐藏提取元素面板（用户要求：文件处理面板不要扩大铺满）
   // - 自定义文本/控件提取模式：强制显示
   // - doc-extract 聚焦模式：强制显示（文件处理+提取元素两栏）
   // - field-doc 聚焦模式：隐藏（字段对比+文件处理两栏）
-  const isSetupMode = fieldSetupMode || docSetupMode || extractSetupMode;
+  const isSetupMode = fieldSetupMode || extractSetupMode;
   const showExtract = isAll
     ? (!isSetupMode || showExtractPanel || !!customTextContent || !!widgetExtractContent || !!docFieldsContent || extractSetupMode)
     : isDocExtractFocus;
@@ -4427,9 +4438,6 @@ function ReportTab({
               <div className="min-h-0 flex-1 min-w-[200px] overflow-y-auto overflow-x-hidden p-1.5">
                 {docSetupMode && !docLocalConfigContent ? (
                   <div className="flex h-full min-h-[140px] flex-col gap-2">
-                    <div className="rounded-md border border-slate-200 bg-slate-50/60 px-2 py-1 text-[9px] leading-relaxed text-slate-500">
-                      请选择文件提取的来源方式：
-                    </div>
                     <div className="grid flex-1 grid-cols-2 gap-2">
                       <button
                         onClick={() => onChooseDocWeb?.()}
@@ -4441,11 +4449,44 @@ function ReportTab({
                       </button>
                       <button
                         onClick={() => onChooseDocLocal?.()}
-                        className="flex flex-col items-center justify-center gap-1.5 rounded-xl bg-slate-50/60 px-2 py-3 text-center transition-all hover:bg-slate-100"
+                        onDragEnter={onDropLocalDocFiles ? (e) => {
+                          if (!e.dataTransfer.types?.includes("Files")) return;
+                          e.preventDefault();
+                          localCardDragCountRef.current++;
+                          setLocalCardDragOver(true);
+                        } : undefined}
+                        onDragOver={onDropLocalDocFiles ? (e) => {
+                          if (!e.dataTransfer.types?.includes("Files")) return;
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = "copy";
+                        } : undefined}
+                        onDragLeave={onDropLocalDocFiles ? (e) => {
+                          if (!e.dataTransfer.types?.includes("Files")) return;
+                          localCardDragCountRef.current--;
+                          if (localCardDragCountRef.current <= 0) {
+                            localCardDragCountRef.current = 0;
+                            setLocalCardDragOver(false);
+                          }
+                        } : undefined}
+                        onDrop={onDropLocalDocFiles ? (e) => {
+                          e.preventDefault();
+                          localCardDragCountRef.current = 0;
+                          setLocalCardDragOver(false);
+                          if (e.dataTransfer.files?.length) onDropLocalDocFiles(e.dataTransfer.files);
+                        } : undefined}
+                        className={`relative flex flex-col items-center justify-center gap-1.5 rounded-xl px-2 py-3 text-center transition-all ${
+                          localCardDragOver
+                            ? "bg-teal-50 ring-2 ring-teal-400"
+                            : "bg-slate-50/60 hover:bg-slate-100"
+                        }`}
                       >
                         <Upload className="h-6 w-6 text-slate-400" />
                         <span className="text-[11px] font-semibold text-slate-700">本地文件</span>
-                        <span className="text-[9px] leading-tight text-slate-500">选择文件夹按字段匹配<br/>如学号.jpg/pdf/png</span>
+                        <span className="text-[9px] leading-tight text-slate-500">
+                          {localCardDragOver
+                            ? <span className="font-medium text-teal-600">松开放下（文件夹/压缩包会自动展开）</span>
+                            : <>选择文件夹按字段匹配<br />如学号.jpg/pdf/png{onDropLocalDocFiles && <><br /><span className="text-teal-500">或拖入文件夹 / 压缩包</span></>}</>}
+                        </span>
                       </button>
                     </div>
                   </div>
@@ -4537,37 +4578,7 @@ function ReportTab({
                 </button>
               </div>
             )}
-            {!expertMode && extractSetupMode && !effectiveSplit && onSwitchStepMode && (
-              <div className="ml-2 flex shrink-0 items-center gap-0 rounded-md bg-slate-100 p-0.5 ring-1 ring-slate-200">
-                <button
-                  onClick={() => onSwitchStepMode("review")}
-                  className={[
-                    "flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-all",
-                    addingStepMode === "review"
-                      ? "bg-red-500 text-white shadow-sm animate-pulse"
-                      : "text-slate-500 hover:bg-white/60",
-                  ].join(" ")}
-                  title={addingStepMode === "review" ? "审核模式激活中（再次点击关闭）" : "审核模式：先选右侧具体字段，再选左侧对应字段核对"}
-                >
-                  <ArrowLeft className="h-2.5 w-2.5" />
-                  审核
-                </button>
-                <div className="h-3.5 w-px bg-slate-300" />
-                <button
-                  onClick={() => onSwitchStepMode("entry")}
-                  className={[
-                    "flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-all",
-                    addingStepMode === "entry"
-                      ? "bg-red-500 text-white shadow-sm animate-pulse"
-                      : "text-slate-500 hover:bg-white/60",
-                  ].join(" ")}
-                  title={addingStepMode === "entry" ? "录入模式激活中（再次点击关闭）" : "录入模式：字段用于从左侧Excel填入右侧网页"}
-                >
-                  <MoveRight className="h-2.5 w-2.5" />
-                  录入
-                </button>
-              </div>
-            )}
+            {/* 审核/录入模式切换已收归「审查映射」分组头部与顶部工具栏，这里不再重复提供 */}
             <button
               onClick={() => setExtractSetupMode((v) => !v)}
               className={[

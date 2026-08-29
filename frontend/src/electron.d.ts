@@ -149,6 +149,10 @@ export interface ElectronAPI {
 
   // === 本地文件提取：选择目录 + 读取文件 ===
   pickLocalDirectory: () => Promise<{ canceled: boolean; rootPath: string; files: Array<{ relativePath: string; name: string; size: number; ext: string }> }>;
+  /** 本地文件提取：直接多选文件（不经根目录，渲染层自行推导根目录+路径模板） */
+  pickLocalDocFiles: () => Promise<{ canceled: boolean; files: Array<{ file_path: string; file_name: string; size: number; ext: string }> }>;
+  /** 本地文件提取：展开「文件夹/压缩包/散文件」混合输入为具体文档文件列表（文件夹递归扫描、zip/tar 解压到临时目录，只收 PDF/图片格式） */
+  expandLocalDocPaths: (paths: string[]) => Promise<{ ok: boolean; files: string[]; extractedArchives: number; warnings: string[]; message: string }>;
   readLocalDocFile: (rootPath: string, relativePath: string) => Promise<{ ok: boolean; dataUrl?: string; filename?: string; mime?: string; size?: number; error?: string }>;
   checkLocalFileExists: (rootPath: string, relativePath: string) => Promise<{ exists: boolean }>;
   saveExportedFile: (defaultName: string, base64: string) => Promise<{ ok: boolean; canceled?: boolean; path?: string; size?: number; error?: string }>;

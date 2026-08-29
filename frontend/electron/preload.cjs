@@ -120,6 +120,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // === 本地文件提取：选择目录 + 读取文件 ===
   pickLocalDirectory: () => ipcRenderer.invoke("pick-local-directory"),
+  // 本地文件提取：直接多选文件（不经根目录）
+  pickLocalDocFiles: () => ipcRenderer.invoke("pick-local-doc-files"),
+  // 本地文件提取：展开「文件夹/压缩包/散文件」混合输入为具体文档文件列表（只收 PDF/图片）
+  expandLocalDocPaths: (paths) => ipcRenderer.invoke("expand-local-doc-paths", paths),
   readLocalDocFile: (rootPath, relativePath) => ipcRenderer.invoke("read-local-doc-file", rootPath, relativePath),
   checkLocalFileExists: (rootPath, relativePath) => ipcRenderer.invoke("check-local-file-exists", rootPath, relativePath),
   // === 导出文件：弹保存对话框并写入磁盘 ===

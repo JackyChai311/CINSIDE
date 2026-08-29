@@ -2026,23 +2026,20 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // ============ 功能3：单卡 LOOP 执行（点击人物卡片 → 自动导航到该人页面） ============
   const [singleRunning, setSingleRunning] = useState(false);
 
-  // 审查流操作时自动收窄底部面板，退出后恢复用户之前的高度；教学模式下自动打开面板
-  const savedBottomHeightRef = useRef<number>(20);
+  // 选择模式（循环操作/步骤设置）时仅确保底部面板可见；不再强制抬高面板高度（用户要求切换模式时面板不要扩大）
+  const savedBottomHeightRef = useRef<number>(20); // 仍供「下载→聚焦文件处理」流程保存/恢复高度使用
   const savedLeftPanelOpenRef = useRef<boolean>(true);
   useEffect(() => {
     if (selectMode) {
-      // 进入选择模式：自动打开底部面板，保存当前高度并收窄
+      // 进入选择模式：若面板被收起则展开（保持用户已调的高度）
       setBottomPanelOpen(true);
-      savedBottomHeightRef.current = bottomPanelHeight;
-      setBottomPanelHeight(34);
       // 自动收起左侧任务卡片面板，腾出浏览器操作空间
       if (!leftDetached) {
         savedLeftPanelOpenRef.current = leftPanelOpen;
         setLeftPanelOpen(false);
       }
     } else {
-      // 退出选择模式：恢复到用户之前的高度和侧边栏状态
-      setBottomPanelHeight(savedBottomHeightRef.current);
+      // 退出选择模式：恢复侧边栏状态
       if (!leftDetached && savedLeftPanelOpenRef.current) {
         setLeftPanelOpen(true);
       }
@@ -2850,6 +2847,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     }
     return "";
   }, [fieldColumnMap]);
+
   /** 取卡片显示名：name → fullname → 映射的姓名列 → passport_no → student_id → record_id */
   const getRecordDisplayName = useCallback((rec: ApplicantRecord | undefined): string => {
     if (!rec) return "";
@@ -2862,6 +2860,23 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
   /** 后端自动识别的列映射（原始列名 -> 标准字段名），用于过滤Excel表头中的别名列和自动初始化fieldColumnMap */
   const [detectedColumnMap, setDetectedColumnMap] = useState<Record<string, string>>({});
+
+  /**
+   * 按绑定的字段名取 Excel 行值：直接列名 → fieldColumnMap 手动映射 → detectedColumnMap 自动识别（反向）。
+   * 修复：绑定流程记录的是「标准字段键」（如 name），而 record.fields 按「原始列名」（如 名 given name）存，
+   * 直接查会 undefined → 取空。这里把两层映射接上，按应用自己的识别结果解析出真实列。
+   * 返回 undefined 表示两层映射都解析不到（真正的「列不存在」）。
+   */
+  const resolveRecordField = useCallback((rec: ApplicantRecord | undefined, field: string): string | undefined => {
+    if (!rec || !field) return undefined;
+    if (field in rec.fields) return String(rec.fields[field] ?? "").trim();
+    const mapped = fieldColumnMap[field];
+    if (mapped && mapped in rec.fields) return String(rec.fields[mapped] ?? "").trim();
+    for (const [col, std] of Object.entries(detectedColumnMap)) {
+      if (std === field && col in rec.fields) return String(rec.fields[col] ?? "").trim();
+    }
+    return undefined;
+  }, [fieldColumnMap, detectedColumnMap]);
 
   // 已绑定到提取元素条目/输入步骤的 Excel 列集合（用于 Excel 视图表头高亮，明确绑定状态）
   const boundExcelFields = useMemo(() => {
@@ -5158,32 +5173,24 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     window.electronAPI?.viewStopPicking("right").catch(() => {});
   }, [selectedExcelColumn, exitAllSetupModes]);
 
-  // 选择网页提取来源 → 多步点击 + 下载捕获模式
-  const chooseDocExtractWeb = useCallback(() => {
-    rlog("[docExtract] 选择网页提取来源（多步点击 + 下载捕获）");
-    setDocExtractSource("web");
-    setDocWebStatus({ phase: "idle" });
-    setDocExtractPanel(null);
-    setSameNameImages(null);
-    // 开启双侧下载捕获：用户点击多个元素后，任一侧触发下载都会被捕获
-    window.electronAPI?.setDownloadCapture("left", true).catch(() => {});
-    window.electronAPI?.setDownloadCapture("right", true).catch(() => {});
-    // 开启双侧拾取：允许用户点击网页元素记录导航步骤
-    setTimeout(() => {
-      if (addingDocExtractModeRef.current && docExtractSourceRef.current === "web") {
-        window.electronAPI?.viewStartPicking("right");
-        window.electronAPI?.viewStartPicking("left");
-      }
-    }, 300);
-    setSuccessToast("网页提取模式：请依次点击网页元素导航到下载按钮，下载会自动捕获");
-  }, [setSuccessToast]);
-
   // 选择本地文件提取来源
   const chooseDocExtractLocal = useCallback(() => {
     rlog("[docExtract] 选择本地文件提取来源");
+    // 快速入口：卡片可能在未激活文件提取模式时点击（docLocalConfigContent 为 null 才显示卡片），需一并激活模式
+    openDocChoosePanel();
     setDocExtractSource("local");
     window.electronAPI?.viewStopPicking("left").catch(() => {});
     window.electronAPI?.viewStopPicking("right").catch(() => {});
+  }, [openDocChoosePanel]);
+
+  // 从 local/web 配置视图返回「选择来源」（上一个界面）
+  const backToDocChooseSource = useCallback(() => {
+    rlog("[docExtract] 返回来源选择");
+    window.electronAPI?.viewStopPicking("left").catch(() => {});
+    window.electronAPI?.viewStopPicking("right").catch(() => {});
+    window.electronAPI?.setDownloadCapture("left", false).catch(() => {});
+    window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
+    setDocExtractSource("choose");
   }, []);
 
   // 触发本地文件选择对话框
@@ -5255,6 +5262,110 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setDocLocalPattern(patternSegments.join("/"));
     rlog(`[docExtract] 样本: ${relativePath} → 模板: ${patternSegments.join("/")}`);
   }, [docFileBindField, records]);
+
+  // === 本地文件提取：直接接收一组路径（「选择文件」对话框 / 卡片拖拽），推导根目录 + 路径模板 ===
+  // 输入可以是散文件、文件夹或 zip/tar 压缩包：先经主进程展开（文件夹递归扫描、压缩包解压到临时目录，
+  // 只收集 PDF/图片文档格式），再取公共父目录为根目录，并自动以第一个文件为样本推断 {field} 模板
+  const ingestLocalDocFilePaths = useCallback(async (paths: string[]): Promise<boolean> => {
+    let docPaths: string[] = [];
+    let expandNote = "";
+    try {
+      const res = await window.electronAPI?.expandLocalDocPaths?.(paths);
+      if (res) {
+        docPaths = res.files || [];
+        const notes: string[] = [];
+        if (res.extractedArchives > 0) notes.push(`解压 ${res.extractedArchives} 个压缩包`);
+        for (const w of (res.warnings || []).slice(0, 3)) notes.push(w);
+        expandNote = notes.join("；");
+        if (!res.ok) {
+          setError(res.message || "未在所选内容中找到 PDF/JPG/JPEG/PNG 等文档格式");
+          return false;
+        }
+      }
+    } catch { /* IPC 不可用（旧版主进程）时回退为本地扩展名过滤 */ }
+    if (docPaths.length === 0) {
+      const supportedExts = [".pdf", ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"];
+      docPaths = paths.map((p) => String(p || "").trim()).filter(Boolean)
+        .filter((p) => supportedExts.includes(p.slice(p.lastIndexOf(".")).toLowerCase()));
+      if (docPaths.length === 0) {
+        setError("未在所选内容中找到 PDF/JPG/JPEG/PNG 等文档格式（支持文件夹与 zip/tar 压缩包，会自动展开取其中的文档）");
+        return false;
+      }
+    }
+    // 公共父目录作为根目录（Windows 大小写不敏感比较）；跨盘符/无公共目录时拒绝，运行时按「根目录+相对路径」读文件会失效
+    const segsOf = (p: string) => p.replace(/\//g, "\\").split("\\").filter(Boolean);
+    const dirSegs = docPaths.map((p) => segsOf(p).slice(0, -1));
+    let common = dirSegs[0];
+    for (const segs of dirSegs.slice(1)) {
+      let i = 0;
+      while (i < common.length && i < segs.length && common[i].toLowerCase() === segs[i].toLowerCase()) i++;
+      common = common.slice(0, i);
+      if (common.length === 0) break;
+    }
+    if (common.length === 0) {
+      setError("所选文件不在同一文件夹（或同一盘符）下：请选择同一根目录内的文件");
+      return false;
+    }
+    const sep = docPaths[0].includes("\\") ? "\\" : "/";
+    const rootPath = common.join(sep);
+    const files = docPaths.map((p) => {
+      const segs = segsOf(p);
+      const name = segs[segs.length - 1];
+      return {
+        relativePath: segs.slice(common.length).join("/") || name,
+        name,
+        size: 0,
+        ext: name.slice(name.lastIndexOf(".")).toLowerCase(),
+      };
+    });
+    setDocExtractSource("local");
+    setDocLocalRootPath(rootPath);
+    setDocLocalDirFiles(files);
+    const bindField = docFileBindField || selectedExcelColumn || null;
+    setDocFileBindField(bindField);
+    // 自动以第一个文件为样本推断路径模板（与 selectDocLocalSample 同算法；此处用本次确定的 bindField，避免闭包取到旧值）
+    const sampleRel = files[0].relativePath;
+    setDocLocalSamplePath(sampleRel);
+    if (bindField) {
+      const segments = sampleRel.replace(/\.[^.]+$/, "").split("/");
+      const fieldValues = new Set<string>();
+      records.forEach((r) => {
+        const v = r.fields?.[bindField];
+        if (v && String(v).trim()) fieldValues.add(String(v).trim());
+      });
+      let found = false;
+      const patternSegments = segments.map((seg) => {
+        if (!found && fieldValues.has(seg)) {
+          found = true;
+          return `{${bindField}}`;
+        }
+        return seg;
+      });
+      if (!found && segments.length > 1) patternSegments[0] = `{${bindField}}`;
+      setDocLocalPattern(patternSegments.join("/"));
+      rlog(`[docExtract] 直选文件 ${files.length} 个 → 根目录 ${rootPath}，样本 ${sampleRel} → 模板 ${patternSegments.join("/")}`);
+    } else {
+      setDocLocalPattern(null);
+      rlog(`[docExtract] 直选文件 ${files.length} 个 → 根目录 ${rootPath}，样本 ${sampleRel}（未选匹配字段，选定后需重新点选样本推模板）`);
+    }
+    setSuccessToast(`已接收 ${files.length} 个文件（根目录 ${rootPath}）${expandNote ? `（${expandNote}）` : ""}${bindField ? `，已按「${bindField}」推断路径模板，可点选样本调整` : "，请先在下方选择文件名匹配字段"}`);
+    return true;
+  }, [docFileBindField, selectedExcelColumn, records, setError, setSuccessToast]);
+
+  // 「选择文件」按钮：系统多选对话框（文件/压缩包）→ 展开为文档列表 → 推导根目录+模板
+  const handlePickLocalDocFiles = useCallback(async () => {
+    const res = await window.electronAPI?.pickLocalDocFiles?.();
+    if (!res || res.canceled || res.files.length === 0) return;
+    await ingestLocalDocFilePaths(res.files.map((f) => f.file_path));
+  }, [ingestLocalDocFilePaths]);
+
+  // 「本地文件」卡片/配置区拖拽：File 对象转真实磁盘路径后走同一入口（文件夹/压缩包由主进程展开）
+  const handleDropLocalDocFiles = useCallback((fileList: FileList | File[]): Promise<boolean> => {
+    const paths = Array.from(fileList).map((f) =>
+      window.electronAPI?.getPathForFile?.(f) || (f as File & { path?: string }).path || ""
+    );
+    return ingestLocalDocFilePaths(paths);
+  }, [ingestLocalDocFilePaths]);
 
   // 确认本地文件提取配置：保存为一个 mark
   const confirmDocLocalExtract = useCallback(() => {
@@ -5937,6 +6048,17 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
   }, []);
 
+  // 网页提取卡片（文件处理「选择来源」）：约等于「添加过程点击」——录中间导航点击，
+  // 点击到下载元素时下载捕获自动升级为下载触发步骤并进入文件提取流程
+  const chooseDocExtractWeb = useCallback(() => {
+    rlog("[docExtract] 选择网页提取来源 → 等价「添加过程点击」（多步点击 + 下载捕获）");
+    // 清掉上一轮网页提取的残留状态，避免文件处理面板停留在旧结果视图
+    setDocWebStatus({ phase: "idle" });
+    setDocExtractPanel(null);
+    setSameNameImages(null);
+    startAddClickStep("mid");
+  }, [startAddClickStep]);
+
   // 教学完成：把 pickedMarks 按当前 appMode 保存为模板
   const finishTeaching = useCallback(() => {
     // 智能分类：带clickPhase(pre/mid/post)的点击归入dataSource，其余按workflow字段分类
@@ -6226,7 +6348,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       icon: icon || "🔍",
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      sourceRecordId: selected?.record_id,
+      // 示范卡固定记「第一张」：跑完 LOOP 后 selectedId 停在最后一张，
+      // 若按当前选中记录会存成最后一张，之后应用该 LOOP 时绑定输入就会填最后一张的值
+      sourceRecordId: cardRecords[0]?.record_id ?? selected?.record_id,
       mode: appMode,
       dataSourceMarks,
       reviewMarks,
@@ -6237,7 +6361,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       hasSearchSteps,
       hasSubmitStep,
     };
-  }, [pickedMarks, selected, appMode, mappings, customTextEntries]);
+  }, [pickedMarks, selected, appMode, mappings, customTextEntries, cardRecords]);
 
   const handleSaveSkill = useCallback((name: string, icon: string, runAfter?: boolean, group?: string, siteLink?: string) => {
     // 自动收纳「提取元素」面板中已配置但未保存的条目（FIFO，插在收尾点击之前），确保保存的 LOOP 模板包含全部步骤
@@ -6612,8 +6736,6 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // 清空：模板、拾取节点、批量结果、报告、日志、核验状态、字段映射、选中卡片
   const startNewLoop = useCallback(() => {
     if (batchRunning) return; // 执行中不允许重置
-    // 清空前先取上个 LOOP 的示范卡（教学时那张卡），下面用它还原选中
-    const prevTpl = workflowTemplateRef.current || lastTemplateRef.current;
     setWorkflowTemplate(null);
     workflowTemplateRef.current = null;
     lastTemplateRef.current = null;
@@ -6634,14 +6756,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setMappings([]);
     // 下栏三个面板自动从「结果」态切回「设置」态，方便直接配置新 LOOP
     setNewLoopSignal((v) => v + 1);
-    // 回到教学示范卡：批量跑完后 selectedId 停在最后一张，直接绑定输入会填最后一个人的值。
-    // 优先上个 LOOP 的 sourceRecordId（教学时那张卡），否则第一张——第二个 LOOP 存入同一 GROUP 时示范卡一致。
-    const demoId = prevTpl?.sourceRecordId;
-    setSelectedId(
-      demoId && cardRecords.some((r) => r.record_id === demoId)
-        ? demoId
-        : cardRecords[0]?.record_id ?? null
-    );
+    // 教学示范卡固定选「第一张」卡片：批量跑完后 selectedId 停在最后一张，
+    // 若沿用会绑定输入填到最后一个人的值；用户要求新 LOOP 一律从第一张开始设置。
+    setSelectedId(cardRecords[0]?.record_id ?? null);
     setPendingAction("none");
     setInputTarget(null);
     setBindInputSide(null);
@@ -7249,8 +7366,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     let resolvedValue = mark.value || "";
     if (mark.variableField) {
       const docFields = getRecordDocFields(record.record_id);
-      const v = record.fields[mark.variableField] ?? record.passport_fields?.[mark.variableField] ?? docFields[mark.variableField] ?? "";
+      const excelV = resolveRecordField(record, mark.variableField);
+      const v = excelV ?? record.passport_fields?.[mark.variableField] ?? docFields[mark.variableField] ?? "";
       resolvedValue = String(v ?? "").trim();
+      // 绑定列经两层映射仍解析不到（不是空值，是列不存在）：显式告警，避免静默取空
+      if (excelV === undefined) {
+        rlog(`[executeMark] ⚠️ 绑定列「${mark.variableField}」在 Excel 中无法解析（列名与表头不一致且无列映射），取值已回退为空`);
+      }
       rlog(`[executeMark] Excel取值: field=${mark.variableField}, raw=${JSON.stringify(record.fields[mark.variableField])}, resolved="${resolvedValue}"`);
     }
 
@@ -8147,7 +8269,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     await window.electronAPI.viewExecuteJS(side, script);
     // 滚动完成后显示高亮 + label（所有步骤都显示字段说明）
     highlightMarkOnViews(mark);
-  }, [performInputValue, performRealClick, mappings, waitElementAppear, getRecordDocFields, waitForDownload, triggerWebExtract, grabDirectPreviewFile, runDocExtractFallback, updateLiveStepDetail, computeDocTargetFields, highlightMarkOnViews]);
+  }, [performInputValue, performRealClick, mappings, waitElementAppear, getRecordDocFields, waitForDownload, triggerWebExtract, grabDirectPreviewFile, runDocExtractFallback, updateLiveStepDetail, computeDocTargetFields, highlightMarkOnViews, resolveRecordField]);
 
   // ============ 前端字段比对：执行完workflow后，直接从右侧BrowserView读取字段值与期望比对 ============
   // 不调用后端 startConfigurableVerify（它会通过Playwright重新导航页面，破坏LOOP当前状态）
@@ -8288,7 +8410,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         // 录入来源字段值常存在 record.fields（用户「放录入」的来源就是 Excel 行数据），
         // 漏掉它会导致审查时同一字段取值失败，报告「来源为空」——尽管页面已被正确填入
         const docFields = getRecordDocFields(record.record_id);
-        leftValue = record.fields[mp.left_field] || record.passport_fields?.[mp.left_field] || docFields[mp.left_field] || "";
+        // 绑定字段可能是标准字段键（如 name）：经两层列映射解析到真实 Excel 列再取值
+        leftValue = (resolveRecordField(record, mp.left_field) || record.passport_fields?.[mp.left_field] || docFields[mp.left_field] || "");
       } else if (mp.left_source === "manual") {
         leftValue = mp.left_field;
       } else if (mp.left_source === "database") {
@@ -8303,7 +8426,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           leftFound = false;
         }
       } else {
-        leftValue = record.fields[mp.left_field] || "";
+        leftValue = (resolveRecordField(record, mp.left_field) || "");
       }
 
       // 逐对填卡：左侧（提取/Excel）值先填入
@@ -8458,7 +8581,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     ]);
 
     return { comparisons, overall: allMatch ? "match" : "mismatch" };
-  }, [mappings, getRecordDocFields, compareDocBindEntries]);
+  }, [mappings, getRecordDocFields, compareDocBindEntries, resolveRecordField]);
 
   // ============ 对单张卡片执行整个模板 ============
   // 执行流程：先按顺序执行所有 marks（填入搜索词→点搜索→点人物→点附加按钮），
@@ -8949,8 +9072,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
   /** 单步/单节执行：在「当前选中卡片」上顺序执行若干 mark（左键卡片=跑该步；节标题按钮=跑整节）。返回是否成功 */
   const executeStepsOnce = useCallback(async (marks: PickedMark[]): Promise<{ ok: boolean; error?: string }> => {
-    const rec = selected;
-    if (!rec) { setError("请先在卡片面板选中一张卡片，再做单步/单节执行"); return { ok: false, error: "无选中卡片" }; }
+    // 固定用「示范卡=第一张」执行：教学/绑定输入就是以第一张为基准填的，
+    // 若用会漂移的 selectedId（跑完后停在最后一张），单步执行会把网页里的值刷成别的卡片的值
+    const rec = cardRecords[0] || selected;
+    if (!rec) { setError("当前没有卡片：请先在 Excel 框选 LOOP 行范围并点击「一键生成卡片」"); return { ok: false, error: "无卡片" }; }
     if (running || singleRunning || batchRunning || queueRunning) return { ok: false, error: "正在执行中，请稍候" };
     const fn = executeMarkRef.current;
     if (!fn) return { ok: false, error: "执行器未就绪" };
@@ -8960,7 +9085,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setSteps([]);
     try {
       for (const mk of marks) {
-        setSteps((prev) => [...prev, { step: prev.length + 1, action: "step", description: `单步 · ${markDisplayLabel(mk)}`, success: false, timestamp: new Date().toISOString(), recordId: rec.record_id }]);
+        setSteps((prev) => [...prev, { step: prev.length + 1, action: "step", description: `单步 · ${markDisplayLabel(mk)}（示范卡：${getRecordDisplayName(rec)}）`, success: false, timestamp: new Date().toISOString(), recordId: rec.record_id }]);
         try {
           await fn(mk, rec);
           setSteps((prev) => prev.map((s, i) => (i === prev.length - 1 ? { ...s, success: true } : s)));
@@ -8975,7 +9100,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     } finally {
       setSingleRunning(false);
     }
-  }, [selected, running, singleRunning, batchRunning, queueRunning, setError]);
+  }, [cardRecords, selected, running, singleRunning, batchRunning, queueRunning, setError]);
 
   // ============ 执行分析：LOOP 运行中问题卡片实时追加 + 结束后总结段（球体进入处理态表明 AI 正在工作） ============
   /** 分段 upsert：card 分段已存在则原位更新（重新生成），不存在时插到总结段之前，总结段始终沉底 */
@@ -16023,12 +16148,12 @@ type: info.type,
           </button>
         )}
 
-        {/* 状态徽章 */}
-        {overall && (
+        {/* 状态徽章：仅出问题（需检查/有问题）时显示；绿色「通过」在顶栏无上下文、毫无信息量，不渲染 */}
+        {overall && overall !== "pass" && (
           <span
             className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium text-white ${OVERALL_STYLES[overall]}`}
           >
-            {overall === "pass" ? <CheckCircle2 className="h-3 w-3" /> : overall === "fail" ? <XCircle className="h-3 w-3" /> : <Clock className="h-3 w-3" />}
+            {overall === "fail" ? <XCircle className="h-3 w-3" /> : <Clock className="h-3 w-3" />}
             {OVERALL_LABELS[overall]}
           </span>
         )}
@@ -16884,6 +17009,7 @@ type: info.type,
                       igpuAcceleration={!!settings.igpu_acceleration}
                       onChooseWeb={chooseDocExtractWeb}
                       onChooseLocal={chooseDocExtractLocal}
+                      onBackToChoose={backToDocChooseSource}
                       onExitChoose={exitAddDocExtractMode}
                       webStepCount={pickedMarks.filter((m) => m.docExtractClick && m.docExtractClickPhase !== "mid").length}
                       webPostStepCount={pickedMarks.filter((m) => m.docExtractClick && m.docExtractClickPhase === "mid").length}
@@ -16899,6 +17025,8 @@ type: info.type,
                       docLocalSamplePath={docLocalSamplePath}
                       docLocalPattern={docLocalPattern}
                       onPickLocalDirectory={pickLocalDirectory}
+                      onPickLocalFiles={handlePickLocalDocFiles}
+                      onDropLocalDocFiles={handleDropLocalDocFiles}
                       onSelectDocLocalSample={selectDocLocalSample}
                       onConfirm={confirmDocLocalExtract}
                       // 网页模式内嵌提取结果（替代外部弹窗）
@@ -17002,6 +17130,7 @@ type: info.type,
                   onAutoOpenDocChoose={openDocChoosePanel}
                   onChooseDocWeb={chooseDocExtractWeb}
                   onChooseDocLocal={chooseDocExtractLocal}
+                  onDropLocalDocFiles={handleDropLocalDocFiles}
                   docConfigChooseMode={addingDocExtractMode && docExtractSource === "choose"}
                   onExitDocChoose={exitAddDocExtractMode}
                   docExtractActive={addingDocExtractMode}

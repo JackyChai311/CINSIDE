@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import {
   FolderOpen, FileText, Check, Globe, KeyRound, ListChecks, ChevronDown, Eye, Loader2,
-  Upload, X, Database, FileDown, Sparkles, Crop, Download, Copy, Sigma, Wand2, Eraser, RotateCcw, RotateCw, ZoomIn, ZoomOut, MousePointer2, ScanLine, AlertTriangle, Play,
+  Upload, X, Database, FileDown, Sparkles, Crop, Download, Copy, Sigma, Wand2, Eraser, RotateCcw, RotateCw, ZoomIn, ZoomOut, MousePointer2, ScanLine, AlertTriangle, Play, ArrowLeft,
 } from "lucide-react";
 import { FIELD_LABELS } from "../types";
 import { api } from "../api/client";
@@ -31,6 +31,8 @@ interface Props {
   onChooseLocal?: () => void;
   /** 退出文件提取模式（choose 阶段取消） */
   onExitChoose?: () => void;
+  /** 从 local/web 配置视图返回来源选择（上一个界面） */
+  onBackToChoose?: () => void;
 
   // ===== 网页提取模式 =====
   /** 网页提取已记录的开头导航点击步骤数（下载前） */
@@ -141,6 +143,10 @@ interface Props {
   docLocalSamplePath?: string | null;
   docLocalPattern?: string | null;
   onPickLocalDirectory?: () => void;
+  /** 直接多选文件（系统对话框），由 App 推导根目录+路径模板 */
+  onPickLocalFiles?: () => void;
+  /** 拖拽放置文件（卡片/配置区），由 App 推导根目录+路径模板；返回是否接收成功 */
+  onDropLocalDocFiles?: (files: FileList | File[]) => boolean | Promise<boolean>;
   onSelectDocLocalSample?: (relativePath: string) => void;
   onConfirm?: () => void;
 
@@ -170,6 +176,7 @@ export default function DocLocalExtractConfig({
   onChooseWeb,
   onChooseLocal,
   onExitChoose,
+  onBackToChoose,
   webStepCount = 0,
   webPostStepCount = 0,
   onExitWebMode,
@@ -209,6 +216,8 @@ export default function DocLocalExtractConfig({
   docLocalSamplePath = null,
   docLocalPattern = null,
   onPickLocalDirectory,
+  onPickLocalFiles,
+  onDropLocalDocFiles,
   onSelectDocLocalSample,
   onConfirm,
   ocrEngine = "vision",
@@ -219,6 +228,37 @@ export default function DocLocalExtractConfig({
   const isChoose = mode === "choose";
   const isWeb = mode === "web";
   const canConfirmLocal = docLocalRootPath && docLocalPattern && docFileBindField;
+
+  // 拖拽文件放置高亮（choose 卡片 / 本地配置区共用）
+  const [localDragOver, setLocalDragOver] = useState(false);
+  const dragEnterCountRef = useRef(0);
+  const localDropHandlers = onDropLocalDocFiles ? {
+    onDragEnter: (e: React.DragEvent) => {
+      if (!e.dataTransfer.types?.includes("Files")) return;
+      e.preventDefault();
+      dragEnterCountRef.current++;
+      setLocalDragOver(true);
+    },
+    onDragOver: (e: React.DragEvent) => {
+      if (!e.dataTransfer.types?.includes("Files")) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    },
+    onDragLeave: (e: React.DragEvent) => {
+      if (!e.dataTransfer.types?.includes("Files")) return;
+      dragEnterCountRef.current--;
+      if (dragEnterCountRef.current <= 0) {
+        dragEnterCountRef.current = 0;
+        setLocalDragOver(false);
+      }
+    },
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault();
+      dragEnterCountRef.current = 0;
+      setLocalDragOver(false);
+      if (e.dataTransfer.files?.length) onDropLocalDocFiles(e.dataTransfer.files);
+    },
+  } : {};
 
   // 字节大小格式化
   const fmtSize = (bytes?: number) => {
@@ -1102,6 +1142,17 @@ const handlePreviewWheel = (e: React.WheelEvent<HTMLDivElement>) => {
       {/* 标题条（hideHeader 时由外层"文件处理"头部替代） */}
       {!hideHeader && (
       <div className="flex shrink-0 items-center gap-1.5 border-b border-teal-200 bg-teal-50/60 px-2 py-1">
+        {/* 返回来源选择（上一个界面） */}
+        {!isChoose && onBackToChoose && (
+          <button
+            onClick={onBackToChoose}
+            className="flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium text-teal-700 transition-colors hover:bg-teal-100"
+            title="返回来源选择（网页提取 / 本地文件）"
+          >
+            <ArrowLeft className="h-3 w-3" />
+            重选来源
+          </button>
+        )}
         {isChoose ? <FileText className="h-3 w-3 text-teal-700" /> : isWeb ? <Globe className="h-3 w-3 text-teal-700" /> : <FolderOpen className="h-3 w-3 text-teal-700" />}
         <span className="text-[10px] font-bold text-teal-800">
           {isChoose ? "选择文件提取来源" : isWeb ? "文件提取配置（网页模式）" : "文件提取配置（目录模式）"}
@@ -1211,9 +1262,6 @@ const handlePreviewWheel = (e: React.WheelEvent<HTMLDivElement>) => {
         {/* ===== choose 模式：选择来源 ===== */}
         {isChoose && (
           <div className="flex flex-1 flex-col gap-2">
-            <div className="rounded-md border border-sky-100 bg-sky-50/50 px-2 py-1.5 text-[9px] leading-relaxed text-sky-700">
-              请选择文件提取的来源方式：
-            </div>
             <div className="grid flex-1 grid-cols-2 gap-2">
               <button
                 onClick={onChooseWeb}
@@ -1225,11 +1273,18 @@ const handlePreviewWheel = (e: React.WheelEvent<HTMLDivElement>) => {
               </button>
               <button
                 onClick={onChooseLocal}
-                className="flex flex-col items-center justify-center gap-1.5 rounded-md border-2 border-teal-200 bg-white px-2 py-3 text-center transition-all hover:border-teal-400 hover:bg-teal-50"
+                {...localDropHandlers}
+                className={`relative flex flex-col items-center justify-center gap-1.5 rounded-md border-2 bg-white px-2 py-3 text-center transition-all ${
+                  localDragOver
+                    ? "border-teal-500 bg-teal-50 ring-2 ring-teal-300"
+                    : "border-teal-200 hover:border-teal-400 hover:bg-teal-50"
+                }`}
               >
                 <Upload className="h-6 w-6 text-teal-600" />
                 <span className="text-[11px] font-semibold text-slate-700">本地文件</span>
-                <span className="text-[9px] leading-tight text-slate-500">选择文件夹按字段匹配<br/>如学号.jpg/pdf/png</span>
+                <span className="text-[9px] leading-tight text-slate-500">
+                  {localDragOver ? "松开放下文件" : <>选择文件夹按字段匹配<br />如学号.jpg/pdf/png<br /><span className="text-teal-500">或拖入文件夹 / 压缩包</span></>}
+                </span>
               </button>
             </div>
           </div>
@@ -1947,19 +2002,34 @@ const handlePreviewWheel = (e: React.WheelEvent<HTMLDivElement>) => {
         {/* ===== 本地模式专属内容 ===== */}
         {!isChoose && !isWeb && (
           <div className="flex min-h-0 flex-1 flex-col gap-2">
-            {/* 步骤1：选择文件夹 */}
-            <div className="shrink-0">
+            {/* 步骤1：选择文件夹 / 直接选择文件 / 拖拽放置（三种等价入口，都会推导根目录+路径模板） */}
+            <div {...localDropHandlers} className={`shrink-0 rounded-md p-1 -m-1 transition-all ${localDragOver ? "bg-teal-50 ring-2 ring-teal-400" : ""}`}>
               <label className="mb-0.5 block text-[9px] font-medium text-slate-600">
-                选择根文件夹
+                选择根文件夹{localDragOver ? " · 松开放下" : "，或直接选择/拖入文件、压缩包"}（自动识别其中 PDF/图片）
               </label>
-              <button
-                onClick={onPickLocalDirectory}
-                className="flex w-full items-center justify-center gap-1 rounded-md border-2 border-dashed border-teal-300 bg-white py-1.5 text-[10px] font-medium text-teal-700 transition-all hover:border-teal-500 hover:bg-teal-50"
-              >
-                <FolderOpen className="h-3 w-3" />
-                {docLocalRootPath ? "重新选择文件夹" : "选择文件夹"}
-              </button>
-              {docLocalRootPath && (
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  onClick={onPickLocalDirectory}
+                  className="flex items-center justify-center gap-1 rounded-md border-2 border-dashed border-teal-300 bg-white py-1.5 text-[10px] font-medium text-teal-700 transition-all hover:border-teal-500 hover:bg-teal-50"
+                >
+                  <FolderOpen className="h-3 w-3" />
+                  {docLocalRootPath ? "重新选择文件夹" : "选择文件夹"}
+                </button>
+                {onPickLocalFiles && (
+                  <button
+                    onClick={onPickLocalFiles}
+                    className="flex items-center justify-center gap-1 rounded-md border-2 border-dashed border-teal-300 bg-white py-1.5 text-[10px] font-medium text-teal-700 transition-all hover:border-teal-500 hover:bg-teal-50"
+                    title="选择文件或压缩包（可多选）：自动展开并按公共父目录推导根目录与路径模板"
+                  >
+                    <Upload className="h-3 w-3" />
+                    选择文件
+                  </button>
+                )}
+              </div>
+              {localDragOver && (
+                <p className="mt-0.5 text-center text-[9px] font-medium text-teal-600">松开放下文件（可多选）</p>
+              )}
+              {docLocalRootPath && !localDragOver && (
                 <p className="mt-0.5 truncate text-[9px] text-slate-500" title={docLocalRootPath}>
                   📁 {docLocalRootPath}（{docLocalDirFiles.length} 个文件）
                 </p>
