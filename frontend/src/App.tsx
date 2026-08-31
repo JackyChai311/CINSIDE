@@ -42,9 +42,11 @@ import {
   Plus,
   Repeat2,
   Rotate3D,
+  RotateCcw,
   RotateCw,
   Save,
   Settings2,
+  UserRound,
   ShieldCheck,
   SkipForward,
   Sparkles,
@@ -1190,6 +1192,17 @@ const sourceFieldLabelRef = useRef<string>("");
 
   // —— 左右 BrowserPane 内容互换（中缝按钮）——
   const [swapMenuOpen, setSwapMenuOpen] = useState(false);
+  // —— 新 LOOP 模式选择菜单（保留原人物卡片 / 重选人物卡片）——
+  const [newLoopMenuOpen, setNewLoopMenuOpen] = useState(false);
+  // 新 LOOP 菜单是 HTML 层，网页模式下会被原生 BrowserView 盖住点不到：打开期间走模态覆盖机制
+  useEffect(() => {
+    if (!newLoopMenuOpen) return;
+    if (!window.electronAPI?.modalOverlayEnter) return;
+    window.electronAPI.modalOverlayEnter();
+    return () => {
+      window.electronAPI?.modalOverlayExit?.();
+    };
+  }, [newLoopMenuOpen]);
   // 会话级左右互换状态：swap-all 时翻转。模板保存时记录自身帧（flipped），
   // 运行/展示时按两帧是否一致决定是否镜像左右归属（见 frameAlignedTemplate）
   const [layoutFlipped, setLayoutFlipped] = useState(false);
@@ -4019,7 +4032,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   }, [setError, selectMode, exitAllSetupModes]);
 
   // 教学模式向导：添加录入步骤到 LOOP 循环体
-  // 录入映射流程（先左后右）：左侧选来源（网页/Excel）→ 右侧选输入框 → 保存映射
+  // 录入映射流程（先右后左，与审查一致）：右侧先选输入框 → 左侧再选来源（网页/Excel）→ 保存映射
   const startAddingEntrySteps = useCallback(() => {
     // Toggle：已在录入模式则退出
     if (addingStepModeRef.current === "entry") {
@@ -4029,7 +4042,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     }
     // 先退出其他模式（前置/过程/收尾点击、审查步骤等），保证互斥
     exitAllSetupModes();
-    rlog("[startAddingEntrySteps] 进入录入步骤添加模式（先左后右）");
+    rlog("[startAddingEntrySteps] 进入录入步骤添加模式（先右后左）");
     setCurrentLoopStepType("entry");
     setTeachingPhase("entry");
     setAddingStepMode("entry");
@@ -4037,20 +4050,18 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setPendingAction("none");
     setInputTarget(null);
     setNextClickLabel(null);
-    // 录入一律先选左侧（标准布局=左Excel来源；右侧Excel布局=左网页输入框），
-    // 与审查的「先右后左」形成固定区分，不随布局改变顺序
-    setPickTarget("left");
+    // 录入与审查统一「先右后左」：先点右侧（网页/Excel），再点左侧完成配对。
+    // 左侧先点会被拒绝（方向颠倒会导致第一张卡录错）。
+    setPickTarget("right");
     setRightPicked(null);
     setLeftPicked(null);
     setError(null);
     if (!selectMode) setSelectMode(true);
     setTimeout(() => {
-      window.electronAPI?.viewStopPicking("right").catch(() => {});
       window.electronAPI?.viewStopPicking("left").catch(() => {});
-      // 左侧是网页时注入拾取光标（右侧Excel布局：先选左网页输入框）；
-      // 左侧是 Excel 时靠 ExcelView 的 picking 属性激活单元格拾取（标准布局：先选左Excel来源列）
-      if (leftViewModeRef.current === "web") {
-        window.electronAPI?.viewStartPicking("left");
+      // 右侧是网页时注入拾取光标；右侧是 Excel 时由 ExcelView 的 picking 属性激活单元格拾取
+      if (rightViewModeRef.current === "web") {
+        window.electronAPI?.viewStartPicking("right");
       }
     }, 300);
   }, [setError, selectMode, exitAllSetupModes]);
@@ -4072,19 +4083,13 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       setBindInputSide(null);
       setPendingAction("none");
       setError(null);
-      // 审查=先选右侧具体字段（右侧Excel布局下即右侧 Excel 列）；录入=从左侧开始
-      const targetSide = type === "entry" ? "left" : "right";
-      setPickTarget(targetSide as PickTarget);
+      // 录入/审查统一先右后左：先选右侧（网页/Excel）
+      setPickTarget("right");
       setTimeout(() => {
-        if (type === "entry") {
-          window.electronAPI?.viewStopPicking("right").catch(() => {});
-          window.electronAPI?.viewStartPicking("left");
-        } else {
-          window.electronAPI?.viewStopPicking("left").catch(() => {});
-          // 右侧是网页时注入光标；右侧是 Excel 时由 ExcelView 的 picking 属性激活单元格拾取
-          if (rightViewModeRef.current === "web") {
-            window.electronAPI?.viewStartPicking("right");
-          }
+        window.electronAPI?.viewStopPicking("left").catch(() => {});
+        // 右侧是网页时注入光标；右侧是 Excel 时由 ExcelView 的 picking 属性激活单元格拾取
+        if (rightViewModeRef.current === "web") {
+          window.electronAPI?.viewStartPicking("right");
         }
       }, 200);
     }
@@ -4839,7 +4844,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               <MousePointerClick className="h-2.5 w-2.5" />
               {entry.selector ? "重选" : "拾取"}
             </button>
-            {/* 绑定 Excel 列：armed 后点击 Excel 单元格完成绑定；已绑定后按钮变为「取消绑定」 */}
+            {/* 绑定 Excel 列：armed 后点击 Excel 单元格完成绑定；已绑定后按钮变为「取消绑定」。
+                录入方向强制先右后左：未拾取右侧网页元素前不允许先绑左侧 Excel（否则方向颠倒，第一张卡会录错） */}
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -4849,7 +4855,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                   bindExcelForEntry(entry.id);
                 }
               }}
-              disabled={!!customTextPickingId && customTextPickingId !== entry.id}
+              disabled={(!!customTextPickingId && customTextPickingId !== entry.id) || ((entry.workflow || currentLoopStepType) === "entry" && !entry.selector)}
               className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors ${
                 excelBindEntryId === entry.id
                   ? "bg-emerald-500 text-white animate-pulse"
@@ -4857,7 +4863,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                   ? "bg-emerald-500 text-white hover:bg-rose-500"
                   : "bg-slate-200 text-slate-600 hover:bg-slate-300"
               } disabled:opacity-40`}
-              title={excelBindEntryId === entry.id ? "请点击 Excel 中的一列完成绑定（再点一次取消）" : entry.excelField ? `已成功绑定 Excel 列「${entry.excelField}」（LOOP 时逐行取该列值）· 点击取消绑定` : "绑定 Excel 列：LOOP 时按每张卡片该行该列的值审查/录入"}
+              title={excelBindEntryId === entry.id ? "请点击 Excel 中的一列完成绑定（再点一次取消）" : entry.excelField ? `已成功绑定 Excel 列「${entry.excelField}」（LOOP 时逐行取该列值）· 点击取消绑定` : (entry.workflow || currentLoopStepType) === "entry" && !entry.selector ? "录入方向：先点「拾取」选右侧网页元素，再绑定 Excel 列" : "绑定 Excel 列：LOOP 时按每张卡片该行该列的值审查/录入"}
             >
               <FileSpreadsheet className="h-2.5 w-2.5" />
               {excelBindEntryId === entry.id ? "点Excel列…" : entry.excelField ? `已绑「${entry.excelField}」· 取消绑定` : "绑Excel"}
@@ -5050,27 +5056,19 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     return items.sort((a, b) => a.ts - b.ts);
   }, [pickedMarks, customTextEntries, mappings, widgetDraft]);
 
-  // 重置当前映射选择轮次：根据当前步骤模式回到初始拾取侧
-  // 审查模式（先右后左）：回到 right；录入模式（先左后右）：回到 left
-  // 右侧Excel模式：审查回到左网页 / 录入回到右侧 Excel
+  // 重置当前映射选择轮次：两种步骤模式都回到初始拾取侧
+  // 审查/录入统一「先右后左」：一律回到 right，与 startAdding* 的初始侧一致
+  // 右侧Excel模式：右侧 Excel 仍是第一步（来源），同样从 right 开始
   // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
   const resetMappingRound = useCallback(() => {
     setRightPicked(null);
     setLeftPicked(null);
     rightPickedSideRef.current = "right";
-    const isEntry = addingStepModeRef.current === "entry";
-    const target: PickTarget = rightExcelModeRef.current
-      ? (isEntry ? "right" : "left")
-      : (isEntry ? "left" : "right");
-    setPickTarget(target);
+    setPickTarget("right");
     setTimeout(() => {
-      if (target === "left") {
-        window.electronAPI?.viewStopPicking("right").catch(() => {});
-        if (leftViewModeRef.current === "web") window.electronAPI?.viewStartPicking("left");
-      } else {
-        window.electronAPI?.viewStopPicking("left").catch(() => {});
-        if (rightViewModeRef.current === "web") window.electronAPI?.viewStartPicking("right");
-      }
+      // 右侧是网页时启动 webview 拾取；右侧是 Excel 时靠单元格点击拾取
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      if (rightViewModeRef.current === "web") window.electronAPI?.viewStartPicking("right");
     }, 200);
   }, []);
 
@@ -6734,8 +6732,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // 跑完一个 LOOP 后，用户想跑其他 LOOP 时调用，确保之前的设置/结果不影响后续
   // 保留：Excel 数据（cardRecords）、左侧网页 URL、右侧网页 URL、收藏网站等环境配置
   // 清空：模板、拾取节点、批量结果、报告、日志、核验状态、字段映射、选中卡片
-  const startNewLoop = useCallback(() => {
+  const startNewLoop = useCallback((opts: { keepCards?: boolean } = {}) => {
     if (batchRunning) return; // 执行中不允许重置
+    // 两种模式共用的重置：模板 / 步骤 / 映射 / 结果 / 日志
     setWorkflowTemplate(null);
     workflowTemplateRef.current = null;
     lastTemplateRef.current = null;
@@ -6756,9 +6755,14 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setMappings([]);
     // 下栏三个面板自动从「结果」态切回「设置」态，方便直接配置新 LOOP
     setNewLoopSignal((v) => v + 1);
-    // 教学示范卡固定选「第一张」卡片：批量跑完后 selectedId 停在最后一张，
-    // 若沿用会绑定输入填到最后一个人的值；用户要求新 LOOP 一律从第一张开始设置。
-    setSelectedId(cardRecords[0]?.record_id ?? null);
+    if (opts.keepCards) {
+      // 保留原人物卡片与 LOOP 列：教学示范卡固定选「第一张」卡片，从第一张开始设置
+      setSelectedId(cardRecords[0]?.record_id ?? null);
+    } else {
+      // 重选人物卡片：清空卡片、卡片绑定、框选范围与 LOOP 列（保留 Excel 原始数据）
+      void clearRecords();
+      setSelectedExcelColumn(null);
+    }
     setPendingAction("none");
     setInputTarget(null);
     setBindInputSide(null);
@@ -6775,7 +6779,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     window.electronAPI?.viewClearHighlight("right").catch(() => {});
     window.electronAPI?.viewStopPicking("left").catch(() => {});
     window.electronAPI?.viewStopPicking("right").catch(() => {});
-  }, [batchRunning, selectMode, avatarMode, cardRecords]);
+  }, [batchRunning, selectMode, avatarMode, cardRecords, clearRecords]);
 
   // ============ 变量识别：检查 value 是否等于当前卡片的某个字段值 ============
   // 如果是，则记录该字段名，批量执行时自动替换为其他卡片的对应字段值
@@ -9275,8 +9279,10 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         setError(msg);
         return;
       }
-      const frameMismatch = (tplRaw.flipped ?? false) !== layoutFlippedRef.current;
-      if (check.status === "swapped" && frameMismatch) {
+      // 网站已按 origin 判定「只开在对面」→ 当前物理布局与保存帧不符，直接互换回去。
+      // 不再要求 layoutFlippedRef（会话手动互换计数）不一致：重启应用后重新打开的反转布局
+      // 该标记不会变化，旧条件会让自动反转静默失效。
+      if (check.status === "swapped") {
         rlog(`[runBatch] 🔄 GROUP 网页左右反了：自动互换全部面板回模板帧后运行`);
         console.log("[runBatch] 🔄 GROUP 网页左右反了：自动互换全部面板");
         // 走 ref 拿最新闭包：确保互换用当前 Excel/视图状态而非 runBatch 创建时的旧值
@@ -13156,21 +13162,33 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       // 灵活绑定模式：右侧点输入框 = 绑定 Excel 列并真实填入第一行值；点其他元素 = 真实点击
       // 右侧网页可用「右侧取列」选择器指定同行其他列（如护照号），未设置时跟随 LOOP 列
       const rightCol = rightBindColumnRef.current || currentExcelCol;
-      if (rightCol && isInputLike) {
-        rlog("[onRightPicked] ✅ 绑定右侧输入框, excelCol=", rightCol, "previewValue=", selected?.fields?.[rightCol]);
-        console.log("[onRightPicked] 绑定输入框:", { excelCol: rightCol, selected, previewValue: selected?.fields?.[rightCol] });
+      // ⚠️ 未选 LOOP 列时：点输入框不再退化成「前置点击」，而是提示补选列并保持绑定态
+      // （NEW LOOP 后 selectedExcelColumn 可能被脱离面板同步清空，旧逻辑会把绑定误记成点击任务）
+      if (isInputLike && !rightCol) {
+        setError("已识别为输入框，但尚未选择 LOOP 取值列：请先点左侧 Excel 列头选择取值列（或用「右侧取列」指定），再点击该输入框完成绑定");
+        setTimeout(() => {
+          if (bindInputSideRef.current) {
+            window.electronAPI?.viewStartPicking("left");
+            window.electronAPI?.viewStartPicking("right");
+          }
+        }, 100);
+        return;
+      }
+      if (isInputLike) {
+        rlog("[onRightPicked] ✅ 绑定右侧输入框, excelCol=", rightCol, "previewValue=", rightCol ? selected?.fields?.[rightCol] : undefined);
+        console.log("[onRightPicked] 绑定输入框:", { excelCol: rightCol, selected, previewValue: rightCol ? selected?.fields?.[rightCol] : undefined });
         addPickedMark({
           side: "right",
           source: "web",
           selector: info.selector,
-          label: `${activePhase === "entry" ? "录入" : activePhase === "review" ? "审查" : "绑定输入"} · ${info.label || info.selector} ← Excel「${rightCol}」`,
+          label: `${activePhase === "entry" ? "录入" : activePhase === "review" ? "审查" : "绑定输入"} · ${info.label || info.selector} ${rightCol ? `← Excel「${rightCol}」` : "← 未选列"}`,
           value: info.value,
           workflow: activePhase || "data-source",
           action: "input",
           inputTarget: info.selector,
           inputTargetLabel: info.label || info.selector,
-          variableField: rightCol,
-          excelField: rightCol,
+          variableField: rightCol || undefined,
+          excelField: rightCol || undefined,
           recordId: selected?.record_id,
           rect: info.rect,
           tag: info.tag,
@@ -13179,7 +13197,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         // 只填入右侧被绑定的那个输入框（info.selector），而不是无差别塞两侧的第一个输入框。
         // 这样用户点哪个框，就只填那个框，之后用户继续点搜索/确认人物跳转页面。
         // 优先使用「第一次点击的字段值」（录入流复制语义），无来源字段时回退到 Excel 列值
-        const previewValue = ((sourceFieldValueRef.current || selected?.fields?.[rightCol]) || "").trim();
+        const previewValue = ((sourceFieldValueRef.current || (rightCol ? selected?.fields?.[rightCol] : "")) || "").trim();
         if (previewValue) {
           console.log("[onRightPicked] 执行填入:", { side: "right", selector: info.selector, previewValue });
           setTimeout(() => {
@@ -13191,6 +13209,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
           }, 350);
         } else {
           console.warn("[onRightPicked] previewValue 为空，无法填入", { selected, rightCol });
+          // 未选 LOOP 列：仍保留绑定步骤，但明确提示用户补选列，避免误以为「没反应」
+          if (!rightCol) setError("已绑定该输入框，但尚未选择 LOOP 取值列：请点左侧 Excel 列头选择取值列（或用「右侧取列」指定），否则运行时不会填入值");
         }
         // 保持绑定模式，继续拾取左右两侧：用户可继续点右侧/其他输入框绑定填入，直到点「完成」。
         // 绑定左侧后不退出，否则再点右侧输入框时已脱离绑定模式，无法立即填入。
@@ -13325,9 +13345,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 普通映射流程：记录右侧拾取标记
     setRightPicked(info);
     rightPickedSideRef.current = "right";
-    // 审查模式（先右后左）：右侧拾取完成后切到左侧拾取来源；录入模式（先左后右）：两侧已完成，等待保存
+    // 审查/录入统一（先右后左）：右侧拾取完成后切到左侧拾取来源/目标，完成配对后等待「确定映射」
     // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
-    setPickTarget(addingStepModeRef.current === "review" ? "left" : null);
+    setPickTarget(addingStepModeRef.current === "review" || addingStepModeRef.current === "entry" ? "left" : null);
     // 录入/映射流程：点击右侧输入框时立即填入来源字段值（优先）或 Excel 列值
     // 参考「绑定搜索」逻辑：即使没有选中 Excel 列，只要来源字段值已捕获就填入；延迟 350ms 确保元素就绪
     // ⚠️ 审查模式例外：右侧是核对目标（只登记待比对），绝不填值
@@ -13724,6 +13744,14 @@ label: `${activePhase === "entry" ? "录入" : activePhase === "review" ? "审�
       return;
     }
 
+    // 录入顺序强制先右后左：右侧未拾取前不接受左侧网页点击（与 onExcelPicked 的守卫对称）。
+    // 脱离窗口场景下左侧拾取仍会被激活（picking 条件含 teachingPhase !== "idle"），此处兜底防方向颠倒。
+    // 右侧 Excel 布局下右侧来源已选时会占 leftPicked 槽位（tag=excel-cell），视为右侧已完成
+    if (addingStepModeRef.current === "entry" && !rightPickedRef.current && leftPickedRef.current?.tag !== "excel-cell" && !inputTargetRef.current) {
+      setError("录入设置：请先点击右侧网页/Excel 完成拾取，再点左侧来源元素");
+      return;
+    }
+
 // 普通映射流程：记录左侧拾取标记
 // 右侧 Excel 数据源模式：左网页是学校系统（核对目标），占 rightPicked 槽位（审查先右后左的第二步）
 if (rightExcelModeRef.current) {
@@ -13738,14 +13766,13 @@ if (info.value || info.text) {
   sourceFieldValueRef.current = String(info.value || info.text).trim();
   sourceFieldLabelRef.current = info.label || info.selector || "";
 }
-// 审查模式（先右后左）：标准布局两侧已完成等待保存；右侧 Excel 布局=左网页核对目标已选、回到右侧 Excel 字段
-// 录入模式（先左后右）：标准布局继续拾取右侧元素；右侧 Excel 布局=左网页输入框已选，
-// Excel 来源未选则切到右侧 Excel 继续选，已选（乱序）则两侧完成等待保存
+// 审查/录入统一「先右后左」：标准布局两侧已完成，等待「确定映射」
+// 右侧 Excel 布局：左网页占核对目标/输入框槽位；Excel 来源未选则切回右侧 Excel 继续选，已选则两侧完成等待保存
 // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
 setPickTarget(
   rightExcelModeRef.current
     ? (addingStepModeRef.current === "entry" ? (leftPickedRef.current ? null : "right") : "right")
-    : (addingStepModeRef.current === "entry" ? "right" : null)
+    : null
 );
 // addingStepMode 下不添加 pick mark，保存映射时才添加 input mark
 if (!addingStepModeRef.current) {
@@ -13763,7 +13790,7 @@ tag: info.tag,
 type: info.type,
 });
 }
-  }, [addPickedMark, selected, pendingAction, inputTarget, performRealClick, performInputValue, detectVariableField, teachingPhase, setSuccessToast, recyclePickedMark, runDocExtractFromUrl, handleUploadBindPick]);
+  }, [addPickedMark, selected, pendingAction, inputTarget, performRealClick, performInputValue, detectVariableField, teachingPhase, setError, setSuccessToast, recyclePickedMark, runDocExtractFromUrl, handleUploadBindPick]);
 
   // 审查/录入模式下，点击「提取元素」面板中的字段卡片 → 注入为左侧来源（合成拾取值）
   // 提取值天然是「来源/真值」，因此始终填充 leftPicked，不区分当前 pickTarget
@@ -13871,22 +13898,16 @@ type: info.type,
     }
     // 控件映射从面板保存，不进入下一轮拾取（用户未处于拾取流程）
     if (m.widget) return;
-    // 重置一轮，继续拾取下一个（审查模式回到核对元素侧，录入模式回到来源侧）
+    // 重置一轮，继续拾取下一个（审查/录入统一：每轮都从右侧面板重新开始）
     setRightPicked(null);
     setLeftPicked(null);
     rightPickedSideRef.current = "right";
-    // 录入→左侧、审查→右侧（两种布局统一：录入先左后右、审查先右后左，与 startAdding* 的初始侧一致）
-    const nextTarget: PickTarget = addingStepModeRef.current === "entry" ? "left" : "right";
-    setPickTarget(nextTarget);
+    // 审查/录入统一「先右后左」：每轮都从右侧面板开始拾取，左侧是第二步（与 startAdding* 的初始侧一致）
+    setPickTarget("right");
     setTimeout(() => {
-      // 只在对应侧显示网页时才启动 webview 拾取（显示 Excel 时靠单元格点击拾取）
-      if (nextTarget === "left") {
-        window.electronAPI?.viewStopPicking("right").catch(() => {});
-        if (leftViewMode === "web") window.electronAPI?.viewStartPicking("left");
-      } else {
-        window.electronAPI?.viewStopPicking("left").catch(() => {});
-        if (rightViewMode === "web") window.electronAPI?.viewStartPicking("right");
-      }
+      // 右侧是网页时才启动 webview 拾取（显示 Excel 时靠单元格点击拾取）
+      window.electronAPI?.viewStopPicking("left").catch(() => {});
+      if (rightViewMode === "web") window.electronAPI?.viewStartPicking("right");
     }, 200);
     // 保存后给出双侧高亮反馈：目标网页元素 + 来源（Excel 列闪烁 / 左网页来源元素高亮）
     if (window.electronAPI) {
@@ -15183,6 +15204,12 @@ type: info.type,
       // 不再用顶部 Toast，靠页面浮标反馈
       return;
     }
+    // 录入设置顺序限制：必须先点击右侧（网页/Excel）完成拾取，左侧 Excel 才能点击绑定。
+    // 左侧先点会生成没有右侧配对、方向颠倒的绑定，运行时第一张卡会录错。
+    if (addingStepModeRef.current === "entry" && !rightPickedRef.current && !inputTargetRef.current) {
+      setError("录入设置：请先点击右侧网页/Excel 完成拾取，再点击左侧 Excel 绑定");
+      return;
+    }
     setLeftPicked({
       selector: info.field,
       label: info.field,
@@ -15197,14 +15224,8 @@ type: info.type,
       sourceFieldValueRef.current = String(info.value).trim();
       sourceFieldLabelRef.current = info.field || "";
     }
-    // 录入模式（先左后右）：Excel 来源确定后激活右侧拾取光标；审查模式（先右后左）：等待保存
-    // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
-    const isEntry = addingStepModeRef.current === "entry";
-    setPickTarget(isEntry ? "right" : null);
-    if (isEntry) {
-      // 激活右侧网页拾取光标
-      window.electronAPI?.viewStartPicking("right");
-    }
+    // 录入已改为先右后左：左侧点完即配对完成（等待「确定映射」），不再回头激活右侧拾取
+    setPickTarget(null);
     // 仅在录入/审查步骤设置阶段打标（高光+序号）；平时浏览数据点格子不打标，
     // 避免每次点击都 setState 触发 App 整树重渲染（点格子卡顿的来源之一）
     if (addingStepModeRef.current) {
@@ -15266,9 +15287,8 @@ type: info.type,
       sourceFieldValueRef.current = String(info.value).trim();
       sourceFieldLabelRef.current = info.field || "";
     }
-    // 审查流（先右后左）：右侧 Excel 具体字段已选（占来源槽位），切到左侧网页选核对目标；
-    // 录入流（先左后右）：右侧 Excel 是第二步来源——左网页输入框已选则两侧完成等待保存，
-    // 未选（乱序先点了 Excel）则切到左侧网页继续选输入框
+    // 审查/录入统一「先右后左」：右侧 Excel 具体字段先选（占来源槽位），切到左侧网页；
+    // 审查流——选核对目标；录入流——左网页输入框已选则两侧完成等待保存，未选则切到左侧网页继续选输入框
     // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
     const inStepMode = !!addingStepModeRef.current;
     const entryBothDone = addingStepModeRef.current === "entry" && !!rightPickedRef.current;
@@ -16136,16 +16156,48 @@ type: info.type,
           </>
         )}
 
-        {/* 新 LOOP 按钮：完全重置所有 LOOP 状态，开始一个全新的 LOOP（仅 LOOP/录入模式显示） */}
+        {/* 新 LOOP 按钮：弹出「保留原人物卡片 / 重选人物卡片」两种模式（仅 LOOP/录入模式显示） */}
         {appMode !== "review" && teachingPhase === "done" && workflowTemplate && !batchRunning && (
-          <button
-            onClick={startNewLoop}
-            className="flex items-center gap-1 rounded-md bg-white/70 px-2 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200 transition-all hover:bg-white hover:text-slate-900"
-            title="开始新 LOOP（清空所有模板、结果、日志，保留 Excel 数据）"
-          >
-            <Repeat2 className="h-3 w-3" />
-            新 LOOP
-          </button>
+          <div className="relative">
+            <button
+              onClick={() => setNewLoopMenuOpen((v) => !v)}
+              className={[
+                "flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium ring-1 transition-all",
+                newLoopMenuOpen
+                  ? "bg-slate-200 text-slate-700 ring-slate-300"
+                  : "bg-white/70 text-slate-600 ring-slate-200 hover:bg-white hover:text-slate-900",
+              ].join(" ")}
+              title="开始新 LOOP：可选择保留原人物卡片（只重新配置步骤）或重选人物卡片"
+            >
+              <Repeat2 className="h-3 w-3" />
+              新 LOOP
+            </button>
+            {newLoopMenuOpen && (
+              <div className="absolute right-0 top-full z-50 mt-1 w-72 rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+                <button
+                  onClick={() => { setNewLoopMenuOpen(false); startNewLoop({ keepCards: true }); }}
+                  className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-slate-50"
+                >
+                  <UserRound className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-500" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[11px] font-medium text-slate-700">保留原人物卡片</span>
+                    <span className="block text-[9px] leading-tight text-slate-400">保留现有卡片与 LOOP 列，只重新配置步骤</span>
+                  </span>
+                </button>
+                <div className="my-0.5 h-px bg-slate-100" />
+                <button
+                  onClick={() => { setNewLoopMenuOpen(false); startNewLoop({ keepCards: false }); }}
+                  className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-slate-50"
+                >
+                  <RotateCcw className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-500" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[11px] font-medium text-slate-700">重选人物卡片</span>
+                    <span className="block text-[9px] leading-tight text-slate-400">清空卡片，重新框选 Excel 行生成新卡片</span>
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
         )}
 
         {/* 状态徽章：仅出问题（需检查/有问题）时显示；绿色「通过」在顶栏无上下文、毫无信息量，不渲染 */}

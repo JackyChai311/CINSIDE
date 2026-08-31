@@ -1613,6 +1613,80 @@ const ELEMENT_PICKER_SCRIPT = `
     window.__cinsideJustPicked = false;
   }
 
+  // 深查询：支持 ' >>> ' 分段穿透 shadowRoot / iframe contentDocument，
+  // 与高亮层(buildHighlightScript)的 deepQuery 行为一致，用于 buildSelector 自检
+  function deepQuerySel(sel) {
+    if (!sel) return null;
+    if (sel.indexOf('>>>') === -1) {
+      try { return document.querySelector(sel); } catch (e) { return null; }
+    }
+    var segs = sel.split('>>>');
+    var ctx = document;
+    var found = null;
+    for (var i = 0; i < segs.length; i++) {
+      var s = segs[i].trim();
+      if (!s) return null;
+      try { found = ctx.querySelector(s); } catch (e) { return null; }
+      if (!found) return null;
+      if (i < segs.length - 1) {
+        var next = null;
+        try { if (found.shadowRoot) next = found.shadowRoot; } catch (e) {}
+        if (!next) { try { if (found.contentDocument) next = found.contentDocument; } catch (e) {} }
+        if (!next) return null;
+        ctx = next;
+      }
+    }
+    return found;
+  }
+
+  // 兜底唯一选择器：每层用 nth-child 位置定位（不截断、不依赖 class、不限深度），
+  // 从元素到根（或最近带 id 的祖先 / shadow host / iframe 边界）的全路径必然唯一。
+  // 仅在 class 选择器无法精确解析回原元素时使用——保证高亮/点击不再落到相邻元素。
+  function buildPositionalSelector(el) {
+    var chain = [];
+    var path = [];
+    var cur = el;
+    while (cur && cur.nodeType === 1) {
+      if (cur.id) {
+        path.unshift('#' + CSS.escape(cur.id));
+        chain.unshift(path.join(' > '));
+        path = [];
+        var root0 = cur.getRootNode ? cur.getRootNode() : null;
+        if (root0 && root0.host) { cur = root0.host; continue; }
+        break;
+      }
+      var parent = cur.parentElement;
+      var part = cur.nodeName.toLowerCase();
+      if (parent) {
+        var idx = Array.prototype.indexOf.call(parent.children, cur) + 1;
+        part += ':nth-child(' + idx + ')';
+      }
+      path.unshift(part);
+      if (parent) { cur = parent; continue; }
+      // 到达当前文档树顶层：跨 shadow root / iframe 继续
+      var root = cur.getRootNode ? cur.getRootNode() : null;
+      if (root && root.host) {
+        chain.unshift(path.join(' > '));
+        path = [];
+        cur = root.host;
+        continue;
+      }
+      try {
+        var topDoc = cur.ownerDocument;
+        var frameEl = topDoc && topDoc.defaultView && topDoc.defaultView.frameElement;
+        if (frameEl) {
+          chain.unshift(path.join(' > '));
+          path = [];
+          cur = frameEl;
+          continue;
+        }
+      } catch (_) {}
+      break;
+    }
+    if (path.length) chain.unshift(path.join(' > '));
+    return chain.join(' >>> ');
+  }
+
   function buildSelector(el) {
     if (el.id) return '#' + CSS.escape(el.id);
     var chain = [];   // 每个 shadow 层一段路径（跨 shadow DOM 时各段用 ' >>> ' 连接）
@@ -1670,7 +1744,17 @@ const ELEMENT_PICKER_SCRIPT = `
       break;
     }
     if (path.length) chain.unshift(path.join(' > '));
-    return chain.join(' >>> ');
+    var sel = chain.join(' >>> ');
+    // 自检：class 选择器可能因 class 截断(.slice(0,2))或深度上限(8)截断在分叉点之前而不唯一，
+    // 命中相邻元素（如同时高亮/点到"录取""拒绝"）。若不能精确解析回原元素，回退到按位置的唯一选择器。
+    try {
+      if (deepQuerySel(sel) === el) return sel;
+    } catch (_) {}
+    try {
+      var posSel = buildPositionalSelector(el);
+      if (posSel) return posSel;
+    } catch (_) {}
+    return sel;
   }
 
   function getLabel(el) {

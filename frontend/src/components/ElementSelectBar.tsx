@@ -369,12 +369,10 @@ onCanSaveChange,
 
   if (!active) return null;
 
-  // 步骤判定（审查模式：先右侧元素 → 后左侧来源；录入模式：先左侧来源 → 后右侧输入框，顺序相反）
+  // 步骤判定（录入/审查统一：先右侧元素 → 后左侧来源；左侧 Excel 先点会被 App 拒绝）
   const isEntryMode = currentStepType === "entry";
   const leftDone = !!leftPicked || (leftSource === "excel" && !!excelField) || leftSource === "manual";
-  const step = isEntryMode
-    ? (leftDone ? (rightPicked ? 3 : 2) : 1)
-    : (rightPicked ? (leftDone ? 3 : 2) : 1);
+  const step = rightPicked ? (leftDone ? 3 : 2) : 1;
 
   const canSave = Boolean(rightPicked && (leftPicked || (leftSource === "excel" && excelField) || leftSource === "manual"));
 
@@ -499,13 +497,13 @@ onCanSaveChange,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, canSave]);
 
-  // 右侧拾取行（审查模式=第1步；录入模式=第2步，需先完成左侧来源）
+  // 右侧拾取行（录入/审查统一：第1步先点右侧）
   const rightPickRow = (
     <StepRow
-      active={isEntryMode ? step === 2 : step === 1}
+      active={step === 1}
       done={!!rightPicked}
       icon={<Globe className="h-3.5 w-3.5" />}
-      label={isEntryMode ? "选择右侧网页中要填入的输入框" : "选择右侧网页中要核对的元素"}
+      label={isEntryMode ? "选择右侧网页/Excel 元素（录入先右后左）" : "选择右侧网页中要核对的元素"}
       highlight={pickTarget === "right"}
     >
       {isEntryMode && !leftDone ? (
@@ -528,17 +526,17 @@ onCanSaveChange,
     </StepRow>
   );
 
-  // 左侧来源行（录入模式=第1步，直接可选；审查模式=第2步，需先完成右侧拾取）
+  // 左侧来源行（录入/审查统一：第2步后点左侧；右侧未完成前左侧 Excel 点击会被拒绝）
   const leftSourceRow = (
     <StepRow
-      active={isEntryMode ? step === 1 : step === 2}
+      active={step === 2}
       done={leftDone}
       icon={<ArrowRight className="h-3.5 w-3.5" />}
-      label={isEntryMode ? "选择左侧来源（网页元素或 Excel 字段）" : "选择对应的左侧来源"}
+      label={isEntryMode ? "选择左侧 Excel/来源 完成配对" : "选择对应的左侧来源"}
       highlight={pickTarget === "left"}
     >
-      {!isEntryMode && !rightPicked ? (
-        <span className="text-[10px] text-slate-400">先完成上一步</span>
+      {!rightPicked ? (
+        <span className="text-[10px] text-slate-400">先完成上一步（先右侧）</span>
       ) : (
         <div className="flex flex-wrap items-center gap-1.5">
           <button
