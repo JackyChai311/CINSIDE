@@ -176,6 +176,19 @@ const sanitizeSelector = (sel: string): string =>
     .replace(/\.cinside-[a-z0-9_-]+/gi, "")
     .replace(/\.lg-start-(?:zoom|show)\b/gi, "");
 
+/** 判断拾取元素是否为「可填入/可绑定的输入控件」。
+ *  统一前端 isInputLike 判定：绑定模式下「输入=输入、点击=点击」严格隔离，
+ *  避免把真实输入框（含 antd/ElementUI 等自定义控件：tag=div 但 role=combobox/textbox/searchbox/
+ *  spinbutton/listbox，或 contenteditable）误判成「点击」。
+ *  button/a/label 等纯交互元素不会被匹配，不会误伤点击步骤。 */
+const isLikelyInput = (info?: { tag?: string; type?: string; role?: string; isContentEditable?: boolean }): boolean =>
+  !!info && (
+    /^(input|textarea|select)$/i.test(info.tag || "") ||
+    !!info.isContentEditable ||
+    /^(text|search|email|tel|url|number|password|date|datetime-local|month|time|week|file|range)$/i.test(info.type || "") ||
+    /^(textbox|searchbox|combobox|spinbutton|listbox|slider)$/i.test(info.role || "")
+  );
+
 /** 兜底：模板未保存 mappings 时，从审查类 marks 反推字段映射（老模板/未同步映射的提取元素条目），
  *  保证 LOOP 运行时「字段对比」区域和逐字段比对有数据 */
 const deriveMappingsFromMarks = (marks: PickedMark[]): FieldMapping[] => {
@@ -1313,6 +1326,20 @@ const sourceFieldLabelRef = useRef<string>("");
     // 绑定逻辑跟着内容走：拾取标记与映射的左右归属互换（Excel来源/网页目标的指向同时换）
     setPickedMarks((prev) => prev.map((m) => ({ ...m, side: m.side === "left" ? "right" : "left" })));
     setMappings((prev) => prev.map((m) => ({ ...m, web_side: m.web_side === "left" ? "right" : "left" })));
+    // 当前进行中的绑定/拾取流程侧也需要跟随互换（否则互换后点输入框的侧与物理面板错位，
+    // 绑定判定断裂 → 后被记成「点击」）。bindInputSide/pickTarget 都翻转对应侧，
+    // 并清空已拾取的 left/right 槽位，让用户互换后在正确的侧继续绑定。
+    setBindInputSide((prev) => {
+      if (!prev) return prev;
+      const flip = (s: "left" | "right" | "both") => (s === "both" ? "both" : s === "left" ? "right" : "left");
+      return flip(prev as "left" | "right" | "both");
+    });
+    setPickTarget((prev) => {
+      if (!prev) return prev;
+      return prev === "left" ? "right" : prev === "right" ? "left" : prev;
+    });
+    setRightPicked(null);
+    setLeftPicked(null);
     // 行范围/焦点列/LOOP变量属于原 Excel 数据集，随互换清空或对调
     setRowRange(null);
     setExcelFocusColumn(null);
@@ -4032,7 +4059,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   }, [setError, selectMode, exitAllSetupModes]);
 
   // 教学模式向导：添加录入步骤到 LOOP 循环体
-  // 录入映射流程（先右后左，与审查一致）：右侧先选输入框 → 左侧再选来源（网页/Excel）→ 保存映射
+  // 录入映射流程（先左后右）：左侧选来源（网页/Excel）→ 右侧选输入框 → 保存映射
   const startAddingEntrySteps = useCallback(() => {
     // Toggle：已在录入模式则退出
     if (addingStepModeRef.current === "entry") {
@@ -4042,7 +4069,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     }
     // 先退出其他模式（前置/过程/收尾点击、审查步骤等），保证互斥
     exitAllSetupModes();
-    rlog("[startAddingEntrySteps] 进入录入步骤添加模式（先右后左）");
+    rlog("[startAddingEntrySteps] 进入录入步骤添加模式（先左后右）");
     setCurrentLoopStepType("entry");
     setTeachingPhase("entry");
     setAddingStepMode("entry");
@@ -4050,18 +4077,20 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setPendingAction("none");
     setInputTarget(null);
     setNextClickLabel(null);
-    // 录入与审查统一「先右后左」：先点右侧（网页/Excel），再点左侧完成配对。
-    // 左侧先点会被拒绝（方向颠倒会导致第一张卡录错）。
-    setPickTarget("right");
+    // 录入一律先选左侧（标准布局=左Excel来源；右侧Excel布局=左网页输入框），
+    // 与审查的「先右后左」形成固定区分，不随布局改变顺序
+    setPickTarget("left");
     setRightPicked(null);
     setLeftPicked(null);
     setError(null);
     if (!selectMode) setSelectMode(true);
     setTimeout(() => {
+      window.electronAPI?.viewStopPicking("right").catch(() => {});
       window.electronAPI?.viewStopPicking("left").catch(() => {});
-      // 右侧是网页时注入拾取光标；右侧是 Excel 时由 ExcelView 的 picking 属性激活单元格拾取
-      if (rightViewModeRef.current === "web") {
-        window.electronAPI?.viewStartPicking("right");
+      // 左侧是网页时注入拾取光标（右侧Excel布局：先选左网页输入框）；
+      // 左侧是 Excel 时靠 ExcelView 的 picking 属性激活单元格拾取（标准布局：先选左Excel来源列）
+      if (leftViewModeRef.current === "web") {
+        window.electronAPI?.viewStartPicking("left");
       }
     }, 300);
   }, [setError, selectMode, exitAllSetupModes]);
@@ -4083,13 +4112,19 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       setBindInputSide(null);
       setPendingAction("none");
       setError(null);
-      // 录入/审查统一先右后左：先选右侧（网页/Excel）
-      setPickTarget("right");
+      // 审查=先选右侧具体字段（右侧Excel布局下即右侧 Excel 列）；录入=从左侧开始
+      const targetSide = type === "entry" ? "left" : "right";
+      setPickTarget(targetSide as PickTarget);
       setTimeout(() => {
-        window.electronAPI?.viewStopPicking("left").catch(() => {});
-        // 右侧是网页时注入光标；右侧是 Excel 时由 ExcelView 的 picking 属性激活单元格拾取
-        if (rightViewModeRef.current === "web") {
-          window.electronAPI?.viewStartPicking("right");
+        if (type === "entry") {
+          window.electronAPI?.viewStopPicking("right").catch(() => {});
+          window.electronAPI?.viewStartPicking("left");
+        } else {
+          window.electronAPI?.viewStopPicking("left").catch(() => {});
+          // 右侧是网页时注入光标；右侧是 Excel 时由 ExcelView 的 picking 属性激活单元格拾取
+          if (rightViewModeRef.current === "web") {
+            window.electronAPI?.viewStartPicking("right");
+          }
         }
       }, 200);
     }
@@ -4845,7 +4880,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
               {entry.selector ? "重选" : "拾取"}
             </button>
             {/* 绑定 Excel 列：armed 后点击 Excel 单元格完成绑定；已绑定后按钮变为「取消绑定」。
-                录入方向强制先右后左：未拾取右侧网页元素前不允许先绑左侧 Excel（否则方向颠倒，第一张卡会录错） */}
+                录入方向先左后右：未拾取左侧来源前不允许直接绑 Excel 列（否则方向颠倒，第一张卡会录错） */}
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -4855,7 +4890,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                   bindExcelForEntry(entry.id);
                 }
               }}
-              disabled={(!!customTextPickingId && customTextPickingId !== entry.id) || ((entry.workflow || currentLoopStepType) === "entry" && !entry.selector)}
+              disabled={!!customTextPickingId && customTextPickingId !== entry.id}
               className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors ${
                 excelBindEntryId === entry.id
                   ? "bg-emerald-500 text-white animate-pulse"
@@ -4863,7 +4898,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                   ? "bg-emerald-500 text-white hover:bg-rose-500"
                   : "bg-slate-200 text-slate-600 hover:bg-slate-300"
               } disabled:opacity-40`}
-              title={excelBindEntryId === entry.id ? "请点击 Excel 中的一列完成绑定（再点一次取消）" : entry.excelField ? `已成功绑定 Excel 列「${entry.excelField}」（LOOP 时逐行取该列值）· 点击取消绑定` : (entry.workflow || currentLoopStepType) === "entry" && !entry.selector ? "录入方向：先点「拾取」选右侧网页元素，再绑定 Excel 列" : "绑定 Excel 列：LOOP 时按每张卡片该行该列的值审查/录入"}
+              title={excelBindEntryId === entry.id ? "请点击 Excel 中的一列完成绑定（再点一次取消）" : entry.excelField ? `已成功绑定 Excel 列「${entry.excelField}」（LOOP 时逐行取该列值）· 点击取消绑定` : "绑定 Excel 列：LOOP 时按每张卡片该行该列的值审查/录入"}
             >
               <FileSpreadsheet className="h-2.5 w-2.5" />
               {excelBindEntryId === entry.id ? "点Excel列…" : entry.excelField ? `已绑「${entry.excelField}」· 取消绑定` : "绑Excel"}
@@ -5056,19 +5091,27 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     return items.sort((a, b) => a.ts - b.ts);
   }, [pickedMarks, customTextEntries, mappings, widgetDraft]);
 
-  // 重置当前映射选择轮次：两种步骤模式都回到初始拾取侧
-  // 审查/录入统一「先右后左」：一律回到 right，与 startAdding* 的初始侧一致
-  // 右侧Excel模式：右侧 Excel 仍是第一步（来源），同样从 right 开始
+  // 重置当前映射选择轮次：根据当前步骤模式回到初始拾取侧
+  // 审查模式（先右后左）：回到 right；录入模式（先左后右）：回到 left
+  // 右侧Excel模式：审查回到左网页 / 录入回到右侧 Excel
   // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
   const resetMappingRound = useCallback(() => {
     setRightPicked(null);
     setLeftPicked(null);
     rightPickedSideRef.current = "right";
-    setPickTarget("right");
+    const isEntry = addingStepModeRef.current === "entry";
+    const target: PickTarget = rightExcelModeRef.current
+      ? (isEntry ? "right" : "left")
+      : (isEntry ? "left" : "right");
+    setPickTarget(target);
     setTimeout(() => {
-      // 右侧是网页时启动 webview 拾取；右侧是 Excel 时靠单元格点击拾取
-      window.electronAPI?.viewStopPicking("left").catch(() => {});
-      if (rightViewModeRef.current === "web") window.electronAPI?.viewStartPicking("right");
+      if (target === "left") {
+        window.electronAPI?.viewStopPicking("right").catch(() => {});
+        if (leftViewModeRef.current === "web") window.electronAPI?.viewStartPicking("left");
+      } else {
+        window.electronAPI?.viewStopPicking("left").catch(() => {});
+        if (rightViewModeRef.current === "web") window.electronAPI?.viewStartPicking("right");
+      }
     }, 200);
   }, []);
 
@@ -6486,10 +6529,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       order: i + 1,
     }));
     setPickedMarks(mergedMarks);
-    // 恢复字段映射
-    if (normalized.mappings && normalized.mappings.length > 0) {
-      setMappings(normalized.mappings);
-    }
+    // 恢复字段映射（审查映射步骤卡片依赖 mappings 渲染）：
+    // 模板未显式存 mappings 时从 marks 反推，避免「应用已保存 LOOP 后审查映射步骤卡片缺失」
+    setMappings(getTemplateMappings(normalized));
     // 恢复提取元素面板条目（自定义文本 + 文件提取字段，含 Excel 列绑定）
     if (normalized.customTextEntries && normalized.customTextEntries.length > 0) {
       setCustomTextEntries(normalized.customTextEntries);
@@ -9388,7 +9430,28 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 只有「录入到网页」（Excel→网页填表）才跳过教学示范卡（它已在教学时填入网页）。
     // 若是「录入到 EXCEL」（网页→Excel 记录），不跳过示范卡——第一张卡也要照常执行读取/写入，
     // 否则会把本该记录的第一条数据漏掉。
-    const isWebToExcelRecording = (tpl.customTextEntries || []).some((e) => e.source === "web" && e.excelField);
+    // 与运行时 web→Excel 写入（webExcelBindings 用 tpl.customTextEntries || customTextEntriesRef.current）保持一致：
+    // 模板未存 customTextEntries（老模板/恢复异常）时按当前面板条目判断，避免漏检导致录入到Excel第一张被跳过。
+    // 判定信号放宽为「任何绑定了 Excel 列且期望写入 Excel 的条目」：source="web"（网页值→Excel列开关）
+    // 或「非 doc/manual 来源 + 绑定 excelField」——即录入对象是 Excel 列。这类 LOOP 教学示范卡未把值写入 Excel，
+    // 批量执行第一张也必须照常读取/写入，否则第一条数据漏掉。
+    const webExcelSrc = tpl.customTextEntries || customTextEntriesRef.current || [];
+    // 「跳过第一张」只适用于「值来自 Excel、填入网页」的纯填表（教学示范卡已填入网页）：
+    //   entryMark.source === "excel"/"passport" 且未绑定"写入Excel"的迹象。
+    // 其余一切「录入对象=Excel」都要执行第一张——包括：
+    //   - customTextEntries source="web"（网页值→Excel列开关）
+    //   - customTextEntries 绑定 Excel 列且非 doc/manual
+    //   - entryMark 带 variableField（值来自/写入 Excel 列，学校系统只读展示框运行时回退写Excel）
+    // 注意 saveMapping 的 source 反映"取值来源"而非"写入方向"：source="excel" 也可能因目标只读
+    // 在运行时回退写Excel。故只要 entryMark 带 variableField（Excel列），就保守判定为「写入Excel」，
+    // 不跳过第一张——宁可第一张多执行一次，也不漏掉第一条数据。
+    const entryMarksWriteExcel = (tpl.entryMarks || []).some(
+      (m) => !!(m.variableField || m.excelField)
+    );
+    const isWebToExcelRecording = webExcelSrc.some(
+      (e) => e.source === "web"
+        || (!!e.excelField && e.source !== "doc" && e.source !== "manual")
+    ) || entryMarksWriteExcel;
     if (willRunEntry && !isWebToExcelRecording && baseTargets.length > 1) {
       // 优先精确跳过教学示范卡（sourceRecordId）；老模板缺该字段时退化为跳过第一张
       const demoIdx = tpl.sourceRecordId
@@ -10345,10 +10408,26 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         }
 
         // 2. 批量执行该组所有卡片（复用现有 executeTemplateForRecord 逻辑）
-        // 录入为主的任务：教学时示范卡已录入过网页，批量执行跳过它（单卡任务不跳过——用户明确只跑这张）
+        // 录入为主的任务：只有「录入到网页」（Excel→网页填表）才跳过教学示范卡（它已在教学时填入网页），
+        // 教学时示范卡已录入过网页，批量执行跳过它（单卡任务不跳过——用户明确只跑这张）。
+        // 若是「录入到 EXCEL」（网页→Excel 记录），不跳过示范卡——第一张卡也要照常执行读取/写入，
+        // 否则会把本该记录的第一条数据漏掉（与 runBatch 的跳过判定保持一致）。
         let targets = task.cardRecords;
         const willEntryQ = task.workflowTemplate.mode !== "review" && task.workflowTemplate.entryMarks.length > 0;
-        if (willEntryQ && targets.length > 1) {
+        // 与运行时 web→Excel 写入一致（webExcelBindings 用 customTextEntries || customTextEntriesRef.current）：
+        // 模板未存 customTextEntries 时按当前面板条目判断，避免漏检导致录入到Excel第一张被跳过。
+        // 判定信号与 runBatch 一致：source="web" 或「非 doc/manual 来源 + 绑定 excelField」——录入对象为 Excel 列。
+        const webExcelSrcQ = task.workflowTemplate.customTextEntries || customTextEntriesRef.current || [];
+        // 判定信号与 runBatch 一致（任一条即「录入对象=Excel」→ 不跳过第一张）：
+        // source="web"、绑定 Excel 列且非 doc/manual、或 entryMark 带 variableField/excelField（写入Excel）。
+        const entryMarksWriteExcelQ = (task.workflowTemplate.entryMarks || []).some(
+          (m) => !!(m.variableField || m.excelField)
+        );
+        const isWebToExcelRecordingQ = webExcelSrcQ.some(
+          (e) => e.source === "web"
+            || (!!e.excelField && e.source !== "doc" && e.source !== "manual")
+        ) || entryMarksWriteExcelQ;
+        if (willEntryQ && !isWebToExcelRecordingQ && targets.length > 1) {
           const demoIdQ = task.workflowTemplate.sourceRecordId;
           const demoIdxQ = demoIdQ ? targets.findIndex((r) => r.record_id === demoIdQ) : 0;
           if (demoIdxQ >= 0) {
@@ -12626,13 +12705,15 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         setPickedMarks((prev) =>
           prev.map((m) => {
             if (m.action === "input" && m.inputTarget === p.selector && m.side === side) {
-              const newValue = selected?.fields?.[p.field] || m.value || "";
               return {
                 ...m,
                 variableField: p.field,
                 excelField: p.field,
-                value: newValue,
-                label: `${m.workflow === "entry" ? "录入" : "审查"}「${newValue.slice(0, 18)}${newValue.length > 18 ? "…" : ""}」← Excel「${p.field}」`,
+                // value 不固化成选中卡(第一张)的值：执行时由 executeMark 按 mark.variableField
+                // 从当前卡 record 逐卡取值替换。若此处填入 selected 值，一旦 variableField
+                // 因故失效就会永远填第一张卡的值（用户反馈的「绑定输入框永恒第一张」）。
+                value: "",
+                label: `${m.workflow === "entry" ? "录入" : "审查"}「${p.field}」← Excel「${p.field}」`,
               };
             }
             return m;
@@ -12998,7 +13079,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       // 录入模式：拾取到输入框后立即把文本值填进去（参考「绑定输入框」逻辑）
       // 使用条目自身的 workflow，未设置时跟随全局 currentLoopStepType
       const entryWorkflow = entry?.workflow || currentLoopStepTypeRef.current;
-      const isInputLike = /^(input|textarea|select)$/i.test(info.tag || "") || !!info.isContentEditable || /^(text|search|email|tel|url|number|password)$/i.test(info.type || "") || /^(textbox|searchbox|combobox|spinbutton)$/i.test(info.role || "");
+      const isInputLike = isLikelyInput(info);
       const isEntry = entryWorkflow === "entry";
       const fillValue = (entry?.text || "").trim();
       if (isEntry && isInputLike && fillValue) {
@@ -13151,8 +13232,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 教学模式向导：连续绑定右侧输入框
     // ⚠️ 绑定流程检查必须在 setRightPicked/setPickTarget 之前，否则会干扰绑定流程的状态
     const currentNextClickLabel = nextClickLabelRef.current;
-    // 放宽输入框判断：标准 input/textarea/select + contenteditable + role=textbox/searchbox + input type 兜底
-    const isInputLike = /^(input|textarea|select)$/i.test(info.tag || "") || !!info.isContentEditable || /^(text|search|email|tel|url|number|password)$/i.test(info.type || "") || /^(textbox|searchbox|combobox|spinbutton)$/i.test(info.role || "");
+    // 统一输入框判定（isLikelyInput）：绑定模式下「输入=输入、点击=点击」严格隔离
+    const isInputLike = isLikelyInput(info);
     // ⚠️ 右侧是填入目标，不在此处捕获来源字段值——来源值只在左侧 (onLeftPicked) 捕获，
     // 否则点击右侧按钮/链接等非输入元素会覆盖左侧已捕获的来源值，导致填入按钮文字而非字段值。
     // addingStepMode 下走普通映射流程，不触发教学模式直接创建 mark
@@ -13345,9 +13426,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 普通映射流程：记录右侧拾取标记
     setRightPicked(info);
     rightPickedSideRef.current = "right";
-    // 审查/录入统一（先右后左）：右侧拾取完成后切到左侧拾取来源/目标，完成配对后等待「确定映射」
+    // 审查模式（先右后左）：右侧拾取完成后切到左侧拾取来源；录入模式（先左后右）：两侧已完成，等待保存
     // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
-    setPickTarget(addingStepModeRef.current === "review" || addingStepModeRef.current === "entry" ? "left" : null);
+    setPickTarget(addingStepModeRef.current === "review" ? "left" : null);
     // 录入/映射流程：点击右侧输入框时立即填入来源字段值（优先）或 Excel 列值
     // 参考「绑定搜索」逻辑：即使没有选中 Excel 列，只要来源字段值已捕获就填入；延迟 350ms 确保元素就绪
     // ⚠️ 审查模式例外：右侧是核对目标（只登记待比对），绝不填值
@@ -13423,7 +13504,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       // 录入模式：拾取到输入框后立即把文本值填进去（参考「绑定输入框」逻辑）
       // 使用条目自身的 workflow，未设置时跟随全局 currentLoopStepType
       const entryWorkflow = entry?.workflow || currentLoopStepTypeRef.current;
-      const isInputLike = /^(input|textarea|select)$/i.test(info.tag || "") || !!info.isContentEditable || /^(text|search|email|tel|url|number|password)$/i.test(info.type || "") || /^(textbox|searchbox|combobox|spinbutton)$/i.test(info.role || "");
+      const isInputLike = isLikelyInput(info);
       const isEntry = entryWorkflow === "entry";
       const fillValue = (entry?.text || "").trim();
       if (isEntry && isInputLike && fillValue) {
@@ -13585,8 +13666,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     // 教学模式向导：连续绑定左侧输入框
     // ⚠️ 绑定流程检查必须在 setLeftPicked/setPickTarget 之前，否则会干扰绑定流程的状态
     const currentNextClickLabel = nextClickLabelRef.current;
-    // 放宽输入框判断：标准 input/textarea/select + contenteditable + role=textbox + input type 兜底
-    const isInputLike = /^(input|textarea|select)$/i.test(info.tag || "") || !!info.isContentEditable || /^(text|search|email|tel|url|number|password)$/i.test(info.type || "");
+    // 统一输入框判定（isLikelyInput）：绑定模式下「输入=输入、点击=点击」严格隔离
+    const isInputLike = isLikelyInput(info);
     // 录入流来源字段：点击非输入字段时捕获其值，供之后点击输入框时复制填入
     // 非输入元素（表格单元格等）的 value 为空，文本在 info.text 中，需取 value || text
     // ⚠️ 绑定模式下不捕获：此时点按钮/链接是记录真实点击步骤，若捕获其文字，
@@ -13744,14 +13825,6 @@ label: `${activePhase === "entry" ? "录入" : activePhase === "review" ? "审�
       return;
     }
 
-    // 录入顺序强制先右后左：右侧未拾取前不接受左侧网页点击（与 onExcelPicked 的守卫对称）。
-    // 脱离窗口场景下左侧拾取仍会被激活（picking 条件含 teachingPhase !== "idle"），此处兜底防方向颠倒。
-    // 右侧 Excel 布局下右侧来源已选时会占 leftPicked 槽位（tag=excel-cell），视为右侧已完成
-    if (addingStepModeRef.current === "entry" && !rightPickedRef.current && leftPickedRef.current?.tag !== "excel-cell" && !inputTargetRef.current) {
-      setError("录入设置：请先点击右侧网页/Excel 完成拾取，再点左侧来源元素");
-      return;
-    }
-
 // 普通映射流程：记录左侧拾取标记
 // 右侧 Excel 数据源模式：左网页是学校系统（核对目标），占 rightPicked 槽位（审查先右后左的第二步）
 if (rightExcelModeRef.current) {
@@ -13766,13 +13839,14 @@ if (info.value || info.text) {
   sourceFieldValueRef.current = String(info.value || info.text).trim();
   sourceFieldLabelRef.current = info.label || info.selector || "";
 }
-// 审查/录入统一「先右后左」：标准布局两侧已完成，等待「确定映射」
-// 右侧 Excel 布局：左网页占核对目标/输入框槽位；Excel 来源未选则切回右侧 Excel 继续选，已选则两侧完成等待保存
+// 审查模式（先右后左）：标准布局两侧已完成等待保存；右侧 Excel 布局=左网页核对目标已选、回到右侧 Excel 字段
+// 录入模式（先左后右）：标准布局继续拾取右侧元素；右侧 Excel 布局=左网页输入框已选，
+// Excel 来源未选则切到右侧 Excel 继续选，已选（乱序）则两侧完成等待保存
 // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
 setPickTarget(
   rightExcelModeRef.current
     ? (addingStepModeRef.current === "entry" ? (leftPickedRef.current ? null : "right") : "right")
-    : null
+    : (addingStepModeRef.current === "entry" ? "right" : null)
 );
 // addingStepMode 下不添加 pick mark，保存映射时才添加 input mark
 if (!addingStepModeRef.current) {
@@ -13898,16 +13972,22 @@ type: info.type,
     }
     // 控件映射从面板保存，不进入下一轮拾取（用户未处于拾取流程）
     if (m.widget) return;
-    // 重置一轮，继续拾取下一个（审查/录入统一：每轮都从右侧面板重新开始）
+    // 重置一轮，继续拾取下一个（审查模式回到核对元素侧，录入模式回到来源侧）
     setRightPicked(null);
     setLeftPicked(null);
     rightPickedSideRef.current = "right";
-    // 审查/录入统一「先右后左」：每轮都从右侧面板开始拾取，左侧是第二步（与 startAdding* 的初始侧一致）
-    setPickTarget("right");
+    // 录入→左侧、审查→右侧（两种布局统一：录入先左后右、审查先右后左，与 startAdding* 的初始侧一致）
+    const nextTarget: PickTarget = addingStepModeRef.current === "entry" ? "left" : "right";
+    setPickTarget(nextTarget);
     setTimeout(() => {
-      // 右侧是网页时才启动 webview 拾取（显示 Excel 时靠单元格点击拾取）
-      window.electronAPI?.viewStopPicking("left").catch(() => {});
-      if (rightViewMode === "web") window.electronAPI?.viewStartPicking("right");
+      // 只在对应侧显示网页时才启动 webview 拾取（显示 Excel 时靠单元格点击拾取）
+      if (nextTarget === "left") {
+        window.electronAPI?.viewStopPicking("right").catch(() => {});
+        if (leftViewMode === "web") window.electronAPI?.viewStartPicking("left");
+      } else {
+        window.electronAPI?.viewStopPicking("left").catch(() => {});
+        if (rightViewMode === "web") window.electronAPI?.viewStartPicking("right");
+      }
     }, 200);
     // 保存后给出双侧高亮反馈：目标网页元素 + 来源（Excel 列闪烁 / 左网页来源元素高亮）
     if (window.electronAPI) {
@@ -15204,12 +15284,6 @@ type: info.type,
       // 不再用顶部 Toast，靠页面浮标反馈
       return;
     }
-    // 录入设置顺序限制：必须先点击右侧（网页/Excel）完成拾取，左侧 Excel 才能点击绑定。
-    // 左侧先点会生成没有右侧配对、方向颠倒的绑定，运行时第一张卡会录错。
-    if (addingStepModeRef.current === "entry" && !rightPickedRef.current && !inputTargetRef.current) {
-      setError("录入设置：请先点击右侧网页/Excel 完成拾取，再点击左侧 Excel 绑定");
-      return;
-    }
     setLeftPicked({
       selector: info.field,
       label: info.field,
@@ -15224,8 +15298,14 @@ type: info.type,
       sourceFieldValueRef.current = String(info.value).trim();
       sourceFieldLabelRef.current = info.field || "";
     }
-    // 录入已改为先右后左：左侧点完即配对完成（等待「确定映射」），不再回头激活右侧拾取
-    setPickTarget(null);
+    // 录入模式（先左后右）：Excel 来源确定后激活右侧拾取光标；审查模式（先右后左）：等待保存
+    // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
+    const isEntry = addingStepModeRef.current === "entry";
+    setPickTarget(isEntry ? "right" : null);
+    if (isEntry) {
+      // 激活右侧网页拾取光标
+      window.electronAPI?.viewStartPicking("right");
+    }
     // 仅在录入/审查步骤设置阶段打标（高光+序号）；平时浏览数据点格子不打标，
     // 避免每次点击都 setState 触发 App 整树重渲染（点格子卡顿的来源之一）
     if (addingStepModeRef.current) {
@@ -15287,8 +15367,9 @@ type: info.type,
       sourceFieldValueRef.current = String(info.value).trim();
       sourceFieldLabelRef.current = info.field || "";
     }
-    // 审查/录入统一「先右后左」：右侧 Excel 具体字段先选（占来源槽位），切到左侧网页；
-    // 审查流——选核对目标；录入流——左网页输入框已选则两侧完成等待保存，未选则切到左侧网页继续选输入框
+    // 审查流（先右后左）：右侧 Excel 具体字段已选（占来源槽位），切到左侧网页选核对目标；
+    // 录入流（先左后右）：右侧 Excel 是第二步来源——左网页输入框已选则两侧完成等待保存，
+    // 未选（乱序先点了 Excel）则切到左侧网页继续选输入框
     // 只以 addingStepModeRef 判断当前正在设置的模式，currentLoopStepTypeRef 仅用于 LOOP 运行，不参与拾取逻辑
     const inStepMode = !!addingStepModeRef.current;
     const entryBothDone = addingStepModeRef.current === "entry" && !!rightPickedRef.current;

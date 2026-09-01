@@ -80,8 +80,23 @@ _JOIN_KEYS: tuple[str, ...] = (
 )
 
 
+# _normalize_key 能稳定命中的标准字段集合（确定性）。
+# 用于判定列是否已被硬编码别名表识别：命中的列直接用 _normalize_key 结果，不依赖非确定性的 AI。
+# 注意比 VERIFY_FIELDS 更全（含 surname/given_name/student_id 等），这些也是标准字段。
+AI_STD_FIELDS = frozenset({
+    "name", "surname", "given_name", "passport_no", "nationality", "birth_date",
+    "gender", "passport_issue", "passport_expiry", "email", "phone",
+    "student_id", "university_url", "university_name",
+})
+
+
 def _normalize_key(k: str) -> str:
-    """归一化列名：去空格、去特殊字符、小写，再查别名表。"""
+    """归一化列名：去空格、去特殊字符、小写，再查别名表。
+
+    支持中英文混合表头（如"申请编号 Applicant No."、"姓 Family Name"、"护照号码 Passport ."）：
+    分别拆出中文块和英文 token 逐个匹配，任一命中（如"申请编号"→student_id、"applicant no."→student_id）
+    即返回对应标准字段，避免混合表头识别不到、导致把原始表头当字段名存成"多余一列"。
+    """
     import re
     k = (k or "").strip().lower()
     # 先查原始形式（可能直接命中，如 "Student Name"）
@@ -94,6 +109,31 @@ def _normalize_key(k: str) -> str:
     # 带空格的版本再查一次（如 "full name" → "full name"）
     if k in _FIELD_ALIASES:
         return _FIELD_ALIASES[k]
+
+    # —— 中英文混合表头条目兜底：逐块（中文连续串 / 英文单词）匹配 ——
+    # 中文块：连续的 CJK 字符（如"申请编号"、"姓"、"护照号码"）
+    for zh in re.findall(r"[\u4e00-\u9fff]+", k):
+        if zh in _FIELD_ALIASES:
+            return _FIELD_ALIASES[zh]
+    # 英文 token：按非字母数字分隔成单词（如 "applicant"、"no"、"family"、"name"），再拼多种组合试探
+    words = [w for w in re.split(r"[^a-z0-9]+", k_compact) if w]
+    if words:
+        # 全词拼接（如 "applicantno"）
+        joined = "".join(words)
+        if joined in _FIELD_ALIASES:
+            return _FIELD_ALIASES[joined]
+        # 相邻词拼接（如 "applicantno" 已试；再试带空格的原文单词组合）
+        if joined in _FIELD_ALIASES:
+            return _FIELD_ALIASES[joined]
+        # 逐单词 + 常见复合：把整个英文部分（去掉中文后）当作候选
+        eng = re.sub(r"[\u4e00-\u9fff]", "", k).strip()
+        eng_compact = re.sub(r"[\s_\-]+", "", eng)
+        if eng_compact in _FIELD_ALIASES:
+            return _FIELD_ALIASES[eng_compact]
+        # 最后：若英文部分恰是某个已知字段的别名（如 "passport no."），用规范化后再比
+        eng_norm = re.sub(r"[\s_\-\.]+", " ", eng).strip()
+        if eng_norm in _FIELD_ALIASES:
+            return _FIELD_ALIASES[eng_norm]
     return k
 
 
@@ -114,11 +154,16 @@ def _row_to_record(idx: int, row: dict[str, str], ai_mapping: dict[str, str] | N
     for k, v in row.items():
         if v is None:
             continue
-        # 优先用 AI 识别的列映射，其次用硬编码别名表
-        if ai_mapping and k in ai_mapping:
+        # 稳定性优先：硬编码别名表（_normalize_key）是确定性的，命中标准字段即采用。
+        # AI 识别（LLM，非确定性）只在硬编码认不出该列（返回原样）时才作为补充。
+        # 这样同一套 Excel 在任何电脑/任何时刻导入都得到相同字段映射，保证 LOOP 复用一致。
+        norm_key = _normalize_key(k)
+        if norm_key in AI_STD_FIELDS:
+            key = norm_key
+        elif ai_mapping and k in ai_mapping:
             key = ai_mapping[k]
         else:
-            key = _normalize_key(k)
+            key = norm_key
         val = str(v).strip()
         if not val:
             continue
@@ -129,12 +174,24 @@ def _row_to_record(idx: int, row: dict[str, str], ai_mapping: dict[str, str] | N
         # 2. 如果标准化 key 与原始列名不同，也存标准化 key（兼容现有代码直接访问 fields["name"] 等）
         if key != k:
             norm[key] = val
-            # 记录自动识别的列映射（原始列 -> 标准字段）
-            if key in VERIFY_FIELDS or key in ("student_id",):
+            # 记录自动识别的列映射（原始列 -> 标准字段），供前端 ExcelView 去重，
+            # 避免原始表头（如"姓 Family Name"）与标准字段（surname）被当成两列显示。
+            # 只要产生了标准字段别名键就记录（含 surname/given_name/student_id 等，不限于 VERIFY_FIELDS）。
+            if key.strip():  # 排除空
                 col_map[k] = key
 
     university_url = row.get("university_url") or row.get("大学申请页URL") or row.get("url") or ""
     university_name = row.get("university_name") or row.get("大学名称") or row.get("university") or ""
+
+    # 合成 name：表头拆成"姓/名"两列（Chinese 常为 surname+given_name 而非 name）。
+    # 若没有单独 name 列但已识别出 surname+given_name，拼接成完整姓名，
+    # 否则 getRecordDisplayName 取不到 name 会回退护照号/学号，界面显示"选择姓名列"占位。
+    if not norm.get("name"):
+        surname = (norm.get("surname") or norm.get("姓") or "").strip()
+        given = (norm.get("given_name") or norm.get("名") or "").strip()
+        combined = " ".join(x for x in (surname, given) if x).strip()
+        if combined:
+            norm["name"] = combined
 
     return ApplicantRecord(
         record_id=f"rec-{idx:03d}",

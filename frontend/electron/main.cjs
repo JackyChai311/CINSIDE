@@ -1891,6 +1891,45 @@ const ELEMENT_PICKER_SCRIPT = `
     // 6. 向上仅查 1 层父元素（点击在 input 内部装饰元素上的情况）
     var parent = el.parentElement;
     if (parent && isInputEl(parent)) return parent;
+
+    // 7. 字段标题（如"申请单号"）点击兜底：标题元素本身非输入，但同一字段容器/同一行内必有真实输入框。
+    //    常见结构：<td>标题</td><td><input></td>、<label>标题</label><input>、或 div.label + div.value。
+    //    仅当元素是"文本标题/单元格/标签"且文本不长时才向上找输入框，避免把整块大容器误配对。
+    try {
+      var elTag = el.nodeName.toLowerCase();
+      var elText = (el.innerText || el.textContent || '').trim();
+      var cls = (typeof el.className === 'string' ? el.className : '');
+      var isFieldTitle = elTag === 'label' || elTag === 'td' || elTag === 'th' || elTag === 'dt' ||
+        (elTag === 'div' && elText.length > 0 && elText.length <= 30) ||
+        /field|label|title|form|input|td|th/i.test(cls);
+      if (isFieldTitle) {
+        // a. label[for] 已在前面处理过；再试 label 紧后兄弟
+        if (elTag === 'label') {
+          var lbSib = el.nextElementSibling;
+          for (var lbI = 0; lbI < 3 && lbSib; lbI++) {
+            if (isInputEl(lbSib)) return lbSib;
+            lbSib = lbSib.nextElementSibling;
+          }
+        }
+        // b. 从元素向上找"字段一行"：最近的含 input 的祖先（限制层级，避免跑到整表）
+        var scope = el.parentElement;
+        var up = 0;
+        while (scope && scope !== document.body && up < 3) {
+          var scInput = scope.querySelector && scope.querySelector('input, textarea, select, [contenteditable], [role="textbox"], [role="combobox"], [role="searchbox"]');
+          if (scInput) {
+            var scRect = scope.getBoundingClientRect();
+            // 仅在"单行字段"尺度内配对，避免误选整表/整表单里第一个 input
+            if (scRect.width < 900 && scRect.height < 160) return scInput;
+          }
+          // 若这才是真的字段行（一行标题+输入），直接返回该行内的 input
+          var rowInput = scope.querySelector && scope.querySelector('td input, th input, .field input, .form-group input, .input-group input, [data-field] input, .ant-form-item input, .el-form-item input');
+          if (rowInput) return rowInput;
+          scope = scope.parentElement;
+          up++;
+        }
+      }
+    } catch (_) {}
+
     return null;
   }
   function onPick(e) {

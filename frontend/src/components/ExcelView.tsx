@@ -224,7 +224,7 @@ const ExcelRow = memo(function ExcelRow({
 
 /** 后端可能作为别名自动添加的标准字段 key 集合（用于过滤重复列） */
 const STANDARD_ALIAS_KEYS = new Set([
-  "name", "passport_no", "student_id", "nationality", "birth_date", "gender",
+  "name", "surname", "given_name", "passport_no", "student_id", "nationality", "birth_date", "gender",
   "passport_issue", "passport_expiry", "email", "phone",
   "university_url", "university_name",
 ]);
@@ -468,12 +468,16 @@ export default function ExcelView({
   const columns = useMemo(() => {
     const set = new Set<string>();
     for (const r of records) {
-      for (const k of Object.keys(r.fields)) {
-        // 过滤掉后端自动添加的标准字段别名：如果k是标准字段名，且detectedColumnMap中有其他列映射到它，说明k是别名
-        if (STANDARD_ALIAS_KEYS.has(k) && detectedStandardKeys.has(k)) {
-          // 进一步确认：检查是否存在原始列名（即detectedColumnMap的key中有映射到k的）
-          const hasOriginalCol = Object.entries(detectedColumnMap).some(([origCol, stdKey]) => stdKey === k && origCol !== k);
-          if (hasOriginalCol) continue; // 跳过别名列
+      const keys = Object.keys(r.fields);
+      const val = (kk: string) => String(r.fields[kk] ?? "");
+      for (const k of keys) {
+        // 过滤掉后端自动添加的标准字段别名列（如 surname/given_name/student_id）：
+        // 当 k 是标准字段（STANDARD_ALIAS_KEYS），且同一条记录里存在另一个**非标准字段**键 kk，
+        // 其值与 k 完全相同（即 kk 是原始表头、k 是它的别名副本）→ 隐藏 k。
+        // 用"值相同 + 存在非标准键"精确判定，避免误伤合成字段（如 name=姓+名拼接，不与任何单列相等）。
+        if (STANDARD_ALIAS_KEYS.has(k)) {
+          const isAliasCopy = keys.some((kk) => kk !== k && !STANDARD_ALIAS_KEYS.has(kk) && val(kk) === val(k) && val(k) !== "");
+          if (isAliasCopy) continue;
         }
         // 过滤掉_source_sheet等内部字段
         if (k.startsWith("_")) continue;
@@ -481,7 +485,7 @@ export default function ExcelView({
       }
     }
     return Array.from(set);
-  }, [records, detectedStandardKeys, detectedColumnMap]);
+  }, [records]);
 
   // 过滤
   const filtered = useMemo(() => {
