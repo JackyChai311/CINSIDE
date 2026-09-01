@@ -1900,6 +1900,7 @@ const ELEMENT_PICKER_SCRIPT = `
       var elText = (el.innerText || el.textContent || '').trim();
       var cls = (typeof el.className === 'string' ? el.className : '');
       var isFieldTitle = elTag === 'label' || elTag === 'td' || elTag === 'th' || elTag === 'dt' ||
+        (elTag === 'span' && elText.length > 0 && elText.length <= 40) ||
         (elTag === 'div' && elText.length > 0 && elText.length <= 30) ||
         /field|label|title|form|input|td|th/i.test(cls);
       if (isFieldTitle) {
@@ -1911,19 +1912,41 @@ const ELEMENT_PICKER_SCRIPT = `
             lbSib = lbSib.nextElementSibling;
           }
         }
-        // b. 从元素向上找"字段一行"：最近的含 input 的祖先（限制层级，避免跑到整表）
+        // b. 标题自身的坐标：用于"水平紧邻右侧输入框"精确匹配（避免选中同排其他字段的框）
+        var tRect = null;
+        try { tRect = el.getBoundingClientRect(); } catch (_) {}
+        // c. 从元素向上找"字段一行"，但优先匹配"与标题同一水平行、位于标题右侧最近"的输入框：
+        //    学校系统查询表单常把多个"标题+输入框"横向排在一行（如 国家/分公司 申请单号 Student Number ...），
+        //    单纯向上 querySelector('input') 会命中同排第一个框导致选错行。用 y 行重叠 + x 比标题靠右最近来精确定位。
         var scope = el.parentElement;
         var up = 0;
         while (scope && scope !== document.body && up < 3) {
-          var scInput = scope.querySelector && scope.querySelector('input, textarea, select, [contenteditable], [role="textbox"], [role="combobox"], [role="searchbox"]');
-          if (scInput) {
+          var scInputs = scope.querySelectorAll && scope.querySelectorAll('input, textarea, select, [contenteditable], [role="textbox"], [role="combobox"], [role="searchbox"]');
+          if (scInputs && scInputs.length) {
             var scRect = scope.getBoundingClientRect();
             // 仅在"单行字段"尺度内配对，避免误选整表/整表单里第一个 input
-            if (scRect.width < 900 && scRect.height < 160) return scInput;
+            if (scRect.width < 900 && scRect.height < 160) {
+              // 先按"同行 + 标题右侧最近"匹配，命中直接返回（最精准）
+              var best = null, bestDx = 1e9;
+              for (var si = 0; si < scInputs.length; si++) {
+                var cand = scInputs[si];
+                if (!isInputEl(cand)) continue;
+                var cr = cand.getBoundingClientRect();
+                if (!tRect) break; // 取不到标题坐标就退化为取第一个
+                // 同一水平行：y 中心接近（容差按行高）
+                var sameRow = Math.abs((cr.top + cr.height / 2) - (tRect.top + tRect.height / 2)) < (Math.max(cr.height, tRect.height) + 12);
+                // 位于标题右侧（或标题右侧边界附近），且间距最小
+                var rightOfTitle = (cr.left + cr.width / 2) >= (tRect.left - 8);
+                if (sameRow && rightOfTitle) {
+                  var dx = Math.abs((cr.left + cr.width / 2) - (tRect.left + tRect.width));
+                  if (dx < bestDx) { bestDx = dx; best = cand; }
+                }
+              }
+              if (best) return best;
+              // 退化为取范围内第一个输入框（老行为兜底）
+              return scInputs[0];
+            }
           }
-          // 若这才是真的字段行（一行标题+输入），直接返回该行内的 input
-          var rowInput = scope.querySelector && scope.querySelector('td input, th input, .field input, .form-group input, .input-group input, [data-field] input, .ant-form-item input, .el-form-item input');
-          if (rowInput) return rowInput;
           scope = scope.parentElement;
           up++;
         }
