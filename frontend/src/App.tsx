@@ -189,6 +189,17 @@ const isLikelyInput = (info?: { tag?: string; type?: string; role?: string; isCo
     /^(textbox|searchbox|combobox|spinbutton|listbox|slider)$/i.test(info.role || "")
   );
 
+/** 明确的可点击控件（按钮/链接/提交/重置）：绑定模式下点这类元素才记「点击」。
+ *  其余元素（哪怕是识别失败的输入框容器/占位）一律按「绑定输入」处理，绝不静默变成「点击」，
+ *  避免用户绑定时点"申请单号"这类输入框却被误记成点击步骤。 */
+const isLikelyClickable = (info?: { tag?: string; type?: string; role?: string }): boolean =>
+  !!info && (
+    /^(button|a)$/i.test(info.tag || "") ||
+    /^(button|submit|reset|menu|menuitem|link)$/i.test((info.role || "").toLowerCase()) ||
+    /^(button|submit|reset)$/i.test((info.type || "").toLowerCase()) ||
+    /^(button|submit|reset)$/i.test((info.role || ""))
+  );
+
 /** 兜底：模板未保存 mappings 时，从审查类 marks 反推字段映射（老模板/未同步映射的提取元素条目），
  *  保证 LOOP 运行时「字段对比」区域和逐字段比对有数据 */
 const deriveMappingsFromMarks = (marks: PickedMark[]): FieldMapping[] => {
@@ -1326,23 +1337,39 @@ const sourceFieldLabelRef = useRef<string>("");
     // 绑定逻辑跟着内容走：拾取标记与映射的左右归属互换（Excel来源/网页目标的指向同时换）
     setPickedMarks((prev) => prev.map((m) => ({ ...m, side: m.side === "left" ? "right" : "left" })));
     setMappings((prev) => prev.map((m) => ({ ...m, web_side: m.web_side === "left" ? "right" : "left" })));
-    // 当前进行中的绑定/拾取流程侧也需要跟随互换（否则互换后点输入框的侧与物理面板错位，
-    // 绑定判定断裂 → 后被记成「点击」）。bindInputSide/pickTarget 都翻转对应侧，
-    // 并清空已拾取的 left/right 槽位，让用户互换后在正确的侧继续绑定。
-    setBindInputSide((prev) => {
-      if (!prev) return prev;
-      const flip = (s: "left" | "right" | "both") => (s === "both" ? "both" : s === "left" ? "right" : "left");
-      return flip(prev as "left" | "right" | "both");
-    });
-    setPickTarget((prev) => {
-      if (!prev) return prev;
-      return prev === "left" ? "right" : prev === "right" ? "left" : prev;
-    });
+    // 当前进行中的绑定/拾取流程：互换面板会 via setLeftUrl/setRightUrl 重新加载页面，
+    // 注入的拾取脚本和 bind-input-mode 会随页面销毁而丢失 → 互换后必须重新武装拾取，
+    // 否则用户再点输入框会落回普通点击行为（被记成「点击」而非「绑定输入」）。
+    // 保留 bindInputSide（绑定中状态），但在页面重载完成后重新 viewStartPicking + viewSetBindInputMode。
     setRightPicked(null);
     setLeftPicked(null);
+    const wasBinds = bindInputSideRef.current;
     // 行范围/焦点列/LOOP变量属于原 Excel 数据集，随互换清空或对调
     setRowRange(null);
     setExcelFocusColumn(null);
+    // 【关键修复】互换面板必须清掉"点击模式"残留状态（pendingAction=click / addingClickMode）：
+    // 互换前面的网页可能停在"添加前置点击"模式，互换后点击输入框会被 13160 行 click 分支拦截，
+    // 记成「点击·申请单号」。swap 不重置这些状态正是"SWAP 后绑定变点击"的根因。
+    setPendingAction("none");
+    setAddingClickMode(false);
+    setAddingClickPhase(null);
+    setNextClickLabel(null);
+    // 互换后重新武装绑定拾取（延迟等 viewLoad 生效；只对当前为 web 的侧注入）
+    if (wasBinds) {
+      setTimeout(() => {
+        if (!bindInputSideRef.current) return;
+        const lWeb = leftViewModeRef.current === "web";
+        const rWeb = rightViewModeRef.current === "web";
+        if (lWeb) {
+          window.electronAPI?.viewStartPicking("left");
+          window.electronAPI?.viewSetBindInputMode("left", true).catch(() => {});
+        }
+        if (rWeb) {
+          window.electronAPI?.viewStartPicking("right");
+          window.electronAPI?.viewSetBindInputMode("right", true).catch(() => {});
+        }
+      }, 600);
+    }
     setRightBindColumn(selectedExcelColumn);
     setSelectedExcelColumn(rightBindColumn);
     // 互换所有 webTAB
@@ -13241,8 +13268,19 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
     if (currentBindInputSide) {
       // 灵活绑定模式：右侧点输入框 = 绑定 Excel 列并真实填入第一行值；点其他元素 = 真实点击
-      // 右侧网页可用「右侧取列」选择器指定同行其他列（如护照号），未设置时跟随 LOOP 列
-      const rightCol = rightBindColumnRef.current || currentExcelCol;
+      // 右侧网页可用「右侧取列」选择器指定同行其他列（如护照号），未设置时跟随 LOOP 列。
+      // LOOP 列兜底链：右侧取列 → 全局LOOP列 → 右侧Excel选中列 → 当前选中卡(第一张)的首个字段列。
+      // 「保留原人物卡片」后 selectedExcelColumn 可能丢失（SWAP 换数据/跑LOOP后清空），但卡片仍在：
+      // 用第一张卡（selected，教学/绑定时即第一张）的字段列做兜底，保证绑定输入框始终能取到 LOOP 字段，
+      // 绝不退化提示"尚未选择"、绝不变成「点击」。字段列取"标准字段优先，否则第一个非空字段"。
+      let rightCol = rightBindColumnRef.current || currentExcelCol || rightSelectedColumnRef.current;
+      if (!rightCol && selected && Object.keys(selected.fields).length > 0) {
+        const stdOrder = ["student_id", "passport_no", "name", "surname", "given_name", "nationality", "birth_date", "gender"];
+        for (const f of stdOrder) {
+          if (selected.fields[f] != null && String(selected.fields[f]).trim() !== "") { rightCol = f; break; }
+        }
+        if (!rightCol) rightCol = Object.keys(selected.fields)[0];
+      }
       // ⚠️ 未选 LOOP 列时：点输入框不再退化成「前置点击」，而是提示补选列并保持绑定态
       // （NEW LOOP 后 selectedExcelColumn 可能被脱离面板同步清空，旧逻辑会把绑定误记成点击任务）
       if (isInputLike && !rightCol) {
@@ -13301,9 +13339,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             window.electronAPI?.viewStartPicking("right");
           }
         }, 300);
-      } else {
-        // 非输入框：真实点击并记录为前置点击步骤
-        rlog("[onRightPicked] ✅ 绑定模式真实点击右侧元素:", info.selector);
+      } else if (isLikelyClickable(info)) {
+        // 明确的可点击控件（button/a/submit/reset）：绑定模式下记录为真实点击，保持绑定状态
+        rlog("[onRightPicked] ✅ 绑定模式点击按钮/链接:", info.selector);
         await performRealClick("right", info.selector);
         addPickedMark({
           side: "right",
@@ -13326,6 +13364,45 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             window.electronAPI?.viewStartPicking("right");
           }
         }, 500);
+      } else {
+        // 非输入且非按钮/链接（可能是识别失败的输入框容器/占位 div 等）：
+        // 仍按「绑定输入」处理——用户进绑定模式点了这里，意图就是绑定该字段的 LOOP 列，
+        // 绝不静默记成「点击」。无 LOOP 列则提示补选列并保持绑定态。
+        rlog("[onRightPicked] ✅ 绑定模式兜底：非按钮元素按绑定输入处理, tag=", info.tag, "label=", info.label);
+        if (!rightCol) {
+          setError("已识别为可绑定元素，但尚未选择 LOOP 取值列：请先点左侧 Excel 列头选择取值列（或用「右侧取列」指定）");
+          setTimeout(() => {
+            if (bindInputSideRef.current) {
+              window.electronAPI?.viewStartPicking("left");
+              window.electronAPI?.viewStartPicking("right");
+            }
+          }, 200);
+          return;
+        }
+        addPickedMark({
+          side: "right",
+          source: "web",
+          selector: info.selector,
+          label: `绑定输入 · ${info.label || info.selector} ← Excel「${rightCol}」`,
+          value: info.value,
+          workflow: activePhase || "data-source",
+          action: "input",
+          inputTarget: info.selector,
+          inputTargetLabel: info.label || info.selector,
+          variableField: rightCol,
+          excelField: rightCol,
+          recordId: selected?.record_id,
+          rect: info.rect,
+          tag: info.tag,
+          type: info.type,
+        });
+        // 保持绑定模式：继续拾取左右两侧
+        setTimeout(() => {
+          if (bindInputSideRef.current) {
+            window.electronAPI?.viewStartPicking("left");
+            window.electronAPI?.viewStartPicking("right");
+          }
+        }, 300);
       }
       return;
     }
@@ -13681,20 +13758,31 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
     if (currentBindInputSide) {
       // 灵活绑定模式：左侧点输入框 = 绑定 Excel 列并真实填入第一行值；点其他元素 = 真实点击
-      if (currentExcelCol && isInputLike) {
-        rlog("[onLeftPicked] ✅ 绑定左侧输入框, excelCol=", currentExcelCol, "previewValue=", selected?.fields?.[currentExcelCol]);
+      // LOOP 列兜底链：全局LOOP列 → 右侧Excel选中列 → 当前选中卡(第一张)的字段列。
+      // SWAP 后 Excel 常居右侧且 selectedExcelColumn 丢失，此时用右侧 Excel 选中列或第一张卡的字段列
+      // 兜底，保证绑定点左侧网页输入框始终能取到 LOOP 字段，绝不提示"尚未选择"、绝不变成「点击」。
+      let bindLeftCol = currentExcelCol;
+      if (!bindLeftCol && selected && Object.keys(selected.fields).length > 0) {
+        const stdOrder = ["student_id", "passport_no", "name", "surname", "given_name", "nationality", "birth_date", "gender"];
+        for (const f of stdOrder) {
+          if (selected.fields[f] != null && String(selected.fields[f]).trim() !== "") { bindLeftCol = f; break; }
+        }
+        if (!bindLeftCol) bindLeftCol = Object.keys(selected.fields)[0];
+      }
+      if (bindLeftCol && isInputLike) {
+        rlog("[onLeftPicked] ✅ 绑定左侧输入框, excelCol=", bindLeftCol, "previewValue=", selected?.fields?.[bindLeftCol]);
         addPickedMark({
           side: "left",
           source: "web",
           selector: info.selector,
-label: `${activePhase === "entry" ? "录入" : activePhase === "review" ? "审查" : "绑定输入"} · ${info.label || info.selector} ← Excel「${currentExcelCol}」`,
+label: `${activePhase === "entry" ? "录入" : activePhase === "review" ? "审查" : "绑定输入"} · ${info.label || info.selector} ← Excel「${bindLeftCol}」`,
           value: info.value,
           workflow: activePhase || "data-source",
           action: "input",
           inputTarget: info.selector,
           inputTargetLabel: info.label || info.selector,
-          variableField: currentExcelCol,
-          excelField: currentExcelCol,
+          variableField: bindLeftCol,
+          excelField: bindLeftCol,
           recordId: selected?.record_id,
           rect: info.rect,
           tag: info.tag,
@@ -13703,7 +13791,7 @@ label: `${activePhase === "entry" ? "录入" : activePhase === "review" ? "审�
         // 只填入左侧被绑定的那个输入框（info.selector），而不是无差别塞两侧的第一个输入框。
         // 这样用户点哪个框，就只填那个框，之后用户继续点搜索/确认人物跳转页面。
         // 优先使用「第一次点击的字段值」（录入流复制语义），无来源字段时回退到 Excel 列值
-        const previewValue = ((sourceFieldValueRef.current || selected?.fields?.[currentExcelCol]) || "").trim();
+        const previewValue = ((sourceFieldValueRef.current || selected?.fields?.[bindLeftCol]) || "").trim();
         if (previewValue) {
           setTimeout(() => {
             performInputValue("left", info.selector, previewValue).catch(() => {});
@@ -13717,9 +13805,9 @@ label: `${activePhase === "entry" ? "录入" : activePhase === "review" ? "审�
             window.electronAPI?.viewStartPicking("right");
           }
         }, 300);
-      } else {
-        // 非输入框：真实点击并记录为前置点击步骤
-        rlog("[onLeftPicked] ✅ 绑定模式真实点击左侧元素:", info.selector);
+      } else if (isLikelyClickable(info)) {
+        // 明确的可点击控件（button/a/submit/reset）：绑定模式下记录为真实点击，保持绑定状态
+        rlog("[onLeftPicked] ✅ 绑定模式点击按钮/链接:", info.selector);
         performRealClick("left", info.selector);
         addPickedMark({
           side: "left",
@@ -13742,6 +13830,44 @@ label: `${activePhase === "entry" ? "录入" : activePhase === "review" ? "审�
             window.electronAPI?.viewStartPicking("right");
           }
         }, 500);
+      } else {
+        // 非输入且非按钮/链接（可能是识别失败的输入框容器/占位 div 等）：仍按「绑定输入」处理，
+        // 绝不静默记成「点击」。无 LOOP 列（且卡片也无字段可兜底）才提示补选列并保持绑定态。
+        rlog("[onLeftPicked] ✅ 绑定模式兜底：非按钮元素按绑定输入处理, tag=", info.tag, "label=", info.label);
+        if (!bindLeftCol) {
+          setError("已识别为可绑定元素，但尚未选择 LOOP 取值列：请先点左侧 Excel 列头选择取值列");
+          setTimeout(() => {
+            if (bindInputSideRef.current) {
+              window.electronAPI?.viewStartPicking("left");
+              window.electronAPI?.viewStartPicking("right");
+            }
+          }, 200);
+          return;
+        }
+        addPickedMark({
+          side: "left",
+          source: "web",
+          selector: info.selector,
+          label: `绑定输入 · ${info.label || info.selector} ← Excel「${bindLeftCol}」`,
+          value: info.value,
+          workflow: activePhase || "data-source",
+          action: "input",
+          inputTarget: info.selector,
+          inputTargetLabel: info.label || info.selector,
+          variableField: bindLeftCol,
+          excelField: bindLeftCol,
+          recordId: selected?.record_id,
+          rect: info.rect,
+          tag: info.tag,
+          type: info.type,
+        });
+        // 保持绑定模式：继续拾取左右两侧
+        setTimeout(() => {
+          if (bindInputSideRef.current) {
+            window.electronAPI?.viewStartPicking("left");
+            window.electronAPI?.viewStartPicking("right");
+          }
+        }, 300);
       }
       return;
     }
