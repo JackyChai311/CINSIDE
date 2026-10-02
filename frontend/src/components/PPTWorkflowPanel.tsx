@@ -1010,191 +1010,196 @@ export default function PPTWorkflowPanel({
       {/* 拖拽放入参考文件的遮罩 */}
       <ReferenceDropOverlay visible={dragOver} />
 
-      {/* ============ 自定义标题栏（与网页任务一致：可拖动 + 窗口控件） ============ */}
+      {/* ============ 自定义标题栏（与网页任务同款：玻璃底 + 可拖动 + 统一窗口控件） ============ */}
       <div
-        className="flex shrink-0 items-center justify-between border-b border-slate-200/60 bg-white/80 px-3 py-1 relative z-20"
-        style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+        className="relative z-20 flex shrink-0 items-center gap-2 px-3 pt-1 pb-0"
+        style={{
+          background: "var(--chrome-bg)",
+          backdropFilter: "blur(24px) saturate(1.6)",
+          WebkitBackdropFilter: "blur(24px) saturate(1.6)",
+          borderBottom: "1px solid var(--chrome-border)",
+          boxShadow: "0 1px 0 0 var(--chrome-highlight) inset",
+          WebkitAppRegion: "drag",
+        } as React.CSSProperties}
       >
-        <div className="flex items-center gap-1" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+        {/* LOGO + 文字合为一个可点按钮：点击返回「选择任务类型」首页（与网页任务一致） */}
+        <button
+          onClick={onBack}
+          className="flex items-center gap-1 rounded-md px-1 py-0.5 transition-colors hover:bg-slate-100/70"
+          title="切换任务类型：返回「选择任务类型」首页"
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+        >
           <img
             src={appIconPng}
             alt="CINSIDE icon"
-            className="h-5 w-5"
+            className="h-5 w-5 app-icon-img"
           />
-          <LogoWordmark className="h-5 logo-wordmark" />
-          <div className="w-px h-4 bg-slate-200 mx-1" />
-          <button
-            onClick={onBack}
-            className="flex items-center justify-center w-7 h-7 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-md transition-colors"
-            title="切换任务类型"
-          >
-            <LayoutGrid size={18} />
-          </button>
+          <LogoWordmark className="h-5 logo-wordmark -ml-1.5 translate-y-0.5" />
+        </button>
+
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          {/* 任务标识 */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="select-none text-[11px] font-semibold text-slate-700">幻灯片任务</span>
+            <span className="hidden text-[10px] font-medium uppercase tracking-[0.2em] text-slate-400 sm:inline">Slide Studio</span>
+          </div>
+
+          {aiInfo && !aiInfo.configured && (
+            <div
+              className="flex shrink-0 items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium transition-colors"
+              style={{
+                background: "rgba(245,158,11,.12)",
+                color: "#b45309",
+                border: "1px solid rgba(245,158,11,.25)",
+              }}
+              title="AI 未配置，请在设置中配置"
+            >
+              <Cpu size={11} />
+              AI 未配置
+            </div>
+          )}
+
+          {/* 模式切换：PPT 制作 / 批量编辑 PPT / PPT 转视频
+              参考 Web Studio：去掉紧贴的分段控件容器，三个功能入口独立成组、间距拉开；
+              激活项=白底+品牌色描边+品牌色文字图标（有明确边界的主按钮），
+              其余=淡白底灰字次级项，hover 提亮，主次分明。 */}
+          <div className="flex-1 flex justify-center">
+            <div className="flex items-center gap-1.5">
+              {(
+                [
+                  { mode: "create" as const, label: "PPT 制作", Icon: Sparkles },
+                  { mode: "batch" as const, label: "批量编辑 PPT", Icon: Presentation },
+                  { mode: "video" as const, label: "PPT 转视频", Icon: Clapperboard },
+                ]
+              ).map(({ mode, label, Icon }) => {
+                const active = activeMode === mode;
+                return (
+                  <button
+                    key={mode}
+                    onClick={() => handleModeSwitch(mode)}
+                    className={`flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-[12px] font-medium transition-all ${
+                      active
+                        ? "bg-white text-brand-600 ring-1 ring-brand-300/90 shadow-[0_1px_2px_rgba(15,23,42,.08),0_0_0_1px_rgba(255,255,255,.85)_inset]"
+                        : "bg-white/35 text-slate-500 hover:bg-white/75 hover:text-slate-700 shadow-[0_1px_1px_rgba(15,23,42,.03)_inset]"
+                    }`}
+                  >
+                    <Icon size={13} className={active ? "text-brand-500" : "text-slate-400"} />
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 右侧工具：预览窗口数量 / 工作文件 / 设置 */}
+          <div className="flex shrink-0 items-center gap-1.5">
+            {/* 预览窗口数量三态按钮：与模式组同款——独立成组，激活=白底+品牌色描边 */}
+            <div className="flex items-center gap-1" title="幻灯片预览窗口数量：1个/2个/3个">
+              {[
+                { n: 1, Icon: Square },
+                { n: 2, Icon: Columns },
+                { n: 3, Icon: LayoutGrid },
+              ].map(({ n, Icon }) => (
+                <button
+                  key={n}
+                  onClick={() => setPreviewSlots(n)}
+                  className={`flex h-7 w-7 items-center justify-center rounded-lg transition-all ${
+                    previewSlots === n
+                      ? "bg-white text-brand-600 ring-1 ring-brand-300/90 shadow-[0_1px_2px_rgba(15,23,42,.08)]"
+                      : "bg-white/35 text-slate-500 hover:bg-white/75 hover:text-slate-700"
+                  }`}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                </button>
+              ))}
+            </div>
+
+            {/* 工作文件选择 */}
+            <div ref={fileMenuRef} className="relative">
+              <button
+                onClick={() => setShowFileMenu((v) => !v)}
+                className={`relative flex h-7 items-center gap-1 rounded-lg px-2 text-[12px] font-medium transition-all ${
+                  showFileMenu
+                    ? "bg-white text-slate-800 shadow-[0_1px_2px_rgba(15,23,42,.10),0_0_0_1px_rgba(255,255,255,.85)_inset]"
+                    : "bg-white/35 text-slate-600 hover:bg-white/75 hover:text-slate-800"
+                }`}
+                title="选择工作文件（PPT）"
+              >
+                <FolderOpen className="h-3.5 w-3.5" />
+                工作文件
+                {selectedFiles.length > 0 && (
+                  <span className="ml-0.5 inline-flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-brand-500 px-1 text-[9px] font-bold leading-none text-white">
+                    {selectedFiles.length}
+                  </span>
+                )}
+                <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showFileMenu ? "rotate-180" : ""}`} />
+              </button>
+              {showFileMenu && (
+                <div className="ppt-file-menu absolute right-0 top-full z-50 mt-1 w-44 overflow-hidden rounded-lg bg-white/95 py-1 text-[11px] shadow-lg ring-1 ring-slate-200">
+                  <button
+                    onClick={() => {
+                      setShowFileMenu(false);
+                      handleModeSwitch("batch");
+                      setBatchConfirmed(false);
+                      void handlePickFiles();
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
+                  >
+                    <FolderOpen className="h-3.5 w-3.5 text-slate-400" />
+                    选择 PPT 文件
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowFileMenu(false);
+                      handleModeSwitch("batch");
+                      setBatchConfirmed(false);
+                      void handlePickDirectory();
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
+                  >
+                    <FolderPlus className="h-3.5 w-3.5 text-slate-400" />
+                    选择文件夹
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* 设定 */}
+            <button
+              onClick={onOpenSettings}
+              className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/35 text-slate-500 transition-all hover:bg-white/75 hover:text-slate-700"
+              title="设置"
+            >
+              <Settings2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
-        <div className="flex items-center gap-1" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+
+        {/* 右侧：窗口控件（统一 chrome-icon-btn 样式，主题自适应） */}
+        <div className="flex items-center gap-1">
           <button
             onClick={() => window.electronAPI?.windowMinimize()}
-            className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+            className="chrome-icon-btn rounded p-1 transition-colors"
             title="最小化"
           >
             <Minus className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={() => window.electronAPI?.windowMaximize()}
-            className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+            className="chrome-icon-btn rounded p-1 transition-colors"
             title="最大化/还原"
           >
             <Square className="h-3 w-3" />
           </button>
           <button
             onClick={() => window.electronAPI?.windowClose()}
-            className="rounded p-1 text-slate-400 hover:bg-rose-100 hover:text-rose-600 transition-colors"
+            className="chrome-icon-btn is-danger rounded p-1 transition-colors"
             title="关闭"
           >
             <X className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
-
-      {/* ============ 顶部工具栏（与网页任务一致：glass-frame） ============ */}
-      <header className="ppt-toolbar glass-frame relative z-20 flex shrink-0 items-center gap-2 border-b border-white/40 px-3 py-1">
-        <div className="flex items-baseline gap-2">
-          <h1 className="ppt-title text-sm font-bold text-slate-800 tracking-tight">幻灯片任务</h1>
-          <span className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-medium hidden sm:inline">Slide Studio</span>
-        </div>
-        {aiInfo && !aiInfo.configured && (
-          <div
-            className="flex items-center gap-1 ml-1 px-2 py-0.5 rounded-full text-[11px] font-medium transition-colors"
-            style={{
-              background: "rgba(245,158,11,.12)",
-              color: "#b45309",
-              border: "1px solid rgba(245,158,11,.25)",
-            }}
-            title="AI 未配置，请在设置中配置"
-          >
-            <Cpu size={11} />
-            AI 未配置
-          </div>
-        )}
-        <div className="flex-1 flex justify-center">
-          <div className="ppt-mode-segment flex items-center gap-0.5 p-0.5 rounded-lg bg-slate-100/70 ring-1 ring-slate-200/60">
-            <button
-              onClick={() => handleModeSwitch("create")}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
-                activeMode === "create"
-                  ? "bg-white text-slate-800 shadow-sm"
-                  : "text-slate-500 hover:text-slate-700"
-              }`}
-            >
-              <Sparkles size={13} />
-              PPT 制作
-            </button>
-            <button
-              onClick={() => handleModeSwitch("batch")}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
-                activeMode === "batch"
-                  ? "bg-white text-slate-800 shadow-sm"
-                  : "text-slate-500 hover:text-slate-700"
-              }`}
-            >
-              <Presentation size={13} />
-              批量编辑 PPT
-            </button>
-            <button
-              onClick={() => handleModeSwitch("video")}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
-                activeMode === "video"
-                  ? "bg-white text-slate-800 shadow-sm"
-                  : "text-slate-500 hover:text-slate-700"
-              }`}
-            >
-              <Clapperboard size={13} />
-              PPT 转视频
-            </button>
-          </div>
-        </div>
-        <div className="flex items-center gap-1">
-          {/* 预览窗口数量三态按钮 */}
-          <div className="flex items-center gap-0.5 p-0.5 rounded-md bg-white/70 ring-1 ring-slate-200/60" title="幻灯片预览窗口数量：1个/2个/3个">
-            {[
-              { n: 1, Icon: Square },
-              { n: 2, Icon: Columns },
-              { n: 3, Icon: LayoutGrid },
-            ].map(({ n, Icon }) => (
-              <button
-                key={n}
-                onClick={() => setPreviewSlots(n)}
-                className={`flex h-5 w-5 items-center justify-center rounded transition-all ${
-                  previewSlots === n
-                    ? "bg-brand-500 text-white shadow-sm"
-                    : "text-slate-500 hover:bg-white hover:text-slate-800"
-                }`}
-              >
-                <Icon className="h-3 w-3" />
-              </button>
-            ))}
-          </div>
-
-          {/* 工作文件选择 */}
-          <div ref={fileMenuRef} className="relative">
-            <button
-              onClick={() => setShowFileMenu((v) => !v)}
-              className={`relative flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium ring-1 transition-all ${
-                showFileMenu
-                  ? "bg-white text-slate-800 ring-slate-300 shadow-sm"
-                  : "bg-white/70 text-slate-600 ring-slate-200 hover:bg-white hover:text-slate-800"
-              }`}
-              title="选择工作文件（PPT）"
-            >
-              <FolderOpen className="h-3 w-3" />
-              工作文件
-              {selectedFiles.length > 0 && (
-                <span className="ml-0.5 inline-flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-brand-500 px-1 text-[9px] font-bold leading-none text-white">
-                  {selectedFiles.length}
-                </span>
-              )}
-              <ChevronDown className={`h-3 w-3 transition-transform ${showFileMenu ? "rotate-180" : ""}`} />
-            </button>
-            {showFileMenu && (
-              <div className="ppt-file-menu absolute right-0 top-full z-50 mt-1 w-44 overflow-hidden rounded-lg bg-white/95 py-1 text-[11px] shadow-lg ring-1 ring-slate-200">
-                <button
-                  onClick={() => {
-                    setShowFileMenu(false);
-                    handleModeSwitch("batch");
-                    setBatchConfirmed(false);
-                    void handlePickFiles();
-                  }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
-                >
-                  <FolderOpen className="h-3.5 w-3.5 text-slate-400" />
-                  选择 PPT 文件
-                </button>
-                <button
-                  onClick={() => {
-                    setShowFileMenu(false);
-                    handleModeSwitch("batch");
-                    setBatchConfirmed(false);
-                    void handlePickDirectory();
-                  }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
-                >
-                  <FolderPlus className="h-3.5 w-3.5 text-slate-400" />
-                  选择文件夹
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* 设定 */}
-          <button
-            onClick={onOpenSettings}
-            className="rounded-md p-1 text-slate-400 transition-colors hover:bg-white/70 hover:text-slate-600"
-            title="设置"
-          >
-            <Settings2 className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      </header>
 
       {/* 阶段进度条（仅批量编辑流程开始时显示） */}
       {activeMode === "batch" && (selectedFiles.length > 0 || fileSlides.length > 0 || analyzing) && (
@@ -1721,7 +1726,7 @@ export default function PPTWorkflowPanel({
                     handlePickFiles(activeMode !== "batch");
                   }
                 }}
-                className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition-all shrink-0"
+                className="p-2 text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition-all shrink-0"
                 title={activeMode === "create" ? "添加 PPT/PDF 作为参考" : "添加 PPT 文件进行预览"}
               >
                 <Paperclip size={18} />
@@ -1737,7 +1742,7 @@ export default function PPTWorkflowPanel({
               placeholder={inputPlaceholder}
               rows={1}
               disabled={inputLocked}
-              className={`flex-1 bg-transparent border-none outline-none resize-none text-sm text-slate-800 placeholder:text-slate-400 py-2 leading-relaxed ${
+              className={`flex-1 bg-transparent border-none outline-none resize-none text-sm text-slate-800 placeholder:text-slate-500 py-2 leading-relaxed ${
                 inputLocked ? "opacity-50 cursor-not-allowed" : ""
               }`}
             />
@@ -1780,7 +1785,7 @@ export default function PPTWorkflowPanel({
             <button
               onClick={handleSend}
               disabled={!canSend}
-              className="ppt-send-btn p-2 rounded-xl bg-slate-900 text-white hover:bg-slate-800 active:scale-95 transition-all disabled:opacity-30 disabled:cursor-not-allowed disabled:active:scale-100 shrink-0"
+              className="ppt-send-btn p-2 rounded-xl bg-slate-900 text-white hover:bg-slate-800 active:scale-95 transition-all disabled:opacity-45 disabled:cursor-not-allowed disabled:active:scale-100 shrink-0"
             >
               <SendHorizontal size={17} />
             </button>
@@ -1844,7 +1849,7 @@ export default function PPTWorkflowPanel({
                   参考资料库
                 </button>
               ) : null}
-              <span className="text-[10px] text-slate-400 truncate flex items-center gap-1">
+              <span className="text-[10px] text-slate-500 truncate flex items-center gap-1">
                 {inputLocked && <Lock size={10} className="shrink-0" />}
                 {activeMode === "video"
                   ? "可添加 PPT 预览幻灯片，或输入内容描述视频（即将上线）"
@@ -1900,7 +1905,7 @@ export default function PPTWorkflowPanel({
         .ppt-style-label {
           font-size: 10px;
           font-weight: 600;
-          color: #94a3b8;
+          color: #475569;
           margin-right: 2px;
         }
         .ppt-style-chip {
@@ -2335,29 +2340,41 @@ export default function PPTWorkflowPanel({
           100% { transform: scale(1.3); opacity: 0; }
         }
 
-        /* ===== 输入栏 ===== */
+        /* ===== 输入栏 =====
+           底色不透明度 0.35 → 0.62：壁纸（自定义图片）为暖色高亮画面时，
+           35% 白玻璃透上来的底色仍偏亮，浅灰文字/图标对比不足；
+           提高衬底让文字清晰，同时保留毛玻璃质感。 */
         .ppt-input-footer { transition: background-color .2s ease, border-color .2s ease; }
+        /* placeholder 显式加深：Tailwind preflight 的全局 ::placeholder 为 #9ca3af，
+           在高亮壁纸上偏淡；这里用更高特异性覆盖（含 .ppt-input-shell 前缀）。 */
+        .ppt-input-shell textarea::placeholder {
+          color: #64748b;
+          opacity: 1;
+        }
+        .ppt-input-shell textarea:disabled::placeholder {
+          color: #94a3b8;
+        }
         .ppt-input-shell {
-          background: rgba(255, 255, 255, .35);
-          border: 1px solid rgba(255, 255, 255, .55);
-          backdrop-filter: blur(12px) saturate(140%);
-          -webkit-backdrop-filter: blur(12px) saturate(140%);
+          background: rgba(255, 255, 255, .62);
+          border: 1px solid rgba(255, 255, 255, .7);
+          backdrop-filter: blur(14px) saturate(140%);
+          -webkit-backdrop-filter: blur(14px) saturate(140%);
           box-shadow:
-            0 1px 0 0 rgba(255, 255, 255, .65) inset,
-            0 4px 18px -6px rgba(31, 41, 55, .18);
+            0 1px 0 0 rgba(255, 255, 255, .75) inset,
+            0 4px 18px -6px rgba(31, 41, 55, .22);
           transition: background-color .2s ease, border-color .2s ease, box-shadow .2s ease;
         }
         .ppt-input-shell:hover {
-          background: rgba(255, 255, 255, .45);
-          border-color: rgba(255, 255, 255, .7);
+          background: rgba(255, 255, 255, .72);
+          border-color: rgba(255, 255, 255, .85);
         }
         .ppt-input-focused .ppt-input-shell {
-          background: rgba(255, 255, 255, .5);
-          border-color: rgba(139, 92, 246, .4);
+          background: rgba(255, 255, 255, .82);
+          border-color: rgba(139, 92, 246, .45);
           box-shadow:
-            0 1px 0 0 rgba(255, 255, 255, .7) inset,
-            0 0 0 3px rgba(139, 92, 246, .12),
-            0 6px 22px -6px rgba(139, 92, 246, .25);
+            0 1px 0 0 rgba(255, 255, 255, .85) inset,
+            0 0 0 3px rgba(139, 92, 246, .14),
+            0 6px 22px -6px rgba(139, 92, 246, .28);
         }
         .ppt-send-btn { position: relative; }
         html[data-theme="dark"] .ppt-send-btn {

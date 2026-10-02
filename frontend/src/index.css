@@ -2,6 +2,54 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============ 按钮/可点控件文字不可框选 ============
+   防止用鼠标框选页面时选中按钮里的文字，出现整块蓝色选中框。
+   覆盖 button、role=button 及它们内部的所有后代（文字、图标、span 等），
+   同时清除这些区域内的 ::selection 高亮。 */
+button,
+button *,
+[role="button"],
+[role="button"] *,
+[onClick] {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+button::selection,
+button *::selection,
+[role="button"]::selection,
+[role="button"] *::selection,
+[onClick]::selection,
+[onClick] *::selection {
+  background: transparent;
+  color: inherit;
+}
+
+/* ============ 自定义标题栏拖拽（无边框 Electron 窗口） ============
+   标题栏容器整体为 -webkit-app-region: drag，可长按拖拽移动窗口；
+   所有按钮统一设为 no-drag，保证按钮不被拖拽区吞掉、能正常点击。
+   这样标题栏中「非按钮的空白区域」都能拖拽窗口。 */
+button,
+[role="button"],
+input,
+select,
+textarea {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* ============ 任务界面切换过渡（从下往上展开） ============
+   进入任务界面时，整个界面从下方推上来（强 ease-out 阻尼），
+   配合容器 overflow-hidden 裁掉屏幕外的部分。只做单一位移，不加淡入淡出。 */
+.app-task-enter {
+  animation: appSlideUp 0.46s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+@keyframes appSlideUp {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
 /* ============ 主题变量（主色调） ============ */
 /* 默认靛蓝；通过 html[data-accent] 切换整套 brand 色 */
 :root {
@@ -39,6 +87,121 @@ html[data-accent="amber"] {
   transition: background-color .2s ease, border-color .2s ease;
 }
 
+/* 面板背景不透明度：按区域拆成三个独立系数，互不影响。
+   - --panel-alpha-left   侧栏（LeftPanel，常驻左列）
+   - --panel-alpha-top    上栏（BrowserPane×2）
+   - --panel-alpha-bottom 下栏（ResultsPanel 三栏：字段对比 / 文件处理 / 提取元素）
+   三个系数都由 PERSONAL 里的同一根滑块下发（勾选哪几个就写哪几个），
+   默认值（侧栏 0.6 / 上栏 0.8 / 下栏 0.8）与 App.tsx 的 PANEL_ALPHA_DEFAULT_BY_ZONE 一致。 */
+:root {
+  --panel-bg-left: rgba(255, 255, 255, var(--panel-alpha-left, 0.6));
+  --panel-bg-top: rgba(255, 255, 255, var(--panel-alpha-top, 0.8));
+  --panel-bg-bottom: rgba(255, 255, 255, var(--panel-alpha-bottom, 0.8));
+  /* 兼容旧名：未显式指定区域的调用方一律按下栏处理 */
+  --panel-bg: var(--panel-bg-bottom);
+  /* 顶部标题栏等 chrome 雾面：默认淡白玻璃，浅色文字模式下改为暗灰雾面 */
+  --chrome-bg: rgba(255, 255, 255, 0.12);
+  /* chrome 边框/高光：默认白色微光，浅色文字模式下改暗灰，避免暗底上出现白线 */
+  --chrome-border: rgba(255, 255, 255, 0.35);
+  --chrome-highlight: rgba(255, 255, 255, 0.45);
+  /* 激活标签页描边色：浅色下为白色微光，深色下改为暗灰（见下方 data-theme="dark" 覆盖） */
+  --tab-active-ring: rgba(255, 255, 255, 0.85);
+  /* 中缝互换圆形按钮底/内高光：浅色下为白色玻璃，深色下改为暗灰蓝，避免暗底上发白发灰 */
+  --swap-btn-bg: rgba(255, 255, 255, 0.55);
+  --swap-btn-hi: rgba(255, 255, 255, 0.6);
+  /* 底部三栏标题行的暖白补偿染色：透明度与 .glass-frame 的白底严格相同（30%），
+     仅把纯白换成暖白以抵消背后壁纸的蓝偏，与上方 BrowserPane 标题行观感对齐。
+     推导：实测底部标题栏玻璃主体 RGB(193,203,216)、标杆 RGB(195,201,206)，
+     按 alpha=0.3 反解壁纸底色 W≈(166,181,199)，再解所需染色 T=(top-(1-a)W)/a，
+     R 通道理论值 262 超出上限，夹到 255 后残差仅 ΔR=-2。详见 .glass-frame-tint 注释。 */
+  --header-tint: rgba(255, 248, 222, 0.30);
+}
+.rp-panel {
+  background-color: var(--panel-bg-bottom);
+}
+
+/* ============ 面板文字对比度（PERSONAL 里可切深/浅色文字）============
+   换上壁纸后，面板内的灰色次要文字在半透明/浅色背景下会发灰发糊。
+   - deep（深色文字，默认）：把面板里常见的浅灰字（slate-400/500 等）整体加深，
+     让它们在浅色/半透明面板上对比度更足、不发浅；
+   - light（浅色文字）：整体提亮为冷白色，适配深色壁纸。 */
+html[data-panel-text="deep"] .text-slate-900 { color: #0f172a; }
+html[data-panel-text="deep"] .text-slate-800 { color: #1e293b; }
+html[data-panel-text="deep"] .text-slate-700 { color: #1e293b; }
+html[data-panel-text="deep"] .text-slate-600 { color: #334155; }
+html[data-panel-text="deep"] .text-slate-500 { color: #475569; }
+html[data-panel-text="deep"] .text-slate-400 { color: #64748b; }
+html[data-panel-text="deep"] .text-slate-300 { color: #94a3b8; }
+html[data-panel-text="deep"] .hover\:text-slate-700:hover { color: #0f172a; }
+html[data-panel-text="deep"] .hover\:text-slate-600:hover { color: #1e293b; }
+html[data-panel-text="deep"] .hover\:text-slate-500:hover { color: #334155; }
+
+html[data-panel-text="light"] .text-slate-900 { color: #f8fafc; }
+html[data-panel-text="light"] .text-slate-800 { color: #f1f5f9; }
+html[data-panel-text="light"] .text-slate-700 { color: #e2e8f0; }
+html[data-panel-text="light"] .text-slate-600 { color: #cbd5e1; }
+html[data-panel-text="light"] .text-slate-500 { color: #94a3b8; }
+html[data-panel-text="light"] .text-slate-400 { color: #cbd5e1; }
+html[data-panel-text="light"] .hover\:text-slate-700:hover { color: #f1f5f9; }
+html[data-panel-text="light"] .hover\:text-slate-600:hover { color: #e2e8f0; }
+html[data-panel-text="light"] .hover\:text-slate-500:hover { color: #cbd5e1; }
+/* light（浅色文字）时面板背景切换为暗灰色半透明，让浅色文字在暗底上直接突出，不依赖壁纸明暗；
+   chrome（标题栏）雾面同步改为暗灰色雾面，与面板暗底一致。
+   三个区域各自覆盖，且必须继续读各自的 --panel-alpha-* 系数：
+   若在此写死 0.5，滑块在浅色文字模式下就会完全失效（系数被这条规则盖掉）。 */
+html[data-panel-text="light"] { --panel-bg-left: rgba(30, 41, 59, var(--panel-alpha-left, 0.6)); --panel-bg-top: rgba(30, 41, 59, var(--panel-alpha-top, 0.8)); --panel-bg-bottom: rgba(30, 41, 59, var(--panel-alpha-bottom, 0.8)); --panel-bg: var(--panel-bg-bottom); --chrome-bg: rgba(30, 41, 59, 0.6); --chrome-border: rgba(148, 163, 184, 0.18); --chrome-highlight: rgba(148, 163, 184, 0.12); --tab-active-ring: rgba(148, 163, 184, 0.30); --swap-btn-bg: rgba(51, 65, 85, 0.6); --swap-btn-hi: rgba(148, 163, 184, 0.18); }
+/* 浅色文字模式下同样取消底部标题行的暖白补偿：此时面板已是暗灰底，暖白会显脏，
+   退回与上方标题行同一档暗灰（同 line 下方 .bg-white/30 的取值）。
+   特异性 (0,3,1) 需高于 .glass-frame.glass-frame-tint (0,2,0) 与 .bg-white/30 覆盖 (0,2,0)；
+   本条须写在 html[data-theme="dark"] 的同名规则之前，以便两模式同时开启时维持原有 dark 优先次序。 */
+html[data-panel-text="light"] .glass-frame.glass-frame-tint { background-color: rgba(51, 65, 85, 0.5); }
+
+/* 其他窗口/组件的白色标题栏、白色底 chrome 条也跟随变暗（如 PPT 工作流顶栏用 bg-white/80） */
+html[data-panel-text="light"] .bg-white\/80 { background-color: rgba(30, 41, 59, 0.7); }
+html[data-panel-text="light"] .bg-white\/90 { background-color: rgba(30, 41, 59, 0.75); }
+html[data-panel-text="light"] .border-slate-200\/60 { border-color: rgba(148, 163, 184, 0.25); }
+/* 统一三个底部面板内部的大块白色卡片/容器背景为同一档暗灰，避免深浅不一 */
+html[data-panel-text="light"] .bg-white\/25 { background-color: rgba(51, 65, 85, 0.45); }
+html[data-panel-text="light"] .bg-white\/30 { background-color: rgba(51, 65, 85, 0.5); }
+html[data-panel-text="light"] .bg-white\/40 { background-color: rgba(51, 65, 85, 0.5); }
+html[data-panel-text="light"] .bg-white\/50 { background-color: rgba(51, 65, 85, 0.55); }
+html[data-panel-text="light"] .bg-white\/60 { background-color: rgba(51, 65, 85, 0.6); }
+html[data-panel-text="light"] .bg-white\/70 { background-color: rgba(51, 65, 85, 0.65); }
+html[data-panel-text="light"] .bg-white\/95 { background-color: rgba(30, 41, 59, 0.78); }
+html[data-panel-text="light"] .bg-slate-50 { background-color: rgba(51, 65, 85, 0.5); }
+html[data-panel-text="light"] .bg-slate-100 { background-color: rgba(51, 65, 85, 0.55); }
+html[data-panel-text="light"] .border-slate-200 { border-color: rgba(100, 116, 139, 0.35); }
+html[data-panel-text="light"] .border-slate-100 { border-color: rgba(100, 116, 139, 0.25); }
+/* 补齐带透明度的 slate 背景变体（卡片/灰色框常用），暗色下统一为暗灰 */
+html[data-panel-text="light"] .bg-slate-50\/95 { background-color: rgba(51, 65, 85, 0.6); }
+html[data-panel-text="light"] .bg-slate-50\/80 { background-color: rgba(51, 65, 85, 0.55); }
+html[data-panel-text="light"] .bg-slate-50\/60 { background-color: rgba(51, 65, 85, 0.5); }
+html[data-panel-text="light"] .bg-slate-50\/50 { background-color: rgba(51, 65, 85, 0.45); }
+html[data-panel-text="light"] .bg-slate-50\/40 { background-color: rgba(51, 65, 85, 0.42); }
+html[data-panel-text="light"] .bg-slate-100\/80 { background-color: rgba(51, 65, 85, 0.55); }
+html[data-panel-text="light"] .bg-slate-100\/70 { background-color: rgba(51, 65, 85, 0.52); }
+html[data-panel-text="light"] .bg-slate-200 { background-color: rgba(51, 65, 85, 0.65); }
+html[data-panel-text="light"] .bg-slate-200\/80 { background-color: rgba(51, 65, 85, 0.6); }
+html[data-panel-text="light"] .bg-slate-200\/60 { background-color: rgba(51, 65, 85, 0.55); }
+html[data-panel-text="light"] .bg-slate-200\/50 { background-color: rgba(51, 65, 85, 0.5); }
+html[data-panel-text="light"] .hover\:bg-slate-50:hover { background-color: rgba(51, 65, 85, 0.55); }
+html[data-panel-text="light"] .hover\:bg-slate-100:hover { background-color: rgba(51, 65, 85, 0.6); }
+html[data-panel-text="light"] .hover\:bg-slate-200:hover { background-color: rgba(51, 65, 85, 0.65); }
+/* 浅灰图标/文字（禁用态按钮图标、次级符号）在暗底上太淡，统一加深保证可辨 */
+html[data-panel-text="light"] .text-slate-200 { color: #cbd5e1; }
+html[data-panel-text="light"] .text-slate-300 { color: #94a3b8; }
+html[data-panel-text="light"] .hover\:text-slate-500:hover { color: #cbd5e1; }
+html[data-panel-text="light"] .hover\:text-slate-400:hover { color: #94a3b8; }
+html[data-panel-text="light"] .hover\:text-slate-300:hover { color: #64748b; }
+/* 纯白背景（搜索框、收藏夹面板等容器）在暗色下不再刺眼，统一为深灰 */
+html[data-panel-text="light"] .bg-white { background-color: #26334b; }
+/* 白色描边（ring-1 ring-slate-200/300）在暗色下太刺眼，改为柔和的深灰半透明描边，更有高级感 */
+html[data-panel-text="light"] .ring-slate-200 { --tw-ring-color: rgba(100, 116, 139, 0.22); }
+html[data-panel-text="light"] .ring-slate-300 { --tw-ring-color: rgba(100, 116, 139, 0.32); }
+html[data-panel-text="light"] .ring-slate-400 { --tw-ring-color: rgba(100, 116, 139, 0.42); }
+html[data-panel-text="light"] .hover\:ring-slate-300:hover { --tw-ring-color: rgba(100, 116, 139, 0.32); }
+html[data-panel-text="light"] .hover\:ring-slate-400:hover { --tw-ring-color: rgba(100, 116, 139, 0.42); }
+
 /* 切换主题/主色调瞬间禁用所有过渡，避免数百个 transition-all 按钮同时动画导致卡顿 */
 html.no-transitions,
 html.no-transitions *,
@@ -50,6 +213,9 @@ html.no-transitions *::after {
 /* LOGO 文字：浅色下黑色，深色下白色（SVG 用 currentColor） */
 .logo-wordmark { color: #0f172a; }
 html[data-theme="dark"] .logo-wordmark { color: #f1f5f9; }
+/* 面板浅色文字模式（暗色面板）：LOGO 文字和图标都变白 */
+html[data-panel-text="light"] .logo-wordmark { color: #f1f5f9; }
+html[data-panel-text="light"] .app-icon-img { filter: invert(1) brightness(1.6); }
 
 html, body, #root {
   height: 100%;
@@ -66,6 +232,15 @@ html[data-theme="dark"] body {
   color: #e2e8f0;
   color-scheme: dark;
 }
+/* 深色主题下把默认的白色 chrome 边框/高光降为低饱和暗灰：
+   避免 BrowserPane/ResultsPanel 等面板顶部出现刺眼的白线（原本内联 boxShadow 硬编码 rgba(255,255,255,.35)） */
+html[data-theme="dark"] {
+  --chrome-border: rgba(148, 163, 184, 0.16);
+  --chrome-highlight: rgba(148, 163, 184, 0.10);
+  --tab-active-ring: rgba(148, 163, 184, 0.30);
+  --swap-btn-bg: rgba(51, 65, 85, 0.6);
+  --swap-btn-hi: rgba(148, 163, 184, 0.18);
+}
 html[data-theme="dark"] .glass {
   background-color: rgba(30, 41, 59, .55);
   border-color: rgba(255, 255, 255, .10);
@@ -80,6 +255,12 @@ html[data-theme="dark"] .glass-frame {
   background-color: rgba(30, 41, 59, .35);
   border-color: rgba(255, 255, 255, .10);
   box-shadow: 0 1px 0 0 rgba(255,255,255,.04) inset, 0 4px 20px -6px rgba(0,0,0,.4);
+}
+/* 深色主题下取消暖白补偿：深色界面里暖白会显脏，且上下本就同为暗灰玻璃，无需补偿。
+   这里特异性 (0,3,1) 必须高于 .glass-frame.glass-frame-tint 的 (0,2,0)
+   和上方 html[data-theme=dark] .glass-frame 的 (0,2,1)，否则补偿染色会在深色主题下漏出。 */
+html[data-theme="dark"] .glass-frame.glass-frame-tint {
+  background-color: rgba(30, 41, 59, .35);
 }
 html[data-theme="dark"] .panel-solid {
   background-color: #1a2236;
@@ -102,6 +283,29 @@ html[data-theme="dark"] .text-slate-800 { color: #f1f5f9; }
 html[data-theme="dark"] .text-slate-700 { color: #e2e8f0; }
 html[data-theme="dark"] .text-slate-600 { color: #cbd5e1; }
 html[data-theme="dark"] .text-slate-500 { color: #94a3b8; }
+/* ============ 标题栏图标按钮统一配色 ============ */
+/* 标题栏图标（面板开合/聚焦/最小化/最大化/关闭、SKILL/站外循环/归档/设置）不再依赖
+   Tailwind 的 text-slate-* 类：那套类会被本文件下方的暗色重映射规则（data-theme="dark" 与
+   data-panel-text="light"，后者特异性同为 (0,2,1) 且更早出现）改写，导致配色随主题在
+   「近黑 #0f172a / 灰 #94a3b8」之间漂移——亮底上够用，暗底上则几乎看不见。
+   改为纯 CSS 变量驱动：亮底黑、暗底白，两种暗色态（深色主题 + 面板浅色文字）都命中。 */
+.chrome-icon-btn { color: #0f172a; }
+html[data-theme="dark"] .chrome-icon-btn,
+html[data-panel-text="light"] .chrome-icon-btn { color: #f1f5f9; }
+.chrome-icon-btn:hover { color: #0f172a; }
+html[data-theme="dark"] .chrome-icon-btn:hover,
+html[data-panel-text="light"] .chrome-icon-btn:hover { color: #ffffff; }
+/* 激活态（面板已展开 / 站外循环已挂起）：亮底用深灰填充，暗底用半透明白填充，
+   保持与图标同样的明暗反转逻辑，不再依赖 bg-slate-900（暗底上会糊成一块黑）。 */
+.chrome-icon-btn.is-on { color: #0f172a; background-color: rgba(15, 23, 42, 0.10); }
+html[data-theme="dark"] .chrome-icon-btn.is-on,
+html[data-panel-text="light"] .chrome-icon-btn.is-on { color: #ffffff; background-color: rgba(255, 255, 255, 0.18); }
+html[data-theme="dark"] .chrome-icon-btn.is-on:hover,
+html[data-panel-text="light"] .chrome-icon-btn.is-on:hover { background-color: rgba(255, 255, 255, 0.28); }
+/* 关闭按钮 hover：亮底淡红底 + 红字；暗底用低饱和红底 + 亮红字，避免浅粉底糊在暗色上 */
+.chrome-icon-btn.is-danger:hover { background-color: #ffe4e6; color: #e11d48; }
+html[data-theme="dark"] .chrome-icon-btn.is-danger:hover,
+html[data-panel-text="light"] .chrome-icon-btn.is-danger:hover { background-color: rgba(244, 63, 94, 0.28); color: #fecdd3; }
 html[data-theme="dark"] .text-slate-400 { color: #94a3b8; }
 html[data-theme="dark"] .text-slate-300 { color: #cbd5e1; }
 html[data-theme="dark"] .border-slate-200 { border-color: #3a4a66; }
@@ -132,6 +336,11 @@ html[data-theme="dark"] .bg-slate-100\/80 { background-color: #26334b; }
 html[data-theme="dark"] .bg-slate-200\/80 { background-color: #2f3d58; }
 html[data-theme="dark"] .bg-slate-200\/70 { background-color: #2f3d58; }
 html[data-theme="dark"] .bg-slate-400 { background-color: #475569; }
+
+/* 激活标签页的白色描边（ring-1 ring-white/80，空标签/CINSIDE SEARCH 页用）：
+   深色下改为低饱和暗灰描边，避免标签框周围出现刺眼的白线 */
+html[data-theme="dark"] .ring-white\/80 { --tw-ring-color: rgba(148, 163, 184, 0.28); }
+html[data-theme="dark"] .ring-white\/60 { --tw-ring-color: rgba(148, 163, 184, 0.22); }
 
 /* —— 彩色浅色底（50/100）→ 深色下改为低透明度同色浸染 —— */
 /* emerald */
@@ -852,6 +1061,8 @@ html[data-theme="dark"] textarea:focus {
 html[data-theme="dark"] ::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, .25); background-clip: padding-box; }
 html[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: var(--brand-500); background-clip: padding-box; }
 
+html, body { overflow: hidden; }
+
 body {
   /* 渐变背景：跟随主色调（用 --brand-* 变量），给玻璃质感提供底层色彩 */
   background:
@@ -936,10 +1147,21 @@ tr.loop-drag-preview > td:first-child {
   }
   /* 玻璃描边：仅边框 + 模糊，几乎无背景 */
   .glass-frame {
-    @apply border border-white/50 bg-white/30 backdrop-blur-md;
+    @apply border bg-white/30 backdrop-blur-md;
+    border-color: var(--chrome-border);
     box-shadow:
-      0 1px 0 0 rgba(255,255,255,.5) inset,
+      0 1px 0 0 var(--chrome-highlight) inset,
       0 4px 20px -6px rgba(31, 41, 55, .12);
+  }
+  /* 暖白补偿染色：仅用于底部三栏（字段对比/文件处理/提取元素）标题行，
+     使其与上方 BrowserPane 标题行（标杆，.glass-frame 原样未动）观感一致。
+     实测两处亮度几乎相同（195 vs 193），差异是色偏：底部标题行 B-R=+23，
+     标杆 B-R=+11，即底部偏蓝约 12 个色阶（背后那片壁纸偏蓝所致）。
+     解法是把 30% 纯白底换成 30% 暖白（透明度与标杆严格相同，不牺牲通透感），
+     抵消蓝偏后残差仅 ΔR=-2，肉眼不可辨。
+     值由 --header-tint 下发，深色主题/浅色文字模式下退回原本的暗灰染色，不破坏主题。 */
+  .glass-frame.glass-frame-tint {
+    background-color: var(--header-tint);
   }
   /* 实心卡片（保留给数据面板，与玻璃区拉开层次） */
   .panel-solid {

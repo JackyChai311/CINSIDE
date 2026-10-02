@@ -1,13 +1,18 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, type ReactNode, type CSSProperties } from "react";
 import { Globe, Presentation, Users, ArrowRight, Loader2 } from "lucide-react";
 import appIconPng from "../assets/app-icon.png";
+import DotWorldMap from "./DotWorldMap";
 
 interface TaskSelectorProps {
   onSelect: (task: "web" | "ppt" | "cowork") => void;
   checking?: boolean;
+  /** 应用版本号（由 App 传入，显示在副标题下方） */
+  appVersion?: string;
+  /** 更新提示条（由 App 传入，渲染在版本号下方；无更新时为 null 不占位） */
+  updateNotice?: ReactNode;
 }
 
-export default function TaskSelector({ onSelect, checking }: TaskSelectorProps) {
+export default function TaskSelector({ onSelect, checking, appVersion, updateNotice }: TaskSelectorProps) {
   const [exiting, setExiting] = useState<"web" | "ppt" | "cowork" | null>(null);
   const prevCheckingRef = useRef(false);
 
@@ -32,6 +37,14 @@ export default function TaskSelector({ onSelect, checking }: TaskSelectorProps) 
 
   return (
     <div className="task-selector-root">
+      {/* Minecraft 风点阵世界地图壁纸（Logo/卡片之下，不拦截交互） */}
+      <DotWorldMap
+        className="pointer-events-none absolute left-1/2 top-1/2 z-0 -translate-x-1/2 -translate-y-1/2 select-none"
+        color="#94a3b8"
+        opacity={1}
+        dotSize={6}
+        gap={3}
+      />
       <style>{`
         .task-selector-root {
           min-height: 100vh;
@@ -44,6 +57,7 @@ export default function TaskSelector({ onSelect, checking }: TaskSelectorProps) 
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
             'Microsoft YaHei', sans-serif;
           overflow: hidden;
+          position: relative;
         }
 
         /* Logo 区域 */
@@ -84,6 +98,19 @@ export default function TaskSelector({ onSelect, checking }: TaskSelectorProps) 
           margin: 0 0 48px 0;
           animation: tsFadeUp 0.6s ease 0.15s both;
         }
+        .ts-version {
+          font-size: 11px;
+          color: #94a3b8;
+          letter-spacing: 0.6px;
+          margin: -30px 0 30px;
+          animation: tsFadeUp 0.6s ease 0.22s both;
+        }
+        .ts-update {
+          margin: -18px 0 32px;
+          display: flex;
+          justify-content: center;
+          animation: tsFadeUp 0.6s ease 0.28s both;
+        }
 
         /* 卡片容器 */
         .ts-cards {
@@ -93,20 +120,25 @@ export default function TaskSelector({ onSelect, checking }: TaskSelectorProps) 
           width: 100%;
         }
 
-        /* 单个卡片 */
+        /* 单个卡片：超透明玻璃，壁纸清晰可见 */
         .ts-card {
           flex: 1;
           position: relative;
-          background: #ffffff;
-          border: 2px solid #e2e8f0;
+          background: rgba(255, 255, 255, 0.08);
+          backdrop-filter: blur(3px) saturate(1.1);
+          -webkit-backdrop-filter: blur(3px) saturate(1.1);
+          border: 2px solid rgba(255, 255, 255, 0.45);
           border-radius: 20px;
           padding: 32px 26px;
           text-align: left;
           cursor: pointer;
           transition: border-color 0.25s ease, box-shadow 0.25s ease,
-            transform 0.25s ease;
+            transform 0.25s ease, background-color 0.25s ease;
           outline: none;
           overflow: hidden;
+          box-shadow:
+            0 1px 0 0 rgba(255,255,255,.35) inset,
+            0 8px 32px -12px rgba(31, 41, 55, .15);
         }
         .ts-card::before {
           content: "";
@@ -129,17 +161,20 @@ export default function TaskSelector({ onSelect, checking }: TaskSelectorProps) 
         .ts-card:hover::before { opacity: 1; }
 
         .ts-card-web:hover {
-          border-color: #818cf8;
+          border-color: rgba(129, 140, 248, 0.9);
+          background: rgba(255, 255, 255, 0.15);
           box-shadow: 0 20px 40px -12px rgba(99,102,241,0.25);
           transform: translateY(-6px);
         }
         .ts-card-ppt:hover {
-          border-color: #a78bfa;
+          border-color: rgba(167, 139, 250, 0.9);
+          background: rgba(255, 255, 255, 0.15);
           box-shadow: 0 20px 40px -12px rgba(139,92,246,0.25);
           transform: translateY(-6px);
         }
         .ts-card-cowork:hover {
-          border-color: #5eead4;
+          border-color: rgba(94, 234, 212, 0.9);
+          background: rgba(255, 255, 255, 0.15);
           box-shadow: 0 20px 40px -12px rgba(20,184,166,0.25);
           transform: translateY(-6px);
         }
@@ -250,6 +285,8 @@ export default function TaskSelector({ onSelect, checking }: TaskSelectorProps) 
         .ts-exit-active .ts-logo,
         .ts-exit-active .ts-title,
         .ts-exit-active .ts-subtitle,
+        .ts-exit-active .ts-version,
+        .ts-exit-active .ts-update,
         .ts-exit-active .ts-footer {
           animation: tsFadeOut 0.3s ease forwards;
         }
@@ -281,9 +318,18 @@ export default function TaskSelector({ onSelect, checking }: TaskSelectorProps) 
           0%, 100% { opacity: 1; }
           50%      { opacity: 0; }
         }
+
+        /* 返回选择页：整个界面从上方往下收起（强 ease-out 阻尼），与进入任务界面的上推过渡呼应 */
+        .ts-enter-down {
+          animation: tsSlideDown 0.46s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+        }
+        @keyframes tsSlideDown {
+          from { transform: translateY(-100%); }
+          to   { transform: translateY(0); }
+        }
       `}</style>
 
-      <div className={exiting ? "ts-exit-active" : ""} style={{ width: "100%", display: "flex", flexDirection: "column", alignItems: "center" }}>
+      <div className={exiting ? "ts-exit-active" : "ts-enter-down"} style={{ width: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", position: "relative", zIndex: 1, WebkitAppRegion: "drag" } as CSSProperties}>
         {/* Logo */}
         <div className="ts-logo">
           <img src={appIconPng} alt="CINSIDE" />
@@ -293,6 +339,8 @@ export default function TaskSelector({ onSelect, checking }: TaskSelectorProps) 
 
         <h1 className="ts-title">选择任务类型</h1>
         <p className="ts-subtitle">选择你要进行的操作</p>
+        {appVersion && <span className="ts-version">v{appVersion}</span>}
+        {updateNotice && <div className="ts-update">{updateNotice}</div>}
 
         {/* 卡片 */}
         <div className="ts-cards">

@@ -408,7 +408,7 @@ function CalendarRoleRow({
 /** 模拟触发框（选项控件/日历控件通用） */
 function MockTriggerBox({ label, icon }: { label: string; icon?: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-between rounded border border-slate-300 bg-white px-2 py-1.5">
+    <div className="flex items-center justify-between rounded border border-slate-300 bg-white/50 px-2 py-1.5">
       <span className="truncate text-[10px] text-slate-700">{label}</span>
       <span className="text-slate-400">{icon || <ChevronDown className="h-3 w-3" />}</span>
     </div>

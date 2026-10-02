@@ -479,7 +479,13 @@ export default function ResultsPanel({
   selectMode = false,
 }: Props) {
   return (
-    <div className="glass-strong relative flex h-full flex-col overflow-hidden rounded-2xl">
+    <div
+      className="relative flex h-full flex-col overflow-hidden rounded-lg rp-panel"
+      style={{
+        background: "var(--panel-bg-bottom)",
+        boxShadow: "0 1px 0 0 var(--chrome-highlight) inset, 0 8px 32px -12px rgba(31,41,55,.15)",
+      } as React.CSSProperties}
+    >
       {/* 右下角悬浮按钮（脱离、关闭） */}
       <div className="absolute bottom-1.5 right-1.5 z-10 flex items-center gap-0.5">
         {onDetach && (
@@ -1891,7 +1897,7 @@ function ReportTab({
     const accent = isFailed
       ? { head: "bg-rose-50/80 border-rose-200", text: "text-rose-700", spin: "text-rose-500", glow: "shadow-[0_2px_14px_-4px_rgba(244,63,94,0.35)]" }
       : isRunning
-      ? { head: "bg-white border-slate-200", text: "text-slate-700", spin: "text-slate-400", glow: "shadow-sm" }
+      ? { head: "bg-white/50 border-slate-200", text: "text-slate-700", spin: "text-slate-400", glow: "shadow-sm" }
       : { head: "bg-sky-50/80 border-sky-200", text: "text-sky-700", spin: "text-sky-500", glow: "shadow-[0_2px_14px_-4px_rgba(14,165,233,0.3)]" };
 
     return (
@@ -2382,7 +2388,7 @@ function ReportTab({
   const SingleCompareTable = ({ rows }: { rows: SideCompareRow[] }) => {
     const isEntry = appMode === "entry";
     return (
-      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white/40 shadow-sm">
         <table className="w-full">
           <thead>
             <tr className="border-b border-slate-100">
@@ -3118,7 +3124,7 @@ function ReportTab({
                     key={field}
                     onClick={widgetPassportPickingKey ? () => onResolvePassportField?.(field) : undefined}
                     className={[
-                      "rounded border bg-white px-1.5 py-1",
+                      "rounded border bg-white/50 px-1.5 py-1",
                       widgetPassportPickingKey
                         ? "cursor-pointer border-violet-300 ring-1 ring-violet-200 transition-colors hover:border-violet-400 hover:bg-violet-50 hover:ring-violet-300"
                         : editExtractMode ? "border-brand-300 ring-1 ring-brand-100" : "border-slate-200",
@@ -3165,7 +3171,7 @@ function ReportTab({
                   <div
                     key={field}
                     className={[
-                      "rounded border border-dashed bg-white px-1.5 py-1",
+                      "rounded border border-dashed bg-white/50 px-1.5 py-1",
                       editExtractMode ? "border-brand-300 ring-1 ring-brand-100" : "border-slate-300",
                     ].join(" ")}
                     title="未识别到该字段，点「编辑」可手动补录"
@@ -3199,7 +3205,7 @@ function ReportTab({
               </div>
             )}
             {hasExtractText && (
-              <div className="rounded border border-slate-200 bg-white">
+              <div className="rounded border border-slate-200 bg-white/40">
                 <button
                   onClick={() => setShowFullText((v) => !v)}
                   className="flex w-full items-center justify-between px-2 py-1 text-left text-[10px] font-medium text-slate-500 hover:bg-slate-50"
@@ -3261,7 +3267,7 @@ function ReportTab({
         {filePreviewCollapsed && filePreview}
         {!fileInfo && !extractResultBlock && !compareBlock && !shotsBlock && (
           <div className="flex h-full min-h-[140px] flex-col items-center justify-center gap-2 text-center text-[11px] text-slate-400">
-            <FileText className="h-8 w-8 text-slate-200" />
+            <FileText className="h-8 w-8 text-slate-300" />
             <div>点击「+文件提取」后下载的</div>
             <div className="text-[10px] text-slate-400">PDF / JPG / JPEG 文件会放到这里</div>
             <button
@@ -3299,7 +3305,7 @@ function ReportTab({
           "rounded-md border px-2 py-1.5 transition-colors",
           isKeyField
             ? "border-indigo-200 bg-indigo-50/40"
-            : "border-slate-200 bg-white",
+            : "border-slate-200 bg-white/50",
           canPickExtract ? "cursor-pointer hover:border-brand-300 hover:bg-brand-50/60 hover:shadow-sm" : "",
         ].join(" ")}
       >
@@ -3392,7 +3398,7 @@ function ReportTab({
   } else {
     extractedContent = (
       <div className="flex h-full min-h-[140px] flex-col items-center justify-center gap-2 text-center text-[11px] text-slate-400">
-        <Database className="h-8 w-8 text-slate-200" />
+        <Database className="h-8 w-8 text-slate-300" />
         <div>识别文件后显示提取的</div>
         <div className="text-[10px] text-slate-400">姓名 / 护照号 / 日期 等元素</div>
         <button
@@ -4131,7 +4137,10 @@ function ReportTab({
   );
 
   return (
-    <div className="flex h-full flex-col p-1.5" ref={containerRef}>
+    <div
+      className="flex h-full flex-col overflow-hidden rounded-lg"
+      ref={containerRef}
+    >
       {/* 大屏：可拖拽三栏；小屏：垂直堆叠。聚焦模式通过 flex-grow + opacity 过渡实现丝滑动画 */}
       <div className="min-h-0 flex-1 flex flex-col gap-1.5 lg:flex-row lg:gap-0 lg:h-full">
         {/* 字段对比卡片 —— 最左侧，向右展开/向左回收 */}
@@ -4139,7 +4148,7 @@ function ReportTab({
           onClick={() => onFieldPanelActive?.()}
           onFocusCapture={() => onFieldPanelActive?.()}
           className={[
-            "flex min-w-0 max-h-[55vh] flex-col overflow-hidden bg-white lg:h-full lg:max-h-none",
+            "flex min-w-0 max-h-[55vh] flex-col overflow-hidden lg:h-full lg:max-h-none",
             dragging ? "" : "transition-[flex-basis,opacity,max-width,flex-grow] duration-300 ease-out",
             isFieldFocus ? "flex-1" : (isAll || isFieldDocFocus) ? "" : "lg:border-0 lg:px-0 lg:mx-0",
           ].join(" ")}
@@ -4151,10 +4160,10 @@ function ReportTab({
             maxWidth: isDocExtractFocus ? 0 : undefined,
             pointerEvents: isDocExtractFocus ? "none" : undefined,
             willChange: "opacity, max-width",
-            contain: "layout style",
+            contain: "layout",
           }}
         >
-          <div className="flex shrink-0 items-center gap-1.5 border-b border-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-700">
+          <div className="glass-frame flex shrink-0 items-center gap-1.5 border-b px-2 py-1 text-[11px] font-semibold text-slate-700">
             <Table2 className="h-3.5 w-3.5 text-slate-500 shrink-0" />
             <span className="shrink-0">字段对比</span>
             {!fieldSetupMode && headerBadges && (
@@ -4227,7 +4236,7 @@ function ReportTab({
                 "flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
                 fieldSetupMode ? "ml-1" : onExportExcel ? "ml-0" : "ml-auto",
                 fieldSetupMode
-                  ? "bg-slate-200 text-slate-700"
+                  ? "bg-slate-900 text-white shadow-sm"
                   : "text-slate-400 hover:bg-slate-100 hover:text-slate-600",
               ].join(" ")}
               title={fieldSetupMode ? "切换到结果显示" : "切换到步骤设置"}
@@ -4263,7 +4272,7 @@ function ReportTab({
         {/* 文件处理卡片 —— 2面板时在右半向左展开/向右回收；3面板时在中间左右展开/向中心回收 */}
         <div
           className={[
-            "relative flex min-w-0 max-h-[55vh] flex-col overflow-hidden bg-white lg:h-full lg:max-h-none",
+            "relative flex min-w-0 max-h-[55vh] flex-col overflow-hidden lg:h-full lg:max-h-none",
             dragging ? "" : "transition-[flex-basis,opacity,max-width] duration-300 ease-out",
             (isDocFocus || isDocExtractFocus || isFieldDocFocus) ? "flex-1" : isAll ? "" : "lg:border-0 lg:px-0 lg:mx-0",
           ].join(" ")}
@@ -4282,7 +4291,7 @@ function ReportTab({
             flexShrink: 0,
             flexGrow: (isDocFocus || isDocExtractFocus || isFieldDocFocus || (isAll && !showExtract)) ? 1 : 0,
             willChange: "opacity, max-width",
-            contain: "layout style",
+            contain: "layout",
           }}
         >
           {docLocalConfigContent && !docConfigChooseMode ? (
@@ -4291,7 +4300,7 @@ function ReportTab({
           ) : (
             <>
               {/* 文件处理标题栏：choose 模式和普通模式共用 */}
-              <div className="flex shrink-0 items-center gap-1.5 border-b border-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-700">
+              <div className="glass-frame flex shrink-0 items-center gap-1.5 border-b px-2 py-1 text-[11px] font-semibold text-slate-700">
                 <FileText className="h-3.5 w-3.5 text-slate-500" />
                 文件处理
                 {docExtracts.length > 0 && (
@@ -4302,26 +4311,17 @@ function ReportTab({
                 {/* OCR 识别引擎切换：识图AI（Vision LLM） ↔ 本地 OCR（内置加速引擎/UMI） */}
                 {onChangeOcrEngine && (
                   <div className="ml-1 flex shrink-0 items-center gap-1">
-                    <div
-                      className="flex items-center gap-0 rounded-md bg-slate-100/80 p-0.5 ring-1 ring-slate-200"
-                      title="护照/图片识别引擎：识图AI（在线Vision）或本地 OCR（核显加速开=内置加速引擎，关=UMI-OCR）"
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleOcrEngineSwitch(ocrEngine === "vision" ? "umi" : "vision"); }}
+                      className="flex items-center gap-0.5 rounded-md bg-slate-900 px-1.5 py-0.5 text-[9px] font-semibold text-white shadow-sm ring-1 ring-slate-500/60 transition-all hover:bg-slate-700 hover:ring-slate-400/60"
+                      title={ocrEngine === "vision"
+                        ? "当前：识图AI（在线 Vision）—— 点击切换为本地 OCR"
+                        : "当前：OCR（本地）—— 点击切换为识图AI"}
                     >
-                      {([["vision", "识图AI"], ["umi", "OCR"]] as const).map(([val, label]) => (
-                        <button
-                          key={val}
-                          onClick={(e) => { e.stopPropagation(); if (ocrEngine !== val) handleOcrEngineSwitch(val); }}
-                          className={[
-                            "flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-semibold transition-all",
-                            ocrEngine === val
-                              ? "bg-slate-900 text-white shadow-sm"
-                              : "text-slate-500 hover:bg-white/70 hover:text-slate-700",
-                          ].join(" ")}
-                        >
-                          {val === "vision" ? <Eye className="h-2.5 w-2.5" /> : <ScanLine className="h-2.5 w-2.5" />}
-                          {label}
-                        </button>
-                      ))}
-                    </div>
+                      {ocrEngine === "vision" ? <Eye className="h-2.5 w-2.5" /> : <ScanLine className="h-2.5 w-2.5" />}
+                      {ocrEngine === "vision" ? "识图AI" : "OCR"}
+                      <MoveRight className="h-2 w-2 opacity-60" />
+                    </button>
                     {/* UMI 状态指示灯（核显加速开启时内置引擎不依赖 UMI，不显示） */}
                     {ocrEngine === "umi" && !igpuAcceleration && umiStatus !== "idle" && (
                       umiStatus === "unavailable" ? (
@@ -4367,9 +4367,9 @@ function ReportTab({
                     className={[
                       "flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-semibold transition-all",
                       docBreakpoint === "always"
-                        ? "bg-rose-500 text-white shadow-sm"
+                        ? "bg-slate-900 text-white shadow-sm"
                         : docBreakpoint === "on-error"
-                        ? "bg-amber-500 text-white shadow-sm"
+                        ? "bg-slate-900 text-white shadow-sm"
                         : "text-slate-400 hover:bg-slate-100 hover:text-slate-600",
                     ].join(" ")}
                     title={
@@ -4390,7 +4390,7 @@ function ReportTab({
                   className={[
                     "ml-auto flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
                     docSetupMode
-                      ? "bg-slate-200 text-slate-700"
+                      ? "bg-slate-900 text-white shadow-sm"
                       : "text-slate-400 hover:bg-slate-100 hover:text-slate-600",
                   ].join(" ")}
                   title={docSetupMode ? "切换到结果显示" : "切换到步骤设置"}
@@ -4515,7 +4515,7 @@ function ReportTab({
         {/* 提取元素卡片 —— 最右侧，向左展开/向右回收（默认隐藏，通过文件处理面板左侧按钮开启）；控件提取时也保持三栏，不再扩到50% */}
         <div
           className={[
-            "flex max-h-[55vh] min-w-0 flex-col overflow-hidden bg-white lg:h-full lg:max-h-none",
+            "flex max-h-[55vh] min-w-0 flex-col overflow-hidden lg:h-full lg:max-h-none",
             dragging ? "" : "transition-[flex-basis,opacity,max-width] duration-300 ease-out",
             showExtract ? "flex-1" : "lg:border-0 lg:px-0 lg:mx-0",
           ].join(" ")}
@@ -4530,10 +4530,10 @@ function ReportTab({
             flexShrink: 0,
             flexGrow: showExtract ? 1 : 0,
             willChange: "opacity, max-width",
-            contain: "layout style",
+            contain: "layout",
           }}
         >
-          <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-slate-100 px-1.5 py-1 text-[11px] font-semibold text-slate-700">
+          <div className="glass-frame flex shrink-0 flex-wrap items-center gap-1 border-b px-1.5 py-1 text-[11px] font-semibold text-slate-700">
             <Database className="h-3.5 w-3.5 shrink-0 text-slate-500" />
             <span className="shrink-0">提取元素</span>
             {extractSetupMode && (
@@ -4584,7 +4584,7 @@ function ReportTab({
               className={[
                 "ml-auto flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium transition-colors",
                 extractSetupMode
-                  ? "bg-slate-200 text-slate-700"
+                  ? "bg-slate-900 text-white shadow-sm"
                   : "text-slate-400 hover:bg-slate-100 hover:text-slate-600",
               ].join(" ")}
               title={extractSetupMode ? "切换到结果显示" : "切换到自定义字段设置"}

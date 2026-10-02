@@ -126,3 +126,19 @@ _repack2_check/
 _repack_tmp/
 asar_temp/
 .repack_tmp/
+
+# Agent session backups / artifacts (local only, not source)
+*.bak-*
+*/*.bak-*
+.box-agent/
+frontend/src/.App.tsx.artifact.json
+nul
+
+# Session screenshot / comparison images dropped at repo root
+image????????-????-????-????-????????????.png
+_hdr_cmp.png
+slide-studio-button-compare.png
+
+# Unrelated project build outputs (FrameTol etc.)
+dist-frametol-client/
+frametol-client/

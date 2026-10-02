@@ -26,7 +26,6 @@ import {
   GraduationCap,
   KeyRound,
   Keyboard,
-  LayoutGrid,
   Library,
   ListChecks,
   Loader2,
@@ -66,20 +65,15 @@ import DocExportDialog from "./components/DocExportDialog";
 import PPTWorkflowPanel from "./components/PPTWorkflowPanel";
 import CoworkStudio from "./components/CoworkStudio";
 import TaskSelector from "./components/TaskSelector";
+import UpdateNotice from "./components/UpdateNotice";
 function LogoWordmark({ className }: { className?: string }) {
   return (
-    <svg viewBox="0 0 520 120" width="100%" height="100%" className={className} aria-label="CINSIDE">
+    <svg viewBox="0 0 420 120" width="100%" height="100%" className={className} aria-label="CINSIDE">
       <text x="10" y="90"
             fontFamily="Arial Black, Impact, 'Segoe UI', sans-serif"
             fontSize="80"
             fontWeight="900"
             fill="currentColor">CINSIDE</text>
-      <rect x="420" y="20" width="6" height="70" fill="#8a2be2" rx="1">
-        <animate attributeName="opacity" values="1;0;1" dur="1s" repeatCount="indefinite" />
-      </rect>
-      <rect x="435" y="80" width="30" height="6" fill="#8a2be2" rx="1">
-        <animate attributeName="opacity" values="1;0;1" dur="1s" repeatCount="indefinite" />
-      </rect>
     </svg>
   );
 }
@@ -139,11 +133,99 @@ import {
 import LeftPanel from "./components/LeftPanel";
 import type { AISphereState } from "./components/AISphere";
 import BrowserPane, { type PickedElementInfo, getPaneExchangeApi } from "./components/BrowserPane";
+import DotWorldMap from "./components/DotWorldMap";
+
+/** 任务界面全局壁纸：勾选「使用默认壁纸」用点阵世界地图，否则用自定义图片（z=-1 绘制在面板之下、body 背景之上）。
+ *  brightness：壁纸亮度系数（0.2~2.0，1.0 为原始亮度），通过 CSS filter 作用于整层壁纸。 */
+function TaskWallpaperLayer({ on, color, custom, useDefault, brightness = 1 }: { on: boolean; color: string; custom?: string; useDefault?: boolean; brightness?: number }) {
+  if (!on) return null;
+  // brightness=1 时不加 filter，避免无谓的合成开销
+  const filterStyle = Math.abs((brightness ?? 1) - 1) < 0.001 ? undefined : `brightness(${brightness})`;
+  // 未勾选「使用默认壁纸」：走自定义图片，无图片则不渲染壁纸
+  if (useDefault === false) {
+    if (!custom) return null;
+    return (
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed inset-0 overflow-hidden"
+        style={{ zIndex: -1, filter: filterStyle }}
+      >
+        {/* 自定义壁纸：cover 铺满整窗，图片作为静态位图由 GPU 直接渲染，无逐帧开销 */}
+        <div
+          className="absolute inset-0 select-none"
+          style={{
+            backgroundImage: `url(${custom})`,
+            backgroundSize: "cover",
+            backgroundPosition: "center",
+            backgroundRepeat: "no-repeat",
+          }}
+        />
+      </div>
+    );
+  }
+  return (
+    <div
+      aria-hidden="true"
+      className="pointer-events-none fixed inset-0 overflow-hidden"
+      style={{ zIndex: -1, filter: filterStyle }}
+    >
+      {/* 地图以 canvas 生成的无缝 tile 位图平铺铺满整窗：GPU 直接纹理采样，
+          左栏/右栏/底部任何位置都能透出壁纸点阵（比数百层 radial-gradient 拼接平铺流畅得多） */}
+      <DotWorldMap
+        className="select-none"
+        color={color}
+        opacity={1}
+        dotSize={6}
+        gap={3}
+        pattern
+        style={{
+          position: "absolute",
+          inset: 0,
+        }}
+      />
+    </div>
+  );
+}
+
+/** 清屏大时钟：聚焦 + 关闭侧栏 + 关闭下栏时，在主区正中显示的日期与大时钟。
+ *  与左栏小时钟各自维护计时器，仅在挂载期间走动。 */
+function BigClock() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const WEEK = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+  const week = WEEK[now.getDay()];
+  const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  return (
+    <div className="flex select-none flex-col items-center animate-fade-in">
+      {/* 星期徽标：浅色胶囊，置于时间上方，作为最轻的一层信息 */}
+      <span className="mb-5 rounded-full bg-white/60 px-3.5 py-1 text-[13px] font-medium tracking-[0.2em] text-slate-500 ring-1 ring-white/70 backdrop-blur-sm">
+        {week}
+      </span>
+      {/* 时间：等宽数字，冒号用品牌色并轻微上提，避免视觉重心偏下 */}
+      <div className="font-mono text-[76px] font-semibold leading-none tabular-nums tracking-tight text-slate-800">
+        {pad(now.getHours())}
+        <span className="mx-1.5 -translate-y-1 text-brand-500">:</span>
+        {pad(now.getMinutes())}
+        <span className="mx-1.5 -translate-y-1 text-brand-500">:</span>
+        {pad(now.getSeconds())}
+      </div>
+      {/* 日期：时间下方一行，字母间距拉开，与大幅时间形成安静的对比 */}
+      <span className="mt-5 text-[15px] font-medium tracking-[0.28em] text-slate-400">
+        {dateStr}
+      </span>
+    </div>
+  );
+}
 import { extractOrigin, collectPaneOrigins, sideFrameByOrigins, hostOf, templatePaneSnapshot, groupPaneSnapshot, checkGroupPanes, originColorClass } from "./lib/paneLinks";
 import ExcelView, { type ExcelPickedField } from "./components/ExcelView";
 import BlankExcel from "./components/BlankExcel";
 import type { PickTarget, CustomTextEntry } from "./components/ElementSelectBar";
 import ResultsPanel from "./components/ResultsPanel";
+import PersonalPanel from "./components/PersonalPanel";
 import type { ExtractSummaryItem } from "./components/ResultsPanel";
 import SettingsModal from "./components/SettingsModal";
 import ArchiveDialog from "./components/ArchiveDialog";
@@ -460,6 +542,74 @@ function getDetachMode(): string | null {
   return d || null;
 }
 
+// ============ 面板不透明度：按区域拆分 ============
+// PERSONAL 面板滑块的合法区间。15% 下限保证面板底色不会薄到让面板内文字与壁纸糊在一起、
+// 读数吃力；80% 上限保证壁纸仍能透出来，不至于把面板变成实心色块。
+// 三个区域各自持有一个系数，互不干扰：勾选哪几个，滑块就写哪几个；
+// 未勾选的区域保持原值不动（而不是被重置），这样临时只调一个区域不会波及其他。
+const PANEL_ALPHA_MIN = 0.15;
+const PANEL_ALPHA_MAX = 0.8;
+// 各区域默认不透明度：侧栏 60%（更透，露出壁纸），上栏/下栏 80%（更实，便于读数）
+const PANEL_ALPHA_DEFAULT_BY_ZONE: Record<"left" | "top" | "bottom", number> = {
+  left: 0.6,
+  top: 0.8,
+  bottom: 0.8,
+};
+const clampPanelAlpha = (v: number) => Math.min(PANEL_ALPHA_MAX, Math.max(PANEL_ALPHA_MIN, v));
+
+// ============ 壁纸亮度 ============
+// 通过 CSS filter: brightness() 作用于壁纸层。0.2~2.0（20%~200%），1.0 为原始亮度。
+const WALLPAPER_BRIGHTNESS_MIN = 0.2;
+const WALLPAPER_BRIGHTNESS_MAX = 2.0;
+const WALLPAPER_BRIGHTNESS_DEFAULT = 1.0;
+const clampWallpaperBrightness = (v: number) =>
+  Math.min(WALLPAPER_BRIGHTNESS_MAX, Math.max(WALLPAPER_BRIGHTNESS_MIN, v));
+
+/** 读取壁纸亮度（localStorage，缺省为 1.0） */
+function readWallpaperBrightness(): number {
+  try {
+    const raw = localStorage.getItem("cinside-wallpaper-brightness");
+    if (raw !== null) {
+      const v = parseFloat(raw);
+      if (Number.isFinite(v)) return clampWallpaperBrightness(v);
+    }
+  } catch { /* localStorage 不可用时退回默认值 */ }
+  return WALLPAPER_BRIGHTNESS_DEFAULT;
+}
+
+/** 面板的三个可调区域 */
+type PanelZone = "left" | "top" | "bottom";
+const PANEL_ZONES: PanelZone[] = ["left", "top", "bottom"];
+
+/** 各区域的 localStorage 键与 CSS 变量名一一对应 */
+const PANEL_ZONE_META: Record<PanelZone, { storageKey: string; cssVar: string; label: string }> = {
+  left: { storageKey: "cinside-panel-alpha-left", cssVar: "--panel-alpha-left", label: "侧栏" },
+  top: { storageKey: "cinside-panel-alpha-top", cssVar: "--panel-alpha-top", label: "上栏" },
+  bottom: { storageKey: "cinside-panel-alpha-bottom", cssVar: "--panel-alpha-bottom", label: "下栏" },
+};
+
+/**
+ * 读取某区域的不透明度。
+ * 优先取该区域专属键 cinside-panel-alpha-<zone>；
+ * 再兼容旧版单一键 cinside-panel-alpha（旧值只存过一份，三个区域都用它初始化，避免升级后观感突变）；
+ * 都没有时退回该区域的默认值（侧栏 60%，上栏/下栏 80%）。
+ */
+function readPanelAlpha(zone: PanelZone): number {
+  try {
+    const specific = localStorage.getItem(PANEL_ZONE_META[zone].storageKey);
+    if (specific !== null) {
+      const v = parseFloat(specific);
+      if (Number.isFinite(v)) return clampPanelAlpha(v);
+    }
+    const legacy = localStorage.getItem("cinside-panel-alpha");
+    if (legacy !== null) {
+      const v = parseFloat(legacy);
+      if (Number.isFinite(v)) return clampPanelAlpha(v);
+    }
+  } catch { /* localStorage 不可用时退回默认值 */ }
+  return PANEL_ALPHA_DEFAULT_BY_ZONE[zone];
+}
+
 // ============ UI缩放共享Hook：Ctrl+滚轮调整整体UI比例（供所有窗口/面板使用） ============
 // 使用Electron原生 webFrame.setZoomFactor() 在Chromium底层缩放整个渲染进程，
 // 所有坐标系统自动保持一致，getBoundingClientRect()返回的值与BrowserView.setBounds()需要的DIP坐标完全匹配。
@@ -535,6 +685,34 @@ function DetachedLeftPanel() {
   const [records, setRecords] = useState<ApplicantRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
+  const [personalOpen, setPersonalOpen] = useState(false);
+  const [wallpaperOn, setWallpaperOn] = useState<boolean>(() => { try { const v = localStorage.getItem("cinside-wallpaper-on"); return v === null ? true : v === "1"; } catch { return true; } });
+  const [wallpaperColor, setWallpaperColor] = useState<string>(() => { try { return localStorage.getItem("cinside-wallpaper-color") || "#94a3b8"; } catch { return "#94a3b8"; } });
+  const [wallpaperCustom, setWallpaperCustom] = useState<string>(() => { try { return localStorage.getItem("cinside-wallpaper-custom") || ""; } catch { return ""; } });
+  const [useDefaultWallpaper, setUseDefaultWallpaper] = useState<boolean>(() => { try { const stored = localStorage.getItem("cinside-use-default-wallpaper"); if (stored !== null) return stored === "1"; return !localStorage.getItem("cinside-wallpaper-custom"); } catch { return true; } });
+  const [wallpaperBrightness, setWallpaperBrightness] = useState<number>(() => readWallpaperBrightness());
+  const [panelAlphaLeft, setPanelAlphaLeft] = useState<number>(() => readPanelAlpha("left"));
+  const [panelAlphaTop, setPanelAlphaTop] = useState<number>(() => readPanelAlpha("top"));
+  const [panelAlphaBottom, setPanelAlphaBottom] = useState<number>(() => readPanelAlpha("bottom"));
+  const [panelTextMode, setPanelTextMode] = useState<"deep" | "light">(() => { try { return localStorage.getItem("cinside-panel-text") === "light" ? "light" : "deep"; } catch { return "deep"; } });
+  useEffect(() => {
+    try {
+      localStorage.setItem("cinside-wallpaper-on", wallpaperOn ? "1" : "0");
+      localStorage.setItem("cinside-wallpaper-color", wallpaperColor);
+      localStorage.setItem("cinside-use-default-wallpaper", useDefaultWallpaper ? "1" : "0");
+      localStorage.setItem("cinside-wallpaper-brightness", String(wallpaperBrightness));
+      if (wallpaperCustom) { try { localStorage.setItem("cinside-wallpaper-custom", wallpaperCustom); } catch (e) { console.warn("[personal] 壁纸图片过大，未能持久化", e); } }
+      else localStorage.removeItem("cinside-wallpaper-custom");
+      const alphas: Record<PanelZone, number> = { left: panelAlphaLeft, top: panelAlphaTop, bottom: panelAlphaBottom };
+      for (const z of PANEL_ZONES) {
+        localStorage.setItem(PANEL_ZONE_META[z].storageKey, String(alphas[z]));
+        document.documentElement.style.setProperty(PANEL_ZONE_META[z].cssVar, String(alphas[z]));
+      }
+      localStorage.setItem("cinside-panel-text", panelTextMode);
+      document.documentElement.setAttribute("data-panel-text", panelTextMode);
+    } catch (e) { console.error("[personal] 保存失败", e); }
+  }, [wallpaperOn, wallpaperColor, wallpaperCustom, useDefaultWallpaper, wallpaperBrightness, panelAlphaLeft, panelAlphaTop, panelAlphaBottom, panelTextMode]);
+
   useEffect(() => {
     document.title = "数据源";
   }, []);
@@ -593,8 +771,31 @@ function DetachedLeftPanel() {
           onSelect={handleSelect}
           onRefresh={handleRefresh}
           onClear={handleClear}
+          onOpenPersonal={() => setPersonalOpen(true)}
         />
       </div>
+      <PersonalPanel
+        open={personalOpen}
+        onClose={() => setPersonalOpen(false)}
+        wallpaperOn={wallpaperOn}
+        wallpaperColor={wallpaperColor}
+        onWallpaperChange={(on, color) => { setWallpaperOn(on); setWallpaperColor(color); }}
+        wallpaperCustom={wallpaperCustom}
+        onCustomWallpaperChange={(d) => { setWallpaperCustom(d || ""); if (d) { setUseDefaultWallpaper(false); setWallpaperOn(true); } }}
+        useDefaultWallpaper={useDefaultWallpaper}
+        onUseDefaultWallpaperChange={(useDefault) => { setUseDefaultWallpaper(useDefault); setWallpaperOn(true); }}
+        onApplyWallpaper={() => setWallpaperOn(true)}
+        wallpaperBrightness={wallpaperBrightness}
+        onWallpaperBrightnessChange={setWallpaperBrightness}
+        panelAlpha={{ left: panelAlphaLeft, top: panelAlphaTop, bottom: panelAlphaBottom }}
+        onPanelAlphaChange={(next) => {
+          if (next.left !== undefined) setPanelAlphaLeft(next.left);
+          if (next.top !== undefined) setPanelAlphaTop(next.top);
+          if (next.bottom !== undefined) setPanelAlphaBottom(next.bottom);
+        }}
+        panelTextMode={panelTextMode}
+        onPanelTextModeChange={setPanelTextMode}
+      />
     </div>
   );
 }
@@ -1037,6 +1238,44 @@ export default function App() {
   // 设置的最新快照：供 executeMark 等不依赖 settings 的 useCallback 闭包读取（避免闭包过期拿到旧开关值）
   const settingsRef = useRef(settings);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
+
+  // PERSONAL：壁纸 + 面板不透明度（UI 偏好，localStorage 持久化，不入后端 settings）
+  const [wallpaperOn, setWallpaperOn] = useState<boolean>(() => {
+    try { const v = localStorage.getItem("cinside-wallpaper-on"); return v === null ? true : v === "1"; } catch { return true; }
+  });
+  const [wallpaperColor, setWallpaperColor] = useState<string>(() => {
+    try { return localStorage.getItem("cinside-wallpaper-color") || "#94a3b8"; } catch { return "#94a3b8"; }
+  });
+  const [wallpaperCustom, setWallpaperCustom] = useState<string>(() => {
+    try { return localStorage.getItem("cinside-wallpaper-custom") || ""; } catch { return ""; }
+  });
+  const [useDefaultWallpaper, setUseDefaultWallpaper] = useState<boolean>(() => { try { const stored = localStorage.getItem("cinside-use-default-wallpaper"); if (stored !== null) return stored === "1"; return !localStorage.getItem("cinside-wallpaper-custom"); } catch { return true; } });
+  const [panelAlphaLeft, setPanelAlphaLeft] = useState<number>(() => readPanelAlpha("left"));
+  const [panelAlphaTop, setPanelAlphaTop] = useState<number>(() => readPanelAlpha("top"));
+  const [panelAlphaBottom, setPanelAlphaBottom] = useState<number>(() => readPanelAlpha("bottom"));
+  const [panelTextMode, setPanelTextMode] = useState<"deep" | "light">(() => { try { return localStorage.getItem("cinside-panel-text") === "light" ? "light" : "deep"; } catch { return "deep"; } });
+  const [wallpaperBrightness, setWallpaperBrightness] = useState<number>(() => readWallpaperBrightness());
+  const [personalOpen, setPersonalOpen] = useState(false);
+  useEffect(() => {
+    try {
+      localStorage.setItem("cinside-wallpaper-on", wallpaperOn ? "1" : "0");
+      localStorage.setItem("cinside-wallpaper-color", wallpaperColor);
+      localStorage.setItem("cinside-use-default-wallpaper", useDefaultWallpaper ? "1" : "0");
+      localStorage.setItem("cinside-wallpaper-brightness", String(wallpaperBrightness));
+      if (wallpaperCustom) { try { localStorage.setItem("cinside-wallpaper-custom", wallpaperCustom); } catch (e) { console.warn("[personal] 壁纸图片过大，未能持久化", e); } }
+      else localStorage.removeItem("cinside-wallpaper-custom");
+      // 面板不透明度按区域通过根 CSS 变量下发：
+      // 侧栏 LeftPanel → --panel-bg-left；上栏 BrowserPane×2 → --panel-bg-top；
+      // 下栏 ResultsPanel 三栏（.rp-panel）→ --panel-bg-bottom
+      const alphas: Record<PanelZone, number> = { left: panelAlphaLeft, top: panelAlphaTop, bottom: panelAlphaBottom };
+      for (const z of PANEL_ZONES) {
+        localStorage.setItem(PANEL_ZONE_META[z].storageKey, String(alphas[z]));
+        document.documentElement.style.setProperty(PANEL_ZONE_META[z].cssVar, String(alphas[z]));
+      }
+      localStorage.setItem("cinside-panel-text", panelTextMode);
+      document.documentElement.setAttribute("data-panel-text", panelTextMode);
+    } catch (e) { console.error("[personal] 保存失败", e); }
+  }, [wallpaperOn, wallpaperColor, wallpaperCustom, useDefaultWallpaper, wallpaperBrightness, panelAlphaLeft, panelAlphaTop, panelAlphaBottom, panelTextMode]);
 
   // 切换文档/护照 OCR 识别引擎（识图AI ↔ UMI-OCR），即时保存到后端
   const handleChangeOcrEngine = useCallback(async (engine: "vision" | "umi") => {
@@ -2095,7 +2334,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
 
   // 选择模式（循环操作/步骤设置）时仅确保底部面板可见；不再强制抬高面板高度（用户要求切换模式时面板不要扩大）
   const savedBottomHeightRef = useRef<number>(20); // 仍供「下载→聚焦文件处理」流程保存/恢复高度使用
-  const savedLeftPanelOpenRef = useRef<boolean>(true);
+  const savedLeftPanelOpenRef = useRef<boolean>(false);
   useEffect(() => {
     if (selectMode) {
       // 进入选择模式：若面板被收起则展开（保持用户已调的高度）
@@ -4981,7 +5220,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
             保存为{addingStepMode === "review" ? "审查" : "录入"}步骤
           </button>
         )}
-        <span className="ml-auto text-[9px] text-slate-400">
+        <span className="text-[9px] text-slate-400">
           {readyCount}/{sorted.length} 已就绪
         </span>
       </div>
@@ -15890,7 +16129,30 @@ type: info.type,
   if (taskType === "select") {
     return (
       <>
-        <TaskSelector onSelect={handleTaskSelect} checking={officecliChecking} />
+        <TaskSelector
+          onSelect={handleTaskSelect}
+          checking={officecliChecking}
+          appVersion={appVersion}
+          updateNotice={
+            updateStatus === "available" ||
+            updateStatus === "downloading" ||
+            updateStatus === "downloaded" ||
+            updateStatus === "error" ? (
+              <UpdateNotice
+                status={updateStatus}
+                updateInfo={updateInfo}
+                updateProgress={updateProgress}
+                updateError={updateError}
+                onDownload={() => {
+                  window.electronAPI?.updateDownloadUpdate();
+                  setUpdateStatus("downloading");
+                  setUpdateProgress(0);
+                }}
+                onInstall={() => window.electronAPI?.updateQuitAndInstall()}
+              />
+            ) : undefined
+          }
+        />
         {officecliModalOpen && (
           <OfficecliRequiredModal
             onClose={() => setOfficecliModalOpen(false)}
@@ -15986,6 +16248,7 @@ type: info.type,
   if (taskType === "ppt") {
     return (
       <>
+        <TaskWallpaperLayer on={wallpaperOn} color={wallpaperColor} custom={wallpaperCustom} useDefault={useDefaultWallpaper} brightness={wallpaperBrightness} />
         <PPTWorkflowPanel
           onBack={() => switchTaskType("select")}
           onOpenSettings={() => setShowSettings(true)}
@@ -15999,6 +16262,7 @@ type: info.type,
   if (taskType === "cowork") {
     return (
       <>
+        <TaskWallpaperLayer on={wallpaperOn} color={wallpaperColor} custom={wallpaperCustom} useDefault={useDefaultWallpaper} brightness={wallpaperBrightness} />
         <CoworkStudio onBack={() => switchTaskType("select")} />
         {settingsModal}
       </>
@@ -16009,7 +16273,8 @@ type: info.type,
   const anyModalOpen = showSettings || showArchive || !!docFillData || showSaveSkill || showSkillPanel || showApplyLoop || !!showCredentialsPanel || !!showBlockPanel;
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="app-task-enter flex h-full flex-col">
+      <TaskWallpaperLayer on={wallpaperOn} color={wallpaperColor} custom={wallpaperCustom} useDefault={useDefaultWallpaper} brightness={wallpaperBrightness} />
       {/* ============ 屏幕调试面板（仅开发环境后台日志可见） ============ */}
       {teachingPhase !== "idle" && (() => {
         // 屏蔽前端可见的 DEBUG STATE 面板，仅输出到后台调试日志
@@ -16019,151 +16284,68 @@ type: info.type,
         }
         return null;
       })()}
-      {/* ============ 自定义标题栏（无边框窗口） ============ */}
+      {/* ============ 自定义标题栏（无边框窗口，Win7 Aero 纯透明玻璃） ============ */}
       <div
-        className="flex shrink-0 items-center justify-between border-b border-slate-200/60 bg-white/80 px-3 py-1"
-        style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+        className="relative z-20 flex shrink-0 items-center gap-2 px-3 pt-1 pb-0"
+        style={{
+          background: "var(--chrome-bg)",
+          backdropFilter: "blur(24px) saturate(1.6)",
+          WebkitBackdropFilter: "blur(24px) saturate(1.6)",
+          borderBottom: "1px solid var(--chrome-border)",
+          boxShadow: "0 1px 0 0 var(--chrome-highlight) inset",
+          WebkitAppRegion: "drag",
+        } as React.CSSProperties}
       >
-        <div className="flex items-center gap-1" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+        <button
+          onClick={() => switchTaskType("select")}
+          className="flex items-center gap-1 rounded-md px-1 py-0.5 transition-colors hover:bg-slate-100/70"
+          title="切换任务类型：返回「选择任务类型」首页"
+        >
           <img
             src={appIconPng}
             alt="CINSIDE icon"
-            className="h-5 w-5"
+            className="h-5 w-5 app-icon-img"
           />
-          <LogoWordmark className="h-5 logo-wordmark" />
-          <div className="w-px h-4 bg-slate-200 mx-1" />
-          <button
-            onClick={() => switchTaskType("select")}
-            className="flex items-center justify-center w-7 h-7 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-md transition-colors"
-            title="切换任务类型"
-          >
-            <LayoutGrid size={18} />
-          </button>
-        </div>
-        {/* UPDATER */}
-        <div className="flex items-center gap-2" style={{WebkitAppRegion:"no-drag"}as React.CSSProperties}>
-          {updateStatus==="available"&&updateInfo&&(
-            <div className="flex items-center gap-2 rounded-lg bg-indigo-50 px-2 py-1 text-[11px] text-indigo-700 border border-indigo-200">
-              <span className="font-semibold">发现新版本 v{updateInfo.version}</span>
-              <button onClick={()=>{window.electronAPI?.updateDownloadUpdate();setUpdateStatus("downloading");setUpdateProgress(0);}} className="rounded bg-indigo-600 px-2 py-0.5 text-white hover:bg-indigo-700 text-[11px] font-medium">立即下载</button>
-            </div>
-          )}
-          {updateStatus==="downloading"&&(
-            <div className="flex items-center gap-2 rounded-lg bg-violet-50 px-2 py-1 text-[11px] text-violet-700 border border-violet-200 min-w-[160px]">
-              <Loader2 className="h-3 w-3 animate-spin"/>
-              <span className="font-medium">下载中</span>
-              <div className="flex-1 h-1.5 bg-violet-200 rounded-full overflow-hidden"><div className="h-full bg-violet-600 transition-all" style={{ width: `${updateProgress}%` }}/></div>
-              <span className="text-violet-600 font-mono text-[10px]">{updateProgress}%</span>
-            </div>
-          )}
-          {updateStatus==="downloaded"&&updateInfo&&(
-            <div className="flex items-center gap-2 rounded-lg bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700 border border-emerald-200">
-              <CheckCircle2 className="h-3.5 w-3.5"/>
-              <span className="font-semibold">v{updateInfo.version} 已下载</span>
-              <button onClick={()=>window.electronAPI?.updateQuitAndInstall()} className="rounded bg-emerald-600 px-2 py-0.5 text-white hover:bg-emerald-700 text-[11px] font-medium">立即重启安装</button>
-            </div>
-          )}
-          {updateStatus==="error"&&updateError&&(
-            <div className="flex items-center gap-1.5 rounded-lg bg-rose-50 px-2 py-1 text-[10px] text-rose-600 border border-rose-200" title={updateError}><AlertCircle className="h-3 w-3"/><span>更新失败</span></div>
-          )}
-          {appVersion&&updateStatus==="idle"&&(<span className="text-[10px] text-slate-400">v{appVersion}</span>)}
-        </div>
-        <div className="flex items-center gap-1" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
-          <button
-            onClick={() => setLeftPanelOpen((v) => !v)}
-            className={[
-              "rounded p-1.5 transition-colors",
-              leftPanelOpen
-                ? "text-slate-700 hover:bg-slate-100"
-                : "text-slate-400 hover:bg-slate-100 hover:text-slate-600",
-            ].join(" ")}
-            title={leftPanelOpen ? "隐藏左侧面板" : "显示左侧面板"}
-          >
-            <PanelLeft className="h-4 w-4" />
-          </button>
-          <button
-            onClick={() => setBottomPanelOpen((v) => !v)}
-            className={[
-              "rounded p-1.5 transition-colors",
-              bottomPanelOpen
-                ? "text-slate-700 hover:bg-slate-100"
-                : "text-slate-400 hover:bg-slate-100 hover:text-slate-600",
-            ].join(" ")}
-            title={bottomPanelOpen ? "隐藏下面板" : "显示下面板"}
-          >
-            <PanelBottom className="h-4 w-4" />
-          </button>
-          <button
-            onClick={() => {
-              if (!focusBottomMode) {
-                setBottomPanelOpen(true);
-                savedBottomHeightRef.current = bottomPanelHeight;
-                setFocusBottomMode(true);
-              } else {
-                setFocusBottomMode(false);
-              }
-            }}
-            className={[
-              "flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-all",
-              focusBottomMode
-                ? "bg-brand-100 text-brand-700 ring-1 ring-brand-300"
-                : "bg-white/70 text-slate-600 ring-1 ring-slate-200 hover:bg-white hover:text-slate-900",
-            ].join(" ")}
-            title={focusBottomMode ? "还原布局：恢复上方浏览器面板" : "聚焦下方：隐藏上方浏览器面板，下方审查面板铺满全屏"}
-          >
-            <PanelBottom className="h-3 w-3" />
-            {focusBottomMode ? "还原" : "聚焦"}
-          </button>
-          <div className="mx-1 h-4 w-px bg-slate-200" />
-          <button
-            onClick={() => window.electronAPI?.windowMinimize()}
-            className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
-            title="最小化"
-          >
-            <Minus className="h-3.5 w-3.5" />
-          </button>
-          <button
-            onClick={() => window.electronAPI?.windowMaximize()}
-            className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
-            title="最大化/还原"
-          >
-            <Square className="h-3 w-3" />
-          </button>
-          <button
-            onClick={() => window.electronAPI?.windowClose()}
-            className="rounded p-1 text-slate-400 hover:bg-rose-100 hover:text-rose-600"
-            title="关闭"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      </div>
-
-      {/* ============ 顶部工具栏 ============ */}
-      <header className="z-20 flex shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-3 py-1">
+          <LogoWordmark className="h-5 logo-wordmark -ml-1.5 translate-y-0.5" />
+        </button>
+        <div className="flex min-w-0 flex-1 items-center gap-2">
         {/* SKILL 管理按钮 */}
         <button
           onClick={() => setShowSkillPanel(true)}
-          className="flex shrink-0 items-center gap-1 rounded-md bg-white/70 px-2 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-slate-200 transition-all hover:bg-slate-100 hover:text-slate-900"
+          className="chrome-icon-btn flex items-center justify-center w-7 h-7 rounded-md transition-colors"
           title="查看已保存的 Loop 模板并执行"
         >
-          <BookMarked className="h-3 w-3 text-slate-400" />
-          查看保存Loop
+          <BookMarked size={16} />
         </button>
 
         {/* 外挂插件开关 */}
         <button
           onClick={toggleDock}
           className={[
-            "flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium ring-1 transition-all",
-            dockOpen
-              ? "bg-slate-900 text-white ring-slate-900 hover:bg-slate-800"
-              : "bg-white/70 text-slate-700 ring-slate-200 hover:bg-slate-100 hover:text-slate-900",
+            "chrome-icon-btn flex items-center justify-center w-7 h-7 rounded-md transition-colors",
+            dockOpen ? "is-on" : "",
           ].join(" ")}
           title="站外循环：在屏幕边缘挂一个悬浮条，设置「提取源」和「操作页」后 AI 自主循环填写；数据痕迹见下方「站外循环记录」"
         >
-          <Rotate3D className={`h-3 w-3 ${dockOpen ? "" : "text-slate-400"}`} />
-          {dockOpen ? "站外循环已开" : "站外循环"}
+          <Rotate3D size={16} />
+        </button>
+
+        {/* 任务归档 */}
+        <button
+          onClick={() => setShowArchive(true)}
+          className="chrome-icon-btn flex items-center justify-center w-7 h-7 rounded-md transition-colors"
+          title="任务归档：一键导出全部卡片与进度为 ZIP / 导入还原"
+        >
+          <Archive size={16} />
+        </button>
+
+        {/* 设置 */}
+        <button
+          onClick={() => setShowSettings(true)}
+          className="chrome-icon-btn flex items-center justify-center w-7 h-7 rounded-md transition-colors"
+          title="设置"
+        >
+          <Settings2 size={16} />
         </button>
 
         {/* 中间空白区：错误/成功提示显示在工具栏同一行中央 */}
@@ -16618,10 +16800,12 @@ type: info.type,
             onClick={start}
             disabled={running || mappings.length === 0 || (!selected && !mappings.every((m) => m.left_source === "database"))}
             className={[
-              "flex items-center gap-1.5 rounded-md px-3 py-0.5 text-[11px] font-medium text-white transition-all",
-              running || singleRunning || batchRunning || mappings.length === 0 || (!selected && !mappings.every((m) => m.left_source === "database"))
-                ? "cursor-not-allowed bg-slate-400"
-                : "bg-slate-900 hover:bg-slate-800 active:scale-[.98] shadow-sm",
+              "flex items-center gap-1.5 rounded-md px-2.5 py-0.5 text-[11px] font-medium transition-all",
+              running || singleRunning || batchRunning
+                ? "bg-sky-50 text-sky-700"
+                : (mappings.length === 0 || (!selected && !mappings.every((m) => m.left_source === "database")))
+                ? "cursor-not-allowed bg-white/40 text-slate-400"
+                : "bg-white/70 text-slate-700 hover:bg-white hover:text-slate-900 active:scale-[.98]",
             ].join(" ")}
             title={
               running || singleRunning || batchRunning
@@ -16633,7 +16817,7 @@ type: info.type,
                 : `开始核验（${mappings.length} 条映射）`
             }
           >
-            {(running || singleRunning || batchRunning) ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+            {(running || singleRunning || batchRunning) ? <Loader2 className="h-3 w-3 animate-spin text-sky-500" /> : <Play className="h-3 w-3 text-slate-400" />}
             {(running || singleRunning || batchRunning) ? "运行中" : "开始核验"}
           </button>
           );
@@ -16647,33 +16831,121 @@ type: info.type,
           </button>
         )}
 
-        <button
-          onClick={() => setShowArchive(true)}
-          className="rounded-md p-1 text-slate-400 hover:bg-white/70 hover:text-slate-600"
-          title="任务归档：一键导出全部卡片与进度为 ZIP / 导入还原"
-        >
-          <Archive className="h-3.5 w-3.5" />
-        </button>
-
-        <button
-          onClick={() => setShowSettings(true)}
-          className="rounded-md p-1 text-slate-400 hover:bg-white/70 hover:text-slate-600"
-          title="设置"
-        >
-          <Settings2 className="h-3.5 w-3.5" />
-        </button>
-      </header>
+        </div>
+        {/* UPDATER：标题栏只显示"进行中/待处理"（下载中、已下载待安装、失败）；
+            空闲的"发现新版本可下载"只在首页入口展示，避免标题栏长期占位 */}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <UpdateNotice
+            compact
+            status={updateStatus}
+            updateInfo={updateInfo}
+            updateProgress={updateProgress}
+            updateError={updateError}
+            onDownload={() => {
+              window.electronAPI?.updateDownloadUpdate();
+              setUpdateStatus("downloading");
+              setUpdateProgress(0);
+            }}
+            onInstall={() => window.electronAPI?.updateQuitAndInstall()}
+          />
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setLeftPanelOpen((v) => !v)}
+            className={[
+              "chrome-icon-btn rounded p-1.5 transition-colors",
+              leftPanelOpen ? "is-on" : "",
+            ].join(" ")}
+            title={leftPanelOpen ? "隐藏左侧面板" : "显示左侧面板"}
+          >
+            <PanelLeft className="h-4 w-4" />
+          </button>
+          <button
+            onClick={() => setBottomPanelOpen((v) => !v)}
+            className={[
+              "chrome-icon-btn rounded p-1.5 transition-colors",
+              bottomPanelOpen ? "is-on" : "",
+            ].join(" ")}
+            title={bottomPanelOpen ? "隐藏下面板" : "显示下面板"}
+          >
+            <PanelBottom className="h-4 w-4" />
+          </button>
+          <button
+            onClick={() => {
+              if (!focusBottomMode) {
+                setBottomPanelOpen(true);
+                savedBottomHeightRef.current = bottomPanelHeight;
+                setFocusBottomMode(true);
+              } else {
+                setFocusBottomMode(false);
+              }
+            }}
+            className={[
+              "chrome-icon-btn rounded p-1.5 transition-colors",
+              focusBottomMode ? "is-on" : "",
+            ].join(" ")}
+            title={focusBottomMode ? "还原布局：恢复上方浏览器面板" : "聚焦下方：隐藏上方浏览器面板，下方审查面板铺满全屏"}
+          >
+            <Maximize2 className="h-4 w-4" />
+          </button>
+          <div className="mx-1 h-4 w-px bg-slate-200" />
+          <button
+            onClick={() => window.electronAPI?.windowMinimize()}
+            className="chrome-icon-btn rounded p-1 transition-colors"
+            title="最小化"
+          >
+            <Minus className="h-3.5 w-3.5" />
+          </button>
+          <button
+            onClick={() => window.electronAPI?.windowMaximize()}
+            className="chrome-icon-btn rounded p-1 transition-colors"
+            title="最大化/还原"
+          >
+            <Square className="h-3 w-3" />
+          </button>
+          <button
+            onClick={() => window.electronAPI?.windowClose()}
+            className="chrome-icon-btn is-danger rounded p-1 transition-colors"
+            title="关闭"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
 
       {/* ============ 主体：三列 + 底部 ============ */}
       <main
-        className={[
-          "relative grid min-h-0 flex-1 gap-2 overflow-hidden p-2",
-          leftPanelOpen && !leftDetached ? "grid-cols-[260px_1fr]" : "grid-cols-1",
-        ].join(" ")}
+        className="relative grid min-h-0 flex-1 gap-2 overflow-hidden pt-0.5 pr-2 pb-2 pl-2"
+        style={{
+          // 左侧面板开合：用数值列宽（260px ↔ 0px）让 grid 列可插值过渡；收起时把 gap 归零避免残留空隙
+          gridTemplateColumns: leftPanelOpen && !leftDetached ? "260px 1fr" : "0px 1fr",
+          gap: leftPanelOpen && !leftDetached ? undefined : 0,
+          transitionProperty: "grid-template-columns, gap",
+          transitionDuration: ".45s",
+          transitionTimingFunction: "cubic-bezier(.16,1,.3,1)",
+        }}
       >
-        {/* 左侧数据面板 */}
-        {leftPanelOpen && !leftDetached && (
-          <aside className="relative min-h-0">
+        {/* 清屏浮层：聚焦下方 + 关闭侧栏 + 关闭下栏时，主区空无一物，
+            在正中显示日期与大时钟，避免只剩壁纸的空白感。
+            绝对定位覆盖整个主区、pointer-events:none，不拦截任何操作。 */}
+        {focusBottomMode && !leftPanelOpen && !bottomPanelOpen && (
+          <div className="pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-center pb-[9vh]">
+            <BigClock />
+          </div>
+        )}
+
+        {/* 左侧数据面板（常驻渲染，靠列宽/透明度过渡显示隐藏） */}
+        {!leftDetached && (
+          <aside
+            className="relative min-h-0 overflow-hidden"
+            style={{
+              opacity: leftPanelOpen ? 1 : 0,
+              pointerEvents: leftPanelOpen ? undefined : "none",
+              transitionProperty: "opacity",
+              transitionDuration: ".3s",
+              transitionTimingFunction: "cubic-bezier(.16,1,.3,1)",
+            }}
+          >
             <LeftPanel
               records={cardRecords}
               selectedId={selectedId}
@@ -16693,6 +16965,7 @@ type: info.type,
                 if (open) setExecutionPanelOpen(false);
               }}
               onRegenerateAnalysis={() => void generateLoopAnalysis(loopReports)}
+              onOpenPersonal={() => setPersonalOpen(true)}
               onRunRecord={runSingleRecord}
               runDisabled={batchRunning || singleRunning}
               runningRecordId={singleRunning ? selectedId : null}
@@ -16769,9 +17042,20 @@ type: info.type,
           {/* 两个浏览器并排（脱离后对应位置留空或单列），可拖拽调整比例 */}
           <div
             className={[
-              "min-h-0 min-w-0 gap-1 overflow-hidden",
-              focusBottomMode ? "hidden" : "flex flex-1",
+              "flex min-h-0 min-w-0 gap-1 overflow-hidden",
+              focusBottomMode ? "" : "flex-1",
             ].join(" ")}
+            style={{
+              // 聚焦/还原：纯高度运动（无淡入淡出），强阻尼曲线与底部面板同步收放
+              // maxHeight/flexGrow 必须给可插值的有限值（1 / 100%），
+              // 用 undefined 表示"无限制"时 CSS 无法插值，切换会瞬间跳变
+              flexGrow: focusBottomMode ? 0 : 1,
+              maxHeight: focusBottomMode ? 0 : "100%",
+              marginBottom: focusBottomMode ? -4 : 0,
+              transitionProperty: "flex-grow, max-height, margin-bottom",
+              transitionDuration: ".45s",
+              transitionTimingFunction: "cubic-bezier(.16,1,.3,1)",
+            }}
             onMouseMove={(e) => {
               if (!draggingRef.current) return;
               const rect = e.currentTarget.getBoundingClientRect();
@@ -16947,7 +17231,7 @@ type: info.type,
                 }}
                 title="拖拽调整左右面板比例"
               >
-                <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-slate-200 hover:bg-brand-300" />
+                <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-white/50 hover:bg-brand-300/80" />
                 {/* 中缝互换按钮：数据源 ⇄ 学校系统（外层热区扩大点击范围，且不触发分隔条拖拽） */}
                 <div className="absolute left-1/2 top-1/2 z-40 -translate-x-1/2 -translate-y-1/2">
                   <div
@@ -16958,13 +17242,19 @@ type: info.type,
                   >
                     <button
                       className={[
-                        "flex h-4 w-4 items-center justify-center rounded-full border bg-white shadow-sm transition-all hover:shadow",
+                        "group flex h-5 w-5 items-center justify-center rounded-full border transition-all duration-200",
                         swapMenuOpen
-                          ? "border-brand-300 text-brand-600"
-                          : "border-slate-200 text-slate-400 opacity-70 hover:border-brand-300 hover:text-brand-600 hover:opacity-100",
+                          ? "border-brand-400/60 text-brand-600 shadow-[0_0_0_4px_rgba(129,140,248,0.15)]"
+                          : "border-[var(--chrome-border)] text-slate-500 opacity-60 hover:opacity-100 hover:border-brand-300/80 hover:text-brand-600 hover:shadow-[0_0_0_4px_rgba(129,140,248,0.12)]",
                       ].join(" ")}
+                      style={{
+                        background: "var(--swap-btn-bg)",
+                        backdropFilter: "blur(8px) saturate(1.3)",
+                        WebkitBackdropFilter: "blur(8px) saturate(1.3)",
+                        boxShadow: "0 1px 0 0 var(--swap-btn-hi) inset, 0 2px 8px -2px rgba(31,41,55,.18)",
+                      } as React.CSSProperties}
                     >
-                      <ArrowLeftRight className="h-2.5 w-2.5" />
+                      <ArrowLeftRight className="h-2.5 w-2.5 transition-transform duration-300 group-hover:scale-110" />
                     </button>
                   </div>
                   {swapMenuOpen && (
@@ -16977,24 +17267,40 @@ type: info.type,
                         }}
                       />
                       <div
-                        className="absolute left-7 top-0 z-50 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg"
+                        className="absolute left-7 top-0 z-50 w-60 overflow-hidden rounded-xl border border-white/60 py-1.5"
                         // 菜单是分隔条的子元素：mousedown 必须阻断冒泡，
                         // 否则按下菜单项会启动分隔条拖拽，面板随之缩放导致 click 永远点不中
                         onMouseDown={(e) => e.stopPropagation()}
+                        style={{
+                          background: "rgba(255,255,255,0.70)",
+                          backdropFilter: "blur(20px) saturate(1.4)",
+                          WebkitBackdropFilter: "blur(20px) saturate(1.4)",
+                          boxShadow: "0 1px 0 0 rgba(255,255,255,.7) inset, 0 12px 40px -12px rgba(31,41,55,.25)",
+                        } as React.CSSProperties}
                       >
                         <button
                           onClick={() => swapPaneContents("page")}
-                          className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-slate-600 hover:bg-slate-50"
+                          className="group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs text-slate-700 transition-colors hover:bg-brand-50/80"
                         >
-                          <Globe className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                          互换当前网页
+                          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-indigo-50 text-indigo-500 ring-1 ring-indigo-100 transition-colors group-hover:bg-indigo-100">
+                            <Globe className="h-3.5 w-3.5" />
+                          </span>
+                          <span className="flex flex-col">
+                            <span className="font-medium">互换当前网页</span>
+                            <span className="text-[10px] text-slate-400">只对调两侧激活的页面</span>
+                          </span>
                         </button>
                         <button
                           onClick={() => swapPaneContents("all")}
-                          className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-slate-600 hover:bg-slate-50"
+                          className="group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs text-slate-700 transition-colors hover:bg-brand-50/80"
                         >
-                          <ArrowLeftRight className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                          互换全部（所有TAB / Excel / 绑定）
+                          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-violet-50 text-violet-500 ring-1 ring-violet-100 transition-colors group-hover:bg-violet-100">
+                            <ArrowLeftRight className="h-3.5 w-3.5" />
+                          </span>
+                          <span className="flex flex-col">
+                            <span className="font-medium">互换全部</span>
+                            <span className="text-[10px] text-slate-400">所有TAB / Excel / 绑定关系</span>
+                          </span>
                         </button>
                       </div>
                     </>
@@ -17166,10 +17472,11 @@ type: info.type,
             )}
           </div>
 
-          {/* 垂直可拖拽分隔条：仅在审查面板可见时显示；双击最大化/还原 */}
-          {bottomPanelOpen && !bottomDetached && !focusBottomMode && (
+          {/* 垂直可拖拽分隔条：常驻渲染，随下面板开合淡入淡出；双击最大化/还原 */}
+          {!bottomDetached && !focusBottomMode && (
             <div
-              className="relative z-10 h-1.5 shrink-0 cursor-row-resize select-none"
+              className="relative z-10 h-1.5 shrink-0 cursor-row-resize select-none transition-opacity duration-300"
+              style={{ opacity: bottomPanelOpen ? 1 : 0, pointerEvents: bottomPanelOpen ? undefined : "none" }}
               onMouseDown={(e) => {
                 e.preventDefault();
                 vDraggingRef.current = true;
@@ -17191,16 +17498,23 @@ type: info.type,
             </div>
           )}
 
-          {/* 审查/结果面板：高手模式直接显示字段对比 ResultsPanel */}
-          {bottomPanelOpen && !bottomDetached && (
+          {/* 审查/结果面板：高手模式直接显示字段对比 ResultsPanel（常驻渲染，靠 height/min-height/opacity 过渡显示隐藏） */}
+          {!bottomDetached && (
             <div
               className={[
                 "flex min-h-0 flex-col gap-0 overflow-hidden",
                 focusBottomMode ? "flex-1" : "shrink-0",
               ].join(" ")}
               style={{
-                height: focusBottomMode ? undefined : `${bottomPanelHeight}%`,
-                minHeight: selectMode ? "200px" : "280px",
+                flexGrow: focusBottomMode ? 1 : 0,
+                height: bottomPanelOpen ? (focusBottomMode ? "100%" : `${bottomPanelHeight}%`) : 0,
+                // 收起时必须同步把 min-height 归零，否则最小高度会挡住收缩
+                minHeight: bottomPanelOpen ? (selectMode ? "200px" : "280px") : 0,
+                opacity: bottomPanelOpen ? 1 : 0,
+                // min-height / opacity 随选择模式与面板开合而变，必须纳入过渡才能平滑，否则切换瞬间跳变
+                transitionProperty: "flex-grow, height, min-height, opacity",
+                transitionDuration: ".45s",
+                transitionTimingFunction: "cubic-bezier(.16,1,.3,1)",
               }}
             >
 
@@ -17530,6 +17844,33 @@ type: info.type,
 
       {/* 任务归档弹窗（与 ppt 视图共用同一 archiveDialog 变量） */}
       {archiveDialog}
+
+      {/* PERSONAL：换壁纸 / 控制面板不透明度 */}
+      <PersonalPanel
+        open={personalOpen}
+        onClose={() => setPersonalOpen(false)}
+        wallpaperOn={wallpaperOn}
+        wallpaperColor={wallpaperColor}
+        onWallpaperChange={(on, color) => {
+          setWallpaperOn(on);
+          setWallpaperColor(color);
+        }}
+        wallpaperCustom={wallpaperCustom}
+        onCustomWallpaperChange={(d) => { setWallpaperCustom(d || ""); if (d) { setUseDefaultWallpaper(false); setWallpaperOn(true); } }}
+        useDefaultWallpaper={useDefaultWallpaper}
+        onUseDefaultWallpaperChange={(useDefault) => { setUseDefaultWallpaper(useDefault); setWallpaperOn(true); }}
+        onApplyWallpaper={() => setWallpaperOn(true)}
+        wallpaperBrightness={wallpaperBrightness}
+        onWallpaperBrightnessChange={setWallpaperBrightness}
+        panelAlpha={{ left: panelAlphaLeft, top: panelAlphaTop, bottom: panelAlphaBottom }}
+        onPanelAlphaChange={(next) => {
+          if (next.left !== undefined) setPanelAlphaLeft(next.left);
+          if (next.top !== undefined) setPanelAlphaTop(next.top);
+          if (next.bottom !== undefined) setPanelAlphaBottom(next.bottom);
+        }}
+        panelTextMode={panelTextMode}
+        onPanelTextModeChange={setPanelTextMode}
+      />
 
       {/* 功能2：本地文档提取审核弹窗（确认后填入右侧网页输入框） */}
       <input

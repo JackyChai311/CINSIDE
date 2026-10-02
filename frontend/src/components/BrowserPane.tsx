@@ -877,10 +877,17 @@ export default function BrowserPane({
 
   return (
     <div
-      className={`relative flex h-full flex-col overflow-hidden rounded-lg bg-white/80 ring-1 ${STATUS_RING[verifyStatus]} ${picking ? "picking-breath" : ""} transition-[box-shadow,background-color] duration-300`}
+      className={`relative flex h-full flex-col overflow-hidden rounded-lg ring-1 ${STATUS_RING[verifyStatus]} ${picking ? "picking-breath" : ""} transition-[box-shadow,background-color] duration-300`}
+      style={{
+        background: "var(--panel-bg-top)",
+        boxShadow: "0 1px 0 0 var(--chrome-highlight) inset, 0 8px 32px -12px rgba(31,41,55,.15)",
+      } as React.CSSProperties}
     >
       {/* 顶部：标题 + URL/Tab融合区域 + 操作（紧凑单行） */}
-      <div className="glass-frame flex items-center gap-2 border-b border-white/40 px-2 py-1">
+      <div
+        className="glass-frame flex items-center gap-2 border-b px-2 py-1"
+        style={{ borderBottomColor: "var(--chrome-border)" }}
+      >
         <div className="flex shrink-0 items-center gap-1.5">
           <span className="truncate text-[11px] font-semibold text-slate-700">{title}</span>
           {!enableViewSwitch && headerExtra}
@@ -954,7 +961,7 @@ export default function BrowserPane({
                           return u.protocol.startsWith("http") ? u.origin : "";
                         } catch { return ""; }
                       })();
-                      const activeTabClass = tabOrigin ? originColorClass(tabOrigin) : "bg-white/90 text-slate-700 shadow-sm ring-1 ring-white/80";
+                      const activeTabClass = tabOrigin ? originColorClass(tabOrigin) : "bg-white/90 text-slate-700 shadow-sm ring-1 ring-[var(--tab-active-ring)]";
                       return (
                         <div key={tab.id} className="flex shrink-0 items-center">
                           {editingTabId === tab.id ? (
@@ -1055,7 +1062,7 @@ export default function BrowserPane({
                       className={[
                         "group flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium transition-all max-w-[160px]",
                         isActive
-                          ? "bg-white/90 text-emerald-700 shadow-sm ring-1 ring-white/80"
+                          ? "bg-white/90 text-emerald-700 shadow-sm ring-1 ring-[var(--tab-active-ring)]"
                           : "bg-white/30 text-slate-500 hover:bg-white/50 hover:text-slate-600",
                       ].join(" ")}
                     >
@@ -1234,9 +1241,13 @@ export default function BrowserPane({
           if (f && /\.(xlsx|xls|csv)$/i.test(f.name)) onExcelDrop(f);
         } : undefined}
       >
+        {/* 无 URL 时的占位底色交给外层根节点的 var(--panel-bg-top) 统一提供。
+            此处再叠一层会让同一个不透明度系数在浏览器面板里被重复合成
+            （两层 → 有效不透明度 1-(1-a)²，明显高于单层的 a），
+            而左侧栏只叠一层，同一个滑块值在两侧呈现不同深浅。 */}
         <div
           ref={containerRef}
-          className={`absolute inset-0 bg-white${currentUrl ? " pointer-events-none" : ""}`}
+          className={`absolute inset-0 ${currentUrl ? "bg-white pointer-events-none" : ""}`}
         >
           {!window.electronAPI && (
             <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-xs text-slate-400">
@@ -1248,14 +1259,15 @@ export default function BrowserPane({
           )}
           {!currentUrl && window.electronAPI && isWebMode && (
             webEmptyState || (newTabTitle ? (
-              <div className="flex h-full flex-col items-center justify-center gap-6 px-8">
+              <div className="relative flex h-full flex-col items-center justify-center gap-6 px-8">
+                {/* 局部小地图已移除：由 App.tsx 的全局任务壁纸（TaskWallpaper）统一提供 */}
                 <h1
-                  className="text-4xl font-black tracking-tight text-slate-800 sm:text-5xl"
+                  className="relative z-10 text-4xl font-black tracking-tight text-slate-800 sm:text-5xl"
                   style={{ fontFamily: "'Inter', 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', sans-serif" }}
                 >
                   {newTabTitle}
                 </h1>
-                <div className="w-full max-w-xl">
+                <div className="relative z-10 w-full max-w-xl">
                   <div className="group relative flex items-center gap-2 rounded-full border-2 border-slate-200 bg-white px-5 py-3 shadow-sm transition-all focus-within:border-brand-400 focus-within:shadow-md">
                     <Search className="h-5 w-5 shrink-0 text-slate-400 group-focus-within:text-brand-500" />
                     <input
@@ -1402,7 +1414,7 @@ export default function BrowserPane({
                       </>
                     )}
                   </div>
-                  <p className="mt-2 text-center text-[11px] text-slate-400">
+                  <p className="relative z-10 mt-2 text-center text-[11px] text-slate-400">
                     无需输入 https://，直接输入网址即可，例如 baidu.com
                   </p>
                 </div>
@@ -1416,19 +1428,12 @@ export default function BrowserPane({
           )}
         </div>
 
-        {/* 面板打开时的毛玻璃遮罩层（替代原来的纯白屏） */}
+        {/* 面板打开时的毛玻璃遮罩层：底色已由根节点的 var(--panel-bg-top) 提供，
+            此处保持透明，避免与根节点重复合成把面板压得比左侧栏更实。 */}
         {overlayActive && (
           <div
             className="pointer-events-none absolute inset-0 z-20"
-            style={{
-              background: `
-                linear-gradient(135deg, rgba(255,255,255,0.90) 0%, rgba(248,250,252,0.78) 40%, rgba(241,245,249,0.85) 60%, rgba(255,255,255,0.90) 100%),
-                radial-gradient(ellipse at 20% 20%, rgba(255,255,255,0.6) 0%, transparent 50%),
-                radial-gradient(ellipse at 80% 80%, rgba(226,232,240,0.5) 0%, transparent 50%)
-              `,
-              backdropFilter: "blur(24px) saturate(1.3)",
-              WebkitBackdropFilter: "blur(24px) saturate(1.3)",
-            }}
+            style={{ background: "transparent" }}
           />
         )}
 
@@ -1482,11 +1487,13 @@ export default function BrowserPane({
         )}
       </div>
 
-      {/* Excel容器：始终挂载，通过hidden切换 */}
+      {/* Excel容器：始终挂载，通过hidden切换。
+          背景保持透明（不设 bg-white）：空状态时透出外层 var(--panel-bg-top) 与壁纸，
+          与网页视图观感一致（透明玻璃）；有数据时由 ExcelView / BlankExcel 自带实底承载表格。 */}
       {enableViewSwitch && (
         <div
           ref={excelScrollRef}
-          className={`relative min-h-0 flex-1 overflow-auto bg-white transition-colors ${isWebMode ? "hidden" : ""} ${excelDragOver ? "ring-2 ring-inset ring-emerald-400 bg-emerald-50/40" : ""}`}
+          className={`relative min-h-0 flex-1 overflow-auto transition-colors ${isWebMode ? "hidden" : ""} ${excelDragOver ? "ring-2 ring-inset ring-emerald-400 bg-emerald-50/40" : ""}`}
           onWheel={(e) => {
             if (e.ctrlKey) {
               e.preventDefault();

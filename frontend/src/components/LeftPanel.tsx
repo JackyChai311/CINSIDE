@@ -7,8 +7,8 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Download,
   ExternalLink,
-  FileSpreadsheet,
   GripVertical,
   Layers,
   ListChecks,
@@ -17,13 +17,16 @@ import {
   RefreshCw,
   Sparkles,
   Trash2,
+  Palette,
   UserCircle,
   X,
   XCircle,
 } from "lucide-react";
 import type { AnalysisSegment, ApplicantRecord, BatchResult, BatchStatus, Overall, VerificationStep } from "../types";
 import { OVERALL_LABELS } from "../types";
-import AISphere, { type AISphereState } from "./AISphere";
+import { api } from "../api/client";
+import { BACKEND_ORIGIN } from "../lib/backendOrigin";
+import { type AISphereState } from "./AISphere";
 import ExecutionBubbles from "./ExecutionBubbles";
 import PluginPanel from "./PluginPanel";
 
@@ -124,6 +127,8 @@ interface Props {
   onToggleAnalysis?: (open: boolean) => void;
   /** 重新生成分析 */
   onRegenerateAnalysis?: () => void;
+  /** 打开 PERSONAL 面板（换壁纸 / 调面板不透明度） */
+  onOpenPersonal?: () => void;
 }
 
 export default function LeftPanel({
@@ -172,6 +177,7 @@ export default function LeftPanel({
   analysisLoading = false,
   onToggleAnalysis,
   onRegenerateAnalysis,
+  onOpenPersonal,
 }: Props) {
   /** 范围勾选：上次点击的记录索引（群组起点） */
   const lastCheckIdxRef = useRef<number>(-1);
@@ -321,12 +327,301 @@ export default function LeftPanel({
   }, [execRunning]);
   const sphereRetracted = execRunning || bubblesVisible;
 
+  // AI 粒子球已移除：球位改为「HI USER → 环境检查 → 结果确认 → 时钟」的启动序列。
+  // 环境检查为真实检测（后端服务 / OCR 引擎 / Python 依赖），非过场动画：
+  // 检查完成后列出每项状态；未就绪项由用户逐项选择「下载/开启」或「忽略」，
+  // 做出选择并确认后才进入时钟。
+  const [bootPhase, setBootPhase] = useState<0 | 1 | 2 | 3>(0);
+  type EnvCheckStatus = "pending" | "checking" | "ok" | "fail";
+  /** 未就绪项的处置方式：install=下载/开启，ignore=忽略 */
+  type EnvChoice = "install" | "ignore";
+  interface EnvCheck {
+    key: "backend" | "ocr" | "python";
+    label: string;
+    status: EnvCheckStatus;
+    /** 失败时的补充说明 */
+    detail?: string;
+    /** 用户对未就绪项的选择（仅 status=fail 时有意义） */
+    choice?: EnvChoice;
+  }
+  const makeInitialChecks = (): EnvCheck[] => [
+    { key: "backend", label: "后端服务", status: "pending" },
+    { key: "ocr", label: "OCR 引擎", status: "pending" },
+    { key: "python", label: "Python 依赖", status: "pending" },
+  ];
+  const [envChecks, setEnvChecks] = useState<EnvCheck[]>(makeInitialChecks);
+  /** 正在处理中的项：安装中 / 启动中 */
+  const [envBusy, setEnvBusy] = useState<null | "ocr" | "python" | "backend">(null);
+  /** 是否正在一次性执行所有勾选的 install */
+  const [envApplying, setEnvApplying] = useState(false);
+
+  const setCheck = useCallback((key: EnvCheck["key"], patch: Partial<EnvCheck>) => {
+    setEnvChecks((cs) => cs.map((c) => (c.key === key ? { ...c, ...patch } : c)));
+  }, []);
+
+  /** 真实跑一遍环境检查：后端健康 → 拉取依赖状态 → 判定 OCR / Python 依赖。返回是否全部就绪 */
+  const runEnvCheck = useCallback(async (): Promise<boolean> => {
+    setEnvChecks([
+      { key: "backend", label: "后端服务", status: "checking" },
+      { key: "ocr", label: "OCR 引擎", status: "pending" },
+      { key: "python", label: "Python 依赖", status: "pending" },
+    ]);
+
+    // 1) 后端服务：健康检查（带超时）
+    let backendOk = false;
+    try {
+      const res = await fetch(BACKEND_ORIGIN + "/api/health", { signal: AbortSignal.timeout(2500) });
+      backendOk = res.ok;
+    } catch {
+      backendOk = false;
+    }
+    setCheck("backend", backendOk ? { status: "ok" } : { status: "fail", detail: "未启动或无法连接" });
+    if (!backendOk) {
+      // 后端没起来就无法查依赖，两项标为后端未就绪
+      setCheck("ocr", { status: "fail", detail: "后端未就绪" });
+      setCheck("python", { status: "fail", detail: "后端未就绪" });
+      return false;
+    }
+
+    // 2) 依赖状态：一次性拿到 OCR 引擎 + Python 依赖
+    setCheck("ocr", { status: "checking" });
+    setCheck("python", { status: "checking" });
+    try {
+      const deps = await api.getDepsStatus();
+      const ocrOk = !!deps.ocr_engine_all_installed;
+      const pyOk = !!deps.python_all_installed;
+      setCheck("ocr", ocrOk ? { status: "ok" } : { status: "fail", detail: "未安装加速引擎" });
+      setCheck("python", pyOk ? { status: "ok" } : { status: "fail", detail: "缺少必要依赖" });
+      return ocrOk && pyOk;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "检测失败";
+      setCheck("ocr", { status: "fail", detail: msg });
+      setCheck("python", { status: "fail", detail: msg });
+      return false;
+    }
+  }, [setCheck]);
+
+  // 启动序列：短暂展示 HI USER → 真实检查 → 结果确认页（等待用户选择）
+  useEffect(() => {
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      if (cancelled) return;
+      setBootPhase(1);
+      await runEnvCheck();
+      if (cancelled) return;
+      // 统一进入「结果确认页」：全部就绪时用户直接点「进入」即可；
+      // 有未就绪项时逐项选择「下载/开启」或「忽略」。
+      setBootPhase(2);
+    }, 1100);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [runEnvCheck]);
+
+  /** 切换某项的处置选择（未就绪项）：点同一项第二次取消选择 */
+  const setEnvChoice = useCallback((key: EnvCheck["key"], choice: EnvChoice) => {
+    setEnvChecks((cs) => cs.map((c) => (c.key === key ? { ...c, choice: c.choice === choice ? undefined : choice } : c)));
+  }, []);
+
+  /** 执行单项安装（Python 依赖 / OCR 引擎）；装完重跑该项检查 */
+  const installOne = useCallback(async (which: "ocr" | "python") => {
+    setEnvBusy(which);
+    try {
+      if (which === "python") await api.installPythonDeps();
+      else await api.installOcrEngineDeps();
+    } catch { /* 失败由重检结果反映 */ }
+    finally { setEnvBusy(null); }
+    // 重跑整轮（后端健康 + 依赖），刷新所有状态
+    await runEnvCheck();
+  }, [runEnvCheck]);
+
+  /** 后端未就绪时的「启动/重试」：重新健康检查 */
+  const startBackend = useCallback(async () => {
+    setEnvBusy("backend");
+    try { await runEnvCheck(); } finally { setEnvBusy(null); }
+  }, [runEnvCheck]);
+
+  /** 确认并继续：先把所有选了「下载/开启」的未就绪项依次执行，再进入时钟 */
+  const confirmEnvAndEnter = useCallback(async () => {
+    const toInstall = envChecks.filter((c) => c.status === "fail" && c.choice === "install");
+    if (toInstall.length > 0) {
+      setEnvApplying(true);
+      for (const c of toInstall) {
+        if (c.key === "python") { setEnvBusy("python"); try { await api.installPythonDeps(); } catch { /* ignore */ } finally { setEnvBusy(null); } }
+        else if (c.key === "ocr") { setEnvBusy("ocr"); try { await api.installOcrEngineDeps(); } catch { /* ignore */ } finally { setEnvBusy(null); } }
+        else if (c.key === "backend") { setEnvBusy("backend"); try { await runEnvCheck(); } catch { /* ignore */ } finally { setEnvBusy(null); } }
+      }
+      await runEnvCheck();
+      setEnvApplying(false);
+    }
+    setBootPhase(3);
+  }, [envChecks, runEnvCheck]);
+
+  /** 结果确认页是否还有未就绪项没做选择（有则「确认」按钮不可用） */
+  const pendingChoices = envChecks.filter((c) => c.status === "fail" && !c.choice);
+  const envAllOk = envChecks.every((c) => c.status === "ok");
+
+  // 数字时钟：确认进入后，固定区域改挂实时时钟（每秒刷新）
+  const [clockNow, setClockNow] = useState(() => new Date());
+  useEffect(() => {
+    if (bootPhase !== 3) return;
+    setClockNow(new Date());
+    const t = setInterval(() => setClockNow(new Date()), 1000);
+    return () => clearInterval(t);
+  }, [bootPhase]);
+
   return (
-    <div className="panel-solid relative flex h-full flex-col gap-3 p-3">
+    <div
+      className="relative flex h-full flex-col gap-3 p-3"
+      style={{
+        background: "var(--panel-bg-left)",
+        borderRadius: "12px",
+        boxShadow: "0 8px 32px -12px rgba(31,41,55,.18)",
+      } as React.CSSProperties}
+    >
       {/* AI 助手：黑白方格粒子球（无边框无文字，LOOP 运行/告警/讲解时形态变化）
           执行气泡锚定在左栏左下角（不挡人物卡片），消散后球体下方显现「执行进度」药丸 */}
-      <div className="relative flex shrink-0 items-center justify-center py-1">
-        <AISphere state={aiSphereState} size={132} paused={aiSphereState === "idle"} retracted={sphereRetracted} />
+      {/* 固定高度容器：HI USER → 检查 → 结果确认 → 时钟 四个阶段共用同一块位置。
+          - 变更期（检查中 / 结果确认）：高度自适应，容纳列表与按钮
+          - 稳定期（HI USER / 时钟）：固定 h-14(56px)
+          执行气泡为 absolute 定位，锚点落在此框中心，不受阶段影响。 */}
+      <div className={["relative flex shrink-0 items-center justify-center py-1", (bootPhase === 1 || bootPhase === 2) ? "" : "h-14"].join(" ")}>
+        {bootPhase === 0 ? (
+          <div className="flex select-none flex-col items-center leading-none animate-fade-in">
+            <span className="text-2xl font-black text-brand-600">HI</span>
+            <span className="text-2xl font-black text-slate-900">USER</span>
+          </div>
+        ) : (bootPhase === 1 || bootPhase === 2) ? (
+          <div className="flex w-full select-none flex-col gap-1 text-[11px] leading-tight animate-fade-in">
+            {/* 检查进行中：只显示进度 */}
+            {bootPhase === 1 && (
+              <>
+                <div className="mb-0.5 text-[10px] font-medium text-slate-400">正在检查运行环境…</div>
+                <ul className="flex flex-col gap-0.5">
+                  {envChecks.map((c) => (
+                    <li key={c.key} className="flex items-center gap-1">
+                      {c.status === "ok" ? (
+                        <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-500" />
+                      ) : c.status === "fail" ? (
+                        <AlertTriangle className="h-3 w-3 shrink-0 text-rose-500" />
+                      ) : (
+                        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-slate-400" />
+                      )}
+                      <span className={c.status === "fail" ? "text-rose-600" : c.status === "ok" ? "text-slate-700" : "text-slate-500"}>
+                        {c.label}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+
+            {/* 结果确认页：列出每项状态，未就绪项逐项选择 下载/开启 或 忽略 */}
+            {bootPhase === 2 && (
+              <>
+                <div className="mb-0.5 flex items-center gap-1 text-[10px] font-medium text-slate-400">
+                  {envAllOk ? (
+                    <><CheckCircle2 className="h-3 w-3 text-emerald-500" /> 环境检查通过</>
+                  ) : (
+                    <><AlertTriangle className="h-3 w-3 text-amber-500" /> 环境检查：{envChecks.filter((c) => c.status === "fail").length} 项未就绪</>
+                  )}
+                </div>
+                <ul className="flex flex-col gap-1">
+                  {envChecks.map((c) => {
+                    const ok = c.status === "ok";
+                    return (
+                      <li key={c.key} className="flex flex-col gap-0.5">
+                        <div className="flex items-center gap-1">
+                          {ok ? (
+                            <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-500" />
+                          ) : (
+                            <AlertTriangle className="h-3 w-3 shrink-0 text-rose-500" />
+                          )}
+                          <span className={ok ? "text-slate-700" : "text-rose-600"}>{c.label}</span>
+                          <span className="text-[10px] text-slate-400">
+                            {ok ? "已就绪" : (c.detail || "未就绪")}
+                          </span>
+                        </div>
+                        {/* 未就绪项：提供两个选择（下载/开启 或 忽略） */}
+                        {!ok && (
+                          <div className="ml-4 flex flex-wrap items-center gap-1">
+                            <button
+                              onClick={() => (c.key === "backend" ? startBackend() : installOne(c.key as "ocr" | "python"))}
+                              disabled={envBusy !== null || envApplying}
+                              className={[
+                                "flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium transition-all disabled:opacity-50",
+                                c.choice === "install"
+                                  ? "bg-slate-900 text-white ring-1 ring-slate-900"
+                                  : "bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50",
+                              ].join(" ")}
+                              title={c.key === "backend" ? "重新尝试连接后端服务" : "立即下载/安装"}
+                            >
+                              {envBusy === c.key ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Download className="h-2.5 w-2.5" />}
+                              {c.key === "backend" ? "启动" : "下载"}
+                            </button>
+                            <button
+                              onClick={() => setEnvChoice(c.key, "ignore")}
+                              disabled={envBusy !== null || envApplying}
+                              className={[
+                                "flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium transition-all disabled:opacity-50",
+                                c.choice === "ignore"
+                                  ? "bg-slate-200 text-slate-700 ring-1 ring-slate-300"
+                                  : "bg-white text-slate-500 ring-1 ring-slate-200 hover:bg-slate-50",
+                              ].join(" ")}
+                              title="忽略此项，直接进入"
+                            >
+                              <X className="h-2.5 w-2.5" /> 忽略
+                            </button>
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+                {/* 底部：确认进入（有未选则禁用）+ 重新检查 */}
+                <div className="mt-1 flex items-center gap-1.5">
+                  <button
+                    onClick={confirmEnvAndEnter}
+                    disabled={envApplying || envBusy !== null || pendingChoices.length > 0}
+                    className="flex items-center gap-0.5 rounded-md bg-brand-600 px-2.5 py-1 text-[10px] font-semibold text-white transition-all hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-40"
+                    title={pendingChoices.length > 0 ? "请先为每个未就绪项选择「下载」或「忽略」" : "确认并进入"}
+                  >
+                    {envApplying ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Check className="h-2.5 w-2.5" />}
+                    {envApplying ? "处理中…" : "确认进入"}
+                  </button>
+                  <button
+                    onClick={() => runEnvCheck()}
+                    disabled={envApplying || envBusy !== null}
+                    className="flex items-center gap-0.5 rounded-md bg-white px-2 py-1 text-[10px] font-medium text-slate-600 ring-1 ring-slate-200 transition-all hover:bg-slate-50 disabled:opacity-50"
+                    title="重新检测所有项"
+                  >
+                    <RefreshCw className="h-2.5 w-2.5" /> 重新检查
+                  </button>
+                </div>
+                {pendingChoices.length > 0 && (
+                  <div className="text-[9px] text-amber-600">
+                    还有 {pendingChoices.length} 项待选择：下载 / 忽略
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        ) : (
+          /* 时钟：运行期间（含气泡未消散）收起，把这块位置让给步骤气泡；运行结束气泡散尽后复原 */
+          <div className={[
+            "flex select-none flex-col items-center leading-none",
+            sphereRetracted ? "invisible" : "animate-fade-in",
+          ].join(" ")}>
+            <span className="font-mono text-xl font-semibold tabular-nums text-slate-800">
+              {String(clockNow.getHours()).padStart(2, "0")}
+              <span className="mx-0.5 text-brand-600">:</span>
+              {String(clockNow.getMinutes()).padStart(2, "0")}
+              <span className="mx-0.5 text-brand-600">:</span>
+              {String(clockNow.getSeconds()).padStart(2, "0")}
+            </span>
+            <span className="mt-0.5 text-[10px] text-slate-400">
+              {clockNow.getFullYear()}-{String(clockNow.getMonth() + 1).padStart(2, "0")}-{String(clockNow.getDate()).padStart(2, "0")}
+            </span>
+          </div>
+        )}
         {/* LOOP 执行气泡：球收起后占据球位，向上堆叠渐淡（运行中不停弹出但不挡卡片） */}
         {!execPanelOpen && sphereRetracted && (
           <ExecutionBubbles
@@ -714,7 +1009,7 @@ export default function LeftPanel({
         <div className="relative min-h-0 flex-1 overflow-auto p-1.5">
           {records.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-2 px-4 py-8 text-center text-xs text-slate-400">
-              <FileSpreadsheet className="h-7 w-7 text-slate-300" />
+              <UserCircle className="h-7 w-7 text-slate-300" />
               {emptyHint ? (
                 <p className="whitespace-pre-line">{emptyHint}</p>
               ) : (
@@ -968,6 +1263,16 @@ export default function LeftPanel({
             </ul>
           )}
         </div>
+
+        {/* PERSONAL：换壁纸 / 控制面板不透明度 */}
+        <button
+          onClick={onOpenPersonal}
+          className="mt-1.5 flex shrink-0 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-[10px] font-medium text-slate-500 ring-1 ring-slate-200/60 transition-colors hover:bg-slate-100 hover:text-slate-800"
+          title="PERSONAL：换壁纸 / 控制面板不透明度"
+        >
+          <Palette className="h-3.5 w-3.5" />
+          PERSONAL
+        </button>
       </div>
       )}
     </div>
