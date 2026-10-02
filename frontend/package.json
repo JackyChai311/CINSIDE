@@ -1,7 +1,7 @@
 {
   "name": "cinside-frontend",
   "private": true,
-  "version": "0.8.4",
+  "version": "0.8.5",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
@@ -11,9 +11,11 @@
     "electron:dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "build:backend": "cd /d ..\\backend && .venv\\Scripts\\pyinstaller.exe cinside-backend.spec --clean --noconfirm",
     "build:backend:mac": "cd ../backend && .venv/bin/pyinstaller cinside-backend.spec --clean --noconfirm",
-    "electron:build": "npm run build && npm run build:backend && electron-builder",
-    "electron:build:portable": "npm run build && npm run build:backend && electron-builder --win portable",
-    "electron:build:mac": "npm run build && npm run build:backend:mac && electron-builder --mac"
+    "electron:build": "npm run build && npm run build:backend && electron-builder --publish never",
+    "electron:build:portable": "npm run build && npm run build:backend && electron-builder --win portable --publish never",
+    "electron:build:mac": "npm run build && npm run build:backend:mac && electron-builder --mac --publish never",
+    "publish:oss": "python scripts/publish-oss.py",
+    "publish:oss:dry": "python scripts/publish-oss.py --dry-run"
   },
   "dependencies": {
     "@officecli/officecli": "^1.0.143",
@@ -162,10 +164,9 @@
     },
     "publish": [
       {
-        "provider": "github",
-        "owner": "JackyChai311",
-        "repo": "CINSIDE",
-        "releaseType": "release"
+        "provider": "generic",
+        "url": "https://YOUR-OSS-DOMAIN/cinside/releases",
+        "channel": "latest"
       }
     ]
   }
