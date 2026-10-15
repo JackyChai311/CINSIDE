@@ -82,6 +82,24 @@ npm run electron:build:portable # 仅便携版
 
 构建产物输出到 `dist-electron/`。
 
+### 接口鉴权（进程间令牌）
+
+后端监听 `127.0.0.1`，而渲染进程里的 BrowserView 用 `webSecurity: false`
+加载**第三方学校网站** —— 该设置会让页面绕过 CORS。因此第三方页面本来可以
+直接读本机后端（`/api/config/settings` 的 API Key、`/api/records` 的护照数据）。
+为此后端 `/api` 与 `/ws` 需要一枚共享令牌：由 Electron 主进程随机生成，
+经环境变量交给 Python 后端、经 preload 交给自家渲染进程（第三方网页的
+BrowserView 没有 preload，因此拿不到）。
+
+| 环境变量 | 作用 |
+|---|---|
+| `CINSIDE_API_TOKEN` | 令牌本体；**未设置时鉴权完全关闭**，`python run.py` 与 pytest 均不受影响 |
+| `CINSIDE_API_AUTH` | `off` / `report`（只记日志不拦） / `enforce`（拦截）。开发版默认 `report`，正式版默认 `enforce` |
+
+**出问题怎么排查**：生产环境若出现 403，先看日志里的
+`[api-auth][BLOCKED] ...` 定位是哪个请求漏带令牌；
+需要立即恢复可用时，给后端进程设 `CINSIDE_API_AUTH=off` 即可关闭鉴权。
+
 ### 发布新版本
 
 1. 改版本号（`frontend/package.json` 的 `version`），然后构建：
