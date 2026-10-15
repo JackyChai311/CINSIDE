@@ -280,3 +280,63 @@ def test_normalize_for_compare_strips_and_uppercases():
     assert _normalize_for_compare("   ") == ""
     # 非 ASCII 字母保留（只做大写与分隔符清理）
     assert _normalize_for_compare("Кузнецов") == "КУЗНЕЦОВ"
+
+
+# ============ 修复告警：错的护照号不能静默 ============
+# 背景：ICAO 检查位只能证明加权和 mod 10 成立，不能证明改对了。
+# 同一组检查位下有大量等价解，_repair_mrz_line2 取的是"首个满足检查位的变异"，
+# 因此可能把护照号改成另一个检查位同样成立的值。
+# 既然无法从检查位判断对错，就要求：只要改动落在护照号本体（前 9 位）上，
+# 必须打出 WARN 提示人工复核。
+# 注意：这些测试只断言日志，**不改动也不放宽**任何返回值断言。
+
+
+def test_repair_warns_when_passport_body_is_rewritten_by_insertion(capsys):
+    """丢一位时把 '6' 插到行首同样满足检查位 → 护照号被改成另一个值，必须告警。"""
+    broken = GOOD_LINE2[:3] + GOOD_LINE2[4:]
+    fixed = _repair_mrz_line2(broken)
+    err = capsys.readouterr().out
+    assert "WARN" in err
+    assert "改动了护照号本体" in err
+    assert "人工复核" in err
+    # 返回值仍与改动前一致（本次只加日志，未改行为）
+    assert fixed == "6" + broken
+    assert fixed[:9] != broken[:9]
+
+
+def test_repair_warns_when_passport_body_is_rewritten_by_substitution(capsys):
+    """8→B 被"修"成 L→I，得到另一个检查位成立但错误的护照号 → 必须告警。"""
+    broken = GOOD_LINE2[:3] + "B" + GOOD_LINE2[4:]
+    fixed = _repair_mrz_line2(broken)
+    err = capsys.readouterr().out
+    assert "WARN" in err
+    assert "改动了护照号本体" in err
+    assert fixed == "I" + broken[1:]
+
+
+def test_repair_does_not_warn_when_only_check_digit_is_fixed(capsys):
+    """只改了检查位（护照号本体未动）→ 不应告警，只保留普通修复日志。"""
+    broken = GOOD_LINE2[:9] + "G" + GOOD_LINE2[10:]
+    fixed = _repair_mrz_line2(broken)
+    out = capsys.readouterr().out
+    assert fixed == GOOD_LINE2
+    assert "[MRZ-REPAIR]" in out
+    assert "WARN" not in out
+
+
+def test_repair_warns_when_no_repair_possible_and_checks_fail(capsys):
+    """无法修复且检查位本就不成立 → 明确告警，避免自相矛盾的行被当成正常结果。"""
+    broken = GOOD_LINE2[:3] + "7" + GOOD_LINE2[4:]
+    fixed = _repair_mrz_line2(broken)
+    err = capsys.readouterr().out
+    assert fixed == broken  # 行为不变
+    assert "WARN" in err
+    assert "无法修复" in err
+    assert "护照号检查位" in err
+
+
+def test_repair_logs_nothing_extra_for_already_valid_line(capsys):
+    """本来就合法的行直接返回，不打任何修复/告警日志。"""
+    assert _repair_mrz_line2(GOOD_LINE2) == GOOD_LINE2
+    assert capsys.readouterr().out == ""
+

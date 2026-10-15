@@ -1957,26 +1957,59 @@ def _repair_mrz_line2(line2: str) -> str:
     if _ok(line2):
         return line2
 
+    def _finish(cand: str, how: str) -> str:
+        """统一的返回出口，顺便把「不可证明正确」这件事显式暴露出来。
+
+        为什么要告警：ICAO 检查位只能证明「按 7,3,1 加权求和 mod 10 成立」，
+        并不能证明改对了。同一组检查位下存在大量等价解，例如：
+          - L898902C3 丢掉一位后，把 '6' 插到行首得到的 6L89902C3 同样满足检查位；
+          - 8→B 认错时，把行首 L 换成 I（加权差正好抵消）也能满足检查位。
+        此时护照号会被"修"成另一个值 —— 因此只要改动落在护照号本体
+        （前 9 位）上，就必须告警提示人工复核，不能让错值静默当成事实使用。
+        """
+        if cand[:9] != line2[:9]:
+            print(
+                f"[MRZ-REPAIR][WARN] {how} 改动了护照号本体: "
+                f"'{line2[:9]}' → '{cand[:9]}'；检查位通过不能证明该值正确，请人工复核",
+                flush=True,
+            )
+        else:
+            print(f"[MRZ-REPAIR] {how} → {cand[:19]}", flush=True)
+        return cand
+
     # 单字符插入（OCR 丢字，如 763890288 → 63890288）
     for pos in range(11):
         for ch in _MRZ_CHARS:
             cand = line2[:pos] + ch + line2[pos:]
             if _ok(cand):
-                print(f"[MRZ-REPAIR] 插入修复: 位置{pos} 插入'{ch}' → {cand[:19]}")
-                return cand
+                return _finish(cand, f"插入修复: 位置{pos} 插入'{ch}'")
     # 单字符替换（OCR 认错，如 8→B）：只接受视觉易混淆字符，避免把正确字符改错
     for pos in range(11):
         for ch in _CONFUSABLE.get(line2[pos], ""):
             cand = line2[:pos] + ch + line2[pos + 1:]
             if _ok(cand):
-                print(f"[MRZ-REPAIR] 替换修复: 位置{pos} '{line2[pos]}'→'{ch}' → {cand[:19]}")
-                return cand
+                return _finish(cand, f"替换修复: 位置{pos} '{line2[pos]}'→'{ch}'")
     # 单字符删除（OCR 多字）
     for pos in range(11):
         cand = line2[:pos] + line2[pos + 1:]
         if len(cand) >= 19 and _ok(cand):
-            print(f"[MRZ-REPAIR] 删除修复: 位置{pos} 删除'{line2[pos]}' → {cand[:19]}")
-            return cand
+            return _finish(cand, f"删除修复: 位置{pos} 删除'{line2[pos]}'")
+
+    # 修复失败：原样返回。此时若检查位本就不成立，要明确告警而不是静默返回，
+    # 否则调用方会把一条自相矛盾的 MRZ 当作正常结果继续解析。
+    failed = []
+    if len(line2) > 9 and _icao_check(line2[:9]) != _mrz_char_val(line2[9]):
+        failed.append("护照号检查位")
+    if len(line2) > 19 and _icao_check(line2[13:19]) != _mrz_char_val(line2[19]):
+        failed.append("出生日期检查位")
+    if len(line2) > 27 and line2[21:27].isdigit() and _icao_check(line2[21:27]) != _mrz_char_val(line2[27]):
+        failed.append("有效期检查位")
+    if failed:
+        print(
+            f"[MRZ-REPAIR][WARN] 无法修复，原样返回；校验失败的字段: {'/'.join(failed)}"
+            f"（该行 MRZ 不可信）",
+            flush=True,
+        )
     return line2
 
 
