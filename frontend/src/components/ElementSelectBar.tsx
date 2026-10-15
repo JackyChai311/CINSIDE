@@ -367,7 +367,10 @@ onCanSaveChange,
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [rightBindDropdownOpen]);
 
-  if (!active) return null;
+  // 注意：此处不能提前 return。下方还有两个 useEffect，提前 return 会让
+  // active 由 false 变 true 时 hook 数量发生变化，触发 React
+  // "Rendered more hooks than during the previous render" 崩溃。
+  // 早退已移到本组件所有 hook 之后。
 
   // 步骤判定（审查模式：先右侧元素 → 后左侧来源；录入模式：先左侧来源 → 后右侧输入框，顺序相反）
   const isEntryMode = currentStepType === "entry";
@@ -498,6 +501,9 @@ onCanSaveChange,
     onCanSaveChange?.(active && canSave);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, canSave]);
+
+  // 所有 hook 之后才允许早退（见上方说明）
+  if (!active) return null;
 
   // 右侧拾取行（审查模式=第1步；录入模式=第2步，需先完成左侧来源）
   const rightPickRow = (

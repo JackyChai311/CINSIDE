@@ -136,14 +136,16 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
     const toggleSkill = (id: string) => {
         setSelectedSkills((prev) => {
             const n = new Set(prev);
-            n.has(id) ? n.delete(id) : n.add(id);
+            if (n.has(id)) n.delete(id);
+            else n.add(id);
             return n;
         });
     };
     const toggleClient = (id: string) => {
         setSelectedClients((prev) => {
             const n = new Set(prev);
-            n.has(id) ? n.delete(id) : n.add(id);
+            if (n.has(id)) n.delete(id);
+            else n.add(id);
             return n;
         });
     };
@@ -378,7 +380,8 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
                                                 title="设置可执行文件位置"
                                                 onClick={(e) => {
                                                     e.stopPropagation();
-                                                    pathEditingId === c.id ? setPathEditingId(null) : startEditPath(c);
+                                                    if (pathEditingId === c.id) setPathEditingId(null);
+                                                    else startEditPath(c);
                                                 }}
                                             >
                                                 <FolderCog size={14} />

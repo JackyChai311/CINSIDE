@@ -2807,6 +2807,9 @@ function startupWindowHandler(_e, w) {
     }
     // 即使标题/URL都识别不出，只要出现在启动阶段且不是白名单窗口，也强制销毁
     // 这是为了兜住 Windows 恢复窗口 URL/标题延迟极慢或恢复的是空窗口壳的情况
+    // 注意：`|| true` 使上面的 isDetach 探测成为死代码，此处恒为真。
+    // 疑似调试期留下的"一律强杀"逻辑，建议后续确认是否应恢复为只杀 isDetach 窗口。
+    // eslint-disable-next-line no-constant-condition
     if (isDetach || true) {
       try {
         debugLog(`[startup-intercept] 拦截并销毁非白名单窗口 title=${w.getTitle()} url=${w.webContents.getURL().slice(0, 80)}`);

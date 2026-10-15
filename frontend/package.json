@@ -15,15 +15,19 @@
     "electron:build:portable": "npm run build && npm run build:backend && electron-builder --win portable --publish never",
     "electron:build:mac": "npm run build && npm run build:backend:mac && electron-builder --mac --publish never",
     "publish:oss": "python scripts/publish-oss.py",
-    "publish:oss:dry": "python scripts/publish-oss.py --dry-run"
+    "publish:oss:dry": "python scripts/publish-oss.py --dry-run",
+    "lint": "eslint src electron scripts",
+    "lint:fix": "eslint src electron scripts --fix",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\""
   },
   "dependencies": {
+    "@chenglou/pretext": "^0.0.9",
     "@officecli/officecli": "^1.0.143",
     "electron-updater": "^6.8.9",
     "lucide-react": "^0.408.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "@chenglou/pretext": "^0.0.9"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",
@@ -33,11 +37,15 @@
     "concurrently": "^8.2.2",
     "electron": "^31.0.0",
     "electron-builder": "^24.13.3",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react-hooks": "^5.2.0",
     "png-to-ico": "^3.0.2",
     "postcss": "^8.4.39",
+    "prettier": "^3.9.10",
     "sharp": "^0.35.3",
     "tailwindcss": "^3.4.6",
     "typescript": "^5.5.3",
+    "typescript-eslint": "^8.71.2",
     "vite": "^5.3.4",
     "wait-on": "^7.2.0"
   },

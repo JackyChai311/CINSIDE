@@ -25,6 +25,9 @@ const INVISIBLE_CHARS_RE = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g;
 
 /** 全角转半角：全角数字/字母/符号（U+FF01-FF5E）转 ASCII，全角空格（U+3000）转普通空格 */
 export function toHalfwidth(s: string): string {
+  // 下面正则里的空白字符是 U+3000（全角空格）本身，属于本函数的匹配目标，
+  // 不是误输入的空白，故显式放行 no-irregular-whitespace
+  // eslint-disable-next-line no-irregular-whitespace
   return (s || "").replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0)).replace(/　/g, " ");
 }
 
