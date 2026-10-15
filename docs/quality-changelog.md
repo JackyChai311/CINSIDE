@@ -9,10 +9,10 @@
 |---|---|
 | 工作分支 | `chore/quality-guardrails`（`main` 未动） |
 | 整改前基线 | `8d6733a0a562ea35c4dc0e707a0f186f1616ebf9` |
-| 提交数 | 20（含去臃肿阶段的前 3 项） |
+| 提交数 | 22（含去臃肿阶段的前 4 项） |
 | 改动规模 | 见 `git diff --stat main..HEAD`（含 1,562 行死代码删除） |
 | 前端测试 | vitest **190 passed** / 4 文件（整改前 **0**） |
-| 后端测试 | pytest **230 passed** / 9 文件（整改前 **0**，且原脚本会产生 2 个收集错误） |
+| 后端测试 | pytest **256 passed** / 10 文件（整改前 **0**，且原脚本会产生 2 个收集错误） |
 | 前端 lint | ESLint **0 error / 467 warning**（整改前无 linter；起手 496，删死代码后降 28） |
 | 后端 lint | ruff **All checks passed**（整改前无 linter） |
 | 类型检查 | `tsc --noEmit` exit 0 |
@@ -308,6 +308,47 @@ CORS 白名单（只放行 localhost:5173）对此**无效** —— `webSecurity
 
 **这个提交的 diff 约 46,000 行，是行尾归一化的固有形态**（每个转换文件的每一行都算改动）。判读方式见上：不看 diff 行数，而看"忽略行尾的内容哈希"与"产物是否逐字节不变"。
 
+### 第 4 项：从 `document_extract.py` 拆出 `text_fields.py` — 已完成
+
+**拆出内容**（连续区块 1905–2460，556 行）：日期抽取 5 个函数（`_extract_date_by_keywords`、`_extract_expiry_from_text`、`_extract_issue_from_text`、`_scan_all_dates`、`_infer_missing_date_pair`）+ 本地标签字段提取 7 个函数与 9 个标签表常量（含入口 `_extract_local_fields`）。
+
+**结果**：`document_extract.py` 3,397 → **2,867 行**；新增 `text_fields.py` **554 行**。该模块只依赖标准库 `re`，**对新模块而言 `document_extract` 零依赖**。
+
+**顺手删除 3 个死常量**（24 行）：`_LABEL_BIRTH_DATE` / `_LABEL_ISSUE_DATE` / `_LABEL_EXPIRY_DATE` —— 全仓 `app/` 与 `tests/` 内搜索，**每个都只命中自己的定义行**，零引用。它们是日期抽取早期的标签表，后来改为由调用方传 `keywords`，这三个就废弃了。删除后不再把死代码搬进新模块。
+
+#### 一个与 `mrz.py` **相反**的坑
+
+| 模块 | 内部 `re` 用法 | 顶层 `import re` |
+|---|---|---|
+| `mrz.py` | 全是函数内局部别名 `import re as _re` | **不需要**（加了会被 ruff 判 F401） |
+| `text_fields.py` | 日期函数用的是**裸 `re.xxx`**（实测 8 处） | **必须**（漏了就是 NameError） |
+
+两边结论相反 —— **不能凭上一次的经验套用**，每次都要实测。
+
+#### 验证（5 项）
+
+1. **行为指纹逐条比对（本次最强证据）**：构造 33 条 `(函数, 输入)` 用例并记录输出，再 `git stash` 回到拆分前跑一遍 → **0 处不一致**，证明是纯搬移、行为未变（含下面列的几处可疑行为，它们拆分前就存在）。
+2. **符号快照比对**：`document_extract` 157 → **154**，丢失的**恰好就是那 3 个死常量**，无其它丢失、无新增；新模块顶层符号 23 个。
+3. **再导出同一性**：21 个被搬符号在两个模块中 `is` 判定**全部为同一对象**（别名而非副本）。其中 6 函数 + 2 常量是本文件仍在用的普通导入，其余用 `X as X` 显式再导出以保持旧导入路径可用。
+4. pytest 全量 **256 passed**（原 230 + 新增 26）；ruff 通过；应用导入正常、`openapi` 路由数 **86**。
+5. 打包不受影响（spec 用 `collect_submodules('app')` 自动收集）。
+
+#### 增值：新增 `tests/test_text_fields.py`（26 个用例）
+
+该模块是纯函数，终于可以独立测试。测试是**特征测试** —— 先用探针脚本逐条取真实输出，再写断言，而不是凭想象写期望值。
+
+顺带把几处**拆分前就存在**的可疑行为固化成测试并显式标注（**不代表认可**，属产品决策）：
+
+| 行为 | 说明 |
+|---|---|
+| `_extract_date_by_keywords` 解析不出 `15-MAR-2024` | 带连字符的月份名失败；而同格式用空格分隔时可解析 |
+| 解析不出 `DATEOFEXPIRY`（关键词丢空格） | 与其 docstring 声称的"关键词中的空格视为可选"**自相矛盾** |
+| 解析不出中文全日期 `2024年03月15日` | 中文证件场景的缺口 |
+| `_extract_latin_name_after_label` 多标签同行时取错值 | `SURNAME KUT GIVEN NAMES AMIR` → `AMIR`（应为 KUT）；换行版式则正常 |
+| **`SURNAME / FAMILY NAME\nKUT\n…` → 返回 `FAMILY`** | 把**标签里的第二个单词**当成了值 —— 这种标签行在真实证件上很常见，最值得评估 |
+| `_extract_gender_near_label` 不支持中文「性别 女」 | |
+| `_rescue_segmented_number` 在测试的分段场景下**原样返回** | 并没有真的把号码"救"回来 |
+
 ## 4. 遗留：需要你在方便时处理
 
 | 项 | 说明 |
@@ -369,7 +410,7 @@ node --check electron\preload.cjs
 | `frontend/src/components/SettingsModal.tsx` | 1,605 | |
 | ~~`frontend/src/components/ElementSelectBar.tsx`~~ | ~~1,562~~ | **已删除**（死代码：组件无任何渲染方，仅类型被引用；`PickTarget` 已迁入 `types.ts`）。见第 3 节 |
 | `frontend/electron/main.cjs` | 4,991 | **81 个 `ipcMain.handle/on`** |
-| `backend/app/services/document_extract.py` | 3,397 | 原 3,956 行；**已拆出 MRZ 一组**（见第 3 节）。剩 7 类职责中的 6 类：图像预处理 / 三种 OCR 引擎调度 / UMI-OCR 进程自愈 / 日期抽取 / 提示词拼装 / JSON 容错 |
+| `backend/app/services/document_extract.py` | 2,867 | 原 3,956 行；**已拆出 MRZ 一组与日期/字段文本抽取一组**（见第 3 节）。剩下：图像预处理 / 三种 OCR 引擎调度 / UMI-OCR 进程自愈 / 提示词拼装 / JSON 容错 / VIZ 兜底 |
 | `backend/app/services/ppt_service.py` | 2,040 | |
 | `backend/app/services/dependency_manager.py` | 1,021 | |
 
@@ -429,16 +470,22 @@ LOOP 回放步骤打在 **Electron 的 BrowserView** 里，即用 Electron 自�
    收益确定、风险低，适合作为去臃肿的第一刀。
 2. ~~`document_extract.py` 拆出 `mrz.py`~~ —— **已完成**，见第 3 节。
    验证手法（符号快照比对 + 再导出同一性）可复用到后续拆分。
-3. **`document_extract.py` 继续拆分** —— 剩下的 6 类职责里，图像预处理
-   （`_shrink_*` / `_crop_*` / `_zoom_*` / `_binarize_*`）与日期/字段抽取
-   （全部 `_extract_*`）同样偏纯函数，可用同一套手法继续切。
+3. **`document_extract.py` 继续拆分** —— 剩下的职责里，图像预处理
+   （`_shrink_*` / `_crop_*` / `_zoom_*` / `_binarize_*`，约 237 行）
+   与 PDF/markitdown 提取同样偏纯函数，可用同一套手法继续切。
    UMI-OCR 进程自愈那部分涉及全局状态，风险较高，建议最后动。
+   —— 第 4 项（拆 text_fields.py）已完成，见第 3 节。
 4. **`App.tsx` 拆解** —— 收益最大但风险最高、工期最长。**必须先产出职责地图**（按 111 个 `useState` 的归属切分业务域），再自叶子域逐个抽 hook，每抽一个域提交一次。**不能先动核心的批量执行状态机。**
 5. **`main.cjs` 按域拆分 IPC** —— 81 个 handler 分域注册，但需逐个确认无顺序依赖。
 6. **契约统一** —— 先补特征测试，再逐端点加 `response_model`；用 `openapi-typescript` 生成类型替代手抄的 12 个同名类型。
 7. **错误处理与日志** —— 收窄 116 处宽泛 except、`print` → `logging`。
 8. ~~**仓库行尾归一**~~ —— **已完成**（第 3 节第 3 项，`3b1c5bd`）。
    之所以提到大批量搬移**之前**做：它正是为了让后续每次搬移的 diff 可信。
+
+9. **评估 `text_fields` 里那几处字段抽取可疑行为**（第 3 节第 4 项已固化测试）——
+   优先级最高的是 `SURNAME / FAMILY NAME` 这类「标签自带空格且并列」的版式会把
+   标签的第二个单词当成值返回（实测 `SURNAME / FAMILY NAME\nKUT\n…` → `FAMILY`），
+   这在真实证件上很常见，可能直接产出错误的姓名字段。属于产品决策，需先确认真实样本。
 
 **贯穿要求**：每一步都必须保持本文第 5 节的 6 条验证全绿。
 纯重构（移动代码、提取函数、类型搬迁、删除未引用代码）应当让**产物逐字节不变** ——
