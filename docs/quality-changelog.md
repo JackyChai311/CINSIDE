@@ -9,7 +9,7 @@
 |---|---|
 | 工作分支 | `chore/quality-guardrails`（`main` 未动） |
 | 整改前基线 | `8d6733a0a562ea35c4dc0e707a0f186f1616ebf9` |
-| 提交数 | 16（含去臃肿阶段的第 1 项） |
+| 提交数 | 18（含去臃肿阶段的前 2 项） |
 | 改动规模 | 见 `git diff --stat main..HEAD`（含 1,562 行死代码删除） |
 | 前端测试 | vitest **190 passed** / 4 文件（整改前 **0**） |
 | 后端测试 | pytest **230 passed** / 9 文件（整改前 **0**，且原脚本会产生 2 个收集错误） |
@@ -242,13 +242,51 @@ CORS 白名单（只放行 localhost:5173）对此**无效** —— `webSecurity
 - 产物中 2,896 个唯一中文串，**丢失 0 个**
 - tsc exit 0；vitest 190 passed；eslint 0 error，warning **495 → 467**（少掉的正是该文件贡献的 28 条）
 
-### 第 2 项：从 `document_extract.py` 拆出 `mrz.py` — 待做
+### 第 2 项：从 `document_extract.py` 拆出纯函数模块 `mrz.py` — 已完成
 
-`document_extract.py` 共 3,956 行、80+ 顶层函数，混合了图像预处理 / 三种 OCR 引擎调度 / UMI-OCR 进程自愈 / MRZ 解析 / 日期抽取 / 提示词拼装 / JSON 容错共 7 类职责。
+**背景**：`document_extract.py` 共 3,956 行 / 80+ 顶层函数，混合了图像预处理、三种 OCR 引擎调度、UMI-OCR 进程自愈、MRZ 解析、日期抽取、提示词拼装、JSON 容错共 7 类职责。其中 MRZ 一组是**纯函数、零重型依赖、且已被 30 个测试覆盖**，最适合先拆。
 
-其中 **MRZ 部分是纯函数、零外部依赖、且已有 30 个测试覆盖**（`test_mrz_parser.py`），是最适合先拆的一块。涉及符号：`_normalize_for_compare`、`_mrz_char_val`、`_icao_check`、`_MRZ_CHARS`、`_CONFUSABLE`、`_repair_mrz_line2`、`_parse_mrz`，以及 `_repair_mrz_line2` 内部 `_ok()` 用到的 `_ISO3_COUNTRY_CODES`（定义在文件另一处，第 3377 行附近）。
+**搬移的 8 个符号**：`_normalize_for_compare`、`_mrz_char_val`、`_icao_check`、`_repair_mrz_line2`、`_parse_mrz`（含其内嵌的 `_DIGITISH`）、`_MRZ_CHARS`、`_CONFUSABLE`、`_ISO3_COUNTRY_CODES`
+**结果**：`document_extract.py` 3,956 → **3,397 行**；新增 `mrz.py` **589 行**。
 
-**关键约束**：现有 230 个测试里有多个 `from app.services.document_extract import _icao_check, ...`，**拆完必须保持 `document_extract` 仍能导出这些名字**，否则会一次性弄坏测试。做法是显式再导出（`from .mrz import X as X` 形式，ruff 认可为有意再导出，不会被 F401 判为未使用导入）。
+#### 依赖分析是自动做的，不靠肉眼
+
+用 **code object 的 `co_names`** 递归统计每个待搬函数引用的"本模块内符号"，结果只有 `_CONFUSABLE` / `_ISO3_COUNTRY_CODES` / `_MRZ_CHARS` 三个常量与同组函数 —— **对 `document_extract` 里其它函数零依赖**，因此可以干净切出。再用 `ast` 精确定位每个定义（并把紧邻上方的连续注释一起带走，例如 `# ============ MRZ 解析 ============` 小节标题），并校验代码块范围无重叠。
+
+两个**只有自动分析才会发现**的坑：
+
+| 坑 | 说明 |
+|---|---|
+| `_CONFUSABLE` 是 `AnnAssign` | 它写作 `_CONFUSABLE: dict[str, str] = {...}`，属于**带类型注解的赋值**。只匹配 `ast.Assign` 会漏掉它 —— 第一版脚本就是这样报"找不到符号"的 |
+| `co_names` 里的 `re` 是假信号 | `_parse_mrz` 内部用的是**函数局部别名** `import re as _re`，这会让 `co_names` 里出现 `"re"`，看上去像需要模块级 `import re`。实际全模块没有任何裸 `re.` 用法，所以 `mrz.py` **不需要**在顶部 `import re`（已按此修正，否则 ruff 报 F401） |
+
+#### 循环导入的规避
+
+`_ISO3_COUNTRY_CODES` 在 `document_extract` 内部还有 3 处使用者（`_parse_mrz` 内 2 处 + 第 3373 行 1 处）。若把它留在 `document_extract` 而让 `mrz.py` 反向导入，就形成**循环导入**。故一并搬到 `mrz.py`，由 `document_extract` 反向导入，保持单向依赖 `document_extract → mrz`。
+
+#### 兼容性：旧导入路径继续可用
+
+`tests/test_mrz_parser.py` 与 `tests/test_mrz_noise.py` 按 `from app.services.document_extract import _icao_check, ...` 的旧路径导入，因此做了**显式再导出**：本文件仍在用的（`_ISO3_COUNTRY_CODES`、`_parse_mrz`）普通导入；仅供外部再导出的 6 个用 `X as X` 冗余别名形式（ruff 认可为有意再导出，不会误报 F401）。
+
+#### 验证（5 项全通过）
+
+1. **符号快照比对**：改动前把 `document_extract` 的顶层符号存 JSON，改动后重取求差 —— **before 157 / after 157，丢失 无，新增 无**。这比"测试通过"更强：任何从旧路径导入某个名字的代码都不可能被弄坏。
+2. **再导出是同一对象**：8 个符号在两个模块中 `getattr(de,n) is getattr(mrz,n)` **全部 True**（是别名而非副本，不会分叉）。
+3. pytest 全量 **230 passed**（MRZ 专项 42 个 = 30 parser + 12 noise）。
+4. `ruff check .` → **All checks passed**。
+5. 应用导入成功，`openapi` 路由数仍为 **86**。
+
+#### 打包不受影响（已核实）
+
+`cinside-backend.spec` 第 44 行用 `collect_submodules('app')` 收集 `app` 下全部子模块，新模块会被自动打包；且 `document_extract → mrz` 是静态导入，PyInstaller 的导入分析同样能发现。**spec 无需改动。**
+
+#### ⚠️ 过程中踩到的坑：行尾不一致会让 diff 假装"整个文件都改了"
+
+拆分后 `git diff --stat` 显示 `document_extract.py | 7353 ++++----` —— 一个 3,397 行的文件却有 7,353 行变动。原因是**行尾被翻转**：该文件在仓库里存的是 **CRLF**，而我的脚本按 `\n` 写回，于是 git 认为每一行都变了，真实改动被完全淹没。
+
+**判据**：`git diff --stat` 的变动行数 ≈ 文件总行数（甚至翻倍）时，几乎一定是行尾或编码被整体改动，而不是你真的改了那么多行。修复方式是**保持原文件的既有行尾**（本例改为用 `git -c core.autocrlf=false add` 避免 CR 被剥离），修好后同一改动的 diff 从 7,353 行降到 **589 行**。
+
+**根因是仓库本身行尾不一致**（这是本次新发现的仓库卫生问题，见第 7.6 节）：同一目录下 `document_extract.py` 与 `main.py` 存的是 CRLF，而 `comparison.py` 存的是 LF。仓库**没有 `.gitattributes`**，`core.autocrlf=true`。建议后续单开一个提交加 `.gitattributes` 并做一次行尾归一 —— 但那会触及大量文件，属于独立的仓库级决定，故本次未做。
 
 ## 4. 遗留：需要你在方便时处理
 
@@ -298,7 +336,7 @@ node --check electron\preload.cjs
 
 > 「去臃肿」阶段的主要工作对象。按严重性排序，不含本次已修项。
 
-### 6.1 单文件巨石（本次未动，风险最高）
+### 7.1 单文件巨石（本次未动，风险最高）
 
 | 文件 | 行数 | 说明 |
 |---|---|---|
@@ -311,13 +349,13 @@ node --check electron\preload.cjs
 | `frontend/src/components/SettingsModal.tsx` | 1,605 | |
 | ~~`frontend/src/components/ElementSelectBar.tsx`~~ | ~~1,562~~ | **已删除**（死代码：组件无任何渲染方，仅类型被引用；`PickTarget` 已迁入 `types.ts`）。见第 3 节 |
 | `frontend/electron/main.cjs` | 4,991 | **81 个 `ipcMain.handle/on`** |
-| `backend/app/services/document_extract.py` | 3,956 | **80+ 个顶层函数**，混合图像预处理 / 三种 OCR 引擎调度 / UMI-OCR 进程自愈 / MRZ 解析 / 日期抽取 / 提示词拼装 / JSON 容错 |
+| `backend/app/services/document_extract.py` | 3,397 | 原 3,956 行；**已拆出 MRZ 一组**（见第 3 节）。剩 7 类职责中的 6 类：图像预处理 / 三种 OCR 引擎调度 / UMI-OCR 进程自愈 / 日期抽取 / 提示词拼装 / JSON 容错 |
 | `backend/app/services/ppt_service.py` | 2,040 | |
 | `backend/app/services/dependency_manager.py` | 1,021 | |
 
 **`App.tsx` 的一个具体佐证**：函数体内部存在**顶格写成第 0 列**的代码块（如第 14194–14200 行）。连大括号配对扫描都会被骗 —— 我实测扫描误判 `App()` 结束于第 14200 行，实际是 18099 行。缩进已完全不可信。
 
-### 6.2 契约与类型
+### 7.2 契约与类型
 
 - **93 个端点零 `response_model`**。⚠️ 注意：**直接补 `response_model` 有破坏功能的风险** —— FastAPI 会按 schema **过滤**响应字段，而前端很可能依赖 schema 之外的字段。必须先有特征测试（已有 6 个端点的 key 集合锁定）再逐端点加
 - `types.ts`（1,183 行）与 `models.py` 有 **12 个同名类型**靠手抄维护，且**已发生漂移**：`types.ts:78` 的 `EvidenceSource` 含 `"web"`，而 `models.py:117` 的 `Literal` 不含；后端 `_decide_evidence_source` 实际只会返回 `passport/excel/none`，所以 `Literal` 里的 `"manual"` 也是死值。更麻烦的是前端把 `c.evidence_source` 写进 `left_source` 字段，而后端该字段 `Literal` 是 `["excel","database","passport","manual"]` → `"web"` 流过去会被 422 拒掉
@@ -326,26 +364,47 @@ node --check electron\preload.cjs
 - 前端 9 处绕过 `client.ts` 的裸 `fetch(`（本次已收口到 `apiFetch`，但契约层仍未统一）
 - 495 条 ESLint warning 存量
 
-### 6.3 错误处理与可观测性
+### 7.3 错误处理与可观测性
 
 - **116 处宽泛/bare `except`**，分布 20 个文件（`document_extract.py` 34、`plugin_loop.py` 17、`dependency_manager.py` 15、`ppt_service.py` 11、`cowork_service.py` 7、`gpu_ocr.py` 6），其中多处以 `pass` 静默吞掉
 - **186 处 `print(`**，14 个文件（`document_extract.py` 70、`ppt_service.py` 58），无 `logging` 模块、无级别、无落盘
 - 前端 129 处 `console.*`（`App.tsx` 71、`main.cjs` 34）
 - `main.py:77` 用的 `@app.on_event("startup")` 在现代 FastAPI 中已弃用，应改用 `lifespan`
 
-### 6.4 安全（除已修的令牌外）
+### 7.4 安全（除已修的令牌外）
 
 - **整个 Electron 层与 `index.html` 没有任何 CSP**（无 `Content-Security-Policy`、无 `onHeadersReceived`）
 - `webSecurity: false` 出现 5 处、`allowRunningInsecureContent: true` 3 处（为跨域 iframe 元素拾取，属有意妥协但全局铺开、无集中说明）
 - IPC 面过宽：81 个 handler + 约 70 个 `electronAPI` 方法，无参数 schema 校验，handler 普遍不检查 `_event.senderFrame`
 
-### 6.5 可能被 WAF 拦截（与 LOOP 受阻相关）
+### 7.5 可能被 WAF 拦截（与 LOOP 受阻相关）
 
 LOOP 回放步骤打在 **Electron 的 BrowserView** 里，即用 Electron 自带 Chromium 加载学校网站。而全仓**没有任何 UA 伪装**（grep `userAgent`/`setUserAgent` 全空），Electron 默认 UA 会带上 `CINSIDE/0.8.6` 与 `Electron/31.7.7` —— 这是最强的自动化特征之一，很多高校/机构站点的 WAF 会直接 403 或弹验证码。叠加 `webSecurity: false` 与主进程开启 CDP 调试端口，可检测特征更多。
 
 **结论：这与接口鉴权改动无关**（鉴权不触碰第三方页面请求，已逐条核实）。修复方向是**只做 UA 对齐**（换成同版本真实 Chrome UA），**不建议**做反检测注入（改 `navigator.webdriver`、伪造指纹那类）—— 后者维护成本高、易随 Chromium 升级失效，也有合规灰区。
 
-### 6.6 其它已记录的怪癖
+### 7.6 仓库卫生：行尾不一致 + 没有 `.gitattributes`（本次新发现）
+
+**问题**：仓库**没有 `.gitattributes`**，`core.autocrlf=true`，但**各文件已存储的行尾并不一致**：
+
+| 文件 | 存储行尾 |
+|---|---|
+| `backend/app/services/document_extract.py` | CRLF |
+| `backend/app/main.py` | CRLF |
+| `backend/app/services/comparison.py` | LF |
+
+**后果**：任何一次整体重写某个文件的操作（脚本改写、编辑器批量格式化、跨平台协作）都可能把行尾翻转，从而让 `git diff` 显示"整个文件都改了"，把真实改动完全淹没。本项目的去臃肿阶段要做大量文件级搬移，**这个坑一定会反复出现**（第 3 节第 2 项已实际踩到一次：7,353 行假 diff）。
+
+**判据**：`git diff --stat` 的变动行数 ≈ 文件总行数（或翻倍）时，先怀疑行尾/编码，而不是自己真的改了那么多。
+
+**建议修复**（会触及大量文件，属仓库级决定，故未擅自做）：
+1. 新增 `.gitattributes`，例如 `* text=auto eol=lf` 统一以 LF 存储（并把 `*.bat`/`*.ps1` 设为 `eol=crlf` 以免破坏 Windows 脚本）；
+2. **单开一个提交**做一次 `git add --renormalize .`，并在提交信息里写明"本提交只改行尾、无逻辑变更"；
+3. 之后所有重构提交都能保持小 diff。
+
+在那之前，**对本仓库文件做搬移时请显式保持原行尾**：`git -c core.autocrlf=false add <file>` 可避免 CR 被剥离。
+
+### 7.7 其它已记录的怪癖
 
 - `comparison.compare_field`：仅网页有值时判成 `mismatch` 且 `evidence_source="none"`；`partial` 只在 excel 与 passport 同时存在时才可能出现；`surname`/`nationality` 是**大小写敏感**比对（`Ivanov` vs `IVANOV` 判为不一致）
 - `config._coerce_value`：`str(raw or "")` 会把 `0` 这类 falsy 非字符串变成 `""`；非法 float 兜底 1.0 而非法 int 兜底 0；`"12.9"` 转 int 得 0
@@ -359,11 +418,17 @@ LOOP 回放步骤打在 **Electron 的 BrowserView** 里，即用 Electron 自�
 
 1. ~~`ElementSelectBar.tsx`（1,562 行死代码）删除~~ —— **已完成**，见第 3 节。
    收益确定、风险低，适合作为去臃肿的第一刀。
-2. **`backend/app/services/document_extract.py` 拆出 `mrz.py`** —— 纯函数、零依赖、已有 30 个测试覆盖，风险最低且能立刻提升可测试性。**建议作为下一项。**
-3. **`App.tsx` 拆解** —— 收益最大但风险最高、工期最长。**必须先产出职责地图**（按 111 个 `useState` 的归属切分业务域），再自叶子域逐个抽 hook，每抽一个域提交一次。**不能先动核心的批量执行状态机。**
-4. **`main.cjs` 按域拆分 IPC** —— 81 个 handler 分域注册，但需逐个确认无顺序依赖。
-5. **契约统一** —— 先补特征测试，再逐端点加 `response_model`；用 `openapi-typescript` 生成类型替代手抄的 12 个同名类型。
-6. **错误处理与日志** —— 收窄 116 处宽泛 except、`print` → `logging`。
+2. ~~`document_extract.py` 拆出 `mrz.py`~~ —— **已完成**，见第 3 节。
+   验证手法（符号快照比对 + 再导出同一性）可复用到后续拆分。
+3. **`document_extract.py` 继续拆分** —— 剩下的 6 类职责里，图像预处理
+   （`_shrink_*` / `_crop_*` / `_zoom_*` / `_binarize_*`）与日期/字段抽取
+   （全部 `_extract_*`）同样偏纯函数，可用同一套手法继续切。
+   UMI-OCR 进程自愈那部分涉及全局状态，风险较高，建议最后动。
+4. **`App.tsx` 拆解** —— 收益最大但风险最高、工期最长。**必须先产出职责地图**（按 111 个 `useState` 的归属切分业务域），再自叶子域逐个抽 hook，每抽一个域提交一次。**不能先动核心的批量执行状态机。**
+5. **`main.cjs` 按域拆分 IPC** —— 81 个 handler 分域注册，但需逐个确认无顺序依赖。
+6. **契约统一** —— 先补特征测试，再逐端点加 `response_model`；用 `openapi-typescript` 生成类型替代手抄的 12 个同名类型。
+7. **错误处理与日志** —— 收窄 116 处宽泛 except、`print` → `logging`。
+8. **仓库行尾归一**（第 7.6 节）—— 建议在做大批量文件搬移**之前**先做，否则每次搬移都要手工防行尾翻转。
 
 **贯穿要求**：每一步都必须保持本文第 5 节的 6 条验证全绿。
 纯重构（移动代码、提取函数、类型搬迁、删除未引用代码）应当让**产物逐字节不变** ——
