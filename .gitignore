@@ -140,6 +140,8 @@ _hdr_cmp.png
 slide-studio-button-compare.png
 
 # Unrelated project build outputs (FrameTol etc.)
+# 注：FrameTol 已于本次整理中移出本仓库（现位于 D:\其他项目\），
+# 这两条保留作为兜底，避免它日后再被误提交。
 dist-frametol-client/
 frametol-client/
 
@@ -149,15 +151,12 @@ _tmp_wave/
 _repack/
 *.artifact.json
 
-# 本地个人资料（非 CINSIDE 源码）：如需入库请先移出仓库
-.remote-input/
-black-hole/
-数学习题解答/
-数学习题.pdf
-习题*.pdf
-习题解答_*.docx
-习题解答_*.md
-第十章 波动.pdf
-# 顶层散落的会话截图/照片（assets 目录内的图片不受影响）
+# 顶层散落的会话截图 / Agent 远程输入暂存（assets 目录内的图片不受影响）
 /*.jpg
 /*.png
+.remote-input/
+
+# 本地个人资料已于本次整理中移出本仓库：
+#   学习资料 与 照片 → D:\个人资料\
+#   独立项目（black-hole、FrameTol）→ D:\其他项目\
+# 因此不再需要针对具体文件名的忽略规则。
