@@ -32,15 +32,14 @@ import asyncio
 import csv
 import io
 import os
-from typing import Iterable
 
-from ..models import ApplicantRecord, VERIFY_FIELDS
+from ..models import ApplicantRecord
 from .excel_ai_parser import ai_detect_column_mapping
 
 # 字段别名映射：归一化成英文 key
 _FIELD_ALIASES: dict[str, str] = {
     "name": "name", "姓名": "name", "fullname": "name", "applicant": "name",
-    "student": "name", "studentname": "name", "studentname": "name", "full name": "name",
+    "student": "name", "studentname": "name", "full name": "name",
     "applicant name": "name", "chinese name": "name", "english name": "name",
     "大写": "name", "英文名": "name", "英文姓名": "name", "姓名大写": "name", "拼音": "name",
     # 护照细分姓名字段（OCR 提取的规范名）：姓/名列也要能归一化命中

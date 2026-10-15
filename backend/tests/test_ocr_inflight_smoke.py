@@ -38,7 +38,7 @@ async def main():
         assert calls["n"] == 1, f"FAIL: 期望识别 1 次，实际 {calls['n']} 次"
         assert dt < 0.9, f"FAIL: 并发未共享（耗时 {dt:.2f}s ≈ 两次串行）"
         assert r1 == ("HELLO", [[0, 0, 1, 1]], (100, 100)), f"FAIL: want_boxes 形状异常 {r1}"
-        assert r2 == r1, f"FAIL: 两个并发调用结果不一致"
+        assert r2 == r1, "FAIL: 两个并发调用结果不一致"
         assert de._last_ocr_backend == "gpu", f"FAIL: backend 标记 {de._last_ocr_backend}"
         print(f"OK 并发去重：识别 {calls['n']} 次，耗时 {dt:.2f}s（两次串行应 >1s）")
 

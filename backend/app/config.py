@@ -5,7 +5,6 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 
 def _get_base_dir() -> Path:

@@ -12,18 +12,18 @@ import abc
 import asyncio
 import base64
 import json
-import uuid
 from typing import AsyncIterator, Optional
 
 from ..config import settings
 from ..models import (
     InputBox,
-    VerificationResult,
+    # ScreenshotEvent 原先只在某个方法内部局部 import，但另一个方法（verify）也用到它，
+    # 导致该处抛 NameError。提升到模块级以覆盖所有使用点。
+    ScreenshotEvent,
     VerificationStep,
     WebsiteField,
     WebsiteInput,
     WorkflowConfig,
-    FieldMapping,
     WorkflowStep,
 )
 
@@ -233,7 +233,6 @@ class BrowserUseAgent(BaseAgent):
         await asyncio.sleep(0.2)
 
         # 构造任务 prompt：明确字段 + 强制 JSON 输出（含 label 和 selector，用于按页面框对比）
-        fields_list = ", ".join(expected_fields.keys())
         expected_hint = "\n".join(
             f"  - {k}: {v}" for k, v in expected_fields.items()
         )

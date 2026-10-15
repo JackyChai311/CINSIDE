@@ -9,7 +9,7 @@ from fastapi import APIRouter, File, HTTPException, Response, UploadFile
 from pydantic import BaseModel
 
 from ..config import settings
-from ..models import ApplicantRecord, PassportData
+from ..models import PassportData
 from ..services.excel_parser import parse_bytes
 from ..services.passport_ocr import extract_passport
 from ..services.task_manager import clear_right_records, list_records, list_right_records, upsert_passport, upsert_records, upsert_right_records

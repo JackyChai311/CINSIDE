@@ -24,7 +24,6 @@ import os
 import re
 import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import httpx

@@ -205,7 +205,7 @@ async def _run_task(task_id: str, record_id: str, university_url: str) -> None:
                         viewport_height=vh,
                     )
                     await emit_screenshot(task_id, final_event)
-        except Exception as e:
+        except Exception:
             # 截图叠加失败不影响主流程
             pass
 

@@ -1,0 +1,41 @@
+# 开发工具配置（pytest / ruff）。
+#
+# 重要：本文件刻意不含 [project] 与 [build-system] 段。
+# 因此它不会被 pip / PyInstaller 当成包元数据读取，
+# 打包仍完全由 cinside-backend.spec 驱动，后端运行时行为不受影响。
+# 测试与 lint 依赖装在 .venv 内，不写入 requirements.txt，
+# 以免改变正式构建产物。
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+# OCR/MRZ 用例接受 stdout 里的中文输出；统一 UTF-8，避免 Windows GBK 控制台报
+# UnicodeEncodeError（原 test_mrz_noise.py 就是被这个打断的）
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+# 只检查源码与测试；不扫 .venv / 构建产物
+extend-exclude = [".venv", "build", "dist", "ocr-models"]
+
+[tool.ruff.lint]
+# 保守起步：只开最不容易误报、且确实代表缺陷的规则集。
+# 不要在这里加 "ALL" —— 存量代码会在一次运行里产生数千条告警，无法收敛。
+select = [
+    "E4",   # import 相关
+    "E7",   # 语句层缺陷（含 E722 裸 except）
+    "E9",   # 语法/运行时错误（未定义名等）
+    "F",    # pyflakes：未使用导入/变量、未定义名
+]
+ignore = [
+    "E402", # 模块级导入不在文件顶部：main.py 为兼容打包刻意在中间导入
+    "E741", # 歧义变量名 l/I/O：存量数学/图像代码里有 l
+    "E702", # 一行多条语句（分号）：纯风格问题，非缺陷；存量 13 处
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里允许 assert 与未使用变量（fixture 占位）
+"tests/*" = ["F401", "F841"]

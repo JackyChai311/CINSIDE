@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """端到端验证导出高亮：模拟用户 Excel 结构（复合中文表头）+ LOOP 报告 highlights。"""
-import sys, io
+import sys
 sys.path.insert(0, ".")
 
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import PatternFill
+from openpyxl import Workbook
 from app.models import ApplicantRecord
 from app.routers.upload import _apply_records_to_first_sheet
 

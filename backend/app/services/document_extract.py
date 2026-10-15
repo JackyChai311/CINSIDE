@@ -1141,7 +1141,7 @@ async def _wait_for_umi_ocr_ready(max_wait: float = 8.0) -> bool:
         try:
             async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
                 # 发一个空请求测试连接（服务未就绪会返回 4xx/5xx，但只要能连接上就说明服务启动了）
-                resp = await client.post(url, json={"base64": ""})
+                await client.post(url, json={"base64": ""})
                 return True  # 不管返回什么，只要能连接上就行
         except Exception:
             await asyncio.sleep(0.8)

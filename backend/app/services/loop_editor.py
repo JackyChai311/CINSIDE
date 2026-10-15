@@ -44,7 +44,6 @@ import sys
 import uuid
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
 
 
 # ---------- 数据结构（与前端 types.ts 对齐） ----------
