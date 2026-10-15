@@ -9,10 +9,10 @@
 |---|---|
 | 工作分支 | `chore/quality-guardrails`（`main` 未动） |
 | 整改前基线 | `8d6733a0a562ea35c4dc0e707a0f186f1616ebf9` |
-| 提交数 | 22（含去臃肿阶段的前 4 项） |
+| 提交数 | 24（含去臃肿阶段的前 4 项） |
 | 改动规模 | 见 `git diff --stat main..HEAD`（含 1,562 行死代码删除） |
 | 前端测试 | vitest **190 passed** / 4 文件（整改前 **0**） |
-| 后端测试 | pytest **256 passed** / 10 文件（整改前 **0**，且原脚本会产生 2 个收集错误） |
+| 后端测试 | pytest **272 passed** / 11 文件（整改前 **0**，且原脚本会产生 2 个收集错误） |
 | 前端 lint | ESLint **0 error / 467 warning**（整改前无 linter；起手 496，删死代码后降 28） |
 | 后端 lint | ruff **All checks passed**（整改前无 linter） |
 | 类型检查 | `tsc --noEmit` exit 0 |
@@ -227,6 +227,25 @@ CORS 白名单（只放行 localhost:5173）对此**无效** —— `webSecurity
 
 约 1.63 GB（FrameTol 占绝大部分）。`black-hole/` 是先读其 README 确认为独立项目后才动的。
 
+### 2.10 修复前后端契约漂移（`0dccca6`）
+
+93 个端点零 `response_model`，请求/响应形状靠 `types.ts` 与 `models.py` 两边手抄，已实际漂移。**先写测试证明 bug 存在，再修**：
+
+修复前 `tests/test_contract_drift.py` 有 6 个用例失败，直接给出证据：
+```
+FieldMapping(left_source="web")        -> ValidationError
+  Input should be 'excel', 'database', 'passport' or 'manual'
+FieldComparison(evidence_source="web") -> ValidationError
+FieldComparison(match="error")         -> ValidationError
+```
+
+其中 `left_source="web"` 是**真实故障**：`frontend/src/App.tsx` 有两处 `left_source: c.evidence_source || "excel"`（行 10218、12216），而 `evidence_source` 按 `types.ts` 的 `EvidenceSource` 可能是 `"web"` → Pydantic 会拒绝**整个请求体**。
+
+**修复**：三处 `Literal` **放宽**（只增加可接受输入，不会让任何已有合法请求失效）——`FieldComparison.match` 补 `"error"`、`FieldComparison.evidence_source` 补 `"web"`、`FieldMapping.left_source` 补 `"web"`。另外发现 `models.py` 自身不一致：`VerificationReportEntry.match` 含 `error` 而 `FieldComparison.match` 不含，已一并统一。
+
+**新增 16 个用例**：7 个值域对齐 + 1 个后端内部一致性 + 5 个参数化（覆盖 `left_source` 前端真正会送的值）+ 2 个往返 + **2 个反向护栏**（放宽值域不等于不校验，完全没出现过的值仍必须被拒）。修复后 16/16 通过，全量 272 passed。
+
+**遗留的语义问题**（本次未动）：前端把 `EvidenceSource` 的值（含 `"web"`）直接写进语义为 `LeftSource` 的 `left_source` 字段 —— 这是前端侧的类型混用，放宽后端值域只是让它在线上不出 422，并未消除概念混淆。值得单独评估。
 ## 3. 去臃肿阶段（进行中）
 
 ### 第 1 项：删除死组件 `ElementSelectBar.tsx`（1,562 行）— 已完成
@@ -419,7 +438,7 @@ node --check electron\preload.cjs
 ### 7.2 契约与类型
 
 - **93 个端点零 `response_model`**。⚠️ 注意：**直接补 `response_model` 有破坏功能的风险** —— FastAPI 会按 schema **过滤**响应字段，而前端很可能依赖 schema 之外的字段。必须先有特征测试（已有 6 个端点的 key 集合锁定）再逐端点加
-- `types.ts`（1,183 行）与 `models.py` 有 **12 个同名类型**靠手抄维护，且**已发生漂移**：`types.ts:78` 的 `EvidenceSource` 含 `"web"`，而 `models.py:117` 的 `Literal` 不含；后端 `_decide_evidence_source` 实际只会返回 `passport/excel/none`，所以 `Literal` 里的 `"manual"` 也是死值。更麻烦的是前端把 `c.evidence_source` 写进 `left_source` 字段，而后端该字段 `Literal` 是 `["excel","database","passport","manual"]` → `"web"` 流过去会被 422 拒掉
+- ~~`types.ts` 与 `models.py` 手抄导致漂移~~ —— ✅ **已修复**（第 2.10 节，`0dccca6`）：三处 `Literal` 已对齐，并新增 `tests/test_contract_drift.py` 作为护栏。**但根因仍在**：两边仍是手抄的 **12 个同名类型**，护栏只能覆盖本次列举的 7 个值域；长期要改用 `openapi-typescript` 生成。另：后端 `_decide_evidence_source` 实际只返回 `passport/excel/none`，故 `Literal` 里的 `"manual"` 仍是死值（无害，已记录）
 - `models.py` 内部并存**两代模型**：老的 `VerificationResult`/`FieldComparison`/`VerificationStep` 与新的 `VerificationReport`/`VerificationReportEntry`/`WorkflowConfig`，另有 `WebsiteField`/`WebsiteInput`/`InputBox` 语义重叠
 - `tsconfig.json` 的 `noUnusedLocals` / `noUnusedParameters` 仍为 `false`
 - 前端 9 处绕过 `client.ts` 的裸 `fetch(`（本次已收口到 `apiFetch`，但契约层仍未统一）
