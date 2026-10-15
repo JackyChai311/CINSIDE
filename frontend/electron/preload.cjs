@@ -18,6 +18,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
   backendStatus: () => ipcRenderer.invoke("backend-status"),
   onBackendReady: (callback) => ipcRenderer.on("backend-ready", callback),
 
+  // 进程间接口令牌：渲染进程调用后端时需带在 X-CINSIDE-Token 头（或 ?token=）。
+  // 用 sendSync 同步取一次，这样渲染进程拿到的是普通字符串，无需 await。
+  // 只有挂了本 preload 的自家窗口才有它 —— 第三方网页的 BrowserView 没有 preload。
+  apiToken: (() => {
+    try {
+      return ipcRenderer.sendSync("get-api-token") || "";
+    } catch (_) {
+      return "";
+    }
+  })(),
+
   // === 自动更新 ===
   updateCheckNow: () => ipcRenderer.invoke("update-check-now"),
   updateDownloadUpdate: () => ipcRenderer.invoke("update-download"),

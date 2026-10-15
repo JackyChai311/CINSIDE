@@ -5,6 +5,7 @@ import asyncio
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from .. import auth
 from ..models import ScreenshotEvent, VerificationStep
 from ..services.task_manager import get_task, subscribe, unsubscribe
 
@@ -13,6 +14,15 @@ router = APIRouter()
 
 @router.websocket("/ws/verify/{task_id}")
 async def ws_verify(websocket: WebSocket, task_id: str):
+    # 这条 WS 会推送护照等个人数据，必须与 /api 同等保护。
+    # 浏览器 WebSocket API 无法自定义请求头，所以令牌走 ?token= 查询串。
+    # 这里读 auth.MODE 而不是 import 时快照，否则测试无法通过 monkeypatch 切换模式。
+    if auth.MODE != "off" and not auth.is_authorized(auth.extract_token(websocket.scope)):
+        if auth.MODE == "enforce":
+            await websocket.close(code=1008)
+            return
+        print(f"[api-auth][REPORT-ONLY] WS 未通过令牌校验: /ws/verify/{task_id}", flush=True)
+
     await websocket.accept()
 
     # 先把已有进度回放

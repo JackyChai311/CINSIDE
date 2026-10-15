@@ -49,9 +49,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .config import settings
+from .auth import ApiAuthMiddleware, describe_mode
 from .routers import config, cowork, document, plugin, ppt, upload, verify, ws, archive
 
 app = FastAPI(title="CINSIDE 核验平台", version="0.1.0")
+
+# 顺序说明：add_middleware 是「前置插入」，后加的在外层、先执行。
+# 先加鉴权再加 CORS，CORS 才是最外层 —— 这样连 403 响应也带 CORS 头，
+# 前端才能读到那条有意义的错误信息，而不是一个笼统的跨域失败。
+#
+# 鉴权令牌由 Electron 主进程经环境变量注入；未配置令牌时中间件直接放行，
+# 因此单独起后端（python run.py）与 pytest 完全不受影响。
+app.add_middleware(ApiAuthMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,6 +69,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+print(f"[init] {describe_mode()}", flush=True)
 
 app.include_router(upload.router)
 app.include_router(verify.router)

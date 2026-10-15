@@ -6,6 +6,7 @@ const fs = require("fs");
 const http = require("http");
 const https = require("https");
 const { spawn, execFile } = require("child_process");
+const crypto = require("crypto");
 const { autoUpdater } = require("electron-updater");
 
 // === 开发版与正式版并存 ===
@@ -20,6 +21,19 @@ if (isDev) {
 const BACKEND_PORT = isDev ? 8001 : 8000;
 const CDP_PORT = isDev ? "9223" : "9222";
 const PLUGIN_CHROME_PORT = isDev ? "9224" : "9223";
+
+// === 进程间接口令牌 ===
+// 为什么需要：渲染进程里的 BrowserView 用 webSecurity:false 加载第三方学校网站，
+// 该设置会让页面**绕过 CORS**。因此任何被载入核验的第三方页面都能直接读本机后端：
+//   /api/config/settings 明文返回全部 API Key，/api/records 含护照号等个人数据。
+// CORS 白名单挡不住（webSecurity 关闭后浏览器不再执行 CORS 检查），
+// 所以必须给后端一把第三方页面拿不到的密钥：这里随机生成，
+// 经环境变量交给 Python 后端，经 preload 交给自家渲染进程。
+const API_TOKEN = crypto.randomBytes(32).toString("hex");
+// 生产 enforce（真正拦截）；开发 report（只记日志不拦）——
+// 开发期若某个调用点漏加请求头，不至于让整片功能失效；
+// 也允许直接用浏览器打开 localhost:5173 调试。
+const API_AUTH_MODE = isDev ? "report" : "enforce";
 
 // 统一日志文件，供调试用。
 // 注意：部分环境的安全软件会拦截 electron.exe 对 AppData 目录的写入（open EPERM/EBADF），
@@ -2741,6 +2755,9 @@ function startBackend() {
       // dev 的 CDP 在 9223、受控 Chrome 在 9224（与正式版的 9222/9223 错开，可并存）
       BROWSER_USE_CDP_URL: "http://localhost:" + CDP_PORT,
       CINSIDE_PLUGIN_CDP_URL: "http://localhost:" + PLUGIN_CHROME_PORT,
+      // 进程间接口鉴权：令牌 + 模式（见文件顶部说明）
+      CINSIDE_API_TOKEN: API_TOKEN,
+      CINSIDE_API_AUTH: API_AUTH_MODE,
     },
   });
 
@@ -3779,6 +3796,14 @@ ipcMain.handle("update-quit-install", () => {
 
 // 前端询问后端是否就绪
 ipcMain.handle("backend-status", () => backendReady);
+
+// 把接口令牌交给自家 preload（preload 用 sendSync 同步取，供 contextBridge 直接暴露）。
+// 注意：第三方网页所在的 BrowserView 没有挂 preload，因此拿不到这个令牌 ——
+// 这正是它能挡住第三方页面读取后端数据的原因。
+ipcMain.on("get-api-token", (event) => {
+  event.returnValue = API_TOKEN;
+  debugLog(`[api-auth] 已向渲染进程下发令牌（模式 ${API_AUTH_MODE}，长度 ${API_TOKEN.length}）`);
+});
 
 // 在文件管理器中显示文件
 // 原 open-external 通道已删除：无任何渲染进程调用方（仅 d.ts 里声明过），
@@ -4920,7 +4945,11 @@ ipcMain.handle("plugin-api", async (_event, req) => {
   try {
     const resp = await fetch(`http://127.0.0.1:${BACKEND_PORT}${apiPath}`, {
       method,
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        // 主进程发起的请求也必须带令牌（这条不走渲染进程，拦不到就不通了）
+        "X-CINSIDE-Token": API_TOKEN,
+      },
       body: body ? JSON.stringify(body) : undefined,
     });
     let data = {};

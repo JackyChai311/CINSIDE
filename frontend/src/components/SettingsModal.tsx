@@ -223,7 +223,14 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
 
       const resp = await fetch(`${apiHost}/api/config/download-umi-ocr/stream`, {
         method: "GET",
-        headers: { Accept: "text/event-stream" },
+        headers: (() => {
+          const h: Record<string, string> = { Accept: "text/event-stream" };
+          // 后端 /api 需要进程间令牌（生产为 enforce）；此处未走 api/client.ts 的
+          // apiFetch，必须自己带上，否则生产环境这个 SSE 会被 403。
+          const t = window.electronAPI?.apiToken;
+          if (t) h["X-CINSIDE-Token"] = t;
+          return h;
+        })(),
         signal: controller.signal,
       });
 

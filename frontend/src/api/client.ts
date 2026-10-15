@@ -36,11 +36,58 @@ const API_HOST =
     : "";
 const BASE = `${API_HOST}/api`;
 
+/**
+ * 进程间接口令牌。
+ *
+ * 后端的 /api 与 /ws 要求带一个只有自家进程才知道的令牌：渲染进程里的
+ * BrowserView 用 webSecurity:false 加载第三方学校网站，该设置会让页面绕过 CORS，
+ * 因此 CORS 白名单挡不住第三方页面直连本机后端（能读到 API Key 与护照数据）。
+ * 令牌由 Electron 主进程随机生成，经 preload 注入到这里；
+ * 第三方网页所在的 BrowserView 没有 preload，所以拿不到。
+ *
+ * 普通浏览器里为空字符串 —— 后端在未配置令牌时完全放行，故不受影响。
+ */
+function apiToken(): string {
+  if (typeof window === "undefined") return "";
+  return window.electronAPI?.apiToken || "";
+}
+
+/** 把令牌并进请求头；必须与调用方已有的头合并，不能覆盖 Content-Type。 */
+function withAuth(headers?: HeadersInit): HeadersInit {
+  const token = apiToken();
+  if (!token) return headers ?? {};
+  const merged: Record<string, string> = {};
+  if (headers) {
+    if (Array.isArray(headers)) {
+      for (const [k, v] of headers) merged[k] = v;
+    } else if (typeof Headers !== "undefined" && headers instanceof Headers) {
+      headers.forEach((v, k) => {
+        merged[k] = v;
+      });
+    } else {
+      Object.assign(merged, headers as Record<string, string>);
+    }
+  }
+  merged["X-CINSIDE-Token"] = token;
+  return merged;
+}
+
+/**
+ * 所有后端 HTTP 请求的统一出口：自动附带令牌。
+ *
+ * 新增调用后端的地方请一律用 apiFetch，不要直接用 fetch ——
+ * 漏带令牌会在生产（enforce）下拿到 403。WebSocket 无法自定义请求头，
+ * 见下方 subscribeTask 改用 ?token= 查询串。
+ */
+function apiFetch(url: string, init?: RequestInit): Promise<Response> {
+  return fetch(url, { ...init, headers: withAuth(init?.headers) });
+}
+
 async function jsonFetch<T>(url: string, init?: RequestInit, timeoutMs = 30000): Promise<T> {
   const controller = new AbortController();
   const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
-    const resp = await fetch(url, { ...init, signal: controller.signal });
+    const resp = await apiFetch(url, { ...init, signal: controller.signal });
     if (!resp.ok) {
       // 只读一次 body：先拿 text，再尝试解析成 JSON 提取 detail/message
       // （避免先 json() 失败再 text() 触发 "body stream already read"）
@@ -351,7 +398,7 @@ export const api = {
 
   downloadExcel: (taskId: string) => {
     const url = `${BASE}/verify/report/${taskId}/excel`;
-    return fetch(url).then((resp) => {
+    return apiFetch(url).then((resp) => {
       if (!resp.ok) throw new Error("下载失败");
       return resp.blob();
     });
@@ -367,7 +414,7 @@ export const api = {
 
   /** 导出 Excel：把内存中（修正后）的字段值写回文件；本地路径=原地写回，否则下载副本 */
   exportExcel: async (side: "left" | "right"): Promise<{ mode: "inplace" | "download"; path?: string; filename?: string; note?: string }> => {
-    const resp = await fetch(`${BASE}/upload/excel-export?side=${side}`);
+    const resp = await apiFetch(`${BASE}/upload/excel-export?side=${side}`);
     return _parseExcelExportResp(resp);
   },
 
@@ -377,7 +424,7 @@ export const api = {
     side: "left" | "right",
     highlights: Array<{ record_id: string; fields: Record<string, string> }>
   ): Promise<{ mode: "inplace" | "download"; path?: string; filename?: string; note?: string }> => {
-    const resp = await fetch(`${BASE}/upload/excel-export-hl`, {
+    const resp = await apiFetch(`${BASE}/upload/excel-export-hl`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ side, highlights }),
@@ -582,7 +629,7 @@ export const api = {
       | { type: "error"; message: string }
     ) => void
   ): Promise<void> => {
-    const resp = await fetch(`${BASE}/ppt/draft-outline-stream`, {
+    const resp = await apiFetch(`${BASE}/ppt/draft-outline-stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
@@ -625,7 +672,7 @@ export const api = {
     slides?: PPTOutlineSlide[] | null,
     addBackground?: boolean
   ): Promise<{ file_path: string; file_name: string; total_slides: number } | void> => {
-    const resp = await fetch(`${BASE}/ppt/create-from-text-stream`, {
+    const resp = await apiFetch(`${BASE}/ppt/create-from-text-stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, style: style ?? null, slides: slides ?? null, add_background: addBackground ?? false }),
@@ -663,7 +710,7 @@ export const api = {
     filePaths: string[],
     onProgress: (ev: PPTProgressEvent) => void
   ): Promise<PPTFileSlides[]> => {
-    const resp = await fetch(`${BASE}/ppt/analyze-stream`, {
+    const resp = await apiFetch(`${BASE}/ppt/analyze-stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ file_paths: filePaths }),
@@ -821,7 +868,7 @@ export const api = {
     },
     onEvent: (ev: CoworkDispatchEvent) => void
   ): Promise<void> => {
-    const resp = await fetch(`${BASE}/cowork/dispatch`, {
+    const resp = await apiFetch(`${BASE}/cowork/dispatch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(params),
@@ -899,7 +946,7 @@ export const api = {
 
   /** 导出：全部卡片 + 进度 + 报告 + 图片 → ZIP 下载 */
   archiveExport: async (payload: ArchivePayload): Promise<void> => {
-    const resp = await fetch(`${BASE}/archive/export`, {
+    const resp = await apiFetch(`${BASE}/archive/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -949,7 +996,11 @@ export function subscribeTask(
 ): WebSocket {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const host = API_HOST ? "localhost:8000" : location.host;
-  const ws = new WebSocket(`${proto}://${host}/ws/verify/${taskId}`);
+  // WebSocket 的浏览器 API 不支持自定义请求头，令牌只能走查询串。
+  // 后端 auth.extract_token 会依次看 X-CINSIDE-Token 与 ?token=。
+  const token = apiToken();
+  const qs = token ? `?token=${encodeURIComponent(token)}` : "";
+  const ws = new WebSocket(`${proto}://${host}/ws/verify/${taskId}${qs}`);
   ws.onopen = () => onOpen?.();
   ws.onmessage = (ev) => {
     try {

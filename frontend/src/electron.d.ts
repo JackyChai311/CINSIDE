@@ -53,6 +53,8 @@ export interface UpdateDownloadProgress {
 export interface ElectronAPI {
   backendStatus: () => Promise<boolean>;
   onBackendReady: (callback: () => void) => void;
+  /** 进程间接口令牌；仅自家渲染进程有（第三方网页的 BrowserView 无 preload）。 */
+  apiToken?: string;
 
   // === 自动更新 ===
   updateCheckNow: () => Promise<{ ok: boolean; message?: string; result?: unknown }>;
