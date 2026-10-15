@@ -53,7 +53,6 @@ export interface UpdateDownloadProgress {
 export interface ElectronAPI {
   backendStatus: () => Promise<boolean>;
   onBackendReady: (callback: () => void) => void;
-  openExternal: (url: string) => void;
 
   // === 自动更新 ===
   updateCheckNow: () => Promise<{ ok: boolean; message?: string; result?: unknown }>;

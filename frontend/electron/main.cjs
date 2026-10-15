@@ -209,8 +209,20 @@ function createWindow() {
   } catch (_) {}
 
   // 外部链接用系统浏览器打开
+  // 加协议白名单：shell.openExternal 对任意协议都照单全收，file: / 自定义协议
+  // 可能被用来拉起本机程序。这里只放行常见的正常外链协议，其余记日志并拒绝。
+  const ALLOWED_EXTERNAL_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    try {
+      const proto = new URL(url).protocol;
+      if (ALLOWED_EXTERNAL_PROTOCOLS.has(proto)) {
+        shell.openExternal(url);
+      } else {
+        debugLog(`[open-external] 已拒绝非白名单协议: ${String(url).slice(0, 120)}`);
+      }
+    } catch (e) {
+      debugLog(`[open-external] URL 解析失败，已拒绝: ${e}`);
+    }
     return { action: "deny" };
   });
 
@@ -3768,14 +3780,21 @@ ipcMain.handle("update-quit-install", () => {
 // 前端询问后端是否就绪
 ipcMain.handle("backend-status", () => backendReady);
 
-// 打开外部链接
-ipcMain.on("open-external", (_event, url) => {
-  shell.openExternal(url);
-});
-
 // 在文件管理器中显示文件
+// 原 open-external 通道已删除：无任何渲染进程调用方（仅 d.ts 里声明过），
+// 却把渲染进程传来的 url 未做任何协议校验地交给 shell.openExternal。
+// 删除该通道即消除这一面攻击面；窗口内 window.open 的链路见 setWindowOpenHandler。
 ipcMain.on("show-item-in-folder", (_event, filePath) => {
-  shell.showItemInFolder(filePath);
+  if (typeof filePath !== "string" || !filePath) return;
+  try {
+    if (!fs.existsSync(filePath)) {
+      debugLog(`[show-item-in-folder] 路径不存在，忽略: ${filePath}`);
+      return;
+    }
+    shell.showItemInFolder(filePath);
+  } catch (e) {
+    debugLog(`[show-item-in-folder] 失败: ${e}`);
+  }
 });
 
 // === 无边框窗口控制 ===

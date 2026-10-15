@@ -17,7 +17,6 @@ contextBridge.exposeInMainWorld("cinsideZoom", {
 contextBridge.exposeInMainWorld("electronAPI", {
   backendStatus: () => ipcRenderer.invoke("backend-status"),
   onBackendReady: (callback) => ipcRenderer.on("backend-ready", callback),
-  openExternal: (url) => ipcRenderer.send("open-external", url),
 
   // === 自动更新 ===
   updateCheckNow: () => ipcRenderer.invoke("update-check-now"),
@@ -145,12 +144,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return file && file.path ? file.path : "";
   },
   // 在文件管理器中显示文件（打开所在目录并选中）
-  showItemInFolder: (filePath) => {
-    try {
-      const { shell } = require("electron");
-      shell.showItemInFolder(filePath);
-    } catch (_) {}
-  },
+  //
+  // 必须走 IPC，不能在这里直接 require("electron").shell：
+  // 本 preload 运行在沙箱化渲染进程里（webPreferences 未显式关闭 sandbox，
+  // Electron 20+ 默认 sandbox: true），而沙箱 preload 只暴露
+  // contextBridge / crashReporter / ipcRenderer / nativeImage / webFrame / webUtils，
+  // 不含 shell。原来的写法会拿到 undefined 并抛 TypeError，
+  // 又被下面的空 catch 吞掉 → "在文件夹中显示" 静默失效。
+  showItemInFolder: (filePath) => ipcRenderer.send("show-item-in-folder", filePath),
   onDownloadCaptured: (callback) => {
     const handler = (_e, data) => callback(data);
     ipcRenderer.on("download-captured", handler);
