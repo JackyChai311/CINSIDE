@@ -109,12 +109,15 @@ class FieldComparison(BaseModel):
     excel_value: str = ""
     passport_value: str = ""
     website_value: str = ""
-    match: Literal["match", "mismatch", "missing", "partial", "unknown"] = "unknown"
+    match: Literal["match", "mismatch", "missing", "partial", "error", "unknown"] = "unknown"
     note: Optional[str] = None
     # === 证据来源扩展（按页面框对比） ===
     website_label: Optional[str] = None     # 右侧页面上该框的原始 label，如 "Full Name"
     selector_hint: Optional[str] = None     # 右侧页面元素的 selector，如 "#full-name"
-    evidence_source: Literal["passport", "excel", "manual", "none"] = "none"
+    # 允许值必须与 frontend/src/types.ts 的 EvidenceSource 对齐（含 "web"）。
+    # 前端 App.tsx 会把 left_source === "database" 映射成 evidence_source = "web"，
+    # 故此处缺 "web" 会导致该值无法往返。见 tests/test_contract_drift.py。
+    evidence_source: Literal["passport", "excel", "web", "manual", "none"] = "none"
     # evidence_source 表示"用来对比该框的左侧证据来自哪个数据源"。
     # 优先级：passport（权威证件）> excel > manual。none 表示左侧没有该字段证据。
 
@@ -153,7 +156,12 @@ class FieldMapping(BaseModel):
     right_label: Optional[str] = None       # 页面 label，如 "Passport Number"
     right_input_type: Optional[str] = None  # text / image / date ...
     # 左侧（Excel / 数据库 / 护照 OCR）
-    left_source: Literal["excel", "database", "passport", "manual"]
+    # ⚠️ "web" 是为了修一处**真实的潜在 422**：前端 App.tsx 里有
+    # `left_source: c.evidence_source || "excel"`（两处），而 evidence_source
+    # 可能是 "web"（见 types.ts 的 EvidenceSource）。此前该值会被 Pydantic
+    # 直接拒绝整个请求体。放宽值域只增加可接受输入，不会让已有合法请求失效。
+    # 见 tests/test_contract_drift.py。
+    left_source: Literal["excel", "database", "passport", "manual", "web"]
     left_field: str                         # 字段名，如 "passport_no"
     left_record_key: Optional[str] = None   # 数据库中定位同一学生的 key
     # 验证方式
