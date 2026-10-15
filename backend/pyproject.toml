@@ -17,7 +17,12 @@ pythonpath = ["."]
 # 若此处再叠加 -q 会变成 extra-quiet，连 "N passed" 汇总行都被抑制，
 # 日志里看不到用例数。安静程度交给调用方决定。
 addopts = ""
-filterwarnings = ["ignore::DeprecationWarning"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    # starlette 自己的 TestClient 弃用提示（与项目代码无关，只污染日志）
+    "ignore:Using .httpx. with .starlette.testclient.",
+    "ignore:You should not use the .timeout. argument with the TestClient",
+]
 
 [tool.ruff]
 target-version = "py312"
