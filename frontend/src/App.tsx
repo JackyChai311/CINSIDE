@@ -223,7 +223,7 @@ function BigClock() {
 import { extractOrigin, collectPaneOrigins, sideFrameByOrigins, hostOf, templatePaneSnapshot, groupPaneSnapshot, checkGroupPanes, originColorClass } from "./lib/paneLinks";
 import ExcelView, { type ExcelPickedField } from "./components/ExcelView";
 import BlankExcel from "./components/BlankExcel";
-import type { PickTarget, CustomTextEntry } from "./components/ElementSelectBar";
+import type { PickTarget, CustomTextEntry } from "./types";
 import ResultsPanel from "./components/ResultsPanel";
 import PersonalPanel from "./components/PersonalPanel";
 import type { ExtractSummaryItem } from "./components/ResultsPanel";

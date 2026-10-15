@@ -77,6 +77,13 @@ export interface ScreenshotEvent {
 
 export type EvidenceSource = "passport" | "excel" | "web" | "manual" | "none";
 
+/**
+ * 当前处于「网页元素拾取」的哪一侧。
+ * 原先定义在 components/ElementSelectBar.tsx 里，但该组件从未被渲染
+ * （只有它的类型被 App.tsx 引用），故把类型迁到此处并删除那个死组件。
+ */
+export type PickTarget = "right" | "left" | null;
+
 export interface FieldComparison {
   field: string;
   excel_value: string;
