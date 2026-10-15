@@ -1,7 +1,7 @@
 {
   "name": "cinside-frontend",
   "private": true,
-  "version": "0.8.5",
+  "version": "0.8.6",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
@@ -164,9 +164,10 @@
     },
     "publish": [
       {
-        "provider": "generic",
-        "url": "https://YOUR-OSS-DOMAIN/cinside/releases",
-        "channel": "latest"
+        "provider": "github",
+        "owner": "JackyChai311",
+        "repo": "CINSIDE",
+        "releaseType": "release"
       }
     ]
   }

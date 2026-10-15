@@ -4,22 +4,26 @@
 
 ## 下载
 
-最新版安装包（Windows）：
+最新版安装包：
 
-- **安装版**：[CINSIDE-Setup.exe](https://YOUR-OSS-DOMAIN/cinside/releases/CINSIDE-Setup-latest.exe)
-- **自动更新清单**：[latest.yml](https://YOUR-OSS-DOMAIN/cinside/releases/latest.yml)
+- **Windows 安装版 / macOS dmg**：[Releases 页面](https://github.com/JackyChai311/CINSIDE/releases/latest)（文件名带版本号，如 `CINSIDE-Setup-0.8.6.exe`）
+- **自动更新清单**：[latest.yml](https://github.com/JackyChai311/CINSIDE/releases/latest/download/latest.yml)
 
-> 安装包体积约 250 MB，超过代码托管平台的单文件限制，因此放在对象存储上分发；
-> 本仓库只托管源码。请把上面的 `YOUR-OSS-DOMAIN` 替换为实际域名。
-> 已安装的客户端会在启动后自动检查并提示升级。
+> 安装包体积约 250 MB，超过代码托管平台的单文件限制，因此随 tag 由 CI 构建并发布到 Release。
+> 已安装的客户端会在启动后自动检查并提示升级（更新源为 GitHub Releases）。
 
-### 从 GitHub 版本迁移
+## 发布
 
-更新源在打包时写死在安装包里，只对重新构建、重新安装的客户端生效。因此：
+打 `v*` tag 推送后，GitHub Actions 会构建 Windows x64 与 macOS arm64/x64 安装包，
+并自动创建对应的 GitHub Release：
 
-- **此前从 GitHub 下载安装的用户**，需要**手动下载并安装一次本页的最新版**；
-- 完成这次重装后，客户端才会改为从对象存储检查更新，之后即可正常自动升级；
-- 未重装的老客户端仍会去 GitHub 检查更新，那里不再发布新版本，因此不会收到升级提示。
+```bash
+git tag v0.8.6
+git push origin main --tags
+```
+
+对象存储（可选的备用分发通道）发布脚本仍在 `frontend/scripts/publish-oss.py`，
+使用前需把 `frontend/package.json` 的 `build.publish` 改为 `generic` provider 并填入真实域名。
 
 ## 技术栈
 

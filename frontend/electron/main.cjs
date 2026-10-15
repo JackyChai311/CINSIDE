@@ -3663,7 +3663,7 @@ app.whenReady().then(async () => {
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = true;
 
-    // 本地开发/自编译运行（win-unpacked 直接跑）没有发布到对象存储的 releases 目录，
+    // 本地开发/自编译运行（win-unpacked 直接跑）没有发布到 GitHub Releases，
     // 自动检查必然失败——后台静默，只有用户手动点「检查更新」才向前端报错
     let autoCheckInFlight = false;
 
