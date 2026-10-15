@@ -9,7 +9,7 @@
 |---|---|
 | 工作分支 | `chore/quality-guardrails`（`main` 未动） |
 | 整改前基线 | `8d6733a0a562ea35c4dc0e707a0f186f1616ebf9` |
-| 提交数 | 18（含去臃肿阶段的前 2 项） |
+| 提交数 | 20（含去臃肿阶段的前 3 项） |
 | 改动规模 | 见 `git diff --stat main..HEAD`（含 1,562 行死代码删除） |
 | 前端测试 | vitest **190 passed** / 4 文件（整改前 **0**） |
 | 后端测试 | pytest **230 passed** / 9 文件（整改前 **0**，且原脚本会产生 2 个收集错误） |
@@ -286,7 +286,27 @@ CORS 白名单（只放行 localhost:5173）对此**无效** —— `webSecurity
 
 **判据**：`git diff --stat` 的变动行数 ≈ 文件总行数（甚至翻倍）时，几乎一定是行尾或编码被整体改动，而不是你真的改了那么多行。修复方式是**保持原文件的既有行尾**（本例改为用 `git -c core.autocrlf=false add` 避免 CR 被剥离），修好后同一改动的 diff 从 7,353 行降到 **589 行**。
 
-**根因是仓库本身行尾不一致**（这是本次新发现的仓库卫生问题，见第 7.6 节）：同一目录下 `document_extract.py` 与 `main.py` 存的是 CRLF，而 `comparison.py` 存的是 LF。仓库**没有 `.gitattributes`**，`core.autocrlf=true`。建议后续单开一个提交加 `.gitattributes` 并做一次行尾归一 —— 但那会触及大量文件，属于独立的仓库级决定，故本次未做。
+**根因是仓库本身行尾不一致**（这是本次新发现的仓库卫生问题）：同一目录下 `document_extract.py` 与 `main.py` 曾存的是 CRLF，而 `comparison.py` 存的是 LF。仓库当时**没有 `.gitattributes`**，`core.autocrlf=true`。
+
+**该根因已在第 3 节第 3 项修复**（`3b1c5bd`：新增 `.gitattributes` 并把 26 个 CRLF 文件归一为 LF）。此后同类搬移不会再出现行尾假 diff。
+
+### 第 3 项：统一行尾为 LF（`3b1c5bd`）— 已完成
+
+**问题**：仓库当时没有 `.gitattributes`，183 个已跟踪文件里 **26 个是 CRLF 存储**，其余为 LF；同一目录下就混着（`document_extract.py` 是 CRLF、`comparison.py` 是 LF），`backend/requirements.txt` 更是 **CRLF/LF 混合**（16 CR / 25 LF）。后果是任何整体重写文件的操作都会翻转行尾、让 diff 假装"整个文件都改了"。而这 26 个文件**恰好就是去臃肿的目标**（`App.tsx`、`main.cjs`、`document_extract.py`、`ResultsPanel.tsx`、`client.ts`、`types.ts` …）。
+
+**改动**：新增 `.gitattributes`（`* text=auto eol=lf`，并把 png/jpg/ico/icns/exe/dll/pyd/asar/pdf 标为 binary），26 个文件 CRLF → LF。
+
+**刻意没做**：不为 `.bat`/`.vbs` 设 `eol=crlf` —— 实测它们在归一化**之前就已是纯 LF**且一直正常工作，不改变能正常工作的东西（将来若出现 `goto`/label 或 `if` 块解析问题，再加 `*.bat text eol=crlf` 即可）。
+
+**验证（6 项）**：
+1. **忽略行尾的内容哈希**（删掉所有 CR 后的 sha256）26 个文件**全部一致** → 除行尾外无任何改动；
+2. **产物逐字节不变**：`npm run build` 仍输出 `index-CQahEXAs.js` / **1,456,521 字节**（与归一化前同名同大小）；
+3. 后端 ruff 通过、pytest **230 passed**、路由数 **86**、`pip install --dry-run -r requirements.txt` exit 0；
+4. 前端 tsc exit 0、vitest **190 passed**、eslint 0 error / 467 warning（与之前一致）；
+5. 4 个 Electron 文件 `node --check` 全过；
+6. 提交后 `git status` **完全干净**（0 改动），索引中 **0 个**含 CR 文件。
+
+**这个提交的 diff 约 46,000 行，是行尾归一化的固有形态**（每个转换文件的每一行都算改动）。判读方式见上：不看 diff 行数，而看"忽略行尾的内容哈希"与"产物是否逐字节不变"。
 
 ## 4. 遗留：需要你在方便时处理
 
@@ -332,7 +352,7 @@ node --check electron\preload.cjs
 
 另：本会话 shell 里 `ELECTRON_RUN_AS_NODE=1` 被设置，导致 Electron 以纯 Node 模式启动（`require("electron")` 直接报找不到模块），所以未能实测拿到 Electron 的真实 User-Agent 字符串。
 
-## 7. 已发现但**未修**的问题（下一阶段输入）
+## 7. 已发现的问题清单（下一阶段输入；含已修复项的记录）
 
 > 「去臃肿」阶段的主要工作对象。按严重性排序，不含本次已修项。
 
@@ -383,26 +403,15 @@ LOOP 回放步骤打在 **Electron 的 BrowserView** 里，即用 Electron 自�
 
 **结论：这与接口鉴权改动无关**（鉴权不触碰第三方页面请求，已逐条核实）。修复方向是**只做 UA 对齐**（换成同版本真实 Chrome UA），**不建议**做反检测注入（改 `navigator.webdriver`、伪造指纹那类）—— 后者维护成本高、易随 Chromium 升级失效，也有合规灰区。
 
-### 7.6 仓库卫生：行尾不一致 + 没有 `.gitattributes`（本次新发现）
+### 7.6 仓库行尾一致性 —— ✅ **已修复**（第 3 节第 3 项，`3b1c5bd`）
 
-**问题**：仓库**没有 `.gitattributes`**，`core.autocrlf=true`，但**各文件已存储的行尾并不一致**：
+原本：仓库没有 `.gitattributes`，183 个已跟踪文件里 26 个是 CRLF 存储、其余 LF，同一目录下混着（`document_extract.py`/`main.py` 为 CRLF，`comparison.py` 为 LF），`requirements.txt` 甚至 CRLF/LF 混合。
 
-| 文件 | 存储行尾 |
-|---|---|
-| `backend/app/services/document_extract.py` | CRLF |
-| `backend/app/main.py` | CRLF |
-| `backend/app/services/comparison.py` | LF |
+后果：任何整体重写文件的操作都会翻转行尾，让 `git diff` 显示"整个文件都改了"（第 3 节第 2 项已实际踩到：7,353 行假 diff）。
 
-**后果**：任何一次整体重写某个文件的操作（脚本改写、编辑器批量格式化、跨平台协作）都可能把行尾翻转，从而让 `git diff` 显示"整个文件都改了"，把真实改动完全淹没。本项目的去臃肿阶段要做大量文件级搬移，**这个坑一定会反复出现**（第 3 节第 2 项已实际踩到一次：7,353 行假 diff）。
+**现已通过 `.gitattributes`（`* text=auto eol=lf`）+ 26 个文件归一转为一律 LF，索引中含 CR 的文件为 0。** 详见第 3 节第 3 项。
 
-**判据**：`git diff --stat` 的变动行数 ≈ 文件总行数（或翻倍）时，先怀疑行尾/编码，而不是自己真的改了那么多。
-
-**建议修复**（会触及大量文件，属仓库级决定，故未擅自做）：
-1. 新增 `.gitattributes`，例如 `* text=auto eol=lf` 统一以 LF 存储（并把 `*.bat`/`*.ps1` 设为 `eol=crlf` 以免破坏 Windows 脚本）；
-2. **单开一个提交**做一次 `git add --renormalize .`，并在提交信息里写明"本提交只改行尾、无逻辑变更"；
-3. 之后所有重构提交都能保持小 diff。
-
-在那之前，**对本仓库文件做搬移时请显式保持原行尾**：`git -c core.autocrlf=false add <file>` 可避免 CR 被剥离。
+保留一条通用判据供将来参考：**`git diff --stat` 的变动行数 ≈ 文件总行数（或翻倍）时，先怀疑行尾/编码被整体改动，而不是自己真的改了那么多。**
 
 ### 7.7 其它已记录的怪癖
 
@@ -428,7 +437,8 @@ LOOP 回放步骤打在 **Electron 的 BrowserView** 里，即用 Electron 自�
 5. **`main.cjs` 按域拆分 IPC** —— 81 个 handler 分域注册，但需逐个确认无顺序依赖。
 6. **契约统一** —— 先补特征测试，再逐端点加 `response_model`；用 `openapi-typescript` 生成类型替代手抄的 12 个同名类型。
 7. **错误处理与日志** —— 收窄 116 处宽泛 except、`print` → `logging`。
-8. **仓库行尾归一**（第 7.6 节）—— 建议在做大批量文件搬移**之前**先做，否则每次搬移都要手工防行尾翻转。
+8. ~~**仓库行尾归一**~~ —— **已完成**（第 3 节第 3 项，`3b1c5bd`）。
+   之所以提到大批量搬移**之前**做：它正是为了让后续每次搬移的 diff 可信。
 
 **贯穿要求**：每一步都必须保持本文第 5 节的 6 条验证全绿。
 纯重构（移动代码、提取函数、类型搬迁、删除未引用代码）应当让**产物逐字节不变** ——
