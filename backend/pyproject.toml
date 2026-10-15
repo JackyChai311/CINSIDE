@@ -13,9 +13,10 @@ python_functions = ["test_*"]
 # 让测试可以 `from app.services import ...`（即 backend/ 目录进 sys.path），
 # 这样从 backend/ 运行 pytest 与从仓库根运行都成立。
 pythonpath = ["."]
-# OCR/MRZ 用例接受 stdout 里的中文输出；统一 UTF-8，避免 Windows GBK 控制台报
-# UnicodeEncodeError（原 test_mrz_noise.py 就是被这个打断的）
-addopts = "-q"
+# 注意：不要把 -q 放进 addopts。CI 调用的是 `pytest -q`，
+# 若此处再叠加 -q 会变成 extra-quiet，连 "N passed" 汇总行都被抑制，
+# 日志里看不到用例数。安静程度交给调用方决定。
+addopts = ""
 filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.ruff]
