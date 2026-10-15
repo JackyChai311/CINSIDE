@@ -142,3 +142,22 @@ slide-studio-button-compare.png
 # Unrelated project build outputs (FrameTol etc.)
 dist-frametol-client/
 frametol-client/
+
+# 会话自查产物 / 临时脚本残留（顶层）
+_ex/
+_tmp_wave/
+_repack/
+*.artifact.json
+
+# 本地个人资料（非 CINSIDE 源码）：如需入库请先移出仓库
+.remote-input/
+black-hole/
+数学习题解答/
+数学习题.pdf
+习题*.pdf
+习题解答_*.docx
+习题解答_*.md
+第十章 波动.pdf
+# 顶层散落的会话截图/照片（assets 目录内的图片不受影响）
+/*.jpg
+/*.png
