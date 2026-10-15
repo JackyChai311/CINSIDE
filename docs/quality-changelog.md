@@ -9,22 +9,44 @@
 |---|---|
 | 工作分支 | `chore/quality-guardrails`（`main` 未动） |
 | 整改前基线 | `8d6733a0a562ea35c4dc0e707a0f186f1616ebf9` |
-| 提交数 | 14 |
-| 改动规模 | 47 文件，+5859 / −345（新增 16，修改 31） |
+| 提交数 | 16（含去臃肿阶段的第 1 项） |
+| 改动规模 | 见 `git diff --stat main..HEAD`（含 1,562 行死代码删除） |
 | 前端测试 | vitest **190 passed** / 4 文件（整改前 **0**） |
 | 后端测试 | pytest **230 passed** / 9 文件（整改前 **0**，且原脚本会产生 2 个收集错误） |
-| 前端 lint | ESLint **0 error / 495 warning**（整改前无 linter） |
+| 前端 lint | ESLint **0 error / 467 warning**（整改前无 linter；起手 496，删死代码后降 28） |
 | 后端 lint | ruff **All checks passed**（整改前无 linter） |
 | 类型检查 | `tsc --noEmit` exit 0 |
-| 生产构建 | exit 0，产物 `dist/assets/index-DbxzguAh.js` 1,397.08 kB（gzip 388.78 kB） |
+| 生产构建 | exit 0，产物 `dist/assets/index-CQahEXAs.js`，1,456,521 字节 |
 | 仓库顶层体积 | 约 19.6 GB → **7.04 GB** |
-| 已跟踪文件数 | 166（`.git` 仅 12.4 MB，仓库本身不臃肿） |
+| 已跟踪文件数 | 165（`.git` 仅 12.4 MB，仓库本身不臃肿） |
 
-### 一条重要的验证线索
+### ⚠️ 关于「产物哈希」这个判据 —— 已被证伪，务必读这一节
 
-前 12 个提交（清理/重构/测试/lint/Electron 修复）期间，生产产物哈希**始终是 `index-JH7MhUmv.js`**，与整改前逐字节相同 —— 这是「零功能影响」最强的证据。
+整改初期我用**产物文件名哈希是否变化**来判断"有没有改变行为"：前 12 个提交期间哈希始终是 `index-JH7MhUmv.js`，所以我认为那是"零功能影响"的强证据。
 
-第 13 个提交（接口鉴权 `2908218`）哈希才变为 `index-DbxzguAh.js`，**这是预期且正确的**：该提交确实改变了运行时行为（给请求加鉴权头），而非重构。
+**后续一个实验证明这个判据不可靠**，记录如下（第 16 个提交，删除死组件时）：
+
+1. 同一份代码连续构建两次 → 文件名哈希、字节数、SHA256 **全部一致**，说明构建本身是确定性的、哈希是稳定可用的；
+2. 但删除一个**从未进入产物**的死组件后，产物**逐字节完全相同**
+   （BEFORE / AFTER 均 1,456,521 字节，**不同字节数 = 0**，2,896 个唯一中文串丢失 0 个），
+   **文件名哈希却变了**（`index-DbxzguAh.js` → `index-CQahEXAs.js`）。
+
+**结论**：
+- **哈希没变** → 可以放心认为行为没变（很强）。
+- **哈希变了 → 不能推断行为变了**。模块图变化（哪怕产物逐字节相同）也会让 Rollup 的哈希改变。
+
+**因此后续去臃肿阶段一律以「产物逐字节比较」为准**，不要只看哈希：
+
+```powershell
+# 改动前：先备份当前产物
+Copy-Item frontend\dist\assets\index-*.js $env:TEMP\bundle-before.js
+# 改动后重新构建，再逐字节比较
+$a=[IO.File]::ReadAllBytes($env:TEMP\bundle-before.js); $b=[IO.File]::ReadAllBytes((Get-ChildItem frontend\dist\assets\index-*.js)[0].FullName)
+$diff=0; for($i=0;$i -lt [Math]::Min($a.Length,$b.Length);$i++){ if($a[$i] -ne $b[$i]){$diff++} }
+"$diff 不同字节 / $($b.Length)"
+```
+
+推而广之：类型-only 改动、移动类型定义、删除未引用文件，都属于"产物应逐字节不变"的类别 —— 这类改动必须用字节比较来证明，不能用哈希。
 
 ## 1. 整改前的关键事实核查
 
@@ -205,7 +227,30 @@ CORS 白名单（只放行 localhost:5173）对此**无效** —— `webSecurity
 
 约 1.63 GB（FrameTol 占绝大部分）。`black-hole/` 是先读其 README 确认为独立项目后才动的。
 
-## 3. 遗留：需要你在方便时处理
+## 3. 去臃肿阶段（进行中）
+
+### 第 1 项：删除死组件 `ElementSelectBar.tsx`（1,562 行）— 已完成
+
+**依据**（删除前逐项核实，不靠猜测）：
+- 全仓搜索 `components/ElementSelectBar`：**只有 `App.tsx:226` 一行 `import type` 引用**。116 处 `ElementSelectBar` 命中里，除该 import 与文件自身外**其余全是注释** —— 组件（default export）无任何渲染方。
+- 它导出的两个类型中，`CustomTextEntry` **本来就定义在 `src/types.ts:383`**（该文件仅 `export type { CustomTextEntry }` 转出）；只有 `PickTarget` 是它自己定义的。
+- 处理：`PickTarget` 迁到 `src/types.ts`（并注明来由），App.tsx 的 import 改指 `./types`，再删除文件。
+
+**验证**（比哈希更硬的证据，详见第 0 节方法论修正）：
+- 产物逐字节比较：BEFORE / AFTER 均 **1,456,521 字节，不同字节数 = 0**
+- 「改动前」产物中搜该组件的独有文案 → **0 次命中**，证明它**从未进入过产物**
+- 产物中 2,896 个唯一中文串，**丢失 0 个**
+- tsc exit 0；vitest 190 passed；eslint 0 error，warning **495 → 467**（少掉的正是该文件贡献的 28 条）
+
+### 第 2 项：从 `document_extract.py` 拆出 `mrz.py` — 待做
+
+`document_extract.py` 共 3,956 行、80+ 顶层函数，混合了图像预处理 / 三种 OCR 引擎调度 / UMI-OCR 进程自愈 / MRZ 解析 / 日期抽取 / 提示词拼装 / JSON 容错共 7 类职责。
+
+其中 **MRZ 部分是纯函数、零外部依赖、且已有 30 个测试覆盖**（`test_mrz_parser.py`），是最适合先拆的一块。涉及符号：`_normalize_for_compare`、`_mrz_char_val`、`_icao_check`、`_MRZ_CHARS`、`_CONFUSABLE`、`_repair_mrz_line2`、`_parse_mrz`，以及 `_repair_mrz_line2` 内部 `_ok()` 用到的 `_ISO3_COUNTRY_CODES`（定义在文件另一处，第 3377 行附近）。
+
+**关键约束**：现有 230 个测试里有多个 `from app.services.document_extract import _icao_check, ...`，**拆完必须保持 `document_extract` 仍能导出这些名字**，否则会一次性弄坏测试。做法是显式再导出（`from .mrz import X as X` 形式，ruff 认可为有意再导出，不会被 F401 判为未使用导入）。
+
+## 4. 遗留：需要你在方便时处理
 
 | 项 | 说明 |
 |---|---|
@@ -213,7 +258,7 @@ CORS 白名单（只放行 localhost:5173）对此**无效** —— `webSecurity
 | CI 门禁未实证 | workflow 尚未在 GitHub 跑过，需 push 分支或打 tag |
 | 后端旧构建产物 | `backend/dist`（415 MB）+ `backend/build`（86.6 MB）保留未动 —— 它们是打包必需中间产物 |
 
-## 4. 复现验证（改完请跑这 6 条）
+## 5. 复现验证（改完请跑这 6 条）
 
 ```powershell
 cd D:\CINSIDE\frontend
@@ -238,7 +283,7 @@ node --check electron\preload.cjs
 **回滚**：所有改动都在 `chore/quality-guardrails` 分支，`main` 保持基线 `8d6733a`。
 `git checkout main` 即可完全复原。或 `git reset --hard 8d6733a`（会丢弃全部改动）。
 
-## 5. 我无法验证的部分（诚实声明）
+## 6. 我无法验证的部分（诚实声明）
 
 本环境无法启动 Electron GUI，因此以下几项**只能靠静态推理 + 后端测试保证**，需要你本地跑一次确认：
 
@@ -249,7 +294,7 @@ node --check electron\preload.cjs
 
 另：本会话 shell 里 `ELECTRON_RUN_AS_NODE=1` 被设置，导致 Electron 以纯 Node 模式启动（`require("electron")` 直接报找不到模块），所以未能实测拿到 Electron 的真实 User-Agent 字符串。
 
-## 6. 已发现但**未修**的问题（下一阶段输入）
+## 7. 已发现但**未修**的问题（下一阶段输入）
 
 > 「去臃肿」阶段的主要工作对象。按严重性排序，不含本次已修项。
 
@@ -264,7 +309,7 @@ node --check electron\preload.cjs
 | `frontend/src/components/LeftPanel.tsx` | 1,990 | |
 | `frontend/src/lib/widgetScripts.ts` | 1,787 | |
 | `frontend/src/components/SettingsModal.tsx` | 1,605 | |
-| `frontend/src/components/ElementSelectBar.tsx` | 1,562 | **死代码**：组件无任何渲染方，仅其类型被 `App.tsx` 引用 |
+| ~~`frontend/src/components/ElementSelectBar.tsx`~~ | ~~1,562~~ | **已删除**（死代码：组件无任何渲染方，仅类型被引用；`PickTarget` 已迁入 `types.ts`）。见第 3 节 |
 | `frontend/electron/main.cjs` | 4,991 | **81 个 `ipcMain.handle/on`** |
 | `backend/app/services/document_extract.py` | 3,956 | **80+ 个顶层函数**，混合图像预处理 / 三种 OCR 引擎调度 / UMI-OCR 进程自愈 / MRZ 解析 / 日期抽取 / 提示词拼装 / JSON 容错 |
 | `backend/app/services/ppt_service.py` | 2,040 | |
@@ -308,15 +353,19 @@ LOOP 回放步骤打在 **Electron 的 BrowserView** 里，即用 Electron 自�
 - `_repair_mrz_line2` 只在国家码属于 `_ISO3_COUNTRY_CODES` 时才修；ICAO 官方样板码 `UTO` 不在白名单里
 - 现存 `test_mrz_noise.py` 的样本自称"标准 TD3 MRZ"，实际 L1 是 47 字符（应 44）、L2 有 3 个检查位不成立。数据已按原样保留（该用例本就是"噪声"场景），新测试另用 `_icao_check` 现算构造真正合法的行
 
-## 7. 「去臃肿」阶段的建议顺序
+## 8. 「去臃肿」阶段的建议顺序
 
-按「收益 ÷ 风险」排序，建议自上而下：
+按「收益 ÷ 风险」排序。~~已完成的划掉~~，便于看出进度：
 
-1. **`App.tsx` 拆解** —— 收益最大但风险最高。**必须先产出职责地图**（按 111 个 `useState` 的归属切分业务域），再自叶子域逐个抽 hook，每抽一个域提交一次。**不能先动核心的批量执行状态机。**
-2. **`backend/app/services/document_extract.py` 拆分** —— 其 `mrz.py` 部分（纯函数、零依赖、已有 30 个测试）**最适合先拆**，风险最低，且能立刻提升可测试性。
-3. **`ElementSelectBar.tsx`（1,562 行死代码）处理** —— 需先把被引用的类型迁出，再删除文件。收益确定、风险低。
+1. ~~`ElementSelectBar.tsx`（1,562 行死代码）删除~~ —— **已完成**，见第 3 节。
+   收益确定、风险低，适合作为去臃肿的第一刀。
+2. **`backend/app/services/document_extract.py` 拆出 `mrz.py`** —— 纯函数、零依赖、已有 30 个测试覆盖，风险最低且能立刻提升可测试性。**建议作为下一项。**
+3. **`App.tsx` 拆解** —— 收益最大但风险最高、工期最长。**必须先产出职责地图**（按 111 个 `useState` 的归属切分业务域），再自叶子域逐个抽 hook，每抽一个域提交一次。**不能先动核心的批量执行状态机。**
 4. **`main.cjs` 按域拆分 IPC** —— 81 个 handler 分域注册，但需逐个确认无顺序依赖。
 5. **契约统一** —— 先补特征测试，再逐端点加 `response_model`；用 `openapi-typescript` 生成类型替代手抄的 12 个同名类型。
 6. **错误处理与日志** —— 收窄 116 处宽泛 except、`print` → `logging`。
 
-**贯穿要求**：每一步都必须保持本文第 4 节的 6 条验证全绿；纯重构应尽量让生产产物哈希不变（哈希变化即意味着行为变了，需单独说明）。
+**贯穿要求**：每一步都必须保持本文第 5 节的 6 条验证全绿。
+纯重构（移动代码、提取函数、类型搬迁、删除未引用代码）应当让**产物逐字节不变** ——
+请在改动前后各构建一次并做字节比较（方法见第 0 节）。**不要只看文件名哈希**：
+已证实哈希会因模块图变化而改变，即使产物逐字节相同。字节数变了就必须解释清楚原因。
