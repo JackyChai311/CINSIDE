@@ -35,6 +35,16 @@ export interface HighlightBox {
   label?: string;
 }
 
+/** HARNESS 绑定的浏览器页（来自 harness-pages IPC） */
+export interface HarnessBrowserPage {
+  side: ViewSide;
+  alive: boolean;
+  detached?: boolean;
+  url: string;
+  title: string;
+  visible?: boolean;
+}
+
 /** 更新信息 */
 export interface UpdateInfo {
   version: string;
@@ -130,6 +140,19 @@ export interface ElectronAPI {
 
   // 截图指定 view 中的元素区域（用于头像提取）
   viewCaptureElement: (side: ViewSide, rect: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
+
+  // === HARNESS（双对象 Computer Use） ===
+  /** 后端操控 BrowserView 用的 CDP 端点 */
+  harnessCdpInfo: () => Promise<{ port: string; endpoint: string }>;
+  /** 左右 BrowserView 当前的真实地址与标题 */
+  harnessPages: () => Promise<HarnessBrowserPage[]>;
+  /** 实时预览：截当前 view 可视区 */
+  harnessPreview: (side: ViewSide) => Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
+  /** 选择要交给 HARNESS 的表格文件 */
+  harnessPickExcel: () => Promise<{
+    canceled: boolean;
+    file: { file_path: string; file_name: string; size: number; ext: string } | null;
+  }>;
 
   // === 下载捕获（文件提取模式） ===
   setDownloadCapture: (side: ViewSide, enabled: boolean) => Promise<{ ok: boolean }>;

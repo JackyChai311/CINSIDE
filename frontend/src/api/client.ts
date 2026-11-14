@@ -11,6 +11,12 @@ import type {
   DocumentExtractResult,
   DocumentPreviewResult,
   GpuInfo,
+  HarnessEvent,
+  HarnessExcelSource,
+  HarnessPage,
+  HarnessPlan,
+  HarnessQueueTask,
+  HarnessStatus,
   HumanCoworkTask,
   PPTFileSlides,
   PPTOutlineSlide,
@@ -404,7 +410,7 @@ export const api = {
     });
   },
 
-  /** 登记 Excel 本地路径（Electron File.path）：导出时可原地写回原文件 */
+  /** 登记 Excel 本地路径（Electron webUtils.getPathForFile）：导出时可原地写回原文件 */
   setExcelSource: (side: "left" | "right", path: string, filename: string) =>
     jsonFetch<{ ok: boolean; mode: string }>(`${BASE}/upload/excel-source`, {
       method: "POST",
@@ -979,6 +985,200 @@ export const api = {
       body: fd,
     }, 120000);
   },
+
+  // ============ HARNESS（双对象 Computer Use） ============
+
+  /** 运行前自检：LLM 是否可用、CDP 是否连得上 */
+  harnessStatus: () => jsonFetch<HarnessStatus>(`${BASE}/harness/status`),
+
+  /** 可绑定的对象清单（网页页面 + Excel 数据源） */
+  harnessTargets: () =>
+    jsonFetch<{
+      pages: HarnessPage[];
+      all_pages: HarnessPage[];
+      cdp_error: string;
+      excel_sources: HarnessExcelSource[];
+    }>(`${BASE}/harness/targets`),
+
+  /** 绑定前预览 Excel 结构 */
+  harnessInspectExcel: (path: string) =>
+    jsonFetch<{ summary: { file: string; sheets: Array<{ name: string; headers: string[]; rows: number; cols: number }> } }>(
+      `${BASE}/harness/excel/inspect`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      },
+      60000
+    ),
+
+  /**
+   * 启动 HARNESS 任务并流式接收事件。
+   * 返回 stop()：中止读取流（后端会在下一次决策边界感知到停止请求）。
+   */
+  harnessRun: async (
+    params: {
+      instruction: string;
+      web?: { url: string; label?: string; exclude_urls?: string[] } | null;
+      excel?: { path: string; label?: string } | null;
+      max_steps?: number;
+      vision?: boolean;
+    },
+    onEvent: (ev: HarnessEvent) => void
+  ): Promise<{ taskId: string; abort: () => void }> => {
+    const controller = new AbortController();
+    const resp = await apiFetch(`${BASE}/harness/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+      signal: controller.signal,
+    });
+    if (!resp.ok || !resp.body) {
+      let msg = `启动失败: HTTP ${resp.status}`;
+      try {
+        const j = await resp.json();
+        msg = j.detail || msg;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(msg);
+    }
+    let taskId = "";
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    const pump = (async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() || "";
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line || line.startsWith(":")) continue; // SSE 心跳
+            if (!line.startsWith("data:")) continue;
+            try {
+              const ev = JSON.parse(line.slice(5).trim()) as HarnessEvent;
+              if (ev.type === "accepted") taskId = ev.taskId;
+              onEvent(ev);
+            } catch (e) {
+              if (!(e instanceof Error) || e.message !== "Unexpected end of JSON input") {
+                console.warn("harness event parse error", e, line.slice(0, 200));
+              }
+            }
+          }
+        }
+      } catch (e) {
+        if (!(e instanceof DOMException && e.name === "AbortError")) {
+          onEvent({ type: "error", message: e instanceof Error ? e.message : String(e) });
+        }
+      }
+    })();
+
+    return {
+      get taskId() {
+        return taskId;
+      },
+      abort: () => {
+        controller.abort();
+        pump.catch(() => {});
+      },
+    } as { taskId: string; abort: () => void };
+  },
+
+  /** 回答 ask_user 提出的问题 */
+  harnessAnswer: (taskId: string, answer: string) =>
+    jsonFetch<{ ok: boolean }>(`${BASE}/harness/${taskId}/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answer }),
+    }),
+
+  /** 停止任务 */
+  harnessStop: (taskId: string) =>
+    jsonFetch<{ ok: boolean; message?: string }>(`${BASE}/harness/${taskId}/stop`, { method: "POST" }),
+
+  /** 最近任务 */
+  harnessTasks: (limit = 20) =>
+    jsonFetch<{ tasks: Array<Record<string, unknown>> }>(`${BASE}/harness/tasks?limit=${limit}`),
+
+  // ---------- 先出流程（可核对 / 可修改） ----------
+
+  /** 让 HARNESS 先出流程：观察真实页面与表格结构后返回步骤清单（不执行） */
+  harnessPlan: (params: {
+    instruction: string;
+    web?: { url: string; label?: string; exclude_urls?: string[] } | null;
+    excel?: { path: string; label?: string } | null;
+  }) =>
+    jsonFetch<{ ok: boolean; plan: HarnessPlan }>(`${BASE}/harness/plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    }, 120000),
+
+  /** 让 HARNESS 按意见改流程 */
+  harnessPlanRevise: (params: {
+    plan: HarnessPlan;
+    request: string;
+    instruction?: string;
+    web?: { url: string; label?: string; exclude_urls?: string[] } | null;
+    excel?: { path: string; label?: string } | null;
+  }) =>
+    jsonFetch<{ ok: boolean; plan: HarnessPlan }>(`${BASE}/harness/plan/revise`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    }, 120000),
+
+  // ---------- 任务队列（桌面待执行卡片） ----------
+
+  /** 安排一个任务：立刻变成一张待执行卡片，按顺序自动执行 */
+  harnessEnqueue: (params: {
+    instruction: string;
+    web?: { url: string; label?: string; exclude_urls?: string[] } | null;
+    excel?: { path: string; label?: string } | null;
+    max_steps?: number;
+    vision?: boolean;
+    plan?: HarnessPlan | null;
+  }) =>
+    jsonFetch<{ ok: boolean; task: HarnessQueueTask }>(`${BASE}/harness/queue`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    }),
+
+  /** 队列里的全部卡片 */
+  harnessQueue: () => jsonFetch<{ tasks: HarnessQueueTask[] }>(`${BASE}/harness/queue`),
+
+  /** 取消（排队中→直接作废；运行中→请求停止） */
+  harnessQueueCancel: (id: string) =>
+    jsonFetch<{ ok: boolean; status?: string; message?: string }>(
+      `${BASE}/harness/queue/${id}/cancel`,
+      { method: "POST" }
+    ),
+
+  /** 回答卡片上的追问 */
+  harnessQueueAnswer: (id: string, answer: string) =>
+    jsonFetch<{ ok: boolean; message?: string }>(`${BASE}/harness/queue/${id}/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answer }),
+    }),
+
+  /** 从桌面移除卡片 */
+  harnessQueueDiscard: (id: string) =>
+    jsonFetch<{ ok: boolean; message?: string }>(`${BASE}/harness/queue/${id}`, { method: "DELETE" }),
+
+  /** 清掉已结束的卡片 */
+  harnessQueueClear: () =>
+    jsonFetch<{ ok: boolean; removed: number }>(`${BASE}/harness/queue/clear`, { method: "POST" }),
+
+  /** 让队列重新跑起来（应用重启后手工恢复） */
+  harnessQueueResume: () =>
+    jsonFetch<{ ok: boolean }>(`${BASE}/harness/queue/resume`, { method: "POST" }),
 };
 
 export type VerifyEvent =

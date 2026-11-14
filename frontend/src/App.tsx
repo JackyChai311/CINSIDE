@@ -66,6 +66,8 @@ import PPTWorkflowPanel from "./components/PPTWorkflowPanel";
 import CoworkStudio from "./components/CoworkStudio";
 import TaskSelector from "./components/TaskSelector";
 import UpdateNotice from "./components/UpdateNotice";
+import HarnessHud from "./components/HarnessHud";
+import DeskTaskBoard from "./components/DeskTaskBoard";
 function LogoWordmark({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 420 120" width="100%" height="100%" className={className} aria-label="CINSIDE">
@@ -93,6 +95,7 @@ import type {
   FieldComparison,
   FieldMapping,
   FieldMatch,
+  HarnessQueueTask,
   LivePair,
   Overall,
   PickedMark,
@@ -133,11 +136,11 @@ import {
 import LeftPanel from "./components/LeftPanel";
 import type { AISphereState } from "./components/AISphere";
 import BrowserPane, { type PickedElementInfo, getPaneExchangeApi } from "./components/BrowserPane";
-import DotWorldMap from "./components/DotWorldMap";
 
-/** 任务界面全局壁纸：勾选「使用默认壁纸」用点阵世界地图，否则用自定义图片（z=-1 绘制在面板之下、body 背景之上）。
- *  brightness：壁纸亮度系数（0.2~2.0，1.0 为原始亮度），通过 CSS filter 作用于整层壁纸。 */
-function TaskWallpaperLayer({ on, color, custom, useDefault, brightness = 1 }: { on: boolean; color: string; custom?: string; useDefault?: boolean; brightness?: number }) {
+/** 任务界面全局壁纸：勾选「使用默认壁纸」用内置默认壁纸图（public/default-wallpaper.webp），否则用用户上传的自定义图片（z=-1 绘制在面板之下、body 背景之上）。
+ *  brightness：壁纸亮度系数（0.2~2.0，1.0 为原始亮度），通过 CSS filter 作用于整层壁纸。
+ *  color：早期点阵地图壁纸的颜色参数，已随默认壁纸换成图片而不再使用；保留在类型里以兼容现有调用点。 */
+function TaskWallpaperLayer({ on, custom, useDefault, brightness = 1 }: { on: boolean; color: string; custom?: string; useDefault?: boolean; brightness?: number }) {
   if (!on) return null;
   // brightness=1 时不加 filter，避免无谓的合成开销
   const filterStyle = Math.abs((brightness ?? 1) - 1) < 0.001 ? undefined : `brightness(${brightness})`;
@@ -169,18 +172,16 @@ function TaskWallpaperLayer({ on, color, custom, useDefault, brightness = 1 }: {
       className="pointer-events-none fixed inset-0 overflow-hidden"
       style={{ zIndex: -1, filter: filterStyle }}
     >
-      {/* 地图以 canvas 生成的无缝 tile 位图平铺铺满整窗：GPU 直接纹理采样，
-          左栏/右栏/底部任何位置都能透出壁纸点阵（比数百层 radial-gradient 拼接平铺流畅得多） */}
-      <DotWorldMap
-        className="select-none"
-        color={color}
-        opacity={1}
-        dotSize={6}
-        gap={3}
-        pattern
+      {/* 默认壁纸：江南水墨图（public/default-wallpaper.webp），cover 铺满整窗，
+          作为静态位图由 GPU 直接纹理采样渲染，无逐帧开销。
+          仍走「使用默认壁纸」分支；用户上传自定义壁纸时由上方 useDefault===false 分支接管，互不影响。 */}
+      <div
+        className="absolute inset-0 select-none"
         style={{
-          position: "absolute",
-          inset: 0,
+          backgroundImage: `url(${import.meta.env.BASE_URL}default-wallpaper.webp)`,
+          backgroundSize: "cover",
+          backgroundPosition: "center",
+          backgroundRepeat: "no-repeat",
         }}
       />
     </div>
@@ -198,26 +199,35 @@ function BigClock() {
   const pad = (n: number) => String(n).padStart(2, "0");
   const WEEK = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
   const week = WEEK[now.getDay()];
-  const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const dateStr = `${now.getFullYear()} 年 ${pad(now.getMonth() + 1)} 月 ${pad(now.getDate())} 日`;
   return (
-    <div className="flex select-none flex-col items-center animate-fade-in">
-      {/* 星期徽标：浅色胶囊，置于时间上方，作为最轻的一层信息 */}
-      <span className="mb-5 rounded-full bg-white/60 px-3.5 py-1 text-[13px] font-medium tracking-[0.2em] text-slate-500 ring-1 ring-white/70 backdrop-blur-sm">
-        {week}
-      </span>
-      {/* 时间：等宽数字，冒号用品牌色并轻微上提，避免视觉重心偏下 */}
-      <div className="font-mono text-[76px] font-semibold leading-none tabular-nums tracking-tight text-slate-800">
-        {pad(now.getHours())}
-        <span className="mx-1.5 -translate-y-1 text-brand-500">:</span>
-        {pad(now.getMinutes())}
-        <span className="mx-1.5 -translate-y-1 text-brand-500">:</span>
-        {pad(now.getSeconds())}
+    <section
+      aria-label={`${dateStr} ${week}，${pad(now.getHours())} 时 ${pad(now.getMinutes())} 分 ${pad(now.getSeconds())} 秒`}
+      className="relative select-none px-12 pb-20 pt-7 text-slate-800 animate-fade-in dark:text-slate-100"
+    >
+      <div className="relative flex items-baseline justify-center whitespace-nowrap" role="timer" aria-live="off">
+        <time
+          className="font-mono text-[88px] font-light leading-none tabular-nums tracking-[-0.05em]"
+        >
+          {pad(now.getHours())}
+          <span
+            aria-hidden="true"
+            className="mx-3 inline-block bg-slate-400/60 dark:bg-slate-500"
+            style={{ width: "0.055em", height: "0.7em", borderRadius: "1px", verticalAlign: "-0.06em" }}
+          />
+          {pad(now.getMinutes())}
+        </time>
+        <span className="ml-3 font-mono text-[22px] font-normal tabular-nums tracking-normal text-slate-400/90">
+          {pad(now.getSeconds())}
+        </span>
       </div>
-      {/* 日期：时间下方一行，字母间距拉开，与大幅时间形成安静的对比 */}
-      <span className="mt-5 text-[15px] font-medium tracking-[0.28em] text-slate-400">
-        {dateStr}
-      </span>
-    </div>
+
+      <div className="relative mt-6 flex items-center justify-center gap-3.5 text-[12px] tracking-[0.18em] text-slate-500 dark:text-slate-400">
+        <span>{dateStr}</span>
+        <span aria-hidden="true" className="h-3 w-px bg-slate-400/40" />
+        <span className="text-slate-600 dark:text-slate-300">{week}</span>
+      </div>
+    </section>
   );
 }
 import { extractOrigin, collectPaneOrigins, sideFrameByOrigins, hostOf, templatePaneSnapshot, groupPaneSnapshot, checkGroupPanes, originColorClass } from "./lib/paneLinks";
@@ -1362,6 +1372,79 @@ export default function App() {
   const [focusBottomMode, setFocusBottomMode] = useState(false);
   // Excel 视图脱离
   const [excelDetached, setExcelDetached] = useState(false);
+  // ---------- HARNESS：入口是「桌面派单」，执行时用浮窗看步骤 ----------
+  // 桌面流程草案是否打开（打开时收起大时钟，把屏幕让给流程核对）
+  const [deskDraftOpen, setDeskDraftOpen] = useState(false);
+  // 顶栏 HARNESS 按钮：+1 表示"召唤一次桌面输入框"
+  const [deskSummon, setDeskSummon] = useState(0);
+  // 流程草案下移：占下栏「字段对比」那一栏，上方亮出两个浏览器面板
+  const [planDocked, setPlanDocked] = useState(false);
+  /** 下栏里留给草案的容器（React 回调 ref，赋值后草案 portal 进来） */
+  const [planDockEl, setPlanDockEl] = useState<HTMLDivElement | null>(null);
+  // 下移前的下栏高度：收回大屏时还原
+  const planDockPrevHeightRef = useRef<number | null>(null);
+  // 正在执行的 HARNESS 任务（浮窗展示步骤与当前步）
+  const [harnessTask, setHarnessTask] = useState<HarnessQueueTask | null>(null);
+  // 用户手动收起过的浮窗任务 id（同一个任务不再自动弹）
+  const [harnessHudHidden, setHarnessHudHidden] = useState("");
+
+  /** 点 HARNESS：未开启时进清屏桌面并弹派单输入框；已开启时关闭（点一次开、再点一次关） */
+  const openHarnessDesk = useCallback(() => {
+    if (deskVisibleRef.current) {
+      setFocusBottomMode(false);
+      setLeftPanelOpen(true);
+      setBottomPanelOpen(true);
+      setDeskDraftOpen(false);
+      return;
+    }
+    setFocusBottomMode(true);
+    setLeftPanelOpen(false);
+    setBottomPanelOpen(false);
+    setDeskSummon((v) => v + 1);
+  }, []);
+
+  // 轮询队列：拿到「正在执行的任务」，驱动浮窗与自动亮出浏览器
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      try {
+        const res = await api.harnessQueue();
+        if (!alive) return;
+        const running = (res.tasks || []).find((t) => t.status === "running") || null;
+        setHarnessTask(running);
+      } catch {
+        /* 后端未就绪时静默 */
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), 2000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  // 任务开跑：退出清屏、亮出两个浏览器面板，让人能盯着光标一步步走
+  const lastRunningRef = useRef("");
+  useEffect(() => {
+    const id = harnessTask?.id || "";
+    if (id && id !== lastRunningRef.current) {
+      lastRunningRef.current = id;
+      setFocusBottomMode(false);
+      setDeskDraftOpen(false);
+      setHarnessHudHidden("");
+    }
+    if (!id) lastRunningRef.current = "";
+  }, [harnessTask?.id]);
+
+  // 清屏桌面是否正在显示（浮窗与桌面卡片不重复展示）
+  const deskVisible = focusBottomMode && !leftPanelOpen && !bottomPanelOpen;
+  // 用 ref 镜像 deskVisible，供 openHarnessDesk 回调读取最新状态（该回调依赖项为空，避免闭包读到旧值）
+  const deskVisibleRef = useRef(deskVisible);
+  deskVisibleRef.current = deskVisible;
+  const showHarnessHud =
+    !!harnessTask && harnessTask.id !== harnessHudHidden && !deskVisible;
   // 弹窗（window.open 拦截）：记录哪个 side 的弹窗处于激活状态
   const [popupSide, setPopupSide] = useState<ViewSide | null>(null);
   const popupSideRef = useRef<ViewSide | null>(null);
@@ -1634,6 +1717,39 @@ const sourceFieldLabelRef = useRef<string>("");
   // 双击最大化前的高度记录（用于还原）
   const prevBottomHeightRef = useRef<number | null>(null);
 
+  // 未下移时随手记下下栏高度：草案收回大屏时按这个值还原
+  useEffect(() => {
+    if (!planDocked) planDockPrevHeightRef.current = bottomPanelHeight;
+  }, [bottomPanelHeight, planDocked]);
+
+  /**
+   * 流程草案下移 / 收回。
+   * 下移：退出清屏，上方两个浏览器面板铺开，下栏抬到能看全步骤的高度，
+   *       并把选中的那一侧切回网页视图（草案的高亮只能在网页上画）。
+   */
+  const handlePlanDockChange = useCallback(
+    (docked: boolean, webSide: "left" | "right" | "none", backToDesk = false) => {
+      setPlanDocked(docked);
+      if (docked) {
+        setFocusBottomMode(false);
+        setBottomPanelOpen(true);
+        if (webSide === "left") setLeftViewMode("web");
+        else if (webSide === "right") setRightViewMode("web");
+        setBottomPanelHeight((h) => (h < 42 ? 46 : h));
+        return;
+      }
+      const prev = planDockPrevHeightRef.current;
+      if (prev !== null) setBottomPanelHeight(prev);
+      if (backToDesk) {
+        // 收回大屏继续核对：回到清屏桌面（草案状态还在 DeskTaskBoard 里，这层必须留着）
+        setFocusBottomMode(true);
+        setBottomPanelOpen(false);
+        setLeftPanelOpen(false);
+      }
+    },
+    []
+  );
+
   // 两个网页的 URL
   // 数据源网页默认 DEMO 地址（模拟原 admin 数据源站点）
   // 左侧默认打开 DEMO 数据源管理页面（后端静态服务）
@@ -1643,6 +1759,18 @@ const sourceFieldLabelRef = useRef<string>("");
 
   // 内置演示站点 URL 前缀（demo-fill/demo-review/demo-entry/demo-admin/mock 均算模拟网页）
   const DEMO_URL_PREFIXES = [BACKEND_ORIGIN + "/demo-", BACKEND_ORIGIN + "/mock"];
+
+  /** 草案里一键打开：面板还停在空白页时，直接把收藏 / DEMO 站点装进去 */
+  const openPaneUrl = useCallback((side: "left" | "right", url: string) => {
+    if (!url) return;
+    if (side === "left") {
+      setLeftViewMode("web");
+      setLeftUrl(url);
+    } else {
+      setRightViewMode("web");
+      setRightUrl(url);
+    }
+  }, []);
 
   // 模拟网页开关联动：关闭时若右侧停留在内置演示页则清空回空白态；开启且右侧为空时自动载入 DEMO 录入系统
   useEffect(() => {
@@ -3515,8 +3643,8 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setBrowserExcelUploading(true);
     try {
       const r = await api.uploadExcel(file);
-      // Electron 下 File.path 可用：登记本地路径，导出时原地写回原文件
-      const fp = (file as File & { path?: string }).path;
+      // Electron 32+ 通过 webUtils.getPathForFile 取得本地路径，导出时原地写回原文件。
+      const fp = window.electronAPI?.getPathForFile?.(file) || (file as File & { path?: string }).path;
       if (fp) api.setExcelSource("left", fp, file.name).catch(() => {});
       setLeftExcelName(file.name);
       if (r.count === 0) {
@@ -3548,7 +3676,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setRightExcelUploading(true);
     try {
       const r = await api.uploadExcelRight(file);
-      const fp = (file as File & { path?: string }).path;
+      const fp = window.electronAPI?.getPathForFile?.(file) || (file as File & { path?: string }).path;
       if (fp) api.setExcelSource("right", fp, file.name).catch(() => {});
       setRightExcelName(file.name);
       if (r.records.length === 0) {
@@ -16483,6 +16611,37 @@ type: info.type,
           </div>
         )}
 
+        {/* HARNESS 入口：跳清屏桌面并弹出派单输入框（不是侧边面板） */}
+        <button
+          onClick={openHarnessDesk}
+          className={[
+            "flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-all",
+            deskVisible
+              ? "bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-sm ring-1 ring-indigo-400"
+              : "bg-white/70 text-slate-600 ring-1 ring-slate-200 hover:bg-white hover:text-slate-900",
+          ].join(" ")}
+          title={deskVisible
+            ? "HARNESS：再次点击收起桌面"
+            : "HARNESS：到桌面派一个任务（先出流程，核对后再执行）"}
+        >
+          {/* 自创图标：横向汇流——左侧两条线收束到右侧一个流程点（躺平的漏斗→流程） */}
+          <svg
+            className="h-3 w-3 shrink-0"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M3 5 L11 12 L3 19" />
+            <path d="M11 12 H15" />
+            <circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none" />
+          </svg>
+          HARNESS
+        </button>
+
         {/* 教学模式 / 录入流操作开关（仅录入模式显示"录入流操作"，LOOP/审查模式显示"教学模式"） */}
         <button
           onClick={() => (selectMode ? exitSelectMode() : enterSelectMode())}
@@ -16918,7 +17077,9 @@ type: info.type,
         className="relative grid min-h-0 flex-1 gap-2 overflow-hidden pt-0.5 pr-2 pb-2 pl-2"
         style={{
           // 左侧面板开合：用数值列宽（260px ↔ 0px）让 grid 列可插值过渡；收起时把 gap 归零避免残留空隙
-          gridTemplateColumns: leftPanelOpen && !leftDetached ? "260px 1fr" : "0px 1fr",
+          // HARNESS 开启时在最右追加一列；关闭时不占列，避免多出一个 gap 把内容顶窄
+          gridTemplateColumns:
+            (leftPanelOpen && !leftDetached ? "260px" : "0px") + " 1fr",
           gap: leftPanelOpen && !leftDetached ? undefined : 0,
           transitionProperty: "grid-template-columns, gap",
           transitionDuration: ".45s",
@@ -16927,10 +17088,39 @@ type: info.type,
       >
         {/* 清屏浮层：聚焦下方 + 关闭侧栏 + 关闭下栏时，主区空无一物，
             在正中显示日期与大时钟，避免只剩壁纸的空白感。
-            绝对定位覆盖整个主区、pointer-events:none，不拦截任何操作。 */}
-        {focusBottomMode && !leftPanelOpen && !bottomPanelOpen && (
-          <div className="pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-center pb-[9vh]">
-            <BigClock />
+            绝对定位覆盖整个主区、pointer-events:none，不拦截任何操作。
+            草案下移后这层必须继续挂着（草案的状态在 DeskTaskBoard 里，
+            卸载就丢了），但会透明化，把屏幕让给上方两个浏览器面板。 */}
+        {((focusBottomMode && !leftPanelOpen && !bottomPanelOpen) || planDocked) && (
+          <div
+            className={
+              planDocked
+                ? "pointer-events-none absolute inset-0 z-0 opacity-0"
+                : "absolute inset-0 z-20 overflow-y-auto"
+            }
+            aria-hidden={planDocked}
+          >
+            <div className="flex min-h-full flex-col items-center justify-center px-6 py-10">
+              {/* 核对流程时把时钟让出来（屏幕矮的时候两者会互相挤） */}
+              {!deskDraftOpen && !planDocked && <BigClock />}
+              {/* 桌面任务调度台：按 / 召唤输入框 → 先出流程 → 核对后变成待执行卡片 */}
+              <DeskTaskBoard
+                onDraftChange={setDeskDraftOpen}
+                autoSummon={deskSummon}
+                onDockChange={handlePlanDockChange}
+                dockEl={planDockEl}
+                favorites={{ left: leftFavoriteSites, right: rightFavoriteSites }}
+                demoPages={
+                  settings.demo_site_enabled === true
+                    ? {
+                        left: BACKEND_ORIGIN + "/demo-admin/",
+                        right: BACKEND_ORIGIN + "/demo-fill/",
+                      }
+                    : null
+                }
+                onOpenUrl={openPaneUrl}
+              />
+            </div>
           </div>
         )}
 
@@ -17686,6 +17876,12 @@ type: info.type,
                     />
                   ) : undefined}
                   focusPanel={null}
+                  fieldPaneOverride={
+                    planDocked ? (
+                      // 流程草案下移时就占这一栏：其余三栏的宽度与拖拽保持不变
+                      <div ref={setPlanDockEl} className="h-full min-h-0" />
+                    ) : undefined
+                  }
                   preClickMarks={pickedMarks.filter((m) => (m.action === "click" && m.clickPhase === "pre") || (m.action === "input" && m.workflow === "data-source"))}
                   processClickMarks={pickedMarks.filter((m) => m.action === "click" && m.clickPhase === "mid")}
                   postClickMarks={pickedMarks.filter((m) => m.action === "click" && m.clickPhase === "post")}
@@ -17838,6 +18034,15 @@ type: info.type,
 
         </section>
       </main>
+
+      {/* HARNESS 执行浮窗：任务在跑时把流程与当前步钉在右下角，
+          主体留给两个浏览器面板 —— 用户要的是看着光标一步步走。 */}
+      {showHarnessHud && harnessTask && (
+        <HarnessHud
+          task={harnessTask}
+          onClose={() => setHarnessHudHidden(harnessTask.id)}
+        />
+      )}
 
       {/* 设置弹窗（与 ppt 视图共用同一 settingsModal 变量） */}
       {settingsModal}

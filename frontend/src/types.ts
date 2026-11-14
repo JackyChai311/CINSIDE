@@ -1188,3 +1188,137 @@ export type PPTStreamEvent =
   | { type: "screenshot"; slide: number; image_data: string }
   | { type: "done"; result: { file_path: string; file_name: string; total_slides: number } }
   | { type: "error"; message?: string };
+
+// ============ HARNESS（双对象 Computer Use） ============
+
+/** 可绑定的网页对象（来自后端 /api/harness/targets 或 Electron harness-pages） */
+export interface HarnessPage {
+  id?: string;
+  side?: "left" | "right";
+  title: string;
+  url: string;
+  alive?: boolean;
+  visible?: boolean;
+  internal?: boolean;
+}
+
+/** 可绑定的 Excel 对象 */
+export interface HarnessExcelSource {
+  id: string;
+  label: string;
+  filename: string;
+  path: string;
+  kind: "path" | "bytes" | string;
+  editable: boolean;
+}
+
+export interface HarnessStatus {
+  llm_ready: boolean;
+  llm_model: string;
+  llm_base: string;
+  cdp_endpoint: string;
+  cdp_ready: boolean;
+  cdp_message: string;
+  pages: Array<{ id: string; type: string; title: string; url: string }>;
+  max_steps: number;
+  vision: boolean;
+}
+
+/** 流程草案里的一步（对齐站内点击/输入步骤的心智模型） */
+export interface HarnessPlanStep {
+  id: string;
+  action:
+    | "click"
+    | "input"
+    | "select"
+    | "press"
+    | "scroll"
+    | "navigate"
+    | "extract"
+    | "write"
+    | "verify"
+    | "wait";
+  /** 作用在哪个对象上 */
+  side: "web" | "excel";
+  /** 人话目标：「左侧「学生管理」标签」 */
+  target: string;
+  /** 要填的值 / 抽取范围 / 写入位置 */
+  value: string;
+  note?: string;
+}
+
+/** HARNESS 先出流程、用户核对后再生效的执行计划 */
+export interface HarnessPlan {
+  title: string;
+  steps: HarnessPlanStep[];
+  risks: string[];
+  questions: string[];
+  changes?: string[];
+  instruction?: string;
+  context?: {
+    web?: { title: string; url: string; elements: number } | null;
+    excel?: { file: string; sheets: string[]; rows: number } | null;
+  };
+}
+
+/** 桌面上的一张「待执行任务卡片」 */
+export interface HarnessQueueTask {
+  id: string;
+  instruction: string;
+  web: { url: string; label: string; exclude_urls?: string[] } | null;
+  excel: { path: string; label: string } | null;
+  max_steps: number;
+  vision: boolean;
+  /** 用户确认过的执行流程 */
+  plan: HarnessPlan | null;
+  status: "queued" | "running" | "done" | "error" | "canceled";
+  steps: number;
+  summary: string;
+  error: string;
+  actions: string[];
+  ask: { question: string; options: string[] } | null;
+  session_id: string;
+  created_at: number;
+  started_at: number;
+  finished_at: number;
+  web_url: string;
+  web_label: string;
+  excel_label: string;
+  excel_path: string;
+}
+
+/** 一次工具调用的 UI 记录 */
+export interface HarnessStep {
+  id: string;
+  index: number;
+  name: string;
+  summary: string;
+  args: Record<string, unknown>;
+  ok?: boolean;
+  durationMs?: number;
+  result?: Record<string, unknown>;
+  thought?: string;
+}
+
+export type HarnessEvent =
+  | { type: "accepted"; taskId: string }
+  | { type: "phase"; phase: string; message: string }
+  | { type: "start"; taskId: string; model: string; tools: string[] }
+  | { type: "step"; index: number; max: number }
+  | { type: "thought"; text: string; step: number }
+  | { type: "tool_call"; id: string; name: string; args: Record<string, unknown>; summary: string; step: number }
+  | {
+      type: "tool_result";
+      id: string;
+      name: string;
+      ok: boolean;
+      durationMs: number;
+      result: Record<string, unknown>;
+      step: number;
+    }
+  | { type: "screenshot"; dataUrl: string; width: number; height: number }
+  | { type: "ask"; question: string; options: string[] }
+  | { type: "warn"; message: string }
+  | { type: "final"; summary: string; truncated?: boolean }
+  | { type: "stopped"; message: string }
+  | { type: "error"; message: string };
