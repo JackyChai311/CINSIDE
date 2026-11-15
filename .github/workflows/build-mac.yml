@@ -54,14 +54,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 只装测试真正需要的轻量依赖（pydantic/httpx/Pillow）。
-      # 不装 requirements.txt：其中的 rapidocr / onnxruntime / openvino / PyMuPDF /
-      # markitdown 体积大且平台相关，而被测模块（document_extract 的 MRZ 解析、
-      # comparison、config）在模块层只依赖这些轻量包，重型依赖都是函数内惰性导入。
+      # 只装测试真正需要的轻量依赖。不装 requirements.txt：其中的 rapidocr /
+      # onnxruntime / openvino / PyMuPDF / markitdown 体积大且平台相关，而被测模块
+      # 在模块层只依赖下列轻量包，重型依赖都是函数内惰性导入。
+      # 注意：测试集需要 fastapi（TestClient）、openpyxl（Excel 导出用例）、
+      # python-multipart（表单端点）；缺任一项都会在 collection 阶段 ImportError。
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest ruff pydantic httpx Pillow python-dotenv
+          pip install pytest ruff pydantic httpx Pillow python-dotenv fastapi python-multipart openpyxl
 
       - name: Lint (ruff)
         working-directory: backend
