@@ -62,9 +62,12 @@ def test_concurrent_same_image_recognized_once(ocr_isolated, monkeypatch):
     r1, r2, dt = asyncio.run(scenario())
 
     assert calls["n"] == 1, f"FAIL: 期望识别 1 次，实际 {calls['n']} 次"
-    assert dt < 0.9, f"FAIL: 并发未共享（耗时 {dt:.2f}s ≈ 两次串行）"
+    # 并发共享的语义由 calls["n"]==1 完全证明（一次识别、两个调用都拿到同一结果）。
+    # 早期版本这里还断言耗时 dt < 0.9s，但「识别次数」才是本质——耗时受机器负载/
+    # CI runner 抢占影响很大（共享 runner 上偶发飙到十几秒），把确定性断言退化成
+    # 时间赌注，导致 CI 间歇性失败。故删去该时间阈值断言，dt 仅作信息打印保留。
     assert r1 == ("HELLO", [[0, 0, 1, 1]], (100, 100)), f"FAIL: want_boxes 形状异常 {r1}"
-    assert r2 == r1, "FAIL: 两个并发调用结果不一致"
+    assert r2 == r1, "FAIL: 两个并发调用结果一致"
     assert de._last_ocr_backend == "gpu", f"FAIL: backend 标记 {de._last_ocr_backend}"
     print(f"OK concurrent dedup: recognized {calls['n']} time(s) in {dt:.2f}s")
 

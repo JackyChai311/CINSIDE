@@ -70,10 +70,14 @@ jobs:
 
       - name: Unit tests (pytest)
         working-directory: backend
-        # 失败时输出详细 traceback 并保存日志（含 platform/version 信息），便于匿名诊断
+        # 失败时把详细 traceback 写进 run summary（Actions 页面匿名可见），便于诊断 runner 环境差异
         run: |
           python -c "import platform,sys; print('PY',sys.version,'PLATFORM',platform.platform())"
-          python -m pytest -v --tb=long 2>&1 | tee pytest-output.txt
+          python -m pytest -v --tb=short 2>&1 | tee pytest-output.txt | tail -60
+          echo "### 后端 pytest" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -40 pytest-output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit ${PIPESTATUS[0]}
 
       - name: Upload pytest log (always, for diagnosis)
