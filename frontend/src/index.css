@@ -1332,3 +1332,18 @@ tr.loop-drag-preview > td:first-child {
   animation: scan-line 2.4s linear infinite;
   pointer-events: none;
 }
+
+/* ============ 面板开合动画性能优化 ============
+   开合侧栏/下栏/HARNESS 桌面时，主区会做 grid-template-columns 过渡（触发 layout+paint），
+   而主区铺着数十处 backdrop-blur 毛玻璃——布局一变，玻璃每帧都要重算模糊，这是掉帧主因。
+   做法：动画进行期间给 <html> 挂 .is-animating-panel，临时关闭所有毛玻璃并把栅格容器
+   隔离成独立合成层；动画结束移除类，毛玻璃静止后照常恢复。肉眼几乎无感，帧率明显提升。 */
+html.is-animating-panel [class*="backdrop-blur"] {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+html.is-animating-panel main {
+  /* 让动画中的主栅格自己成为合成层，避免整页反复重排 */
+  isolation: isolate;
+  contain: layout paint;
+}

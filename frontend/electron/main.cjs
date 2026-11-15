@@ -317,7 +317,10 @@ function createWindow() {
     debugLog("[main] ⚠️ 主窗口无响应（可能长任务阻塞渲染）");
   });
   // 渲染层未捕获异常转发到调试日志（定位白屏根因用）
-  mainWindow.webContents.on("console-message", (_e, _level, message, _line, sourceId) => {
+  mainWindow.webContents.on("console-message", (details, _level, legacyMessage, _line, legacySourceId) => {
+    // Electron 35+ 将结构化字段放进 details；旧版仍使用后续位置参数。
+    const message = details && typeof details.message === "string" ? details.message : legacyMessage;
+    const sourceId = details && typeof details.sourceId === "string" ? details.sourceId : legacySourceId;
     if (typeof message !== "string") return;
     if (message.startsWith("[cinside-crash]")) {
       debugLog(`[renderer-crash] ${message}`);
@@ -657,7 +660,8 @@ function attachViewMessageRelay(view, side) {
   });
 
   // 监听 console message，把 [cinside-relay] 前缀的日志解析回前端
-  view.webContents.on("console-message", (_e, level, message) => {
+  view.webContents.on("console-message", (details, _level, legacyMessage) => {
+    const message = details && typeof details.message === "string" ? details.message : legacyMessage;
     if (typeof message !== "string") return;
     // 全量转发 BrowserView console 日志到调试文件
     if (message.startsWith("[onPick]") || message.startsWith("[BrowserPane")) {
@@ -802,7 +806,8 @@ function createPopupView(parentSide, url, win) {
   });
 
 // 弹窗内的 console-message 转发到前端（side = parentSide，拾取结果正常回传）
-view.webContents.on("console-message", (_e, level, message) => {
+view.webContents.on("console-message", (details, _level, legacyMessage) => {
+  const message = details && typeof details.message === "string" ? details.message : legacyMessage;
   if (typeof message !== "string") return;
   if (message.startsWith("[onPick]") || message.startsWith("[BrowserPane")) {
     debugLog(`[popup:${side}] ${message}`);
@@ -2872,9 +2877,18 @@ app.whenReady().then(async () => {
   // 注册会话级 preload：document_start 即注入屏蔽 CSS + 折叠 JS，消除跳转/刷新时侧边栏闪现
   try {
     const bp = path.join(__dirname, "preload-blockcss.cjs");
-    const existing = session.defaultSession.getPreloads();
-    if (!existing.includes(bp)) session.defaultSession.setPreloads([...existing, bp]);
-    debugLog(`[blockcss] preload registered: ${bp} (total=${session.defaultSession.getPreloads().length})`);
+    const ses = session.defaultSession;
+    if (typeof ses.registerPreloadScript === "function") {
+      // Electron 35+：frame preload 需要明确类型；省略 matches 表示所有 URL。
+      const existing = ses.getPreloadScripts();
+      const alreadyRegistered = existing.some((script) => script.type === "frame" && script.filePath === bp);
+      if (!alreadyRegistered) ses.registerPreloadScript({ type: "frame", filePath: bp });
+      debugLog(`[blockcss] preload registered: ${bp} (total=${ses.getPreloadScripts().length})`);
+    } else {
+      const existing = ses.getPreloads();
+      if (!existing.includes(bp)) ses.setPreloads([...existing, bp]);
+      debugLog(`[blockcss] preload registered: ${bp} (total=${ses.getPreloads().length})`);
+    }
   } catch (e) { debugLog(`[blockcss] register preload failed: ${e.message}`); }
 
   createSplashWindow();
@@ -3989,13 +4003,19 @@ ipcMain.handle("view-stop-picking", (_event, side) => {
   return executeInView(side, ELEMENT_PICKER_DEACTIVATE_SCRIPT);
 });
 
+// Electron 32+ 将历史导航迁移到 webContents.navigationHistory。
+function viewHistory(view) {
+  return view && view.webContents ? (view.webContents.navigationHistory || view.webContents) : null;
+}
+
 // 浏览器回退（用于网页提取时点错元素撤销）
 ipcMain.handle("view-go-back", (_event, side) => {
   debugLog(`[main] view-go-back side=${side}`);
   const view = side === "left" ? leftBrowserView : rightBrowserView;
-  if (view && view.webContents.canGoBack()) {
+  const history = viewHistory(view);
+  if (history && history.canGoBack()) {
     // 回退前保持picking状态，did-navigate/did-finish-load后会自动重注入picker
-    view.webContents.goBack();
+    history.goBack();
     return { ok: true };
   }
   return { ok: false, reason: "cannot-go-back" };
@@ -4004,8 +4024,9 @@ ipcMain.handle("view-go-back", (_event, side) => {
 ipcMain.handle("view-go-forward", (_event, side) => {
   debugLog(`[main] view-go-forward side=${side}`);
   const view = side === "left" ? leftBrowserView : rightBrowserView;
-  if (view && view.webContents.canGoForward()) {
-    view.webContents.goForward();
+  const history = viewHistory(view);
+  if (history && history.canGoForward()) {
+    history.goForward();
     return { ok: true };
   }
   return { ok: false, reason: "cannot-go-forward" };
@@ -4221,6 +4242,80 @@ ipcMain.handle("view-capture-element", async (_event, side, rect) => {
   }
 });
 
+// ============ HARNESS（双对象 Computer Use） ============
+// 后端通过 CDP 直接操控 BrowserView；这里只提供「接线信息」和「实时预览」，
+// 让前端不需要自己知道 CDP 端口，也不会误连到 Electron 自己的 UI 页面。
+
+ipcMain.handle("harness-cdp-info", () => ({
+  port: CDP_PORT,
+  endpoint: `http://127.0.0.1:${CDP_PORT}`,
+}));
+
+// 当前左右 BrowserView 的真实地址/标题（HARNESS 绑定时用来锁定要操控的页面）
+ipcMain.handle("harness-pages", () => {
+  const out = [];
+  for (const side of ["left", "right"]) {
+    const view = side === "left" ? leftBrowserView : rightBrowserView;
+    const detached = detachedPanels[`browser-${side}_view`];
+    const target = view || detached;
+    if (!target || !target.webContents || target.webContents.isDestroyed()) {
+      out.push({ side, alive: false, url: "", title: "" });
+      continue;
+    }
+    let url = "";
+    let title = "";
+    try { url = target.webContents.getURL() || ""; } catch (_) {}
+    try { title = target.webContents.getTitle() || ""; } catch (_) {}
+    out.push({
+      side,
+      alive: true,
+      detached: !view && !!detached,
+      url,
+      title,
+      visible: view ? !!(mainWindow && mainWindow.getBrowserViews().includes(view)) : true,
+    });
+  }
+  return out;
+});
+
+// 选择要交给 HARNESS 操控的表格文件（不复制、不改动，后端用工作副本读写）
+ipcMain.handle("harness-pick-excel", async () => {
+  const { dialog } = require("electron");
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "选择要交给 HARNESS 的表格文件",
+    properties: ["openFile"],
+    filters: [
+      { name: "表格文件", extensions: ["xlsx", "xlsm", "csv"] },
+      { name: "所有文件", extensions: ["*"] },
+    ],
+  });
+  if (result.canceled || result.filePaths.length === 0) return { canceled: true, file: null };
+  const filePath = result.filePaths[0];
+  let size = 0;
+  try { size = fs.statSync(filePath).size; } catch (_) {}
+  return {
+    canceled: false,
+    file: {
+      file_path: filePath,
+      file_name: path.basename(filePath),
+      size,
+      ext: path.extname(filePath).toLowerCase(),
+    },
+  };
+});
+
+// 实时预览：截当前 view 的可视区（面板里给用户看「对象现在长什么样」）
+ipcMain.handle("harness-preview", async (_event, side) => {
+  const view = side === "left" ? leftBrowserView : rightBrowserView;
+  if (!view || view.webContents.isDestroyed()) return { ok: false, error: "view not ready" };
+  try {
+    const image = await view.webContents.capturePage();
+    return { ok: true, dataUrl: image.toDataURL() };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+});
+
 // 元素选择消息转发：前端订阅 view-message 事件
 ipcMain.on("subscribe-view-messages", (event) => {
   // 由前端通过 ipcRenderer.on('view-message', cb) 接收
@@ -4323,7 +4418,8 @@ function createDetachedBrowserView(win, side) {
   });
 
 // 监听 console message，把 [cinside-relay] 前缀的日志解析后转发到脱离窗口
-view.webContents.on("console-message", (_e, level, message) => {
+view.webContents.on("console-message", (details, _level, legacyMessage) => {
+  const message = details && typeof details.message === "string" ? details.message : legacyMessage;
   if (typeof message !== "string") return;
   if (message.startsWith("[onPick]") || message.startsWith("[BrowserPane")) {
     debugLog(`[detach:${side}] ${message}`);

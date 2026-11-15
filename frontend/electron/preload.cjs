@@ -116,6 +116,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // 截图指定 view 中的元素区域（用于头像提取）
   viewCaptureElement: (side, rect) => ipcRenderer.invoke("view-capture-element", side, rect),
 
+  // === HARNESS（双对象 Computer Use） ===
+  // CDP 端点：后端据此直连 BrowserView 操控页面
+  harnessCdpInfo: () => ipcRenderer.invoke("harness-cdp-info"),
+  // 左右 BrowserView 当前的真实地址/标题（绑定网页对象用）
+  harnessPages: () => ipcRenderer.invoke("harness-pages"),
+  // 实时预览：截当前 view 可视区
+  harnessPreview: (side) => ipcRenderer.invoke("harness-preview", side),
+  // 选择要交给 HARNESS 的表格文件
+  harnessPickExcel: () => ipcRenderer.invoke("harness-pick-excel"),
+
   // === 下载捕获（文件提取模式） ===
   setDownloadCapture: (side, enabled) => ipcRenderer.invoke("set-download-capture", side, enabled),
 

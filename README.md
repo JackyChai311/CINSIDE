@@ -28,7 +28,7 @@ git push origin main --tags
 ## 技术栈
 
 - **前端**：React 18 + TypeScript + Vite + Tailwind CSS
-- **桌面**：Electron 31 + electron-builder
+- **桌面**：Electron 45 + electron-builder
 - **后端**：Python 3.12 + FastAPI + PyInstaller
 - **AI**：视觉模型 OCR / 字段比对
 
@@ -52,7 +52,7 @@ CINSIDE/
 
 ### 环境要求
 
-- Node.js 18+
+- Node.js 24+
 - Python 3.12+
 - Windows 10/11
 

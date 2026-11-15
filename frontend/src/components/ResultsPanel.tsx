@@ -77,27 +77,6 @@ const personCardExpandedCache = new Map<string, boolean>();
  * 监听列表长度，新增卡片时平滑滚动到末尾（scroll-smooth 自带缓动，先快后慢有质感）。
  * 用户手动滚离末尾后不打断（仅当接近末尾或新增时才跟随）。
  */
-function useFollowScrollToEnd(itemCount: number) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const prevCountRef = useRef(itemCount);
-  useEffect(() => {
-    const el = ref.current;
-    const prev = prevCountRef.current;
-    prevCountRef.current = itemCount;
-    if (!el) return;
-    // 仅在卡片数增加时跟随（避免删除/重排时突兀跳动）
-    if (itemCount <= prev) return;
-    // 等浏览器完成新卡片布局后再滚（配合入场动画，滚动与动画衔接更顺）
-    const raf = requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        el.scrollTo({ left: el.scrollWidth, behavior: "smooth" });
-      });
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [itemCount]);
-  return ref;
-}
-
 /** 提取元素汇总项：字段对比设置态「提取元素」小卡片（文件提取步骤 + 自定义文本 + 控件，按设置时间 FIFO） */
 export interface ExtractSummaryItem {
   id: string;
@@ -183,32 +162,14 @@ interface Props {
   onExitDocChoose?: () => void;
   /** 聚焦面板模式："field"=只显示字段对比，"doc"=只显示文件处理，"doc-extract"=文件处理+提取元素两栏，"field-doc"=字段对比+文件处理两栏，null=三面板 */
   focusPanel?: "field" | "doc" | "doc-extract" | "field-doc" | null;
+  /** 覆盖「字段对比」那一栏的整块内容（流程草案下移时占这一栏，其余三栏的宽度/拖拽不变） */
+  fieldPaneOverride?: React.ReactNode;
   /** 字段对比设置模式数据：前置点击 marks */
   preClickMarks?: PickedMark[];
   /** 字段对比设置模式数据：过程点击 marks（点击NEXT等中间步骤） */
   processClickMarks?: PickedMark[];
   /** 字段对比设置模式数据：收尾点击 marks */
   postClickMarks?: PickedMark[];
-  /** 高手模式：true=功能按钮在顶部工具栏（面板内分组标题按钮隐藏）；false=默认模式（按钮在分组标题行） */
-  expertMode?: boolean;
-  /** 开始添加前置点击 */
-  onStartAddPreClick?: () => void;
-  /** 开始绑定输入框 */
-  onStartBindInputs?: () => void;
-  /** 是否正在绑定输入框模式中（用于高亮按钮） */
-  bindInputActive?: boolean;
-  /** 已绑定的输入/点击步数（用于数量徽章） */
-  bindStepCount?: number;
-  /** 是否正在添加前置点击 */
-  preClickActive?: boolean;
-  /** 开始添加过程点击（点击NEXT等中间步骤） */
-  onStartAddProcessClick?: () => void;
-  /** 是否正在添加过程点击 */
-  processClickActive?: boolean;
-  /** 开始添加收尾点击（提交按钮等） */
-  onStartAddPostClick?: () => void;
-  /** 是否正在添加收尾点击 */
-  postClickActive?: boolean;
   /** 开始添加文件提取步骤 */
   onStartAddDocExtract?: () => void;
   /** 轻量打开文件提取来源选择面板（不退出其他设置模式，用于空面板自动展示） */
@@ -222,7 +183,6 @@ interface Props {
   /** 是否正在文件提取模式 */
   docExtractActive?: boolean;
   /** 切换提取步骤的录入/审核模式（用于文件提取和自定义文本面板） */
-  onSwitchStepMode?: (mode: "review" | "entry") => void;
   /** 退出添加步骤模式（完成录入/审核步骤设置） */
   onExitAddingStepMode?: () => void;
   /** 点击字段对比面板时触发（激活仅面板内可用的快捷键） */
@@ -388,19 +348,10 @@ export default function ResultsPanel({
   docConfigChooseMode = false,
   onExitDocChoose,
   focusPanel = null,
+  fieldPaneOverride,
   preClickMarks = [],
   processClickMarks = [],
   postClickMarks = [],
-  expertMode = false,
-  onStartAddPreClick,
-  onStartBindInputs,
-  bindInputActive = false,
-  bindStepCount = 0,
-  preClickActive = false,
-  onStartAddProcessClick,
-  processClickActive = false,
-  onStartAddPostClick,
-  postClickActive = false,
   onStartAddDocExtract,
   reviewMappings = [],
   onRemoveMark,
@@ -416,7 +367,6 @@ export default function ResultsPanel({
   onChooseDocLocal,
   onDropLocalDocFiles,
   docExtractActive = false,
-  onSwitchStepMode,
   onExitAddingStepMode,
   onFieldPanelActive,
   canSaveMapping = false,
@@ -537,21 +487,11 @@ export default function ResultsPanel({
           docConfigChooseMode={docConfigChooseMode}
           onExitDocChoose={onExitDocChoose}
           focusPanel={focusPanel}
+          fieldPaneOverride={fieldPaneOverride}
           preClickMarks={preClickMarks}
           processClickMarks={processClickMarks}
           postClickMarks={postClickMarks}
-          expertMode={expertMode}
-          onStartAddPreClick={onStartAddPreClick}
-          onStartBindInputs={onStartBindInputs}
-          bindInputActive={bindInputActive}
-          bindStepCount={bindStepCount}
-          preClickActive={preClickActive}
-          onStartAddProcessClick={onStartAddProcessClick}
-          processClickActive={processClickActive}
-          onStartAddPostClick={onStartAddPostClick}
-          postClickActive={postClickActive}
           onStartAddDocExtract={onStartAddDocExtract}
-          onSwitchStepMode={onSwitchStepMode}
           reviewMappings={reviewMappings}
           onRemoveMark={onRemoveMark}
           onReplaceMark={onReplaceMark}
@@ -932,19 +872,10 @@ function ReportTab({
   docConfigChooseMode = false,
   onExitDocChoose,
   focusPanel = null,
+  fieldPaneOverride,
   preClickMarks = [],
   processClickMarks = [],
   postClickMarks = [],
-  expertMode = false,
-  onStartAddPreClick,
-  onStartBindInputs,
-  bindInputActive = false,
-  bindStepCount = 0,
-  preClickActive = false,
-  onStartAddProcessClick,
-  processClickActive = false,
-  onStartAddPostClick,
-  postClickActive = false,
   onStartAddDocExtract,
   reviewMappings = [],
   onRemoveMark,
@@ -960,7 +891,6 @@ function ReportTab({
   onChooseDocLocal,
   onDropLocalDocFiles,
   docExtractActive = false,
-  onSwitchStepMode,
   onExitAddingStepMode,
   onFieldPanelActive,
   canSaveMapping = false,
@@ -1062,32 +992,14 @@ function ReportTab({
   onExitDocChoose?: () => void;
   /** 聚焦面板模式："field"=只显示字段对比，"doc"=只显示文件处理，"doc-extract"=文件处理+提取元素两栏，"field-doc"=字段对比+文件处理两栏，null=三面板 */
   focusPanel?: "field" | "doc" | "doc-extract" | "field-doc" | null;
+  /** 覆盖「字段对比」那一栏的整块内容（流程草案下移时占这一栏，其余三栏的宽度/拖拽不变） */
+  fieldPaneOverride?: React.ReactNode;
   /** 字段对比设置模式数据：前置点击 marks */
   preClickMarks?: PickedMark[];
   /** 字段对比设置模式数据：过程点击 marks（点击NEXT等中间步骤） */
   processClickMarks?: PickedMark[];
   /** 字段对比设置模式数据：收尾点击 marks */
   postClickMarks?: PickedMark[];
-  /** 高手模式：true=功能按钮在顶部工具栏（面板内分组标题按钮隐藏）；false=默认模式（按钮在分组标题行） */
-  expertMode?: boolean;
-  /** 开始添加前置点击 */
-  onStartAddPreClick?: () => void;
-  /** 开始绑定输入框 */
-  onStartBindInputs?: () => void;
-  /** 是否正在绑定输入框模式中（用于高亮按钮） */
-  bindInputActive?: boolean;
-  /** 已绑定的输入/点击步数（用于数量徽章） */
-  bindStepCount?: number;
-  /** 是否正在添加前置点击 */
-  preClickActive?: boolean;
-  /** 开始添加过程点击（点击NEXT等中间步骤） */
-  onStartAddProcessClick?: () => void;
-  /** 是否正在添加过程点击 */
-  processClickActive?: boolean;
-  /** 开始添加收尾点击（提交按钮等） */
-  onStartAddPostClick?: () => void;
-  /** 是否正在添加收尾点击 */
-  postClickActive?: boolean;
   /** 开始添加文件提取步骤 */
   onStartAddDocExtract?: () => void;
   /** 轻量打开文件提取来源选择面板（不退出其他设置模式，用于空面板自动展示） */
@@ -1101,7 +1013,6 @@ function ReportTab({
   /** 是否正在文件提取模式 */
   docExtractActive?: boolean;
   /** 切换提取步骤的录入/审核模式（用于文件提取和自定义文本面板） */
-  onSwitchStepMode?: (mode: "review" | "entry") => void;
   /** 退出添加步骤模式（完成录入/审核步骤设置） */
   onExitAddingStepMode?: () => void;
   /** 点击字段对比面板时触发（激活仅面板内可用的快捷键） */
@@ -1255,6 +1166,8 @@ function ReportTab({
   const [showExtractPanel, setShowExtractPanel] = useState(false);
   /** 字段对比面板模式开关：true=步骤设置版，false=结果显示版 */
   const [fieldSetupMode, setFieldSetupMode] = useState(false);
+  /** 步骤分组（默认关闭）：不勾选时所有 STEP 按顺序直排为单一列表；勾选后切回「前置设置/审查映射/过程点击/提取元素/收尾点击」分组视图 */
+  const [stepGrouping, setStepGrouping] = useState(false);
   /** 文件处理面板模式开关：true=步骤设置版，false=结果显示版 */
   const [docSetupMode, setDocSetupMode] = useState(false);
   /** 文件处理面板中提取结果展开/收起（默认展开，方便二审查看提取的字段和全文） */
@@ -3433,16 +3346,6 @@ function ReportTab({
   // 文件处理面板在布局中是否实际可见（综合 focus 状态、三栏模式）
   const filePanelActuallyVisible = isDocFocus || isDocExtractFocus || isFieldDocFocus || isAll;
 
-  // 横向滚动容器的滚轮处理：垂直滚轮 → 水平滚动
-  const handleHorizontalWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
-    const target = e.currentTarget;
-    // 只有当容器有水平溢出时才转换滚轮方向
-    if (target.scrollWidth > target.clientWidth) {
-      e.preventDefault();
-      target.scrollLeft += e.deltaY;
-    }
-  }, []);
-
   // 全局「最新步骤」：5 类步骤卡片中 createdAt/ts 最大的那一条，文字部分以「高光笔」黄色高亮涂出（hl-latest，带画出动画）便于定位。
   // 新增步骤后旧「最新」自动恢复、新卡片涂高光。extract 项 ts=MAX_SAFE_INTEGER 是「无时间戳」哨兵，不参与比较。
   const latestStepKey = useMemo(() => {
@@ -3462,13 +3365,6 @@ function ReportTab({
     extractStepSummary.forEach((item) => consider(`extract:${item.id}`, item.ts));
     return bestKey;
   }, [preClickMarks, processClickMarks, postClickMarks, reviewMappings, extractStepSummary]);
-
-  // 步骤卡片「自动跟随最新」：新增卡片时对应分组横向平滑滚动到末尾
-  const preClickScrollRef = useFollowScrollToEnd(preClickMarks.length);
-  const reviewScrollRef = useFollowScrollToEnd(reviewMappings.length);
-  const processClickScrollRef = useFollowScrollToEnd(processClickMarks.length);
-  const extractScrollRef2 = useFollowScrollToEnd(extractStepSummary.length);
-  const postClickScrollRef = useFollowScrollToEnd(postClickMarks.length);
 
   // 纵向「自动跟随最新」：小窗口下新步骤落在视野外分组时，纵向平滑滚动到该卡片（block:nearest 最小滚动，已在视野内不动）
   const fieldSetupScrollRef = useRef<HTMLDivElement | null>(null);
@@ -3496,10 +3392,251 @@ function ReportTab({
     return () => cancelAnimationFrame(raf);
   }, [latestStepKey]);
 
-  // 字段对比设置模式内容：三大分组纵向排列，每组内部元素横向排列成玻璃质感小卡片
+  // 步骤卡片统一外观：单行紧凑（上下留白小），每组内自上而下纵向堆叠；悬停仍触发 onHoverMark 定位网页高亮
+  const stepCardCls = "group relative flex w-full shrink-0 cursor-pointer items-center gap-1.5 rounded-lg bg-slate-50 py-1 pl-2 pr-7 text-left transition-colors hover:bg-slate-100 hover:shadow-sm";
+  const stepNoCls = "flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-slate-900 text-[10px] font-bold leading-none text-white";
+
+  /* ============ 扁平模式：不分组，所有步骤按时间顺序 1..N 直排（默认） ============ */
+  interface FlatStep {
+    key: string;
+    ts: number;
+    seq: number;
+    no: number;
+    typeLabel: string;
+    /** 单行正文（点击/提取类） */
+    body?: string;
+    /** 映射类：左侧来源 → 右侧目标 */
+    left?: string;
+    right?: string;
+    arrow?: "left" | "right";
+    /** 右侧小标签（如「左」表示左侧网页） */
+    note?: string;
+    isLatest: boolean;
+    title: string;
+    active?: boolean;
+    /** 提取元素：已保存=绿点 / 草稿=黄点 */
+    dotCls?: string;
+    onClick?: () => void;
+    onEnter?: () => void;
+    onCtx?: (e: React.MouseEvent) => void;
+    del?: () => void;
+    delConfirm?: string;
+  }
+
+  const buildOrderedSteps = (): FlatStep[] => {
+    const out: FlatStep[] = [];
+    let seq = 0;
+    const push = (s: Omit<FlatStep, "seq" | "no">) => out.push({ ...s, seq: seq++, no: 0 });
+
+    // 1) 前置设置（含绑定输入框 / 前置点击）
+    preClickMarks.forEach((m) => {
+      const isInput = m.action === "input";
+      const actionWord = isInput ? (m.workflow === "entry" ? "录入" : "审查") : "点击";
+      const displayLabel = (m.label || "").replace(/^输入/, m.workflow === "entry" ? "录入" : "审查");
+      push({
+        key: `mark:${m.id}`,
+        ts: m.createdAt ?? 0,
+        typeLabel: actionWord,
+        body: displayLabel,
+        isLatest: latestStepKey === `mark:${m.id}`,
+        title: `${actionWord} · ${displayLabel}（点击在网页定位）`,
+        active: replacingMarkId === m.id,
+        onClick: () => (onRunSteps ? onRunSteps([m]) : onPreviewMark?.(m)),
+        onEnter: () => onHoverMark?.(m),
+        onCtx: (e) => { e.preventDefault(); if (onReplaceMark) onReplaceMark(m); },
+        del: onRemoveMark ? () => onRemoveMark(m.id) : undefined,
+        delConfirm: `确定要删除这个${actionWord}步骤吗？`,
+      });
+    });
+
+    // 2) 审查/录入映射
+    reviewMappings.forEach((mp, i) => {
+      const isEntry = appMode === "entry";
+      const webSide = mp.web_side || "right";
+      const previewMark: PickedMark = {
+        id: `mapping-${i}`,
+        order: i + 1,
+        side: webSide,
+        source: "web",
+        selector: mp.right_selector,
+        label: mp.right_label || mp.right_selector,
+        workflow: "review",
+        createdAt: 0,
+        excelField: mp.left_source === "excel" ? mp.left_field : undefined,
+      };
+      const reviewMark = allPickedMarks.find((mm) => mm.side === webSide && mm.selector === mp.right_selector && mm.workflow === "review");
+      const leftTxt = mp.left_field || "—";
+      const rightTxt = mp.right_label || mp.right_selector;
+      push({
+        key: `mapping:${i}`,
+        ts: mp.createdAt ?? 0,
+        typeLabel: isEntry ? "填入" : "对比",
+        left: leftTxt,
+        right: rightTxt,
+        arrow: isEntry ? "right" : "left",
+        note: webSide === "left" ? "左" : undefined,
+        isLatest: latestStepKey === `mapping:${i}`,
+        title: `${leftTxt} ${isEntry ? "→" : "←"} ${rightTxt}（${webSide === "left" ? "左" : "右"}侧网页，点击定位）`,
+        active: !!reviewMark && replacingMarkId === reviewMark.id,
+        onClick: () => (reviewMark && onRunSteps ? onRunSteps([reviewMark]) : onPreviewMark?.(previewMark)),
+        onEnter: () => onHoverMark?.(previewMark),
+        onCtx: (e) => { e.preventDefault(); if (reviewMark && onReplaceMark) onReplaceMark(reviewMark); },
+        del: onRemoveMapping ? () => onRemoveMapping(i) : undefined,
+        delConfirm: "确定要删除这个映射吗？",
+      });
+    });
+
+    // 3) 过程点击
+    processClickMarks.forEach((m) => {
+      push({
+        key: `mark:${m.id}`,
+        ts: m.createdAt ?? 0,
+        typeLabel: "点击",
+        body: m.label,
+        isLatest: latestStepKey === `mark:${m.id}`,
+        title: `点击 · ${m.label}（点击在网页定位）`,
+        active: replacingMarkId === m.id,
+        onClick: () => onPreviewMark?.(m),
+        onEnter: () => onHoverMark?.(m),
+        onCtx: (e) => { e.preventDefault(); if (onReplaceMark) onReplaceMark(m); },
+        del: onRemoveMark ? () => onRemoveMark(m.id) : undefined,
+        delConfirm: "确定要删除这个过程点击吗？",
+      });
+    });
+
+    // 4) 提取元素（文件/文本/控件）
+    extractStepSummary.forEach((item, idx) => {
+      let typeLabel = "提取";
+      if (item.kind === "doc") typeLabel = "文件";
+      else if (item.kind === "custom") typeLabel = "文本";
+      else if (item.kind === "widget") {
+        typeLabel = item.name.includes("日历") ? "日历" : item.name.includes("选项") ? "选项" : "控件";
+      }
+      const previewMark: PickedMark = {
+        id: item.id,
+        order: idx + 1,
+        side: item.side || "right",
+        source: "web",
+        selector: item.selector || "",
+        label: item.detail,
+        workflow: "review",
+        createdAt: 0,
+        excelField: item.excelField,
+      };
+      const canPreview = !!item.selector || !!item.excelField;
+      push({
+        key: `extract:${item.id}`,
+        ts: item.ts,
+        typeLabel,
+        body: item.detail,
+        isLatest: latestStepKey === `extract:${item.id}`,
+        title: `${item.name} · ${item.detail}${canPreview ? "（点击在网页定位）" : ""}`,
+        dotCls: item.saved ? "bg-emerald-400" : "bg-amber-400",
+        onClick: () => { if (canPreview) onPreviewMark?.(previewMark); },
+        onEnter: () => { if (canPreview) onHoverMark?.(previewMark); },
+        del: onRemoveExtractStep ? () => onRemoveExtractStep(item.id, item.kind) : undefined,
+        delConfirm: `确定要删除这个${typeLabel}步骤吗？`,
+      });
+    });
+
+    // 5) 收尾点击
+    postClickMarks.forEach((m) => {
+      push({
+        key: `mark:${m.id}`,
+        ts: m.createdAt ?? 0,
+        typeLabel: "点击",
+        body: m.label,
+        isLatest: latestStepKey === `mark:${m.id}`,
+        title: `点击 · ${m.label}（点击在网页定位）`,
+        active: replacingMarkId === m.id,
+        onClick: () => onPreviewMark?.(m),
+        onEnter: () => onHoverMark?.(m),
+        onCtx: (e) => { e.preventDefault(); if (onReplaceMark) onReplaceMark(m); },
+        del: onRemoveMark ? () => onRemoveMark(m.id) : undefined,
+        delConfirm: "确定要删除这个点击步骤吗？",
+      });
+    });
+
+    // 按设置时间排序（同时间戳按录入先后），再重编 1..N 连续序号
+    out.sort((a, b) => (a.ts === b.ts ? a.seq - b.seq : a.ts - b.ts));
+    return out.map((s, i) => ({ ...s, no: i + 1 }));
+  };
+
+  const orderedSteps = buildOrderedSteps();
+
+  // 扁平模式内容：无分组标题，一条列表从 1 排到 N
+  const orderedStepsContent = (
+    <div ref={fieldSetupScrollRef} className="flex h-full flex-col gap-1 overflow-y-auto p-1.5">
+      {orderedSteps.length === 0 ? (
+        <div className="flex w-full items-center gap-1.5 rounded-lg bg-slate-50/60 px-2 py-1.5">
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-slate-200 text-[10px] font-bold leading-none text-slate-500">?</span>
+          <span className="min-w-0 flex-1 text-[11px] font-medium leading-tight text-slate-400">
+            还没有步骤：点上方「绑定输入框 / 前置点击 / 过程点击 / 收尾点击 / 录入步骤 / 审查步骤」开始录制
+          </span>
+        </div>
+      ) : (
+        orderedSteps.map((s) => (
+          <div
+            key={s.key}
+            data-latest-step={s.isLatest ? "true" : undefined}
+            onClick={s.onClick}
+            onMouseEnter={s.onEnter}
+            onMouseLeave={() => onHoverMark?.(null)}
+            onContextMenu={s.onCtx}
+            className={`${stepCardCls}${s.active ? " ring-2 ring-indigo-400 bg-indigo-50" : ""}`}
+            title={s.title}
+          >
+            <span className={stepNoCls}>{s.no}</span>
+            <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+              <span className={`shrink-0 text-[10px] font-bold ${s.isLatest ? "text-slate-800" : "text-slate-500"}`}>
+                {s.typeLabel}
+              </span>
+              {s.note && (
+                <span className="shrink-0 rounded bg-slate-200/80 px-1 py-px text-[8px] font-semibold text-slate-500">{s.note}</span>
+              )}
+              {s.left != null ? (
+                <>
+                  <span className={`min-w-0 truncate text-[10px] font-medium leading-tight text-slate-500 ${s.isLatest ? "text-slate-800" : ""}`}>
+                    {s.isLatest ? <span className="hl-latest">{s.left}</span> : s.left}
+                  </span>
+                  {s.arrow === "right" ? (
+                    <MoveRight className="h-2.5 w-2.5 shrink-0 text-slate-400" />
+                  ) : (
+                    <ArrowLeft className="h-2.5 w-2.5 shrink-0 text-slate-400" />
+                  )}
+                  <span className={`min-w-0 flex-1 truncate text-[11px] font-medium leading-tight ${s.isLatest ? "text-slate-800" : "text-slate-700"}`}>
+                    {s.isLatest ? <span className="hl-latest">{s.right}</span> : s.right}
+                  </span>
+                </>
+              ) : (
+                <span className={`min-w-0 truncate text-[11px] font-medium leading-tight ${s.isLatest ? "text-slate-800" : "text-slate-700"}`}>
+                  {s.isLatest ? <span className="hl-latest">{s.body}</span> : s.body}
+                </span>
+              )}
+              {s.dotCls && <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.dotCls}`} />}
+            </div>
+            {s.del && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (s.delConfirm && window.confirm(s.delConfirm)) s.del!();
+                }}
+                className="absolute right-1 top-1/2 flex h-5 w-4 -translate-y-1/2 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
+                title="删除"
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+        ))
+      )}
+    </div>
+  );
+
+  // 字段对比设置模式内容：分组自上而下排列，每组内卡片同样纵向堆叠
   const fieldSetupContent = (
     <div ref={fieldSetupScrollRef} className="flex h-full flex-col gap-2 overflow-y-auto p-1.5">
-      {/* 前置设置分组 —— 小卡片从左到右排列（含步骤2绑定输入框 + 步骤3前置点击） */}
+      {/* 前置设置分组 —— 卡片自上而下排列（含步骤2绑定输入框 + 步骤3前置点击） */}
       <div className="shrink-0">
         <div className="mb-0 flex items-center gap-1.5 border-b-2 border-slate-200 pb-1.5 text-[11px] font-bold text-slate-700">
           <MousePointerClick className="h-3.5 w-3.5 text-slate-500" />
@@ -3515,68 +3652,19 @@ function ReportTab({
               运行本节
             </button>
           )}
-          {!expertMode && fieldSetupMode && onStartBindInputs && !running && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onStartBindInputs(); }}
-              className={[
-                "ml-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
-                bindInputActive
-                  ? "bg-red-600 text-white shadow-md ring-2 ring-red-300"
-                  : "bg-white/70 text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 hover:text-slate-900",
-              ].join(" ")}
-              title={bindInputActive ? "绑定输入框/点击进行中（再次点击关闭）" : "开始绑定输入框/点击（点输入框自动绑定Excel列并填入第一行值）"}
-            >
-              {bindInputActive ? (
-                <span className="relative flex h-2 w-2 shrink-0">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-75" />
-                  <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
-                </span>
-              ) : (
-                <Keyboard className="h-2.5 w-2.5" />
-              )}
-              {bindInputActive ? "绑定中" : "绑定输入框"}
-              {bindStepCount > 0 && (
-                <span className={bindInputActive ? "rounded bg-white/30 px-1 text-[8px] leading-tight" : "rounded bg-slate-200 px-1 text-[8px] leading-tight"}>{bindStepCount}</span>
-              )}
-            </button>
-          )}
-          {!expertMode && fieldSetupMode && onStartAddPreClick && !running && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onStartAddPreClick(); }}
-              className={[
-                "inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
-                preClickActive
-                  ? "bg-red-600 text-white shadow-md ring-2 ring-red-300"
-                  : "bg-white/70 text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 hover:text-slate-900",
-              ].join(" ")}
-              title={preClickActive ? "前置点击添加中（再次点击关闭）" : "添加前置点击（搜索按钮、开始按钮等）"}
-            >
-              {preClickActive ? (
-                <span className="relative flex h-2 w-2 shrink-0">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-75" />
-                  <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
-                </span>
-              ) : (
-                <Plus className="h-2.5 w-2.5" />
-              )}
-              {preClickActive ? "前置点击中" : "添加前置点击"}
-            </button>
-          )}
         </div>
         {preClickMarks.length === 0 ? (
-          <div className="flex gap-2 pt-1.5">
-            <div className="flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-2xl bg-slate-50/60 px-2.5 py-2">
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-[13px] font-bold text-slate-400">
-                ?
-              </span>
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="text-[11px] font-bold text-slate-500">点击</span>
-                <span className="line-clamp-2 text-[12px] font-medium leading-tight text-slate-400">点击搜索按钮等…</span>
+          <div className="pt-1.5">
+            <div className="flex w-full items-center gap-1.5 rounded-lg bg-slate-50/60 py-1 pl-2 pr-2">
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-slate-200 text-[10px] font-bold leading-none text-slate-500">?</span>
+              <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                <span className="shrink-0 text-[10px] font-bold text-slate-500">点击</span>
+                <span className="min-w-0 truncate text-[11px] font-medium leading-tight text-slate-400">点击搜索按钮等…</span>
               </div>
             </div>
           </div>
         ) : (
-          <div ref={preClickScrollRef} className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
+          <div className="flex flex-col gap-1 pt-1.5">
             {preClickMarks.map((m) => {
               const isInput = m.action === "input";
               const actionWord = isInput ? (m.workflow === "entry" ? "录入" : "审查") : "点击";
@@ -3590,17 +3678,17 @@ function ReportTab({
                   onMouseEnter={() => onHoverMark?.(m)}
                   onMouseLeave={() => onHoverMark?.(null)}
                   onContextMenu={(e) => { e.preventDefault(); if (onReplaceMark) onReplaceMark(m); }}
-                  className={`group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}${replacingMarkId === m.id ? " ring-2 ring-indigo-400 bg-indigo-50" : ""}`}
+                  className={`${stepCardCls}${replacingMarkId === m.id ? " ring-2 ring-indigo-400 bg-indigo-50" : ""}`}
                   title={`${actionWord} · ${displayLabel}（点击在网页定位）`}
                 >
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-[12px] font-bold text-white shadow-sm">
+                  <span className={stepNoCls}>
                     {m.order}
                   </span>
-                  <div className="flex min-w-0 flex-1 flex-col gap-0.5 pr-5">
-                    <span className={`text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>
-                      {isLatest ? <span className="hl-latest">{actionWord}</span> : actionWord}
+                  <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                    <span className={`shrink-0 text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>
+                      {actionWord}
                     </span>
-                    <span className={`line-clamp-2 text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{displayLabel}</span> : displayLabel}</span>
+                    <span className={`min-w-0 truncate text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{displayLabel}</span> : displayLabel}</span>
                   </div>
                   {onRemoveMark && (
                     <button
@@ -3610,7 +3698,7 @@ function ReportTab({
                           onRemoveMark(m.id);
                         }
                       }}
-                      className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-5 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
+                      className="absolute right-1 top-1/2 flex h-5 w-4 -translate-y-1/2 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
                       title="删除"
                     >
                       <Trash2 className="h-3 w-3" />
@@ -3623,7 +3711,7 @@ function ReportTab({
         )}
       </div>
 
-      {/* 审查映射分组 —— 小卡片从左到右排列 */}
+      {/* 审查映射分组 —— 卡片自上而下排列 */}
       <div className="shrink-0">
         <div className="mb-0 flex flex-wrap items-center gap-1.5 border-b-2 border-slate-200 pb-1.5 text-[11px] font-bold text-slate-700">
           <Table2 className="h-3.5 w-3.5 text-slate-500" />
@@ -3631,37 +3719,6 @@ function ReportTab({
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{reviewMappings.length}</span>
           {fieldSetupMode && !running && (
             <>
-              {!expertMode && onSwitchStepMode && (
-                <div className="ml-1 flex shrink-0 items-center gap-0 rounded-md bg-slate-100 p-0.5 ring-1 ring-slate-200">
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onSwitchStepMode("review"); }}
-                    className={[
-                      "flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-all",
-                      addingStepMode === "review"
-                        ? "bg-red-500 text-white shadow-sm animate-pulse"
-                        : "text-slate-500 hover:bg-white/60",
-                    ].join(" ")}
-                    title={addingStepMode === "review" ? "审核模式激活中（再次点击关闭）" : "审核模式：先选右侧具体字段，再选左侧对应字段核对"}
-                  >
-                    <ArrowLeft className="h-2.5 w-2.5" />
-                    审核
-                  </button>
-                  <div className="h-3.5 w-px bg-slate-300" />
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onSwitchStepMode("entry"); }}
-                    className={[
-                      "flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium transition-all",
-                      addingStepMode === "entry"
-                        ? "bg-red-500 text-white shadow-sm animate-pulse"
-                        : "text-slate-500 hover:bg-white/60",
-                    ].join(" ")}
-                    title={addingStepMode === "entry" ? "录入模式激活中（再次点击关闭）" : "录入模式：先选左侧字段/输入框，再选右侧完成填入映射"}
-                  >
-                    <MoveRight className="h-2.5 w-2.5" />
-                    录入
-                  </button>
-                </div>
-              )}
               {/* 确定映射：匹配好一对即可确认（未匹配时禁用） */}
               {!running && onConfirmMapping && (
                 <button
@@ -3694,21 +3751,19 @@ function ReportTab({
           )}
         </div>
         {reviewMappings.length === 0 ? (
-          <div className="flex gap-2 pt-1.5">
-            <div className="flex shrink-0 min-w-[100px] max-w-[160px] items-start gap-2 rounded-2xl bg-slate-50/60 px-2.5 py-2">
-              <div className="flex shrink-0 flex-col items-center gap-1">
-                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-100 text-[13px] font-bold text-slate-400">?</span>
-                <ArrowLeft className="h-3.5 w-3.5 text-slate-300" />
-              </div>
-              <div className="flex min-w-0 flex-1 flex-col">
-                <span className="text-[11px] font-bold text-slate-500">对比</span>
-                <div className="truncate py-0.5 text-[11px] font-medium leading-tight text-slate-400">左侧字段</div>
-                <div className="truncate py-0.5 text-[12px] font-medium leading-tight text-slate-400">右侧字段</div>
+          <div className="pt-1.5">
+            <div className="flex w-full items-center gap-1.5 rounded-lg bg-slate-50/60 py-1 pl-2 pr-2">
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-slate-200 text-[10px] font-bold leading-none text-slate-500">?</span>
+              <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                <span className="shrink-0 text-[10px] font-bold text-slate-500">对比</span>
+                <span className="min-w-0 flex-1 truncate text-[10px] font-medium leading-tight text-slate-400">左侧字段</span>
+                <ArrowLeft className="h-2.5 w-2.5 shrink-0 text-slate-300" />
+                <span className="min-w-0 flex-1 truncate text-[11px] font-medium leading-tight text-slate-400">右侧字段</span>
               </div>
             </div>
           </div>
         ) : (
-          <div ref={reviewScrollRef} className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
+          <div className="flex flex-col gap-1 pt-1.5">
             {reviewMappings.map((mp, i) => {
               const isEntry = appMode === "entry";
               const webSide = mp.web_side || "right";
@@ -3738,28 +3793,26 @@ function ReportTab({
                     e.preventDefault();
                     if (reviewMark && onReplaceMark) onReplaceMark(reviewMark);
                   }}
-                  className={`group relative flex shrink-0 min-w-[100px] max-w-[160px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}${reviewMark && replacingMarkId === reviewMark.id ? " ring-2 ring-indigo-400 bg-indigo-50" : ""}`}
+                  className={`${stepCardCls}${reviewMark && replacingMarkId === reviewMark.id ? " ring-2 ring-indigo-400 bg-indigo-50" : ""}`}
                   title={`${mp.left_field || "—"} ${isEntry ? "→" : "←"} ${mp.right_label || mp.right_selector}（${webSide === "left" ? "左" : "右"}侧网页，点击定位）`}
                 >
-                  <div className="flex shrink-0 flex-col items-center gap-1">
-                    <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-900 text-[12px] font-bold text-white shadow-sm">
-                      {i + 1}
-                    </span>
-                    {isEntry ? (
-                      <MoveRight className="h-3 w-3 text-slate-400" />
-                    ) : (
-                      <ArrowLeft className="h-3 w-3 text-slate-400" />
-                    )}
-                  </div>
-                  <div className="flex min-w-0 flex-1 flex-col pr-5">
-                    <span className={`text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>
-                      {isLatest ? <span className="hl-latest">{isEntry ? "填入" : "对比"}</span> : (isEntry ? "填入" : "对比")}
+                  <span className={stepNoCls}>
+                    {i + 1}
+                  </span>
+                  <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                    <span className={`shrink-0 text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>
+                      {isEntry ? "填入" : "对比"}
                       {webSide === "left" && (
-                        <span className="ml-1 rounded bg-slate-200/80 px-1 py-px text-[8px] font-semibold text-slate-500">左网页</span>
+                        <span className="ml-1 rounded bg-slate-200/80 px-1 py-px text-[8px] font-semibold text-slate-500">左</span>
                       )}
                     </span>
-                    <div className={`truncate py-0.5 text-[10px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-500"}`}>{isLatest ? <span className="hl-latest">{mp.left_field || "—"}</span> : (mp.left_field || "—")}</div>
-                    <div className={`line-clamp-2 text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{mp.right_label || mp.right_selector}</span> : (mp.right_label || mp.right_selector)}</div>
+                    <span className={`min-w-0 truncate text-[10px] font-medium leading-tight text-slate-500 ${isLatest ? "text-slate-800" : ""}`}>{isLatest ? <span className="hl-latest">{mp.left_field || "—"}</span> : (mp.left_field || "—")}</span>
+                    {isEntry ? (
+                      <MoveRight className="h-2.5 w-2.5 shrink-0 text-slate-400" />
+                    ) : (
+                      <ArrowLeft className="h-2.5 w-2.5 shrink-0 text-slate-400" />
+                    )}
+                    <span className={`min-w-0 flex-1 truncate text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{mp.right_label || mp.right_selector}</span> : (mp.right_label || mp.right_selector)}</span>
                   </div>
                   {onRemoveMapping && (
                     <button
@@ -3769,7 +3822,7 @@ function ReportTab({
                           onRemoveMapping(i);
                         }
                       }}
-                      className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-5 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
+                      className="absolute right-1 top-1/2 flex h-5 w-4 -translate-y-1/2 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
                       title="删除"
                     >
                       <Trash2 className="h-3 w-3" />
@@ -3788,28 +3841,6 @@ function ReportTab({
           <MousePointerClick className="h-3.5 w-3.5 text-slate-500" />
           过程点击
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{processClickMarks.length}</span>
-          {!expertMode && fieldSetupMode && onStartAddProcessClick && !running && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onStartAddProcessClick(); }}
-              className={[
-                "ml-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
-                processClickActive
-                  ? "bg-red-600 text-white shadow-md ring-2 ring-red-300"
-                  : "bg-white/70 text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 hover:text-slate-900",
-              ].join(" ")}
-              title={processClickActive ? "过程点击添加中（再次点击关闭）" : "添加过程点击（NEXT、下一步等中间步骤）"}
-            >
-              {processClickActive ? (
-                <span className="relative flex h-2 w-2 shrink-0">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-75" />
-                  <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
-                </span>
-              ) : (
-                <Plus className="h-2.5 w-2.5" />
-              )}
-              {processClickActive ? "过程点击中" : "添加过程点击"}
-            </button>
-          )}
           {fieldSetupMode && !running && onRunSteps && processClickMarks.length > 0 && (
             <button
               onClick={(e) => { e.stopPropagation(); onRunSteps(processClickMarks); }}
@@ -3822,17 +3853,17 @@ function ReportTab({
           )}
         </div>
         {processClickMarks.length === 0 ? (
-          <div className="flex gap-2 pt-1.5">
-            <div className="flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-2xl bg-slate-50/60 px-2.5 py-2">
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-[13px] font-bold text-slate-400">?</span>
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="text-[11px] font-bold text-slate-500">点击</span>
-                <span className="line-clamp-2 text-[12px] font-medium leading-tight text-slate-400">点击 NEXT 等中间步骤…</span>
+          <div className="pt-1.5">
+            <div className="flex w-full items-center gap-1.5 rounded-lg bg-slate-50/60 py-1 pl-2 pr-2">
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-slate-200 text-[10px] font-bold leading-none text-slate-500">?</span>
+              <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                <span className="shrink-0 text-[10px] font-bold text-slate-500">点击</span>
+                <span className="min-w-0 truncate text-[11px] font-medium leading-tight text-slate-400">点击 NEXT 等中间步骤…</span>
               </div>
             </div>
           </div>
         ) : (
-          <div ref={processClickScrollRef} className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
+          <div className="flex flex-col gap-1 pt-1.5">
             {processClickMarks.map((m) => {
               const isLatest = latestStepKey === `mark:${m.id}`;
               return (
@@ -3843,13 +3874,13 @@ function ReportTab({
                 onMouseEnter={() => onHoverMark?.(m)}
                 onMouseLeave={() => onHoverMark?.(null)}
                 onContextMenu={(e) => { e.preventDefault(); if (onReplaceMark) onReplaceMark(m); }}
-                className={`group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}${replacingMarkId === m.id ? " ring-2 ring-indigo-400 bg-indigo-50" : ""}`}
+                className={`${stepCardCls}${replacingMarkId === m.id ? " ring-2 ring-indigo-400 bg-indigo-50" : ""}`}
                 title={`点击 · ${m.label}（点击在网页定位）`}
               >
-                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-[12px] font-bold text-white shadow-sm">{m.order}</span>
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5 pr-5">
-                  <span className={`text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>{isLatest ? <span className="hl-latest">点击</span> : "点击"}</span>
-                  <span className={`line-clamp-2 text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{m.label}</span> : m.label}</span>
+                <span className={stepNoCls}>{m.order}</span>
+                <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                  <span className={`shrink-0 text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>点击</span>
+                  <span className={`min-w-0 truncate text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{m.label}</span> : m.label}</span>
                 </div>
                 {onRemoveMark && (
                   <button
@@ -3859,7 +3890,7 @@ function ReportTab({
                         onRemoveMark(m.id);
                       }
                     }}
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-5 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
+                    className="absolute right-1 top-1/2 flex h-5 w-4 -translate-y-1/2 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
                     title="删除"
                   >
                     <Trash2 className="h-3 w-3" />
@@ -3893,17 +3924,17 @@ function ReportTab({
           )}
         </div>
         {extractStepSummary.length === 0 ? (
-          <div className="flex gap-2 pt-1.5">
-            <div className="flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-2xl bg-slate-50/60 px-2.5 py-2">
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-[13px] font-bold text-slate-400">?</span>
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="text-[11px] font-bold text-slate-500">提取</span>
-                <span className="line-clamp-2 text-[12px] font-medium leading-tight text-slate-400">文件提取/自定义文本/控件…</span>
+          <div className="pt-1.5">
+            <div className="flex w-full items-center gap-1.5 rounded-lg bg-slate-50/60 py-1 pl-2 pr-2">
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-slate-200 text-[10px] font-bold leading-none text-slate-500">?</span>
+              <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                <span className="shrink-0 text-[10px] font-bold text-slate-500">提取</span>
+                <span className="min-w-0 truncate text-[11px] font-medium leading-tight text-slate-400">文件提取/自定义文本/控件…</span>
               </div>
             </div>
           </div>
         ) : (
-          <div ref={extractScrollRef2} className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
+          <div className="flex flex-col gap-1 pt-1.5">
             {extractStepSummary.map((item, idx) => {
               let typeLabel = "提取";
               if (item.kind === "doc") {
@@ -3947,25 +3978,22 @@ function ReportTab({
                   }}
                   onMouseLeave={() => onHoverMark?.(null)}
                   className={[
-                    "group relative flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all",
-                    canPreview ? "cursor-pointer hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm" : "",
-                    isLatest ? "animate-step-card-in" : "",
+                    stepCardCls,
+                    canPreview ? "" : "cursor-default hover:bg-slate-50 hover:shadow-none",
                   ].join(" ")}
                   title={`${item.name} · ${item.detail}${canPreview ? "（点击在网页定位）" : ""}`}
                 >
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-[12px] font-bold text-white shadow-sm">
+                  <span className={stepNoCls}>
                     {idx + 1}
                   </span>
-                  <div className="flex min-w-0 flex-1 flex-col gap-0.5 pr-5">
-                    <div className="flex items-center justify-between">
-                      <span className={`text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>{isLatest ? <span className="hl-latest">{typeLabel}</span> : typeLabel}</span>
-                      <span
-                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                          item.saved ? "bg-emerald-400" : "bg-amber-400"
-                        }`}
-                      />
-                    </div>
-                    <span className={`line-clamp-2 text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{item.detail}</span> : item.detail}</span>
+                  <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                    <span className={`shrink-0 text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>{typeLabel}</span>
+                    <span className={`min-w-0 flex-1 truncate text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{item.detail}</span> : item.detail}</span>
+                    <span
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                        item.saved ? "bg-emerald-400" : "bg-amber-400"
+                      }`}
+                    />
                   </div>
                   {onRemoveExtractStep && (
                     <button
@@ -3975,7 +4003,7 @@ function ReportTab({
                           onRemoveExtractStep(item.id, item.kind);
                         }
                       }}
-                      className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-5 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
+                      className="absolute right-1 top-1/2 flex h-5 w-4 -translate-y-1/2 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
                       title="删除"
                     >
                       <Trash2 className="h-3 w-3" />
@@ -3988,7 +4016,7 @@ function ReportTab({
         )}
       </div>
 
-      {/* 收尾点击分组 —— 小卡片从左到右排列 */}
+      {/* 收尾点击分组 —— 卡片自上而下排列 */}
       <div className="shrink-0">
         <div className="mb-0 flex items-center gap-1.5 border-b-2 border-slate-200 pb-1.5 text-[11px] font-bold text-slate-700">
           <MousePointerClick className="h-3.5 w-3.5 text-slate-500" />
@@ -4004,41 +4032,19 @@ function ReportTab({
               运行本节
             </button>
           )}
-          {!expertMode && fieldSetupMode && onStartAddPostClick && !running && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onStartAddPostClick(); }}
-              className={[
-                "ml-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold transition-all",
-                postClickActive
-                  ? "bg-red-600 text-white shadow-md ring-2 ring-red-300"
-                  : "bg-white/70 text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 hover:text-slate-900",
-              ].join(" ")}
-              title={postClickActive ? "收尾点击添加中（再次点击关闭）" : "添加收尾点击（提交按钮等）"}
-            >
-              {postClickActive ? (
-                <span className="relative flex h-2 w-2 shrink-0">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-75" />
-                  <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
-                </span>
-              ) : (
-                <Plus className="h-2.5 w-2.5" />
-              )}
-              {postClickActive ? "收尾点击中" : "添加收尾点击"}
-            </button>
-          )}
         </div>
         {postClickMarks.length === 0 ? (
-          <div className="flex gap-2 pt-1.5">
-            <div className="flex shrink-0 min-w-[120px] max-w-[180px] items-start gap-2 rounded-2xl bg-slate-50/60 px-2.5 py-2">
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-[13px] font-bold text-slate-400">?</span>
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="text-[11px] font-bold text-slate-500">点击</span>
-                <span className="line-clamp-2 text-[12px] font-medium leading-tight text-slate-400">点击提交按钮等…</span>
+          <div className="pt-1.5">
+            <div className="flex w-full items-center gap-1.5 rounded-lg bg-slate-50/60 py-1 pl-2 pr-2">
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-slate-200 text-[10px] font-bold leading-none text-slate-500">?</span>
+              <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                <span className="shrink-0 text-[10px] font-bold text-slate-500">点击</span>
+                <span className="min-w-0 truncate text-[11px] font-medium leading-tight text-slate-400">点击提交按钮等…</span>
               </div>
             </div>
           </div>
         ) : (
-          <div ref={postClickScrollRef} className="scrollbar-tiny flex gap-2 overflow-x-auto pb-0.5 pt-1.5" onWheel={handleHorizontalWheel}>
+          <div className="flex flex-col gap-1 pt-1.5">
             {postClickMarks.map((m) => {
               const isLatest = latestStepKey === `mark:${m.id}`;
               return (
@@ -4049,13 +4055,13 @@ function ReportTab({
                 onMouseEnter={() => onHoverMark?.(m)}
                 onMouseLeave={() => onHoverMark?.(null)}
                 onContextMenu={(e) => { e.preventDefault(); if (onReplaceMark) onReplaceMark(m); }}
-                className={`group relative flex shrink-0 min-w-[120px] max-w-[180px] cursor-pointer items-start gap-2 rounded-2xl bg-slate-50 px-2.5 py-2 transition-all hover:-translate-y-0.5 hover:bg-slate-100 hover:shadow-sm ${isLatest ? "animate-step-card-in" : ""}${replacingMarkId === m.id ? " ring-2 ring-indigo-400 bg-indigo-50" : ""}`}
+                className={`${stepCardCls}${replacingMarkId === m.id ? " ring-2 ring-indigo-400 bg-indigo-50" : ""}`}
                 title={`点击 · ${m.label}（点击在网页定位）`}
               >
-                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-[12px] font-bold text-white shadow-sm">{m.order}</span>
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5 pr-5">
-                  <span className={`text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>{isLatest ? <span className="hl-latest">点击</span> : "点击"}</span>
-                  <span className={`line-clamp-2 text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{m.label}</span> : m.label}</span>
+                <span className={stepNoCls}>{m.order}</span>
+                <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                  <span className={`shrink-0 text-[10px] font-bold ${isLatest ? "text-slate-800" : "text-slate-500"}`}>点击</span>
+                  <span className={`min-w-0 truncate text-[11px] font-medium leading-tight ${isLatest ? "text-slate-800" : "text-slate-700"}`}>{isLatest ? <span className="hl-latest">{m.label}</span> : m.label}</span>
                 </div>
                 {onRemoveMark && (
                   <button
@@ -4065,7 +4071,7 @@ function ReportTab({
                         onRemoveMark(m.id);
                       }
                     }}
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-5 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
+                    className="absolute right-1 top-1/2 flex h-5 w-4 -translate-y-1/2 items-center justify-center rounded text-rose-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
                     title="删除"
                   >
                     <Trash2 className="h-3 w-3" />
@@ -4163,9 +4169,29 @@ function ReportTab({
             contain: "layout",
           }}
         >
+          {fieldPaneOverride ? (
+            <div className="flex h-full min-h-0 flex-col overflow-hidden">{fieldPaneOverride}</div>
+          ) : (
+            <>
           <div className="glass-frame flex shrink-0 items-center gap-1.5 border-b px-2 py-1 text-[11px] font-semibold text-slate-700">
             <Table2 className="h-3.5 w-3.5 text-slate-500 shrink-0" />
             <span className="shrink-0">字段对比</span>
+            {/* 步骤分类开关（默认不勾选）：不勾选=所有 STEP 按顺序直排；勾选=按前置设置/审查映射/过程点击/提取元素/收尾点击分组 */}
+            {fieldSetupMode && (
+              <label
+                className="ml-1 flex shrink-0 cursor-pointer select-none items-center gap-1 rounded px-1 py-0.5 text-[9px] font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                title="勾选后按「前置设置 / 审查映射 / 过程点击 / 提取元素 / 收尾点击」分组显示；不勾选则所有步骤按顺序直排"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <input
+                  type="checkbox"
+                  className="h-2.5 w-2.5 shrink-0 cursor-pointer accent-violet-600"
+                  checked={stepGrouping}
+                  onChange={(e) => setStepGrouping(e.target.checked)}
+                />
+                分类
+              </label>
+            )}
             {!fieldSetupMode && headerBadges && (
               <span className="ml-1 flex shrink-0 items-center gap-1">{headerBadges}</span>
             )}
@@ -4246,11 +4272,17 @@ function ReportTab({
             </button>
           </div>
           {fieldSetupMode ? (
-            <div className="min-h-0 flex-1 min-w-[200px] overflow-y-auto overflow-x-hidden">{fieldSetupContent}</div>
+            stepGrouping ? (
+              <div className="min-h-0 flex-1 min-w-[200px] overflow-y-auto overflow-x-hidden">{fieldSetupContent}</div>
+            ) : (
+              <div className="min-h-0 flex-1 min-w-[200px] overflow-hidden">{orderedStepsContent}</div>
+            )
           ) : (
             <>
               {summaryBar && <div className="shrink-0 px-1.5 pt-1.5">{summaryBar}</div>}
               <div ref={liveScrollRef} className="min-h-0 flex-1 min-w-[200px] overflow-y-auto overflow-x-hidden p-1.5">{fieldContent}</div>
+            </>
+          )}
             </>
           )}
         </div>

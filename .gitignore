@@ -135,9 +135,15 @@ frontend/src/.App.tsx.artifact.json
 nul
 
 # Session screenshot / comparison images dropped at repo root
-image????????-????-????-????-????????????.png
+image-*.png
+image-*.webp
+image-*.jpg
 _hdr_cmp.png
 slide-studio-button-compare.png
+
+# Box-Agent runtime scratch / uploads (local only, not source)
+.box-agent-scratch/
+backend/_uploads/
 
 # Unrelated project build outputs (FrameTol etc.)
 # 注：FrameTol 已于本次整理中移出本仓库（现位于 D:\其他项目\），

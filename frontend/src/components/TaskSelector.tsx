@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, type ReactNode, type CSSProperties } from "react";
 import { Globe, Presentation, Users, ArrowRight, Loader2 } from "lucide-react";
 import appIconPng from "../assets/app-icon.png";
-import DotWorldMap from "./DotWorldMap";
 
 interface TaskSelectorProps {
   onSelect: (task: "web" | "ppt" | "cowork") => void;
@@ -37,14 +36,7 @@ export default function TaskSelector({ onSelect, checking, appVersion, updateNot
 
   return (
     <div className="task-selector-root">
-      {/* Minecraft 风点阵世界地图壁纸（Logo/卡片之下，不拦截交互） */}
-      <DotWorldMap
-        className="pointer-events-none absolute left-1/2 top-1/2 z-0 -translate-x-1/2 -translate-y-1/2 select-none"
-        color="#94a3b8"
-        opacity={1}
-        dotSize={6}
-        gap={3}
-      />
+      {/* 壁纸改由 App 的 TaskWallpaperLayer 统一提供（与网页任务一致），此处背景透明以露出壁纸 */}
       <style>{`
         .task-selector-root {
           min-height: 100vh;
@@ -53,7 +45,7 @@ export default function TaskSelector({ onSelect, checking, appVersion, updateNot
           align-items: center;
           justify-content: center;
           padding: 32px;
-          background: linear-gradient(135deg, #f8fafc 0%, #ffffff 50%, #f5f3ff 100%);
+          background: transparent;
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
             'Microsoft YaHei', sans-serif;
           overflow: hidden;

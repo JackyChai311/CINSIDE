@@ -235,10 +235,11 @@ export const api = {
     jsonFetch<{ ok: boolean; message: string; host: string; port: number }>(`${BASE}/config/test-umi-ocr`, {
       method: "POST",
     }),
+  /** 一键启动 UMI-OCR：后端会拉起进程并等 HTTP 就绪（首次加载模型可达 120s），前端需放长超时 */
   launchUmiOcr: () =>
     jsonFetch<{ ok: boolean; message: string; exe_path: string }>(`${BASE}/config/launch-umi-ocr`, {
       method: "POST",
-    }),
+    }, 130000),
   browseUmiOcr: () =>
     jsonFetch<{ ok: boolean; message: string; path: string }>(`${BASE}/config/browse-umi-ocr`, {
       method: "POST",

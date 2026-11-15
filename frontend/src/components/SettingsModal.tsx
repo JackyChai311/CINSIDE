@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Cpu, Download, Eye, EyeOff, Film, FolderOpen, Globe, Loader2, Maximize2, Minus, MonitorCheck, MonitorOff, Moon, Package, Palette, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, ShieldX, Sparkles, Sun, Target, X, XCircle, Zap } from "lucide-react";
+import { CheckCircle2, Cpu, Download, Film, FolderOpen, Loader2, Maximize2, Minus, Moon, Package, Palette, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, Sun, Target, X, XCircle, Zap } from "lucide-react";
 import { api } from "../api/client";
 import type { AppSettings, DepsStatus, GpuInfo } from "../types";
+import AppearanceSection from "./AppearanceSection";
 
 interface Props {
   initial: AppSettings;
@@ -10,6 +11,19 @@ interface Props {
   onScaleChange?: (scale: number) => void;
   onBrightnessChange?: (brightness: number) => void;
   onAppearanceChange?: (theme: string, accent: string) => void;
+  // 外观控制（原 PERSONAL 移入）：壁纸 / 面板不透明度 / 文字颜色
+  wallpaperOn: boolean;
+  wallpaperColor: string;
+  onWallpaperChange: (on: boolean, color: string) => void;
+  wallpaperCustom: string;
+  onCustomWallpaperChange: (dataUrl: string | null) => void;
+  useDefaultWallpaper: boolean;
+  onUseDefaultWallpaperChange: (useDefault: boolean) => void;
+  onApplyWallpaper: () => void;
+  wallpaperBrightness: number;
+  onWallpaperBrightnessChange: (v: number) => void;
+  panelAlpha: { left: number; top: number; bottom: number };
+  onPanelAlphaChange: (next: Partial<{ left: number; top: number; bottom: number }>) => void;
 }
 
 const DEFAULTS: AppSettings = {
@@ -29,8 +43,8 @@ const DEFAULTS: AppSettings = {
   browser_use_llm_base: "https://token.sensenova.cn/v1",
   browser_use_llm_key: "",
   browser_use_llm_model: "sensenova-6.7-flash-lite",
-  prevent_accidental_close: false,
-  loop_keep_awake: false,
+  prevent_accidental_close: true,
+  loop_keep_awake: true,
   high_speed_mode: false,
   igpu_acceleration: false,
   ui_scale: 1.0,
@@ -80,12 +94,9 @@ const RECOG_GEARS = [
   },
 ];
 
-export default function SettingsModal({ initial, onClose, onSaved, onScaleChange, onBrightnessChange, onAppearanceChange }: Props) {
+export default function SettingsModal({ initial, onClose, onSaved, onScaleChange, onBrightnessChange, onAppearanceChange, wallpaperOn, wallpaperColor, onWallpaperChange, wallpaperCustom, onCustomWallpaperChange, useDefaultWallpaper, onUseDefaultWallpaperChange, onApplyWallpaper, wallpaperBrightness, onWallpaperBrightnessChange, panelAlpha, onPanelAlphaChange }: Props) {
   const [settings, setSettings] = useState<AppSettings>({ ...DEFAULTS, ...initial });
-  const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // 依赖与工具状态
@@ -384,7 +395,6 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
       next.vision_model = next.browser_use_llm_model = next.vision_model || next.browser_use_llm_model;
     }
     setSettings(next);
-    setTestResult(null);
     setError(null);
     // 主题/主色调：点击即生效，不等待保存按钮
     if ("theme" in patch || "accent" in patch) {
@@ -396,67 +406,6 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
   const recogGearPos = (settings.ocr_engine || "vision") === "vision"
     ? (settings.vision_viz_fallback === true ? 0 : settings.vision_auto_orient !== false ? 1 : 2)
     : (settings.vision_auto_orient !== false ? 3 : 4);
-
-  const handleTest = async () => {
-    const base = (settings.vision_api_base || "").trim();
-    // 本地先校验 URL 协议，填错（如 hhttps://）直接提示，不发起请求干等
-    if (base && !base.startsWith("http://") && !base.startsWith("https://")) {
-      setTestResult({ ok: false, message: `API Base URL 格式错误（应以 http:// 或 https:// 开头）：${base.slice(0, 60)}` });
-      return;
-    }
-    setTesting(true);
-    setTestResult(null);
-    setError(null);
-    try {
-      await api.saveSettings(settings);
-      const r = await api.testVision();
-      setTestResult({ ok: r.supports_images, message: r.message });
-    } catch (e: any) {
-      setTestResult({ ok: false, message: e.message || "检测失败" });
-    } finally {
-      setTesting(false);
-    }
-  };
-
-  // 全局分析模型测试：按面板当前填写（留空项按已保存配置继承）发极小请求
-  const [testAnalysisRunning, setTestAnalysisRunning] = useState(false);
-  const [testAnalysisMsg, setTestAnalysisMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const handleTestAnalysis = async () => {
-    setTestAnalysisRunning(true);
-    setTestAnalysisMsg(null);
-    try {
-      const r = await api.testAnalysis({
-        api_base: settings.analysis_api_base || "",
-        api_key: settings.analysis_api_key || "",
-        model: settings.analysis_model || "",
-      });
-      setTestAnalysisMsg({ ok: r.ok, text: r.message });
-    } catch (e: any) {
-      setTestAnalysisMsg({ ok: false, text: e?.message || "测试请求失败" });
-    } finally {
-      setTestAnalysisRunning(false);
-    }
-  };
-
-  // 生图模型测试：核对手写型号在端点是否存在（不实际生图，避免耗时与配额消耗）
-  const [testImagegenRunning, setTestImagegenRunning] = useState(false);
-  const [testImagegenMsg, setTestImagegenMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const handleTestImagegen = async () => {
-    setTestImagegenRunning(true);
-    setTestImagegenMsg(null);
-    try {
-      const r = await api.testImagegen({
-        api_base: settings.sensenova_api_base || "",
-        api_key: settings.sensenova_api_key || "",
-        model: settings.sensenova_model || "",
-      });
-      setTestImagegenMsg({ ok: r.ok, text: r.message });
-    } catch (e: any) {
-      setTestImagegenMsg({ ok: false, text: e?.message || "测试请求失败" });
-    } finally {
-      setTestImagegenRunning(false);
-    }
-  };
 
   const handleClose = () => {
     // 取消时恢复原始主题外观和亮度（因为点击/拖动已即时生效）
@@ -507,261 +456,7 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
 
         {/* body：可滚动 */}
         <div className="settings-scroll flex-1 space-y-4 overflow-y-auto px-5 py-5">
-          {/* AI API：左=识图/排版（原有视图），右=全局分析；模型均为「识别端点可用选项」后下拉选择 */}
-          <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-2">
-          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
-            <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-slate-700">
-                <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
-                AI API（识图：护照 OCR / 视觉比对 / 控制浏览器）
-              </div>
-            <div className="space-y-3">
-              <div>
-                <label className="mb-1 block text-[10px] font-medium text-slate-500">API Base URL</label>
-                <input
-                  type="text"
-                  value={settings.vision_api_base}
-                  onChange={(e) => update({ vision_api_base: e.target.value })}
-                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-brand-400"
-                  placeholder="https://token.sensenova.cn/v1"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-[10px] font-medium text-slate-500">API Key</label>
-                <div className="relative">
-                  <input
-                    type={showKey ? "text" : "password"}
-                    value={settings.vision_api_key}
-                    onChange={(e) => update({ vision_api_key: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 pr-9 text-xs text-slate-700 outline-none focus:border-brand-400"
-                    placeholder="sk-..."
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowKey((v) => !v)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                  >
-                    {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                  </button>
-                </div>
-              </div>
-              <div>
-                <label className="mb-1 block text-[10px] font-medium text-slate-500">模型</label>
-                <input
-                  type="text"
-                  value={settings.vision_model}
-                  onChange={(e) => update({ vision_model: e.target.value })}
-                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-brand-400"
-                  placeholder="sensenova-6.7-flash-lite"
-                />
-                <p className="mt-1 text-[10px] text-slate-400">必须支持 image_url 输入；填好后点下方「检测」验证该模型。</p>
-              </div>
-              <button
-                type="button"
-                onClick={handleTest}
-                disabled={testing}
-                className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60"
-              >
-                {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
-                {testing ? "检测中…" : "检测该模型是否支持图片"}
-              </button>
-              {testResult && (
-                <div
-                  className={[
-                    "rounded-lg px-3 py-2 text-xs",
-                    testResult.ok
-                      ? "bg-emerald-50 text-emerald-700"
-                      : "bg-rose-50 text-rose-700",
-                  ].join(" ")}
-                >
-                  {testResult.ok
-                    ? "✓ 该模型支持图片输入，OCR / 视觉比对可用。"
-                    : `✗ ${testResult.message || "该模型不支持图片输入，OCR / 视觉比对将不可用。"}`}
-                </div>
-              )}
-              {/* AI 自动转正 / VIZ 看图兜底均已并入下方「文件识别档位」5档调节杆 */}
-              {/* 文本 AI：识图之外的纯文字任务（UMI-OCR 结果排版 / LOOP 执行总结）用轻量文本模型 */}
-              <div className="rounded-lg border border-slate-200 bg-white px-3 py-2.5">
-                <div className="text-xs font-medium text-slate-700">文本 AI（OCR 文字排版 / 执行总结）</div>
-                <p className="mt-0.5 text-[10px] leading-relaxed text-slate-400">
-                  识图走上方模型；纯文字任务（UMI-OCR 识别结果的字段排版、左上角执行总结）交给这里的轻量文本模型，更快更省。
-                  地址和密钥留空时自动沿用上方 AI API（同一把 Key 只换模型名的场景直接可用）。
-                </p>
-                <div className="mt-2">
-                  <label className="mb-1 block text-[10px] font-medium text-slate-500">文本模型</label>
-                  <input
-                    type="text"
-                    value={settings.text_model || ""}
-                    onChange={(e) => update({ text_model: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-brand-400"
-                    placeholder="deepseek-v4-flash（留空用识图模型）"
-                  />
-                </div>
-                <details className="mt-2 group">
-                  <summary className="cursor-pointer select-none text-[10px] font-medium text-slate-400 hover:text-slate-600">
-                    使用不同的地址 / 密钥（默认同上方 AI API）
-                  </summary>
-                  <div className="mt-2 space-y-2">
-                    <input
-                      type="text"
-                      value={settings.text_api_base || ""}
-                      onChange={(e) => update({ text_api_base: e.target.value })}
-                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-brand-400"
-                      placeholder="API Base URL（留空同上方）"
-                    />
-                    <input
-                      type={showKey ? "text" : "password"}
-                      value={settings.text_api_key || ""}
-                      onChange={(e) => update({ text_api_key: e.target.value })}
-                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-brand-400"
-                      placeholder="API Key（留空同上方）"
-                    />
-                  </div>
-                </details>
-              </div>
-            </div>
-          </div>
-
-          {/* 右列：全局分析 AI + PPT 配图纵向排列，填满与左侧识图卡片的高度差 */}
-          <div className="space-y-3">
-            {/* 全局分析 AI：LOOP 运行中逐卡实时分析 + 结束总结，独立 Key 与识图流量分开 */}
-            <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
-              <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-slate-700">
-                <Sparkles className="h-3.5 w-3.5 text-indigo-500" />
-                全局分析 AI（LOOP 执行分析 / 单卡即时分析）
-              </div>
-              <p className="mb-3 text-[10px] leading-relaxed text-slate-400">
-                LOOP 运行中对问题卡片的实时分析和结束总结走这里的模型。全部留空时自动沿用左侧识图 / 文本配置；
-                填入独立 Key 可与识图流量分开，避免运行中逐卡分析互相限流。
-              </p>
-              <div className="space-y-3">
-                <div>
-                  <label className="mb-1 block text-[10px] font-medium text-slate-500">API Base URL</label>
-                  <input
-                    type="text"
-                    value={settings.analysis_api_base || ""}
-                    onChange={(e) => update({ analysis_api_base: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-brand-400"
-                    placeholder="留空同左侧"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] font-medium text-slate-500">API Key</label>
-                  <div className="relative">
-                    <input
-                      type={showKey ? "text" : "password"}
-                      value={settings.analysis_api_key || ""}
-                      onChange={(e) => update({ analysis_api_key: e.target.value })}
-                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 pr-9 text-xs text-slate-700 outline-none focus:border-brand-400"
-                      placeholder="留空同左侧"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowKey((v) => !v)}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                    >
-                      {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                    </button>
-                  </div>
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] font-medium text-slate-500">模型</label>
-                  <div className="flex gap-1.5">
-                    <input
-                      type="text"
-                      value={settings.analysis_model || ""}
-                      onChange={(e) => update({ analysis_model: e.target.value })}
-                      className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-brand-400"
-                      placeholder="deepseek-v4-flash（留空继承左侧）"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleTestAnalysis}
-                      disabled={testAnalysisRunning}
-                      title="按当前填写的地址/密钥/模型发一次极小请求验证可用性"
-                      className="flex shrink-0 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-60"
-                    >
-                      {testAnalysisRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
-                      测试
-                    </button>
-                  </div>
-                  {testAnalysisMsg && (
-                    <p className={`mt-1 text-[10px] ${testAnalysisMsg.ok ? "text-emerald-600" : "text-rose-500"}`}>{testAnalysisMsg.text}</p>
-                  )}
-                  <p className="mt-1 text-[10px] text-slate-400">纯文字分析任务，轻量文本模型即可，无需识图能力。</p>
-                </div>
-              </div>
-            </div>
-
-            {/* PPT 配图：生图端点 URL/Key/模型均可配置（默认商汤 U1 Fast），识别按钮拉取可用生图模型 */}
-            <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
-              <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-700">
-                <Palette className="h-3.5 w-3.5 text-violet-600" />
-                PPT 配图（商汤日日新 U1 Fast 生图）
-              </div>
-              <div className="space-y-3">
-                <div>
-                  <label className="mb-1 block text-[10px] font-medium text-slate-500">API Base URL</label>
-                  <input
-                    type="text"
-                    value={settings.sensenova_api_base || ""}
-                    onChange={(e) => update({ sensenova_api_base: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-brand-400"
-                    placeholder="https://token.sensenova.cn/v1"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] font-medium text-slate-500">API Key</label>
-                  <div className="relative">
-                    <input
-                      type={showKey ? "text" : "password"}
-                      value={settings.sensenova_api_key || ""}
-                      onChange={(e) => update({ sensenova_api_key: e.target.value })}
-                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 pr-9 text-xs text-slate-700 outline-none focus:border-brand-400"
-                      placeholder="sk-..."
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowKey((v) => !v)}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                    >
-                      {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                    </button>
-                  </div>
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] font-medium text-slate-500">生图模型</label>
-                  <div className="flex gap-1.5">
-                    <input
-                      type="text"
-                      value={settings.sensenova_model || ""}
-                      onChange={(e) => update({ sensenova_model: e.target.value })}
-                      className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-brand-400"
-                      placeholder="sensenova-u1-fast"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleTestImagegen}
-                      disabled={testImagegenRunning}
-                      title="核对手写型号在该端点是否存在（不实际生图）"
-                      className="flex shrink-0 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-60"
-                    >
-                      {testImagegenRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
-                      测试
-                    </button>
-                  </div>
-                  {testImagegenMsg && (
-                    <p className={`mt-1 text-[10px] ${testImagegenMsg.ok ? "text-emerald-600" : "text-rose-500"}`}>{testImagegenMsg.text}</p>
-                  )}
-                  <p className="mt-1 text-[10px] text-slate-400">
-                    Key 留空则生成纯文字 PPT；填入后制作 PPT 时会自动为每页生成信息图配图。
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-          </div>
-
-          {/* 文件识别档位：准确⇄速度 5档调节杆（引擎 × VIZ兜底 × 自动转正 × 高速模式 一杆定档） */}
+          {/* 文件识别档位：准确⇄速度 5档调节杆（引擎 × VIZ兜底 × 自动转正 × 高速模式 一杆定档）——置于面板最上方 */}
           <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
             {/* 两端语义标签：紧贴轨道最左/最右端（与轨道同宽对齐） */}
             <div className="mb-1.5 flex items-center justify-between">
@@ -830,156 +525,31 @@ export default function SettingsModal({ initial, onClose, onSaved, onScaleChange
             </div>
           </div>
 
-          {/* 防误关：挂后台到系统托盘 */}
-          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
-            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-700">
-              {settings.prevent_accidental_close ? (
-                <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
-              ) : (
-                <ShieldX className="h-3.5 w-3.5 text-slate-400" />
-              )}
-              防误关保护
-            </div>
-            <label className="flex cursor-pointer items-start gap-2.5">
-              <button
-                type="button"
-                role="switch"
-                aria-checked={!!settings.prevent_accidental_close}
-                onClick={() => update({ prevent_accidental_close: !settings.prevent_accidental_close })}
-                className={[
-                  "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors",
-                  settings.prevent_accidental_close ? "bg-emerald-500" : "bg-slate-300",
-                ].join(" ")}
-              >
-                <span
-                  className={[
-                    "inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform",
-                    settings.prevent_accidental_close ? "translate-x-[18px]" : "translate-x-0.5",
-                  ].join(" ")}
-                />
-              </button>
-              <div className="text-xs text-slate-500">
-                <div className="font-medium text-slate-700">
-                  {settings.prevent_accidental_close ? "已开启" : "已关闭"}
-                </div>
-                <p className="mt-0.5 leading-relaxed">
-                  开启后，点窗口关闭按钮不会真正退出，而是最小化到系统托盘后台运行。
-                  点击托盘图标可恢复窗口，右键托盘选「退出 CINSIDE」可真正退出。
-                </p>
-              </div>
-            </label>
-          </div>
-
-          {/* LOOP 运行时不息屏 */}
-          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
-            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-700">
-              {settings.loop_keep_awake ? (
-                <MonitorCheck className="h-3.5 w-3.5 text-emerald-600" />
-              ) : (
-                <MonitorOff className="h-3.5 w-3.5 text-slate-400" />
-              )}
-              LOOP 运行不息屏
-            </div>
-            <label className="flex cursor-pointer items-start gap-2.5">
-              <button
-                type="button"
-                role="switch"
-                aria-checked={!!settings.loop_keep_awake}
-                onClick={() => update({ loop_keep_awake: !settings.loop_keep_awake })}
-                className={[
-                  "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors",
-                  settings.loop_keep_awake ? "bg-emerald-500" : "bg-slate-300",
-                ].join(" ")}
-              >
-                <span
-                  className={[
-                    "inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform",
-                    settings.loop_keep_awake ? "translate-x-[18px]" : "translate-x-0.5",
-                  ].join(" ")}
-                />
-              </button>
-              <div className="text-xs text-slate-500">
-                <div className="font-medium text-slate-700">
-                  {settings.loop_keep_awake ? "已开启" : "已关闭"}
-                </div>
-                <p className="mt-0.5 leading-relaxed">
-                  开启后，运行 LOOP 任务期间电脑不会息屏或休眠，任务结束后自动恢复系统默认的息屏策略。适合长时间批量执行时离开电脑。
-                </p>
-              </div>
-            </label>
-          </div>
-
           {/* 高速模式已并入上方「文件识别档位」第4档（OCR+无转正·高速） */}
 
-          {/* 高手模式 */}
+          {/* 外观控制（原 PERSONAL 移入）：壁纸 / 面板不透明度 / 文字颜色，改即生效 */}
           <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
-            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-700">
-              <Zap className={`h-3.5 w-3.5 ${settings.expert_mode === true ? "text-amber-500" : "text-slate-400"}`} />
-              高手模式
+            <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-slate-700">
+              <Palette className="h-3.5 w-3.5 text-brand-600" />
+              外观 · 壁纸 / 面板透明度 / 文字颜色
             </div>
-            <label className="flex cursor-pointer items-start gap-2.5">
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.expert_mode === true}
-                onClick={() => update({ expert_mode: settings.expert_mode !== true })}
-                className={[
-                  "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors",
-                  settings.expert_mode === true ? "bg-amber-500" : "bg-slate-300",
-                ].join(" ")}
-              >
-                <span
-                  className={[
-                    "inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform",
-                    settings.expert_mode === true ? "translate-x-[18px]" : "translate-x-0.5",
-                  ].join(" ")}
-                />
-              </button>
-              <div className="text-xs text-slate-500">
-                <div className="font-medium text-slate-700">
-                  {settings.expert_mode === true ? "已开启" : "已关闭（默认模式）"}
-                </div>
-                <p className="mt-0.5 leading-relaxed">
-                  开启后，步骤设置的功能按钮（绑定输入框、前置/过程/收尾点击、录入/审查步骤、文件提取、自定义文本、控件提取）集中到顶部工具栏并标注快捷键，适合熟练使用快捷键操作；关闭为默认模式，按钮显示在字段对比面板各分组标题行内。默认关闭。
-                </p>
-              </div>
-            </label>
+            <AppearanceSection
+              wallpaperOn={wallpaperOn}
+              wallpaperColor={wallpaperColor}
+              onWallpaperChange={onWallpaperChange}
+              wallpaperCustom={wallpaperCustom}
+              onCustomWallpaperChange={onCustomWallpaperChange}
+              useDefaultWallpaper={useDefaultWallpaper}
+              onUseDefaultWallpaperChange={onUseDefaultWallpaperChange}
+              onApplyWallpaper={onApplyWallpaper}
+              wallpaperBrightness={wallpaperBrightness}
+              onWallpaperBrightnessChange={onWallpaperBrightnessChange}
+              panelAlpha={panelAlpha}
+              onPanelAlphaChange={onPanelAlphaChange}
+            />
           </div>
 
-        {/* 模拟网页 */}
-          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
-            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-700">
-              <Globe className="h-3.5 w-3.5 text-brand-600" />
-              模拟网页
-            </div>
-            <label className="flex cursor-pointer items-start gap-2.5">
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.demo_site_enabled === true}
-                onClick={() => update({ demo_site_enabled: settings.demo_site_enabled !== true })}
-                className={[
-                  "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors",
-                  settings.demo_site_enabled === true ? "bg-brand-500" : "bg-slate-300",
-                ].join(" ")}
-              >
-                <span
-                  className={[
-                    "inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform",
-                    settings.demo_site_enabled === true ? "translate-x-[18px]" : "translate-x-0.5",
-                  ].join(" ")}
-                />
-              </button>
-              <div className="text-xs text-slate-500">
-                <div className="font-medium text-slate-700">
-                  {settings.demo_site_enabled === true ? "已开启" : "已关闭"}
-                </div>
-                <p className="mt-0.5 leading-relaxed">
-                  开启后右侧网页默认载入内置的模拟学校系统（DEMO 演示站点），并显示「审查DEMO / 录入DEMO」快捷入口，适合演示和练习；关闭后右侧为空白，需自行输入真实的学校系统网址。默认关闭。
-                </p>
-              </div>
-            </label>
-          </div>
+          {/* 模拟网页已移入 PERSONAL 面板（系统开关区） */}
 
           {/* 主题外观：明暗 + 主色调 */}
           <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">

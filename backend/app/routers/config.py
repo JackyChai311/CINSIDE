@@ -49,8 +49,8 @@ class AppSettings(BaseModel):
     umi_ocr_port: int = 1224
     umi_ocr_exe_path: str = ""
     demo_site_enabled: bool = False
-    prevent_accidental_close: bool = False
-    loop_keep_awake: bool = False
+    prevent_accidental_close: bool = True
+    loop_keep_awake: bool = True
     high_speed_mode: bool = False
     igpu_acceleration: bool = False
     ui_scale: float = 1.0

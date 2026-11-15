@@ -137,10 +137,10 @@ import LeftPanel from "./components/LeftPanel";
 import type { AISphereState } from "./components/AISphere";
 import BrowserPane, { type PickedElementInfo, getPaneExchangeApi } from "./components/BrowserPane";
 
-/** 任务界面全局壁纸：勾选「使用默认壁纸」用内置默认壁纸图（public/default-wallpaper.webp），否则用用户上传的自定义图片（z=-1 绘制在面板之下、body 背景之上）。
+/** 任务界面全局壁纸：勾选「使用默认壁纸」用内置默认壁纸图（浅色=public/default-wallpaper.webp，暗色=public/default-wallpaper-dark.webp），否则用用户上传的自定义图片（z=-1 绘制在面板之下、body 背景之上）。
  *  brightness：壁纸亮度系数（0.2~2.0，1.0 为原始亮度），通过 CSS filter 作用于整层壁纸。
  *  color：早期点阵地图壁纸的颜色参数，已随默认壁纸换成图片而不再使用；保留在类型里以兼容现有调用点。 */
-function TaskWallpaperLayer({ on, custom, useDefault, brightness = 1 }: { on: boolean; color: string; custom?: string; useDefault?: boolean; brightness?: number }) {
+function TaskWallpaperLayer({ on, custom, useDefault, brightness = 1, theme = "light" }: { on: boolean; color: string; custom?: string; useDefault?: boolean; brightness?: number; theme?: string }) {
   if (!on) return null;
   // brightness=1 时不加 filter，避免无谓的合成开销
   const filterStyle = Math.abs((brightness ?? 1) - 1) < 0.001 ? undefined : `brightness(${brightness})`;
@@ -172,13 +172,13 @@ function TaskWallpaperLayer({ on, custom, useDefault, brightness = 1 }: { on: bo
       className="pointer-events-none fixed inset-0 overflow-hidden"
       style={{ zIndex: -1, filter: filterStyle }}
     >
-      {/* 默认壁纸：江南水墨图（public/default-wallpaper.webp），cover 铺满整窗，
+      {/* 默认壁纸：浅色主题用江南水墨图，暗色主题用月夜江景图；cover 铺满整窗，
           作为静态位图由 GPU 直接纹理采样渲染，无逐帧开销。
           仍走「使用默认壁纸」分支；用户上传自定义壁纸时由上方 useDefault===false 分支接管，互不影响。 */}
       <div
         className="absolute inset-0 select-none"
         style={{
-          backgroundImage: `url(${import.meta.env.BASE_URL}default-wallpaper.webp)`,
+          backgroundImage: `url(${import.meta.env.BASE_URL}${theme === "dark" ? "default-wallpaper-dark.webp" : "default-wallpaper.webp"})`,
           backgroundSize: "cover",
           backgroundPosition: "center",
           backgroundRepeat: "no-repeat",
@@ -533,8 +533,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   vision_auto_orient: true,
   umi_ocr_host: "127.0.0.1",
   umi_ocr_port: 1224,
-  prevent_accidental_close: false,
-  loop_keep_awake: false,
+  prevent_accidental_close: true,
+  loop_keep_awake: true,
   high_speed_mode: false,
   ui_scale: 1.0,
   demo_site_enabled: false,
@@ -690,7 +690,7 @@ function useApplyUiScale() {
 }
 
 // ============ 脱离模式：左侧数据源面板 ============
-function DetachedLeftPanel() {
+function DetachedLeftPanel({ settings, onSettingsChange, preventAccidentalClose = true, loopKeepAwake = true, onQuickSettingChange }: { settings?: AppSettings; onSettingsChange?: (patch: Partial<AppSettings>) => void; preventAccidentalClose?: boolean; loopKeepAwake?: boolean; onQuickSettingChange?: (key: "prevent_accidental_close" | "loop_keep_awake", value: boolean) => void }) {
   useApplyUiScale();
   const [records, setRecords] = useState<ApplicantRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -704,7 +704,11 @@ function DetachedLeftPanel() {
   const [panelAlphaLeft, setPanelAlphaLeft] = useState<number>(() => readPanelAlpha("left"));
   const [panelAlphaTop, setPanelAlphaTop] = useState<number>(() => readPanelAlpha("top"));
   const [panelAlphaBottom, setPanelAlphaBottom] = useState<number>(() => readPanelAlpha("bottom"));
-  const [panelTextMode, setPanelTextMode] = useState<"deep" | "light">(() => { try { return localStorage.getItem("cinside-panel-text") === "light" ? "light" : "deep"; } catch { return "deep"; } });
+  // 面板文字颜色并入主题外观：浅色主题=深色文字，深色主题=浅色文字
+  const [panelTextMode, setPanelTextMode] = useState<"deep" | "light">(settings?.theme === "dark" ? "light" : "deep");
+  useEffect(() => {
+    setPanelTextMode(settings?.theme === "dark" ? "light" : "deep");
+  }, [settings?.theme]);
   useEffect(() => {
     try {
       localStorage.setItem("cinside-wallpaper-on", wallpaperOn ? "1" : "0");
@@ -787,31 +791,19 @@ function DetachedLeftPanel() {
       <PersonalPanel
         open={personalOpen}
         onClose={() => setPersonalOpen(false)}
-        wallpaperOn={wallpaperOn}
-        wallpaperColor={wallpaperColor}
-        onWallpaperChange={(on, color) => { setWallpaperOn(on); setWallpaperColor(color); }}
-        wallpaperCustom={wallpaperCustom}
-        onCustomWallpaperChange={(d) => { setWallpaperCustom(d || ""); if (d) { setUseDefaultWallpaper(false); setWallpaperOn(true); } }}
-        useDefaultWallpaper={useDefaultWallpaper}
-        onUseDefaultWallpaperChange={(useDefault) => { setUseDefaultWallpaper(useDefault); setWallpaperOn(true); }}
-        onApplyWallpaper={() => setWallpaperOn(true)}
-        wallpaperBrightness={wallpaperBrightness}
-        onWallpaperBrightnessChange={setWallpaperBrightness}
-        panelAlpha={{ left: panelAlphaLeft, top: panelAlphaTop, bottom: panelAlphaBottom }}
-        onPanelAlphaChange={(next) => {
-          if (next.left !== undefined) setPanelAlphaLeft(next.left);
-          if (next.top !== undefined) setPanelAlphaTop(next.top);
-          if (next.bottom !== undefined) setPanelAlphaBottom(next.bottom);
-        }}
-        panelTextMode={panelTextMode}
-        onPanelTextModeChange={setPanelTextMode}
+        settings={settings || ({ agent_backend: "browser_use" } as AppSettings)}
+        onSettingsChange={(patch) => onSettingsChange?.(patch)}
+        preventAccidentalClose={preventAccidentalClose}
+        onPreventAccidentalCloseChange={(v) => onQuickSettingChange?.("prevent_accidental_close", v)}
+        loopKeepAwake={loopKeepAwake}
+        onLoopKeepAwakeChange={(v) => onQuickSettingChange?.("loop_keep_awake", v)}
       />
     </div>
   );
 }
 
 // ============ 脱离模式：底部核验结果面板 ============
-function DetachedBottomPanel({ onFieldPanelActive, fieldSetupToggleSignal }: { onFieldPanelActive?: () => void; fieldSetupToggleSignal?: number }) {
+function DetachedBottomPanel({ onFieldPanelActive, fieldSetupToggleSignal, settings, onSettingsChange, preventAccidentalClose = true, loopKeepAwake = true, onQuickSettingChange }: { onFieldPanelActive?: () => void; fieldSetupToggleSignal?: number; settings?: AppSettings; onSettingsChange?: (patch: Partial<AppSettings>) => void; preventAccidentalClose?: boolean; loopKeepAwake?: boolean; onQuickSettingChange?: (key: "prevent_accidental_close" | "loop_keep_awake", value: boolean) => void }) {
   useApplyUiScale();
   const [record, setRecord] = useState<ApplicantRecord | null>(null);
   const [mappings, setMappings] = useState<FieldMapping[]>([]);
@@ -1263,7 +1255,11 @@ export default function App() {
   const [panelAlphaLeft, setPanelAlphaLeft] = useState<number>(() => readPanelAlpha("left"));
   const [panelAlphaTop, setPanelAlphaTop] = useState<number>(() => readPanelAlpha("top"));
   const [panelAlphaBottom, setPanelAlphaBottom] = useState<number>(() => readPanelAlpha("bottom"));
-  const [panelTextMode, setPanelTextMode] = useState<"deep" | "light">(() => { try { return localStorage.getItem("cinside-panel-text") === "light" ? "light" : "deep"; } catch { return "deep"; } });
+  // 面板文字颜色并入主题外观：浅色主题=深色文字，深色主题=浅色文字（不再独立设置）
+  const [panelTextMode, setPanelTextMode] = useState<"deep" | "light">(settings.theme === "dark" ? "light" : "deep");
+  useEffect(() => {
+    setPanelTextMode(settings.theme === "dark" ? "light" : "deep");
+  }, [settings.theme]);
   const [wallpaperBrightness, setWallpaperBrightness] = useState<number>(() => readWallpaperBrightness());
   const [personalOpen, setPersonalOpen] = useState(false);
   useEffect(() => {
@@ -1300,6 +1296,34 @@ export default function App() {
       await api.saveSettings({ ocr_engine: engine });
     } catch (e) {
       console.error("[ocrEngine] 保存失败", e);
+    }
+  }, [settings]);
+  // 标题栏快速切换开关（防误关 / LOOP 不息屏）：即时生效并增量保存到后端
+  const toggleQuickSetting = useCallback(async (
+    key: "prevent_accidental_close" | "loop_keep_awake",
+    next: boolean
+  ) => {
+    const prev = settings[key];
+    setSettings((s) => ({ ...s, [key]: next }));
+    setConfig((c) => (c ? { ...c, settings: { ...c.settings, [key]: next } } : c));
+    try {
+      await api.saveSettings({ [key]: next });
+    } catch (e) {
+      console.error("[quickToggle] 保存失败", key, e);
+      // 回滚
+      setSettings((s) => ({ ...s, [key]: prev }));
+    }
+  }, [settings]);
+  // PERSONAL 面板 AI 配置项即时保存（识图/文本/全局分析/PPT 配图字段变更时逐字段增量提交）
+  const saveSettingsInline = useCallback(async (patch: Partial<AppSettings>) => {
+    const prev = settings;
+    setSettings((s) => ({ ...s, ...patch }));
+    setConfig((c) => (c ? { ...c, settings: { ...c.settings, ...patch } } : c));
+    try {
+      await api.saveSettings(patch);
+    } catch (e) {
+      console.error("[personalInline] 保存失败", patch, e);
+      setSettings(prev);
     }
   }, [settings]);
   // 整体UI缩放（Ctrl+滚轮调控，范围0.6~1.6，步长0.05）
@@ -1443,6 +1467,26 @@ export default function App() {
   // 用 ref 镜像 deskVisible，供 openHarnessDesk 回调读取最新状态（该回调依赖项为空，避免闭包读到旧值）
   const deskVisibleRef = useRef(deskVisible);
   deskVisibleRef.current = deskVisible;
+
+  // 面板开合动画性能优化：动画期间临时关闭所有毛玻璃（.is-animating-panel），结束后移除恢复。
+  // grid-template-columns 过渡会逐帧触发 layout+paint，主区数十处 backdrop-blur 每帧重算模糊是掉帧主因。
+  const PANEL_ANIM_MS = 470; // 略长于 CSS 的 .45s 过渡，确保覆盖整段动画
+  const panelAnimInitRef = useRef(true);
+  useEffect(() => {
+    // 首次挂载不挂类（无需动画，毛玻璃照常显示），只在开合变化时启用
+    if (panelAnimInitRef.current) {
+      panelAnimInitRef.current = false;
+      return;
+    }
+    const root = document.documentElement;
+    root.classList.add("is-animating-panel");
+    const t = window.setTimeout(() => root.classList.remove("is-animating-panel"), PANEL_ANIM_MS);
+    return () => {
+      window.clearTimeout(t);
+      root.classList.remove("is-animating-panel");
+    };
+  }, [leftPanelOpen, bottomPanelOpen, leftDetached, bottomDetached]);
+
   const showHarnessHud =
     !!harnessTask && harnessTask.id !== harnessHudHidden && !deskVisible;
   // 弹窗（window.open 拦截）：记录哪个 side 的弹窗处于激活状态
@@ -4074,14 +4118,14 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setSelectMode(true);
     setRightPicked(null);
     setLeftPicked(null);
-    // 高手模式：不限定初始拾取侧，等待用户点击具体功能按钮后再启动
+    // 步骤设置工具栏：不限定初始拾取侧，等待用户点击具体功能按钮后再启动
     setPickTarget(null);
     // 已选中 LOOP 列时，进入步骤设置自动切到左侧网页视图，方便拾取网页元素
     if (selectedExcelColumnRef.current && leftViewMode === "excel") {
       setLeftViewMode("web");
       setTimeout(() => window.dispatchEvent(new Event("resize")), 50);
     }
-    // 高手模式：不自动启动拾取，等待用户点击具体按钮后再启动
+    // 步骤设置工具栏：不自动启动拾取，等待用户点击具体按钮后再启动
     setTimeout(() => {
       window.electronAPI?.viewStopPicking("left").catch(() => {});
       window.electronAPI?.viewStopPicking("right").catch(() => {});
@@ -5330,7 +5374,7 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       {opts.showAdd && !opts.widgetPickActive && (
         <button
           onClick={addCustomTextEntry}
-          className="flex w-full shrink-0 items-center justify-center gap-1 rounded-lg border-2 border-dashed border-sky-200 bg-sky-50/30 py-2 text-[10px] font-medium text-sky-500 transition-all hover:border-sky-400 hover:bg-sky-50 hover:text-sky-600"
+          className="flex w-full shrink-0 items-center justify-center gap-1 rounded-lg border-2 border-dashed border-purple-200 bg-purple-50/30 py-2 text-[10px] font-medium text-purple-500 transition-all hover:border-purple-400 hover:bg-purple-50 hover:text-purple-600 dark:border-purple-400/40 dark:bg-purple-400/10 dark:text-purple-300 dark:hover:border-purple-300/70 dark:hover:bg-purple-400/20 dark:hover:text-purple-200"
         >
           <Plus className="h-3 w-3" />
           添加文本
@@ -14509,7 +14553,7 @@ type: info.type,
     setMappings((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // 高手模式（字段对比面板直接拾取）：根据两侧拾取状态计算 canSaveMapping 并挂载保存触发器，
+  // 字段对比面板直接拾取：根据两侧拾取状态计算 canSaveMapping 并挂载保存触发器，
   // 确保"确定映射"按钮及 Enter 快捷键在映射完成后可用。
   useEffect(() => {
     const canSave = Boolean(rightPicked && leftPicked);
@@ -16247,8 +16291,8 @@ type: info.type,
 
   // 脱离模式：根据 URL query param 渲染独立面板窗口
   const detachMode = getDetachMode();
-  if (detachMode === "left") return <DetachedLeftPanel />;
-  if (detachMode === "bottom") return <DetachedBottomPanel onFieldPanelActive={() => setFieldPanelActive(true)} fieldSetupToggleSignal={fieldSetupToggleSignal} />;
+  if (detachMode === "left") return <DetachedLeftPanel settings={settings} onSettingsChange={(patch) => saveSettingsInline(patch)} preventAccidentalClose={settings.prevent_accidental_close === true} loopKeepAwake={settings.loop_keep_awake === true} onQuickSettingChange={(key, value) => toggleQuickSetting(key, value)} />;
+  if (detachMode === "bottom") return <DetachedBottomPanel onFieldPanelActive={() => setFieldPanelActive(true)} fieldSetupToggleSignal={fieldSetupToggleSignal} settings={settings} onSettingsChange={(patch) => saveSettingsInline(patch)} preventAccidentalClose={settings.prevent_accidental_close === true} loopKeepAwake={settings.loop_keep_awake === true} onQuickSettingChange={(key, value) => toggleQuickSetting(key, value)} />;
   if (detachMode === "browser-left") return <DetachedBrowserPanel detachSide="browser-left" />;
   if (detachMode === "browser-right") return <DetachedBrowserPanel detachSide="browser-right" />;
   if (detachMode === "browser-excel") return <DetachedExcelPanel />;
@@ -16257,6 +16301,9 @@ type: info.type,
   if (taskType === "select") {
     return (
       <>
+        {/* 壁纸与网页/PPT/协作任务界面统一：用同一张全局壁纸层（默认=江南水墨图），
+            覆盖选择页原有的点阵世界地图 + 白色渐变。壁纸 z=-1 衬底，选择页卡片在 z-0 及以上，交互不受影响。 */}
+        <TaskWallpaperLayer on={wallpaperOn} color={wallpaperColor} custom={wallpaperCustom} useDefault={useDefaultWallpaper} brightness={wallpaperBrightness} theme={settings.theme} />
         <TaskSelector
           onSelect={handleTaskSelect}
           checking={officecliChecking}
@@ -16369,6 +16416,22 @@ type: info.type,
         );
         setShowSettings(false);
       }}
+      wallpaperOn={wallpaperOn}
+      wallpaperColor={wallpaperColor}
+      onWallpaperChange={(on, color) => { setWallpaperOn(on); setWallpaperColor(color); }}
+      wallpaperCustom={wallpaperCustom}
+      onCustomWallpaperChange={(d) => { setWallpaperCustom(d || ""); if (d) { setUseDefaultWallpaper(false); setWallpaperOn(true); } }}
+      useDefaultWallpaper={useDefaultWallpaper}
+      onUseDefaultWallpaperChange={(useDefault) => { setUseDefaultWallpaper(useDefault); setWallpaperOn(true); }}
+      onApplyWallpaper={() => setWallpaperOn(true)}
+      wallpaperBrightness={wallpaperBrightness}
+      onWallpaperBrightnessChange={setWallpaperBrightness}
+      panelAlpha={{ left: panelAlphaLeft, top: panelAlphaTop, bottom: panelAlphaBottom }}
+      onPanelAlphaChange={(next) => {
+        if (next.left !== undefined) setPanelAlphaLeft(next.left);
+        if (next.top !== undefined) setPanelAlphaTop(next.top);
+        if (next.bottom !== undefined) setPanelAlphaBottom(next.bottom);
+      }}
     />
   ) : null;
 
@@ -16376,7 +16439,7 @@ type: info.type,
   if (taskType === "ppt") {
     return (
       <>
-        <TaskWallpaperLayer on={wallpaperOn} color={wallpaperColor} custom={wallpaperCustom} useDefault={useDefaultWallpaper} brightness={wallpaperBrightness} />
+        <TaskWallpaperLayer on={wallpaperOn} color={wallpaperColor} custom={wallpaperCustom} useDefault={useDefaultWallpaper} brightness={wallpaperBrightness} theme={settings.theme} />
         <PPTWorkflowPanel
           onBack={() => switchTaskType("select")}
           onOpenSettings={() => setShowSettings(true)}
@@ -16390,7 +16453,7 @@ type: info.type,
   if (taskType === "cowork") {
     return (
       <>
-        <TaskWallpaperLayer on={wallpaperOn} color={wallpaperColor} custom={wallpaperCustom} useDefault={useDefaultWallpaper} brightness={wallpaperBrightness} />
+        <TaskWallpaperLayer on={wallpaperOn} color={wallpaperColor} custom={wallpaperCustom} useDefault={useDefaultWallpaper} brightness={wallpaperBrightness} theme={settings.theme} />
         <CoworkStudio onBack={() => switchTaskType("select")} />
         {settingsModal}
       </>
@@ -16402,7 +16465,7 @@ type: info.type,
 
   return (
     <div className="app-task-enter flex h-full flex-col">
-      <TaskWallpaperLayer on={wallpaperOn} color={wallpaperColor} custom={wallpaperCustom} useDefault={useDefaultWallpaper} brightness={wallpaperBrightness} />
+      <TaskWallpaperLayer on={wallpaperOn} color={wallpaperColor} custom={wallpaperCustom} useDefault={useDefaultWallpaper} brightness={wallpaperBrightness} theme={settings.theme} />
       {/* ============ 屏幕调试面板（仅开发环境后台日志可见） ============ */}
       {teachingPhase !== "idle" && (() => {
         // 屏蔽前端可见的 DEBUG STATE 面板，仅输出到后台调试日志
@@ -16478,9 +16541,9 @@ type: info.type,
 
         {/* 中间空白区：错误/成功提示显示在工具栏同一行中央 */}
         <div className="flex min-w-0 flex-1 items-center justify-center gap-2">
-          {/* 高手模式功能按钮组（仅步骤设置模式显示）：原字段对比面板分组标题行按钮迁移至此，快捷键标注在按钮文字旁（悬停伸出放大）；
+          {/* 步骤设置功能按钮组（仅步骤设置模式显示，常驻；原「高手模式」开关已移除）：
               分组：绑定输入框 ｜ 前置/过程/收尾点击 ｜ 录入/审查步骤（文件提取/自定义文本/控件提取留在文件处理与提取元素面板） */}
-          {settings.expert_mode === true && selectMode && !isAnyRunning && (
+          {selectMode && !isAnyRunning && !deskVisible && (
             <div className="flex shrink-0 items-center gap-1">
               {([
                 [
@@ -16506,7 +16569,7 @@ type: info.type,
                       className={[
                         "group relative flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-all",
                         b.active
-                          ? "bg-red-600 text-white shadow-md ring-2 ring-red-300"
+                          ? "bg-violet-600 text-white shadow-md ring-2 ring-violet-300"
                           : "bg-white/70 text-slate-700 ring-1 ring-slate-200 hover:bg-slate-100 hover:text-slate-900",
                       ].join(" ")}
                     >
@@ -16518,7 +16581,7 @@ type: info.type,
                             "origin-left scale-90 rounded px-1 text-[9px] font-bold leading-tight transition-all duration-200",
                             "group-hover:ml-0.5 group-hover:scale-110 group-hover:px-1.5 group-hover:shadow-sm",
                             b.active
-                              ? "bg-white/25 text-white group-hover:bg-white group-hover:text-red-600"
+                              ? "bg-white/25 text-white group-hover:bg-white group-hover:text-violet-600"
                               : "bg-slate-100 text-slate-400 group-hover:bg-slate-800 group-hover:text-white",
                           ].join(" ")}
                         >
@@ -16532,12 +16595,14 @@ type: info.type,
             </div>
           )}
           {error && (
-            <div className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md bg-rose-50 px-2 py-0.5 text-[11px] text-rose-700 ring-1 ring-rose-200 animate-slide-up">
-              <AlertCircle className="h-3 w-3 shrink-0" />
-              <span className="truncate">{error}</span>
-              <button onClick={() => setError(null)} className="ml-0.5 shrink-0 text-rose-400 hover:text-rose-600">
-                <X className="h-3 w-3" />
-              </button>
+            <div className="pointer-events-auto fixed bottom-8 left-1/2 z-50 -translate-x-1/2 animate-slide-up">
+              <div className="relative flex min-w-0 max-w-[560px] items-center gap-2 rounded-xl bg-rose-100/95 px-4 py-2.5 text-[12px] text-rose-700 shadow-xl ring-1 ring-rose-200 backdrop-blur-sm">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 break-words">{error}</span>
+                <button onClick={() => setError(null)} className="ml-1 shrink-0 text-rose-400 hover:text-rose-600">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
           )}
           {warn && (
@@ -16648,7 +16713,7 @@ type: info.type,
           className={[
             "flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-all",
             selectMode
-              ? "bg-slate-200 text-slate-600 ring-1 ring-slate-300 hover:bg-slate-300"
+              ? "bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-sm ring-1 ring-indigo-400"
               : "bg-white/70 text-slate-600 ring-1 ring-slate-200 hover:bg-white hover:text-slate-900",
           ].join(" ")}
           title={appMode === "entry"
@@ -17688,7 +17753,7 @@ type: info.type,
             </div>
           )}
 
-          {/* 审查/结果面板：高手模式直接显示字段对比 ResultsPanel（常驻渲染，靠 height/min-height/opacity 过渡显示隐藏） */}
+          {/* 审查/结果面板：直接显示字段对比 ResultsPanel（常驻渲染，靠 height/min-height/opacity 过渡显示隐藏） */}
           {!bottomDetached && (
             <div
               className={[
@@ -17885,16 +17950,6 @@ type: info.type,
                   preClickMarks={pickedMarks.filter((m) => (m.action === "click" && m.clickPhase === "pre") || (m.action === "input" && m.workflow === "data-source"))}
                   processClickMarks={pickedMarks.filter((m) => m.action === "click" && m.clickPhase === "mid")}
                   postClickMarks={pickedMarks.filter((m) => m.action === "click" && m.clickPhase === "post")}
-                  expertMode={settings.expert_mode === true}
-                  onStartAddPreClick={() => startAddClickStep("pre")}
-                  onStartBindInputs={startBindBothInputs}
-                  bindInputActive={!!bindInputSide}
-                  bindStepCount={pickedMarks.filter((m) => m.action === "input" || (m.action === "click" && m.clickPhase === "pre")).length}
-                  preClickActive={addingClickMode && addingClickPhase === "pre"}
-                  onStartAddProcessClick={() => startAddClickStep("mid")}
-                  processClickActive={addingClickMode && addingClickPhase === "mid"}
-                  onStartAddPostClick={() => startAddClickStep("post")}
-                  postClickActive={addingClickMode && addingClickPhase === "post"}
                   onStartAddDocExtract={startAddDocExtract}
                   onAutoOpenDocChoose={openDocChoosePanel}
                   onChooseDocWeb={chooseDocExtractWeb}
@@ -17903,18 +17958,6 @@ type: info.type,
                   docConfigChooseMode={addingDocExtractMode && docExtractSource === "choose"}
                   onExitDocChoose={exitAddDocExtractMode}
                   docExtractActive={addingDocExtractMode}
-                  onSwitchStepMode={(mode) => {
-                    if (addingStepModeRef.current === mode) {
-                      rlog(`[onSwitchStepMode] 已在${mode}模式，退出所有设置模式`);
-                      exitAllSetupModes();
-                      return;
-                    }
-                    // 先退出所有其他模式（互斥），再走完整激活流程：
-                    // startAdding* 会设置 selectMode/pickTarget/teachingPhase 并激活网页拾取光标
-                    exitAllSetupModes();
-                    if (mode === "entry") startAddingEntrySteps();
-                    else startAddingReviewSteps();
-                  }}
                   onExitAddingStepMode={exitAddingStepMode}
                   canSaveMapping={canSaveMapping}
                   onConfirmMapping={() => {
@@ -18054,27 +18097,12 @@ type: info.type,
       <PersonalPanel
         open={personalOpen}
         onClose={() => setPersonalOpen(false)}
-        wallpaperOn={wallpaperOn}
-        wallpaperColor={wallpaperColor}
-        onWallpaperChange={(on, color) => {
-          setWallpaperOn(on);
-          setWallpaperColor(color);
-        }}
-        wallpaperCustom={wallpaperCustom}
-        onCustomWallpaperChange={(d) => { setWallpaperCustom(d || ""); if (d) { setUseDefaultWallpaper(false); setWallpaperOn(true); } }}
-        useDefaultWallpaper={useDefaultWallpaper}
-        onUseDefaultWallpaperChange={(useDefault) => { setUseDefaultWallpaper(useDefault); setWallpaperOn(true); }}
-        onApplyWallpaper={() => setWallpaperOn(true)}
-        wallpaperBrightness={wallpaperBrightness}
-        onWallpaperBrightnessChange={setWallpaperBrightness}
-        panelAlpha={{ left: panelAlphaLeft, top: panelAlphaTop, bottom: panelAlphaBottom }}
-        onPanelAlphaChange={(next) => {
-          if (next.left !== undefined) setPanelAlphaLeft(next.left);
-          if (next.top !== undefined) setPanelAlphaTop(next.top);
-          if (next.bottom !== undefined) setPanelAlphaBottom(next.bottom);
-        }}
-        panelTextMode={panelTextMode}
-        onPanelTextModeChange={setPanelTextMode}
+        settings={settings}
+        onSettingsChange={saveSettingsInline}
+        preventAccidentalClose={settings.prevent_accidental_close === true}
+        onPreventAccidentalCloseChange={(v) => toggleQuickSetting("prevent_accidental_close", v)}
+        loopKeepAwake={settings.loop_keep_awake === true}
+        onLoopKeepAwakeChange={(v) => toggleQuickSetting("loop_keep_awake", v)}
       />
 
       {/* 功能2：本地文档提取审核弹窗（确认后填入右侧网页输入框） */}

@@ -1,7 +1,7 @@
 {
   "name": "cinside-frontend",
   "private": true,
-  "version": "0.8.6",
+  "version": "0.9.0",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
@@ -26,7 +26,7 @@
   "dependencies": {
     "@chenglou/pretext": "^0.0.9",
     "@officecli/officecli": "^1.0.143",
-    "electron-updater": "^6.8.9",
+    "electron-updater": "6.8.11",
     "lucide-react": "^0.408.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
@@ -37,8 +37,8 @@
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.19",
     "concurrently": "^8.2.2",
-    "electron": "^31.0.0",
-    "electron-builder": "^24.13.3",
+    "electron": "45.3.2",
+    "electron-builder": "26.18.0",
     "eslint": "^9.39.4",
     "eslint-plugin-react-hooks": "^5.2.0",
     "png-to-ico": "^3.0.2",

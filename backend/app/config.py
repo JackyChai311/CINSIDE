@@ -101,6 +101,9 @@ SETTING_KEYS = {
     "browser_use_llm_base": "BROWSER_USE_LLM_BASE",
     "browser_use_llm_key": "BROWSER_USE_LLM_KEY",
     "browser_use_llm_model": "BROWSER_USE_LLM_MODEL",
+    "harness_max_steps": "HARNESS_MAX_STEPS",
+    "harness_vision": "HARNESS_VISION",
+    "harness_cdp_url": "HARNESS_CDP_URL",
     "sensenova_api_base": "SENSENOVA_API_BASE",
     "sensenova_api_key": "SENSENOVA_API_KEY",
     "sensenova_model": "SENSENOVA_MODEL",
@@ -140,6 +143,8 @@ _SETTING_TYPES: dict[str, type] = {
     "browser_brightness": float,
     "umi_ocr_port": int,
     "expert_mode": bool,
+    "harness_max_steps": int,
+    "harness_vision": bool,
 }
 
 
@@ -207,6 +212,14 @@ class Settings:
     # 连接 Electron 等已运行浏览器的 CDP endpoint（例如 http://localhost:9222）
     browser_use_cdp_url: str = field(default_factory=lambda: _env("BROWSER_USE_CDP_URL", ""))
 
+    # === HARNESS（双对象 Computer Use） ===
+    # 单任务最大步数：一步 = 一次 LLM 决策 + 一次工具调用
+    harness_max_steps: int = field(default_factory=lambda: int(_env("HARNESS_MAX_STEPS", "40")))
+    # 是否把网页截图作为图像回传给模型（需要支持看图的模型；纯文本模型开了会报错）
+    harness_vision: bool = field(default_factory=lambda: _env_bool("HARNESS_VISION", False))
+    # HARNESS 连接 BrowserView 的 CDP 端点；留空则继承 browser_use_cdp_url
+    harness_cdp_url: str = field(default_factory=lambda: _env("HARNESS_CDP_URL", ""))
+
     # === Hermes Agent ===
     hermes_api_base: str = field(default_factory=lambda: _env("HERMES_API_BASE", "http://localhost:8001"))
 
@@ -224,10 +237,10 @@ class Settings:
     # === UI 偏好（前端设置面板） ===
     # 模拟网页：true=右侧网页默认载入内置 DEMO 演示站点并显示 DEMO 快捷入口；默认关闭
     demo_site_enabled: bool = field(default_factory=lambda: _env_bool("DEMO_SITE_ENABLED", False))
-    # 防误关：true=关闭按钮最小化到托盘
-    prevent_accidental_close: bool = field(default_factory=lambda: _env_bool("PREVENT_ACCIDENTAL_CLOSE", False))
-    # LOOP 运行不息屏：true=执行 LOOP 期间阻止电脑息屏/休眠，结束后恢复
-    loop_keep_awake: bool = field(default_factory=lambda: _env_bool("LOOP_KEEP_AWAKE", False))
+    # 防误关：true=关闭按钮最小化到托盘（默认开启，标题栏可切换；已从设置面板移出）
+    prevent_accidental_close: bool = field(default_factory=lambda: _env_bool("PREVENT_ACCIDENTAL_CLOSE", True))
+    # LOOP 运行不息屏：true=执行 LOOP 期间阻止电脑息屏/休眠，结束后恢复（默认开启，标题栏可切换）
+    loop_keep_awake: bool = field(default_factory=lambda: _env_bool("LOOP_KEEP_AWAKE", True))
     # 高速模式：true=LOOP 运行时 OCR 提取与浏览器步骤并行处理（字段对比前统一等待结果）
     high_speed_mode: bool = field(default_factory=lambda: _env_bool("HIGH_SPEED_MODE", False))
     # 核显加速：true=本地 OCR 改走内置 RapidOCR 引擎（自动适配 DirectML GPU，
@@ -265,6 +278,9 @@ class Settings:
             "browser_use_llm_base": self.browser_use_llm_base,
             "browser_use_llm_key": self.browser_use_llm_key,
             "browser_use_llm_model": self.browser_use_llm_model,
+            "harness_max_steps": self.harness_max_steps,
+            "harness_vision": self.harness_vision,
+            "harness_cdp_url": self.harness_cdp_url,
             "sensenova_api_base": self.sensenova_api_base,
             "sensenova_api_key": self.sensenova_api_key,
             "sensenova_model": self.sensenova_model,
@@ -300,6 +316,31 @@ class Settings:
         if not (base.startswith(("http://", "https://")) and key and model):
             return "", "", ""
         return base, key, model
+
+    def effective_harness_llm(self) -> tuple[str, str, str]:
+        """返回 HARNESS 智能体实际使用的 (base, key, model)。
+
+        回退链：**全局分析 AI**（设置里的「全局分析 AI」面板，与 LOOP 分析共用同一套
+        base/key/model）→ Browser Use → 文本 AI → Vision。
+        HARNESS 强依赖 function calling，建议用 glm-4-plus / deepseek 等支持工具调用的模型。
+        """
+        candidates = [
+            self.effective_analysis_llm(),
+            (self.browser_use_llm_base, self.browser_use_llm_key, self.browser_use_llm_model),
+            self.effective_text_llm(),
+            (self.vision_api_base, self.vision_api_key, self.vision_model),
+        ]
+        for base, key, model in candidates:
+            base = (base or "").strip().rstrip("/")
+            key = (key or "").strip()
+            model = (model or "").strip()
+            if base.startswith(("http://", "https://")) and key and model:
+                return base, key, model
+        return "", "", ""
+
+    def effective_harness_cdp(self) -> str:
+        """HARNESS 用的 CDP 端点；留空继承 Browser Use 的 CDP 地址。"""
+        return (self.harness_cdp_url or "").strip() or (self.browser_use_cdp_url or "").strip()
 
     def effective_analysis_llm(self) -> tuple[str, str, str]:
         """返回 LOOP 执行分析实际使用的 (base, key, model)。

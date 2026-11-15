@@ -1206,6 +1206,9 @@ def _find_umi_ocr_pids() -> list[int]:
         ).stdout
     except Exception:
         return []
+    # stdout 在某些异常路径下可能为 None，兜底空串避免 .splitlines() 崩溃
+    if not out:
+        return []
     pids: list[int] = []
     for line in out.splitlines():
         # CSV 行形如: "Umi-OCR.exe","35020","Console","1","27,720 K"

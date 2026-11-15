@@ -196,6 +196,9 @@ _SETTINGS_KEYS = {
     "browser_use_llm_model",
     "demo_site_enabled",
     "expert_mode",
+    "harness_cdp_url",
+    "harness_max_steps",
+    "harness_vision",
     "high_speed_mode",
     "igpu_acceleration",
     "loop_keep_awake",
@@ -221,7 +224,7 @@ _SETTINGS_KEYS = {
 
 
 def test_settings_endpoint_key_set_is_stable():
-    """GET /api/config/settings 返回 32 个键。
+    """GET /api/config/settings 返回 35 个键。
 
     ⚠️ 安全现状（有意锁定，不是认可）：该响应**明文包含全部 5 个 API Key**
     （vision_api_key / text_api_key / analysis_api_key /
