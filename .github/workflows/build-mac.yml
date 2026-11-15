@@ -70,7 +70,21 @@ jobs:
 
       - name: Unit tests (pytest)
         working-directory: backend
-        run: python -m pytest -q
+        # 失败时输出详细 traceback 并保存日志（含 platform/version 信息），便于匿名诊断
+        run: |
+          python -c "import platform,sys; print('PY',sys.version,'PLATFORM',platform.platform())"
+          python -m pytest -v --tb=long 2>&1 | tee pytest-output.txt
+          exit ${PIPESTATUS[0]}
+
+      - name: Upload pytest log (always, for diagnosis)
+        if: always()
+        working-directory: backend
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output-${{ github.run_id }}
+          path: backend/pytest-output.txt
+          retention-days: 7
+          if-no-files-found: warn
 
   build-mac:
     name: macOS ${{ matrix.arch }}
