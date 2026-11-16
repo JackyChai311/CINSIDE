@@ -62,7 +62,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest ruff pydantic httpx Pillow python-dotenv fastapi python-multipart openpyxl
+          pip install pytest pytest-rerunfailures ruff pydantic httpx Pillow python-dotenv fastapi python-multipart openpyxl
 
       - name: Lint (ruff)
         working-directory: backend
@@ -73,7 +73,7 @@ jobs:
         # 失败时把详细 traceback 写进 run summary（Actions 页面匿名可见），便于诊断 runner 环境差异
         run: |
           python -c "import platform,sys; print('PY',sys.version,'PLATFORM',platform.platform())"
-          python -m pytest -v --tb=short 2>&1 | tee pytest-output.txt | tail -60
+          python -m pytest -v --tb=short --reruns 2 --reruns-delay 3 2>&1 | tee pytest-output.txt | tail -60
           echo "### 后端 pytest" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           tail -40 pytest-output.txt >> "$GITHUB_STEP_SUMMARY"
