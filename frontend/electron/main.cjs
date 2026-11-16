@@ -584,7 +584,14 @@ function attachViewMessageRelay(view, side) {
     `).catch(() => {});
     // 页面重载后若拾取模式仍激活，重新注入拾取脚本
     if (pickingActive[side]) {
-      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).catch(() => {});
+      // 绑定输入模式标记随导航丢失：重注入 picker 后必须补回，否则右键选列菜单静默失效
+      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT)
+        .then(() => {
+          if (bindInputModeActive[side]) {
+            return view.webContents.executeJavaScript("window.__cinsideBindInputMode = true;");
+          }
+        })
+        .catch(() => {});
     }
   });
 
@@ -617,17 +624,34 @@ function attachViewMessageRelay(view, side) {
     // 父页面导航时关闭弹窗
     closePopupView(side);
     if (pickingActive[side]) {
-      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).catch(() => {});
+      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT)
+        .then(() => {
+          if (bindInputModeActive[side]) {
+            return view.webContents.executeJavaScript("window.__cinsideBindInputMode = true;");
+          }
+        })
+        .catch(() => {});
     }
     // 导航后立即注入屏蔽规则（dom-ready 也会注入，这里作为兜底）
     applyBlockRules(side);
   });
   view.webContents.on("did-navigate-in-page", () => {
     if (pickingActive[side]) {
-      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).catch(() => {});
+      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT)
+        .then(() => {
+          if (bindInputModeActive[side]) {
+            return view.webContents.executeJavaScript("window.__cinsideBindInputMode = true;");
+          }
+        })
+        .catch(() => {});
     }
     // SPA 路由变化后重新注入屏蔽规则（SPA 可能重新渲染了被屏蔽元素）
     applyBlockRules(side);
+  });
+
+  // LOOP 常驻右键绑定：整页加载完成后补武装（window 标记随导航丢失）
+  view.webContents.on("did-finish-load", () => {
+    if (loopBindArmed[side]) syncLoopBindArming(side);
   });
 
   // 加载状态变化：通知前端 loading 开始/结束
@@ -769,8 +793,16 @@ function createPopupView(parentSide, url, win) {
     // 页面加载后若拾取模式激活，注入拾取脚本
     const picking = isDetached ? detachedPickingActive[detachedSide] : pickingActive[parentSide];
     if (picking) {
-      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).catch(() => {});
+      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT)
+        .then(() => {
+          if (bindInputModeActive[parentSide]) {
+            return view.webContents.executeJavaScript("window.__cinsideBindInputMode = true;");
+          }
+        })
+        .catch(() => {});
     }
+    // LOOP 常驻右键绑定：弹窗整页加载后同样补武装
+    if (loopBindArmed[parentSide]) syncLoopBindArming(parentSide);
   });
 
   view.webContents.on("dom-ready", () => {
@@ -795,13 +827,25 @@ function createPopupView(parentSide, url, win) {
   view.webContents.on("did-navigate", () => {
     const picking = isDetached ? detachedPickingActive[detachedSide] : pickingActive[parentSide];
     if (picking) {
-      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).catch(() => {});
+      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT)
+        .then(() => {
+          if (bindInputModeActive[parentSide]) {
+            return view.webContents.executeJavaScript("window.__cinsideBindInputMode = true;");
+          }
+        })
+        .catch(() => {});
     }
   });
   view.webContents.on("did-navigate-in-page", () => {
     const picking = isDetached ? detachedPickingActive[detachedSide] : pickingActive[parentSide];
     if (picking) {
-      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).catch(() => {});
+      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT)
+        .then(() => {
+          if (bindInputModeActive[parentSide]) {
+            return view.webContents.executeJavaScript("window.__cinsideBindInputMode = true;");
+          }
+        })
+        .catch(() => {});
     }
   });
 
@@ -895,6 +939,84 @@ function closeAllPopupViews() {
 // ============ 通用 view 操作 ============
 // 跟踪每个 side 的拾取模式状态：导航/重载后需重注入拾取脚本
 const pickingActive = { left: false, right: false };
+// 跟踪每个 side 的「绑定输入」右键选列模式：picker 重注入会把 __cinsideBindInputMode 重置为 false，
+// 必须在每次重注入后按此状态补回，否则绑定中点一次按钮跳转页面后右键选 Excel 列就静默失效
+const bindInputModeActive = { left: false, right: false };
+// 跟踪每个 side 的「LOOP 常驻右键绑定」武装：选好 LOOP 列后开启，
+// 无需进入绑定模式即可右键输入框选列绑定（循环起点）。独立于 picker 生命周期，
+// 由 syncLoopBindArming 在每次页面加载/导航后补注入。
+const loopBindArmed = { left: false, right: false };
+// 各侧当前 LOOP 列名：右键菜单置顶「⚡ LOOP 列」一键绑定项用
+const loopBindCol = { left: "", right: "" };
+
+// 把 LOOP 常驻右键绑定标记注入指定 webContents（含 iframe 武装），幂等。
+// 监听器只装一次（__cinsideLoopCtxInstalled）；开关只改 __cinsideLoopBindArmed。
+function buildLoopBindArmScript(enabled, loopCol) {
+  const colJson = JSON.stringify(typeof loopCol === "string" ? loopCol : "");
+  return `
+(function () {
+  window.__cinsideLoopBindArmed = ${enabled ? "true" : "false"};
+  window.__cinsideLoopCol = ${colJson};
+  if (!${enabled ? "true" : "false"}) return 'disarmed';
+  if (window.__cinsideLoopCtxInstalled) return 'armed';
+  window.__cinsideLoopCtxInstalled = true;
+  var handler = function (e) {
+    // picker 在绑定模式下自己处理右键（onContextMenu 已接管），避免双菜单
+    if (window.__cinsidePickerActive && window.__cinsideBindInputMode) return;
+    if (window.__cinsideOnContextMenu) {
+      try { window.__cinsideOnContextMenu(e); } catch (_) {}
+    }
+  };
+  var armDoc = function (doc) {
+    if (!doc || doc.__cinsideLoopCtxArmed) return;
+    try {
+      doc.addEventListener('contextmenu', handler, true);
+      doc.__cinsideLoopCtxArmed = true;
+    } catch (_) {}
+  };
+  var armAll = function () {
+    armDoc(document);
+    try {
+      var frames = document.querySelectorAll('iframe, frame');
+      for (var i = 0; i < frames.length; i++) {
+        try { armDoc(frames[i].contentDocument); } catch (_) {}
+      }
+    } catch (_) {}
+  };
+  armAll();
+  // iframe 异步加载完成后补挂
+  setTimeout(armAll, 800);
+  setTimeout(armAll, 2500);
+  return 'armed';
+})();
+`;
+}
+
+// 按当前状态把武装标记补到主 view / 脱离 view / 弹窗（页面导航会清掉 window 标记）
+function syncLoopBindArming(side) {
+  const enabled = !!loopBindArmed[side];
+  if (!enabled) return;
+  const script = buildLoopBindArmScript(true, loopBindCol[side]);
+  const targets = [];
+  const mainView = side === "left" ? leftBrowserView : rightBrowserView;
+  if (mainView && mainView.webContents && !mainView.webContents.isDestroyed()) targets.push(mainView.webContents);
+  const detached = detachedPanels[`browser-${side}_view`];
+  if (detached && detached.webContents && !detached.webContents.isDestroyed()) targets.push(detached.webContents);
+  const popup = popupViews[side];
+  if (popup && popup.view && !popup.view.webContents.isDestroyed()) targets.push(popup.view.webContents);
+  for (const wc of targets) {
+    // picker 未注入时 onContextMenu 不存在：先注入 picker（保持停用态），再挂常驻右键
+    wc.executeJavaScript(`(function(){ if (!window.__cinsideOnContextMenu) { return 'need-picker'; } return 'ok'; })()`)
+      .then((r) => {
+        if (r === 'need-picker') {
+          return wc.executeJavaScript(ELEMENT_PICKER_SCRIPT)
+            .then(() => wc.executeJavaScript("window.__cinsidePickerActive = false; document.body.classList.remove('cinside-picking'); if (window.__cinsideRemoveFrameArms) { try { window.__cinsideRemoveFrameArms(); } catch (_) {} }"));
+        }
+      })
+      .then(() => wc.executeJavaScript(script))
+      .catch(() => {});
+  }
+}
 // 跟踪每个 side 的元素屏蔽规则（含 mode），导航/重载后自动重注入
 const blockRulesBySide = { left: [], right: [] };
 // 缓存每个 side 的完整屏蔽 CSS 字符串，导航开始时立即 insertCSS 防闪烁
@@ -1974,6 +2096,24 @@ const ELEMENT_PICKER_SCRIPT = `
       return;
     }
     if (!window.__cinsidePickerActive) return;
+    // 右键不走拾取：绑定输入的右键要弹 Excel 列菜单（onContextMenu）。
+    // 旧逻辑不区分按键，右键 pointerdown 被当成一次"拾取"吞掉并停用 picker，
+    // 随后的 contextmenu 因 pickerActive=false 直接 return → 右键选列菜单永远弹不出来。
+    if (typeof e.button === 'number' && e.button !== 0) return;
+    // click 事件的 button 恒为 0，右键还需按 type 兜底排除（contextmenu 由 onContextMenu 处理）
+    if (e.type === 'contextmenu') return;
+    // Excel 列菜单内的点击不是拾取：onPick 注册早于菜单自己的监听器，
+    // 若不跳过会先 stopImmediatePropagation 把菜单项 click 吞掉 → 点列没反应。
+    try {
+      var cpMenu = e.composedPath ? e.composedPath() : null;
+      if (cpMenu) {
+        for (var mi = 0; mi < cpMenu.length; mi++) {
+          if (cpMenu[mi] && cpMenu[mi].id === 'cinside-ctx-menu') return;
+        }
+      } else if (e.target && e.target.closest && e.target.closest('#cinside-ctx-menu')) {
+        return;
+      }
+    } catch (_) {}
     var now = Date.now();
     if (now - lastPickTime < 200) return;
     lastPickTime = now;
@@ -2072,9 +2212,11 @@ const ELEMENT_PICKER_SCRIPT = `
   }
 
   // ============ 右键菜单：绑定输入时右键点输入框 → 弹出 Excel 列选择菜单 ============
-  // 仅在"绑定输入"模式（__cinsideBindInputMode=true 由主进程设置）下生效
-  // 菜单列出当前行的所有 Excel 列，点击后通过 IPC 回传选择的列名
-  window.__cinsideBindInputMode = false; // 由主进程通过 executeJavaScript 设置
+  // 两种开启方式（由主进程通过 executeJavaScript 设置）：
+  // 1. __cinsideBindInputMode=true：「绑定输入框」模式，picker 激活时生效
+  // 2. __cinsideLoopBindArmed=true：已选好 LOOP 列后的常驻武装——无需进入任何模式，
+  //    右键输入框即可把 LOOP 列的值绑定进去（循环起点）。此标记独立于 picker 生命周期。
+  window.__cinsideBindInputMode = false;
   var _cinsideCtxMenu = null; // 当前显示的右键菜单 DOM
 
   function _removeCtxMenu() {
@@ -2085,13 +2227,11 @@ const ELEMENT_PICKER_SCRIPT = `
   }
 
   function onContextMenu(e) {
-    if (!window.__cinsidePickerActive) return;
-    // 仅在绑定输入模式下拦截右键
-    if (!window.__cinsideBindInputMode) return;
-    e.preventDefault();
-    e.stopPropagation();
-    e.stopImmediatePropagation();
-
+    // LOOP 常驻武装：不依赖 picker/绑定模式；否则维持原有"picker 激活 + 绑定模式"门槛
+    if (!window.__cinsideLoopBindArmed) {
+      if (!window.__cinsidePickerActive) return;
+      if (!window.__cinsideBindInputMode) return;
+    }
     // 找到目标元素（同 onPick 逻辑）
     var rawTarget = null;
     try {
@@ -2106,18 +2246,35 @@ const ELEMENT_PICKER_SCRIPT = `
     if (!rawTarget || rawTarget.nodeType !== 1) return;
 
     var el = findInputFromTarget(rawTarget, e.clientX, e.clientY) || rawTarget;
-    // 只对输入类元素弹出菜单
-    if (!isInputEl(el)) return;
+    // LOOP 常驻武装下（未进绑定模式）：只对真正的输入类元素弹菜单，
+    // 按钮/链接/纯文本区域放行为浏览器默认右键，不吞整页右键。
+    // 绑定模式下与左键口径一致：识别失败的输入框容器/占位 div 也兜底弹菜单。
+    var elTag = el.nodeName ? el.nodeName.toLowerCase() : '';
+    var isBtnLink = elTag === 'button' || elTag === 'a' ||
+      (el.getAttribute && /^(button|link)$/i.test(el.getAttribute('role') || '')) ||
+      (el.closest && el.closest('button, a'));
+    if (isBtnLink) return;
+    var inBindMode = !!(window.__cinsidePickerActive && window.__cinsideBindInputMode);
+    if (!isInputEl(el) && !inBindMode) return;
+
+    // 确认是输入目标后才拦截右键
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
 
     // 先移除旧菜单
     _removeCtxMenu();
+
+    // 菜单挂在目标所在文档（iframe 内右键时挂主文档会错位/不可见）
+    var menuDoc = el.ownerDocument || document;
+    var menuWin = menuDoc.defaultView || window;
 
     // 向主进程请求 Excel 列列表（通过 IPC，携带目标元素选择器）
     var selector = buildSelector(el);
     var menuId = 'ctx-' + Date.now();
 
     // 创建悬浮菜单容器（loading 状态）
-    var menu = document.createElement('div');
+    var menu = menuDoc.createElement('div');
     menu.id = 'cinside-ctx-menu';
     menu.style.cssText = 'position:fixed;z-index:999999;background:#fff;border:1px solid #e2e8f0;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);padding:4px 0;min-width:160px;max-height:280px;overflow-y:auto;font-size:13px;font-family:system-ui,-apple-system,sans-serif;';
     // 定位：鼠标位置，但避免超出视口
@@ -2125,21 +2282,23 @@ const ELEMENT_PICKER_SCRIPT = `
     menu.style.left = x + 'px';
     menu.style.top = y + 'px';
     // loading 提示
-    var loading = document.createElement('div');
+    var loading = menuDoc.createElement('div');
     loading.style.cssText = 'padding:8px 14px;color:#94a3b8;font-size:12px;';
     loading.textContent = '加载列列表…';
     menu.appendChild(loading);
-    document.body.appendChild(menu);
+    menuDoc.body.appendChild(menu);
     _cinsideCtxMenu = menu;
 
-    // 点击菜单外部时关闭
+    // 点击菜单外部时关闭。菜单内的 pointerdown/click 由 onPick 的
+    // #cinside-ctx-menu 白名单放行（onPick 注册更早，会先执行），
+    // 菜单项自己的 click 监听器才能收到事件完成选列。
     var closeHandler = function(ev) {
       if (_cinsideCtxMenu && !_cinsideCtxMenu.contains(ev.target)) {
         _removeCtxMenu();
-        document.removeEventListener('pointerdown', closeHandler, true);
+        menuDoc.removeEventListener('pointerdown', closeHandler, true);
       }
     };
-    document.addEventListener('pointerdown', closeHandler, true);
+    menuDoc.addEventListener('pointerdown', closeHandler, true);
 
     // 通知主进程：请求 Excel 列列表，附带目标元素选择器
     window.__cinsidePostMessage({
@@ -2154,19 +2313,39 @@ const ELEMENT_PICKER_SCRIPT = `
       if (!_cinsideCtxMenu) return;
       _cinsideCtxMenu.innerHTML = '';
       if (!columns || !columns.length) {
-        var empty = document.createElement('div');
+        var empty = menuDoc.createElement('div');
         empty.style.cssText = 'padding:8px 14px;color:#94a3b8;font-size:12px;';
         empty.textContent = '无可用列';
         _cinsideCtxMenu.appendChild(empty);
         return;
       }
       // 标题
-      var title = document.createElement('div');
+      var title = menuDoc.createElement('div');
       title.style.cssText = 'padding:6px 14px 4px;font-size:11px;color:#94a3b8;border-bottom:1px solid #f1f5f9;margin-bottom:2px;';
       title.textContent = '选择输入源列';
       _cinsideCtxMenu.appendChild(title);
+      // 「LOOP 列」快捷项：常驻武装（未进绑定模式）时置顶，点它直接用当前 LOOP 列绑定——
+      // 用户流程"选好 LOOP 后右键输入框"最常见意图就是绑 LOOP 列本身
+      var inBindModeNow = !!(window.__cinsidePickerActive && window.__cinsideBindInputMode);
+      if (!inBindModeNow && window.__cinsideLoopCol) {
+        var loopItem = menuDoc.createElement('div');
+        loopItem.style.cssText = 'padding:6px 14px;cursor:pointer;color:#6366f1;font-weight:600;display:flex;align-items:center;gap:6px;border-bottom:1px solid #f1f5f9;';
+        loopItem.textContent = '⚡ LOOP 列「' + window.__cinsideLoopCol + '」';
+        loopItem.addEventListener('mouseenter', function() { loopItem.style.background = '#eef2ff'; });
+        loopItem.addEventListener('mouseleave', function() { loopItem.style.background = ''; });
+        loopItem.addEventListener('click', function() {
+          _removeCtxMenu();
+          menuDoc.removeEventListener('pointerdown', closeHandler, true);
+          window.__cinsidePostMessage({
+            kind: 'context-menu-select',
+            selector: selector,
+            field: window.__cinsideLoopCol,
+          });
+        });
+        _cinsideCtxMenu.appendChild(loopItem);
+      }
       columns.forEach(function(col) {
-        var item = document.createElement('div');
+        var item = menuDoc.createElement('div');
         item.style.cssText = 'padding:6px 14px;cursor:pointer;color:#334155;display:flex;align-items:center;gap:6px;transition:background .1s;';
         if (col === currentField) {
           item.style.color = '#6366f1';
@@ -2179,7 +2358,7 @@ const ELEMENT_PICKER_SCRIPT = `
         item.addEventListener('mouseleave', function() { item.style.background = ''; });
         item.addEventListener('click', function() {
           _removeCtxMenu();
-          document.removeEventListener('pointerdown', closeHandler, true);
+          menuDoc.removeEventListener('pointerdown', closeHandler, true);
           window.__cinsidePostMessage({
             kind: 'context-menu-select',
             selector: selector,
@@ -2188,10 +2367,10 @@ const ELEMENT_PICKER_SCRIPT = `
         });
         _cinsideCtxMenu.appendChild(item);
       });
-      // 确保菜单不超出视口
+      // 确保菜单不超出视口（iframe 内用 iframe 自己的视口尺寸）
       var rect = _cinsideCtxMenu.getBoundingClientRect();
-      if (rect.right > window.innerWidth) _cinsideCtxMenu.style.left = (window.innerWidth - rect.width - 8) + 'px';
-      if (rect.bottom > window.innerHeight) _cinsideCtxMenu.style.top = (window.innerHeight - rect.height - 8) + 'px';
+      if (rect.right > menuWin.innerWidth) _cinsideCtxMenu.style.left = (menuWin.innerWidth - rect.width - 8) + 'px';
+      if (rect.bottom > menuWin.innerHeight) _cinsideCtxMenu.style.top = (menuWin.innerHeight - rect.height - 8) + 'px';
     };
   }
 
@@ -3993,7 +4172,14 @@ ipcMain.handle("view-insert-css", (_event, side, css) => {
 ipcMain.handle("view-start-picking", (_event, side) => {
   pickingActive[side] = true;
   debugLog(`[main] view-start-picking side=${side}`);
-  return executeInView(side, ELEMENT_PICKER_SCRIPT);
+  // picker 脚本每次注入都会把 __cinsideBindInputMode 重置为 false：
+  // 绑定流程中每拾取一次就重新 viewStartPicking，若不补回标记，右键选 Excel 列会在第一次绑定后静默失效
+  return executeInView(side, ELEMENT_PICKER_SCRIPT).then((r) => {
+    if (bindInputModeActive[side]) {
+      return executeInView(side, "window.__cinsideBindInputMode = true;").then(() => r);
+    }
+    return r;
+  });
 });
 
 // 取消元素选择模式
@@ -4204,7 +4390,31 @@ ipcMain.handle("view-clear-highlight", (_event, side) => {
 
 // 设置绑定输入模式（右键菜单开关）：true=开启右键菜单，false=关闭
 ipcMain.handle("view-set-bind-input-mode", (_event, side, enabled) => {
+  bindInputModeActive[side] = !!enabled;
   return executeInView(side, `window.__cinsideBindInputMode = ${enabled ? "true" : "false"};`);
+});
+
+// LOOP 常驻右键绑定武装：选好 LOOP 列后由前端开启。
+// 开启后无需进入「绑定输入框」模式，右键网页输入框即弹 Excel 列菜单完成绑定（循环起点）。
+// loopCol：当前 LOOP 列名，菜单置顶提供「⚡ LOOP 列」一键绑定项。
+ipcMain.handle("view-set-loop-bind-armed", (_event, side, enabled, loopCol) => {
+  if (side !== "left" && side !== "right") return { ok: false };
+  loopBindArmed[side] = !!enabled;
+  loopBindCol[side] = typeof loopCol === "string" ? loopCol : "";
+  debugLog(`[main] loop-bind-armed side=${side} enabled=${!!enabled} col=${loopBindCol[side]}`);
+  if (enabled) {
+    syncLoopBindArming(side);
+    return { ok: true };
+  }
+  // 关闭：主 view / 脱离 view / 弹窗都清标记（监听器留着但 handler 首行判断标记，无副作用）
+  const off = "window.__cinsideLoopBindArmed = false;";
+  const mainView = side === "left" ? leftBrowserView : rightBrowserView;
+  if (mainView && !mainView.webContents.isDestroyed()) mainView.webContents.executeJavaScript(off).catch(() => {});
+  const detached = detachedPanels[`browser-${side}_view`];
+  if (detached && !detached.webContents.isDestroyed()) detached.webContents.executeJavaScript(off).catch(() => {});
+  const popup = popupViews[side];
+  if (popup && popup.view && !popup.view.webContents.isDestroyed()) popup.view.webContents.executeJavaScript(off).catch(() => {});
+  return { ok: true };
 });
 
 // 启用/禁用框选模式（日格子多选：拖拽画矩形批量选中矩形内所有日格子元素）
@@ -4221,7 +4431,13 @@ ipcMain.handle("view-set-marquee-mode", (_event, side, enabled) => {
 ipcMain.handle("view-ctx-menu-response", (_event, side, columns, currentField) => {
   const colsJson = JSON.stringify(columns || []);
   const curField = JSON.stringify(currentField || "");
-  return executeInView(side, `if (window.__cinsideCtxMenuResponse) window.__cinsideCtxMenuResponse(${colsJson}, ${curField});`);
+  const script = `if (window.__cinsideCtxMenuResponse) window.__cinsideCtxMenuResponse(${colsJson}, ${curField});`;
+  // 弹窗内右键的菜单：回调挂在弹窗 view 上，主 view 里没有 → 两边都送达（没有回调的一侧是 no-op）
+  const popup = popupViews[side];
+  if (popup && popup.view && !popup.view.webContents.isDestroyed()) {
+    popup.view.webContents.executeJavaScript(script).catch(() => {});
+  }
+  return executeInView(side, script);
 });
 
 // 截图指定 view 中的元素区域，返回 base64 PNG（用于头像提取）
@@ -4360,8 +4576,18 @@ function createDetachedBrowserView(win, side) {
     `).catch(() => {});
     // 页面重载后若拾取模式仍激活，重新注入拾取脚本
     if (detachedPickingActive[side]) {
-      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).catch(() => {});
+      const actualSide = side === "browser-left" ? "left" : "right";
+      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT)
+        .then(() => {
+          if (bindInputModeActive[actualSide]) {
+            return view.webContents.executeJavaScript("window.__cinsideBindInputMode = true;");
+          }
+        })
+        .catch(() => {});
     }
+    // LOOP 常驻右键绑定：脱离窗口整页加载后同样补武装
+    const actualSideArm = side === "browser-left" ? "left" : "right";
+    if (loopBindArmed[actualSideArm]) syncLoopBindArming(actualSideArm);
   });
 
   // dom-ready：注入 relay 桥接
@@ -4390,12 +4616,25 @@ function createDetachedBrowserView(win, side) {
     const actualSide = side === "browser-left" ? "left" : "right";
     closePopupView(actualSide);
     if (detachedPickingActive[side]) {
-      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).catch(() => {});
+      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT)
+        .then(() => {
+          if (bindInputModeActive[actualSide]) {
+            return view.webContents.executeJavaScript("window.__cinsideBindInputMode = true;");
+          }
+        })
+        .catch(() => {});
     }
   });
   view.webContents.on("did-navigate-in-page", () => {
     if (detachedPickingActive[side]) {
-      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).catch(() => {});
+      const actualSide = side === "browser-left" ? "left" : "right";
+      view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT)
+        .then(() => {
+          if (bindInputModeActive[actualSide]) {
+            return view.webContents.executeJavaScript("window.__cinsideBindInputMode = true;");
+          }
+        })
+        .catch(() => {});
     }
   });
 
@@ -4631,7 +4870,12 @@ ipcMain.handle("detached-view-start-picking", (_event, side) => {
   detachedPickingActive[side] = true;
   const view = detachedPanels[side + "_view"];
   if (!view) return Promise.resolve(undefined);
-  return view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).catch((e) => {
+  const actualSide = side === "browser-left" ? "left" : "right";
+  return view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).then(() => {
+    if (bindInputModeActive[actualSide]) {
+      return view.webContents.executeJavaScript("window.__cinsideBindInputMode = true;");
+    }
+  }).catch((e) => {
     console.error(`[detached-view-picking:${side}]`, e);
     return undefined;
   });
@@ -4688,7 +4932,11 @@ ipcMain.handle("popup-close", (_event, side) => {
 ipcMain.handle("popup-start-picking", (_event, side) => {
   const popup = popupViews[side];
   if (!popup) return Promise.resolve(undefined);
-  return popup.view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).catch((e) => {
+  return popup.view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT).then(() => {
+    if (bindInputModeActive[side]) {
+      return popup.view.webContents.executeJavaScript("window.__cinsideBindInputMode = true;");
+    }
+  }).catch((e) => {
     console.error(`[popup-picking:${side}]`, e);
     return undefined;
   });

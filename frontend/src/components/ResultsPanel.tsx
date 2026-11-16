@@ -3571,7 +3571,7 @@ function ReportTab({
         <div className="flex w-full items-center gap-1.5 rounded-lg bg-slate-50/60 px-2 py-1.5">
           <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-slate-200 text-[10px] font-bold leading-none text-slate-500">?</span>
           <span className="min-w-0 flex-1 text-[11px] font-medium leading-tight text-slate-400">
-            还没有步骤：点上方「绑定输入框 / 前置点击 / 过程点击 / 收尾点击 / 录入步骤 / 审查步骤」开始录制
+            还没有步骤：右键网页输入框绑定 LOOP 列（循环起点），或点上方「点击按钮（Tab 切换前置/过程/收尾）/ 步骤按钮（Shift+Tab 切换录入/审查）」开始录制
           </span>
         </div>
       ) : (

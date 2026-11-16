@@ -133,6 +133,8 @@ export interface ElectronAPI {
 
   // 绑定输入模式右键菜单：开启/关闭
   viewSetBindInputMode: (side: ViewSide, enabled: boolean) => Promise<unknown>;
+  // LOOP 常驻右键绑定：选好 LOOP 列后开启，右键输入框即可绑定该列（无需进入绑定模式）
+  viewSetLoopBindArmed: (side: ViewSide, enabled: boolean, loopCol?: string) => Promise<unknown>;
   // 框选模式（日格子多选）：true=拖拽框选，false=单点选择
   viewSetMarqueeMode: (side: ViewSide, enabled: boolean) => Promise<unknown>;
   // 回传 Excel 列列表到 picker 脚本（右键菜单响应）

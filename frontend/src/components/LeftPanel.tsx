@@ -407,13 +407,21 @@ export default function LeftPanel({
     const t = setTimeout(async () => {
       if (cancelled) return;
       setBootPhase(1);
-      await runEnvCheck();
+      const allOk = await runEnvCheck();
       if (cancelled) return;
-      // 统一进入「结果确认页」：全部就绪时用户直接点「进入」即可；
-      // 有未就绪项时逐项选择「下载/开启」或「忽略」。
+      if (allOk) {
+        // 全部就绪：短暂展示「环境检查通过」后自动进入时钟，无需手动确认
+        setBootPhase(2);
+        autoEnterTimer = setTimeout(() => {
+          if (!cancelled) setBootPhase(3);
+        }, 900);
+        return;
+      }
+      // 有未就绪项时进入「结果确认页」，逐项选择「下载/开启」或「忽略」。
       setBootPhase(2);
     }, 1100);
-    return () => { cancelled = true; clearTimeout(t); };
+    let autoEnterTimer: ReturnType<typeof setTimeout> | undefined;
+    return () => { cancelled = true; clearTimeout(t); if (autoEnterTimer) clearTimeout(autoEnterTimer); };
   }, [runEnvCheck]);
 
   /** 切换某项的处置选择（未就绪项）：点同一项第二次取消选择 */

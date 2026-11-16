@@ -25,7 +25,6 @@ import {
   Globe,
   GraduationCap,
   KeyRound,
-  Keyboard,
   Library,
   ListChecks,
   Loader2,
@@ -2351,6 +2350,9 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   const [appMode, setAppMode] = useState<AppMode>("loop");
   // 教学阶段：idle 未开始 / data-source 教数据源处理 / review 教审查流操作 / entry 教录入流操作 / done 教学完成
   const [teachingPhase, setTeachingPhase] = useState<TeachingPhase>("idle");
+  // ref 镜像：右键选列等异步回调读取最新阶段，避免闭包陷阱
+  const teachingPhaseRef = useRef(teachingPhase);
+  teachingPhaseRef.current = teachingPhase;
   // 已保存的流程模板（教学完成后生成）
   const [workflowTemplate, setWorkflowTemplate] = useState<WorkflowTemplate | null>(null);
   // ref 始终持有最新的 workflowTemplate，避免 setState 异步导致的读取旧值
@@ -4611,6 +4613,27 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     setLeftPicked(null);
   }, []);
 
+  // ===== 二合一步骤按钮：录入/审查合为一个可切换态按钮 =====
+  // stepKindChoice 记住按钮当前展示的类型（退出模式后保留，下次点击从该类型继续）
+  const [stepKindChoice, setStepKindChoice] = useState<"entry" | "review">("entry");
+  // 按钮展示的类型：模式激活时跟随实际 addingStepMode（W/R 快捷键、脱离面板等入口也会改），否则用记忆选择
+  const stepBtnKind: "entry" | "review" = addingStepMode || stepKindChoice;
+  const stepBtnKindRef = useRef(stepBtnKind);
+  stepBtnKindRef.current = stepBtnKind;
+  // Shift+Tab 切换 录入 ⇄ 审查（与点击按钮的 Tab 循环区分开）。
+  // 已在步骤模式时直接切到另一类型继续拾取（复用 switchLoopStepType 的切换逻辑）；
+  // 未激活时只切换按钮展示态（点击按钮才进入模式）
+  const toggleStepKind = useCallback(() => {
+    const next = stepBtnKindRef.current === "entry" ? "review" : "entry";
+    setStepKindChoice(next);
+    if (addingStepModeRef.current) {
+      // 不弹 toast：按钮文字/高亮变化本身就是反馈
+      switchLoopStepType(next);
+    }
+  }, [switchLoopStepType]);
+  const toggleStepKindRef = useRef(toggleStepKind);
+  toggleStepKindRef.current = toggleStepKind;
+
   // 统一的人物卡片选择 handler：选中卡片 + 退出设置模式 + 切换到结果视图，
   // 确保点击卡片时文件处理面板显示该卡片绑定的提取文件和字段
   const handleSelectCard = useCallback((id: string) => {
@@ -6526,6 +6549,29 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     window.electronAPI?.setDownloadCapture("left", false).catch(() => {});
     window.electronAPI?.setDownloadCapture("right", false).catch(() => {});
   }, []);
+
+  // ===== 三合一点击按钮：前置/过程/收尾合为一个可切换态按钮 =====
+  // clickPhaseChoice 记住按钮当前展示的阶段（退出模式后保留，下次点击从该阶段继续）
+  const [clickPhaseChoice, setClickPhaseChoice] = useState<"pre" | "mid" | "post">("pre");
+  // 按钮展示的阶段：模式激活时跟随实际阶段（Q/E 快捷键、脱离面板等入口也会改），否则用记忆选择
+  const clickBtnPhase: "pre" | "mid" | "post" = addingClickMode && addingClickPhase ? addingClickPhase : clickPhaseChoice;
+  const clickBtnPhaseRef = useRef(clickBtnPhase);
+  clickBtnPhaseRef.current = clickBtnPhase;
+  // Tab 循环切换：前置 → 过程 → 收尾 → 前置。
+  // 已在点击模式时直接切到下一阶段继续拾取；未激活时只切换按钮展示态（点击按钮才进入模式）
+  const cycleClickPhase = useCallback(() => {
+    const order: Array<"pre" | "mid" | "post"> = ["pre", "mid", "post"];
+    const cur = clickBtnPhaseRef.current;
+    const next = order[(order.indexOf(cur) + 1) % order.length];
+    setClickPhaseChoice(next);
+    if (addingClickModeRef.current) {
+      // startAddClickStep 对相同 phase 是 toggle 退出，这里 next 必不等于 cur，安全
+      // 不弹 toast：按钮文字/高亮变化本身就是反馈
+      startAddClickStep(next);
+    }
+  }, [startAddClickStep]);
+  const cycleClickPhaseRef = useRef(cycleClickPhase);
+  cycleClickPhaseRef.current = cycleClickPhase;
 
   // 网页提取卡片（文件处理「选择来源」）：约等于「添加过程点击」——录中间导航点击，
   // 点击到下载元素时下载捕获自动升级为下载触发步骤并进入文件提取流程
@@ -12868,6 +12914,18 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
       // 放在按钮检查之前，确保焦点在面板按钮上时也能响应。
       if (s.selectMode || s.fieldPanelActive) {
         if (key === "l" || key === "L") { e.preventDefault(); s.toggleFieldSetup(); return; }
+        // Tab：按当前活跃模式切换——步骤模式（录入/审查）中切 录入⇄审查；
+        // 点击模式或空闲时循环点击阶段 前置→过程→收尾。
+        // Shift+Tab 显式指定步骤按钮切换（任何状态下都切 录入⇄审查）。
+        if (key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+          e.preventDefault();
+          if (e.shiftKey || s.addingStepMode === "entry" || s.addingStepMode === "review") {
+            toggleStepKindRef.current();
+          } else {
+            cycleClickPhaseRef.current();
+          }
+          return;
+        }
         if (key === "q" || key === "Q") { e.preventDefault(); const inStepMode = s.addingStepMode === "entry" || s.addingStepMode === "review"; s.startAddClickStepPhase(inStepMode ? "mid" : "pre"); return; }
         if (key === "w" || key === "W") { e.preventDefault(); s.startAddingEntrySteps(); return; }
         if (key === "r" || key === "R") { e.preventDefault(); s.startAddingReviewSteps(); return; }
@@ -13121,14 +13179,11 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         const side = msg.side;
         // 获取当前选中卡片的所有字段名
         const currentSelected = selected;
-        if (!currentSelected) {
-          window.electronAPI?.viewCtxMenuResponse(side, [], "");
-          return;
-        }
-        const columns = Object.keys(currentSelected.fields).filter((k) => {
-          const v = currentSelected.fields[k];
-          return v && String(v).trim();
-        });
+        const fields = currentSelected?.fields || {};
+        // 列列表不再按"当前卡该列非空"过滤：第一行该列为空时旧逻辑会把整列藏掉
+        // （用户反馈"没法选中 Excel 里的列"），LOOP 逐卡取值时空列对后面的卡仍有意义。
+        // 只排除内部字段（_ 开头）。
+        const columns = Object.keys(fields).filter((k) => !k.startsWith("_"));
         // 当前绑定的字段（查找该 selector 对应的 input mark）
         const currentMark = pickedMarksRef.current.find(
           (m) => m.action === "input" && m.inputTarget === p.selector && m.side === side
@@ -13139,10 +13194,15 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
         // 用户选择了某列：更新对应 input mark 的 variableField
         const p = msg.payload as { kind: string; selector: string; field: string };
         const side = msg.side;
+        const targetLabel = pickedMarksRef.current.find(
+          (m) => m.action === "input" && m.inputTarget === p.selector && m.side === side
+        )?.inputTargetLabel;
         // 更新 pickedMarks 中该 selector 的 input mark
-        setPickedMarks((prev) =>
-          prev.map((m) => {
+        setPickedMarks((prev) => {
+          let matched = false;
+          const next = prev.map((m) => {
             if (m.action === "input" && m.inputTarget === p.selector && m.side === side) {
+              matched = true;
               return {
                 ...m,
                 variableField: p.field,
@@ -13151,12 +13211,39 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
                 // 从当前卡 record 逐卡取值替换。若此处填入 selected 值，一旦 variableField
                 // 因故失效就会永远填第一张卡的值（用户反馈的「绑定输入框永恒第一张」）。
                 value: "",
-                label: `${m.workflow === "entry" ? "录入" : "审查"}「${p.field}」← Excel「${p.field}」`,
+                label: `${m.workflow === "entry" ? "录入" : m.workflow === "review" ? "审查" : "绑定输入"} · ${m.inputTargetLabel || m.inputTarget || p.selector} ← Excel「${p.field}」`,
               };
             }
             return m;
-          })
-        );
+          });
+          // 该输入框还没绑定过（用户先右键选列再点框）：直接创建绑定 mark，
+          // 否则右键选完列没有任何步骤落地，看起来就是"选不中"
+          if (!matched) {
+            // 右键绑定 = 循环起点：新 mark 插到已有绑定输入步骤之后、其他步骤之前，
+            // 保证 LOOP 每张卡先填该框再执行后续步骤；整体重编号
+            const frontCount = next.filter((m) => m.action === "input" && m.variableField && m.source === "web").length;
+            const newMark: PickedMark = {
+              id: `mk-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+              order: frontCount + 1,
+              createdAt: Date.now(),
+              side,
+              source: "web",
+              selector: p.selector,
+              label: `绑定输入 · ${targetLabel || p.selector} ← Excel「${p.field}」`,
+              value: "",
+              workflow: teachingPhaseRef.current === "entry" || teachingPhaseRef.current === "review" ? teachingPhaseRef.current : "data-source",
+              action: "input",
+              inputTarget: p.selector,
+              inputTargetLabel: targetLabel || p.selector,
+              variableField: p.field,
+              excelField: p.field,
+              recordId: selected?.record_id,
+            };
+            next.splice(frontCount, 0, newMark);
+            return next.map((m, i) => (m.order === i + 1 ? m : { ...m, order: i + 1 }));
+          }
+          return next;
+        });
         // 同时更新 inputTarget 状态（如果该 mark 是当前目标）
         if (inputTargetRef.current?.selector === p.selector && inputTargetRef.current?.side === side) {
           setPendingInputField(p.field);
@@ -13174,6 +13261,21 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
     });
     return () => off?.();
   }, [selected, performInputValue, setSuccessToast]);
+
+  // === LOOP 常驻右键绑定 ===
+  // 用户流程：选好 LOOP 列（点 Excel 列头）→ 直接右键网页输入框 → 选列完成绑定（循环起点），
+  // 无需先点「绑定输入框」按钮。这里在 LOOP 列存在且空闲时自动武装左右网页侧的右键菜单；
+  // 运行中/其他设置模式（审查/录入/点击/文件提取等）中不武装，避免抢占右键。
+  useEffect(() => {
+    if (!window.electronAPI?.viewSetLoopBindArmed) return;
+    const hasLoopCol = !!(selectedExcelColumn || rightSelectedColumn || rightBindColumn);
+    const idle = !isAnyRunning && !replaying && !addingStepMode && !addingClickMode && !addingDocExtractMode && !bindInputSide;
+    const armLeft = hasLoopCol && idle && leftViewMode === "web";
+    const armRight = hasLoopCol && idle && rightViewMode === "web";
+    const loopCol = selectedExcelColumn || rightSelectedColumn || rightBindColumn || "";
+    window.electronAPI.viewSetLoopBindArmed("left", armLeft, loopCol).catch(() => {});
+    window.electronAPI.viewSetLoopBindArmed("right", armRight, loopCol).catch(() => {});
+  }, [selectedExcelColumn, rightSelectedColumn, rightBindColumn, isAnyRunning, replaying, addingStepMode, addingClickMode, addingDocExtractMode, bindInputSide, leftViewMode, rightViewMode]);
 
   // === 元素屏蔽功能 ===
   // 应用屏蔽规则到指定 side（从 localStorage 读取该 host 的规则 + 自动侧边栏折叠规则，发送到主进程）
@@ -15805,6 +15907,14 @@ type: info.type,
       setSuccessToast(`已绑定 Excel 列「${info.field}」：跑 LOOP 时每张卡片取该行该列的值`);
       return;
     }
+    // 绑定输入模式：点 Excel 单元格 = 选中该列作为取值列（LOOP 列），
+    // 接下来点网页输入框即用该列绑定填值。旧逻辑落到普通拾取分支，绑定中点格子没有任何反应，
+    // 表现为"绑定输入没法选中 Excel 里的列"。
+    if (bindInputSideRef.current) {
+      setSelectedExcelColumn(info.field);
+      setSuccessToast(`已选取值列「${info.field}」：接下来点网页输入框即用该列绑定（右键输入框可换其他列）`);
+      return;
+    }
     // pendingAction=input：记录待填入的值，等用户按 Enter 时才真正填入网页框
     // 用户规定流程：S → 先点 Excel/网页取值 → 再点右侧输入框作为目标 → Enter 完成
     if (currentPendingAction === "input") {
@@ -15876,6 +15986,12 @@ type: info.type,
       setExcelBindEntryId(null);
       excelBindEntryIdRef.current = null;
       setSuccessToast(`已绑定 Excel 列「${info.field}」：跑 LOOP 时每张卡片取该行该列的值`);
+      return;
+    }
+    // 绑定输入模式：点右侧 Excel 单元格 = 选中该列作为取值列（与左侧对称，SWAP 后 Excel 在右侧）
+    if (bindInputSideRef.current) {
+      setSelectedExcelColumn(info.field);
+      setSuccessToast(`已选取值列「${info.field}」：接下来点网页输入框即用该列绑定（右键输入框可换其他列）`);
       return;
     }
     // S 输入模式：记录待填入的值，目标框在左网页
@@ -16542,21 +16658,16 @@ type: info.type,
         {/* 中间空白区：错误/成功提示显示在工具栏同一行中央 */}
         <div className="flex min-w-0 flex-1 items-center justify-center gap-2">
           {/* 步骤设置功能按钮组（仅步骤设置模式显示，常驻；原「高手模式」开关已移除）：
-              分组：绑定输入框 ｜ 前置/过程/收尾点击 ｜ 录入/审查步骤（文件提取/自定义文本/控件提取留在文件处理与提取元素面板） */}
+              分组：前置/过程/收尾点击 ｜ 录入/审查步骤（文件提取/自定义文本/控件提取留在文件处理与提取元素面板）
+              原「绑定输入框」按钮已移除：选好 LOOP 列后直接右键网页输入框即可绑定（循环起点） */}
           {selectMode && !isAnyRunning && !deskVisible && (
             <div className="flex shrink-0 items-center gap-1">
               {([
                 [
-                  { key: "bind", label: "绑定输入框", icon: Keyboard, active: !!bindInputSide, onClick: startBindBothInputs, shortcut: null, title: "绑定输入框/点击（点输入框自动绑定Excel列并填入第一行值，再次点击关闭）" },
+                  { key: "click", label: clickBtnPhase === "pre" ? "前置点击" : clickBtnPhase === "mid" ? "过程点击" : "收尾点击", icon: clickBtnPhase === "pre" ? MousePointerClick : clickBtnPhase === "mid" ? SkipForward : Check, active: addingClickMode, onClick: () => { setClickPhaseChoice(clickBtnPhase); startAddClickStep(clickBtnPhase); }, shortcut: "Q", title: `添加${clickBtnPhase === "pre" ? "前置点击（搜索按钮、开始按钮等）" : clickBtnPhase === "mid" ? "过程点击（NEXT、下一步等中间步骤）" : "收尾点击（提交按钮等）"} · 快捷键 Q 进入 · Tab 切换 前置→过程→收尾 · 再点关闭` },
                 ],
                 [
-                  { key: "pre", label: "前置点击", icon: MousePointerClick, active: addingClickMode && addingClickPhase === "pre", onClick: () => startAddClickStep("pre"), shortcut: "Q", title: "添加前置点击（搜索按钮、开始按钮等）· 快捷键 Q" },
-                  { key: "mid", label: "过程点击", icon: SkipForward, active: addingClickMode && addingClickPhase === "mid", onClick: () => startAddClickStep("mid"), shortcut: null, title: "添加过程点击（NEXT、下一步等中间步骤）" },
-                  { key: "post", label: "收尾点击", icon: Check, active: addingClickMode && addingClickPhase === "post", onClick: () => startAddClickStep("post"), shortcut: "E", title: "添加收尾点击（提交按钮等）· 快捷键 E" },
-                ],
-                [
-                  { key: "entry", label: "录入步骤", icon: ClipboardEdit, active: addingStepMode === "entry", onClick: startAddingEntrySteps, shortcut: "W", title: "录入模式：字段用于从左侧Excel填入右侧网页 · 快捷键 W" },
-                  { key: "review", label: "审查步骤", icon: ClipboardCheck, active: addingStepMode === "review", onClick: startAddingReviewSteps, shortcut: "R", title: "审核模式：字段用于右侧网页与左侧Excel核对 · 快捷键 R" },
+                  { key: "step", label: stepBtnKind === "entry" ? "录入步骤" : "审查步骤", icon: stepBtnKind === "entry" ? ClipboardEdit : ClipboardCheck, active: !!addingStepMode, onClick: () => { setStepKindChoice(stepBtnKind); if (stepBtnKind === "entry") startAddingEntrySteps(); else startAddingReviewSteps(); }, shortcut: stepBtnKind === "entry" ? "W" : "R", title: stepBtnKind === "entry" ? "录入模式：字段用于从左侧Excel填入右侧网页 · 快捷键 W 进入 · 本模式中按 Tab（或 Shift+Tab）切换 录入⇄审查 · 再点关闭" : "审核模式：字段用于右侧网页与左侧Excel核对 · 快捷键 R 进入 · 本模式中按 Tab（或 Shift+Tab）切换 录入⇄审查 · 再点关闭" },
                 ],
               ] as const).map((group, gi) => (
                 <div key={gi} className="flex shrink-0 items-center gap-1">
@@ -16575,6 +16686,34 @@ type: info.type,
                     >
                       <b.icon className={`h-3 w-3 ${b.active ? "" : "text-slate-400"}`} />
                       {b.label}
+                      {b.key === "click" && (
+                        <kbd
+                          className={[
+                            "origin-left scale-90 rounded px-1 text-[9px] font-bold leading-tight transition-all duration-200",
+                            "group-hover:ml-0.5 group-hover:scale-110 group-hover:px-1.5 group-hover:shadow-sm",
+                            b.active
+                              ? "bg-white/25 text-white group-hover:bg-white group-hover:text-violet-600"
+                              : "bg-slate-100 text-slate-400 group-hover:bg-slate-800 group-hover:text-white",
+                          ].join(" ")}
+                          title="Tab 循环切换：前置 → 过程 → 收尾"
+                        >
+                          Tab⇄
+                        </kbd>
+                      )}
+                      {b.key === "step" && (
+                        <kbd
+                          className={[
+                            "origin-left scale-90 rounded px-1 text-[9px] font-bold leading-tight transition-all duration-200",
+                            "group-hover:ml-0.5 group-hover:scale-110 group-hover:px-1.5 group-hover:shadow-sm",
+                            b.active
+                              ? "bg-white/25 text-white group-hover:bg-white group-hover:text-violet-600"
+                              : "bg-slate-100 text-slate-400 group-hover:bg-slate-800 group-hover:text-white",
+                          ].join(" ")}
+                          title={addingStepMode ? "Tab 切换：录入 ⇄ 审查（当前步骤模式中）" : "Shift+Tab 切换：录入 ⇄ 审查"}
+                        >
+                          {addingStepMode ? "Tab⇄" : "⇧Tab⇄"}
+                        </kbd>
+                      )}
                       {b.shortcut && (
                         <kbd
                           className={[
@@ -17631,7 +17770,7 @@ type: info.type,
                       : pendingAction === "click"
                       ? "空格点击模式：点击元素触发真实点击"
                       : teachingPhase !== "idle"
-                      ? "LOOP 步骤配置中：先点上方「绑定输入框/点击」开始"
+                      ? "LOOP 步骤配置中：选好 LOOP 列后，右键网页输入框即可绑定（循环起点）"
                       : "输入学校系统 URL，或切换到Excel模式上传参考数据"
                   }
                   onDetach={() => detachPanel("browser-right")}
