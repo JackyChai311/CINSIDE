@@ -288,6 +288,10 @@ class ExcelTarget:
             "header": head,
             "rows": rows,
             "returned": len(rows),
+            # 工作表全量尺寸：模型据此判断「是否还有没读到的行/列」
+            "sheet_rows": ws.max_row or 0,
+            "sheet_cols": ws.max_column or 0,
+            "has_more": (ws.max_row or 0) > r2 or (ws.max_column or 0) > c2,
         }
 
     async def read(self, sheet: str = "", cell_range: str = "", with_header: bool = True) -> dict:

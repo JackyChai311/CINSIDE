@@ -14,6 +14,10 @@ const ACTION_LABEL: Record<HarnessPlanStep["action"], string> = {
   write: "写入",
   verify: "核对",
   wait: "等待",
+  render: "渲染画面",
+  narrate: "生成配音",
+  compose: "合成视频",
+  export: "交付文件",
 };
 
 /**

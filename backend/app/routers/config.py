@@ -17,9 +17,9 @@ from ..services.dependency_manager import (
     download_and_install_umi_ocr_stream,
     get_all_deps_status,
     install_ocr_engine_deps,
+    install_ffmpeg,
     install_officecli,
     install_python_deps,
-    install_remotion,
 )
 
 router = APIRouter(prefix="/api/config", tags=["config"])
@@ -409,13 +409,13 @@ async def download_umi_ocr_stream_endpoint():
     )
 
 
-@router.post("/install-remotion")
-def install_remotion_endpoint():
-    """通过 npm 在工具目录中安装 Remotion 视频渲染依赖。
+@router.post("/install-ffmpeg")
+def install_ffmpeg_endpoint():
+    """下载 ffmpeg 静态构建到工具目录（SLIDE STUDIO 视频合成用，替代原 Remotion）。
 
-    此操作可能耗时数分钟（下载约 100-200MB），同步执行，前端需显示加载状态。
+    此操作可能耗时数分钟（下载约 30-90MB），同步执行，前端需显示加载状态。
     """
-    ok, msg = install_remotion()
+    ok, msg = install_ffmpeg()
     return {"ok": ok, "message": msg}
 
 

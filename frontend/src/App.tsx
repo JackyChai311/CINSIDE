@@ -188,8 +188,9 @@ function TaskWallpaperLayer({ on, custom, useDefault, brightness = 1, theme = "l
 }
 
 /** 清屏大时钟：聚焦 + 关闭侧栏 + 关闭下栏时，在主区正中显示的日期与大时钟。
- *  与左栏小时钟各自维护计时器，仅在挂载期间走动。 */
-function BigClock() {
+ *  与左栏小时钟各自维护计时器，仅在挂载期间走动。
+ *  compact=true：主聊天框有内容时缩到左上方腾位置。 */
+function BigClock({ compact = false }: { compact?: boolean }) {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -199,6 +200,32 @@ function BigClock() {
   const WEEK = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
   const week = WEEK[now.getDay()];
   const dateStr = `${now.getFullYear()} 年 ${pad(now.getMonth() + 1)} 月 ${pad(now.getDate())} 日`;
+  if (compact) {
+    return (
+      <section
+        aria-label={`${dateStr} ${week}，${pad(now.getHours())} 时 ${pad(now.getMinutes())} 分`}
+        className="pointer-events-none absolute left-5 top-4 z-10 select-none text-slate-700 animate-fade-in dark:text-slate-200"
+      >
+        <div className="flex items-baseline gap-2 whitespace-nowrap" role="timer" aria-live="off">
+          <time className="font-mono text-[30px] font-light leading-none tabular-nums tracking-[-0.04em]">
+            {pad(now.getHours())}
+            <span
+              aria-hidden="true"
+              className="mx-1.5 inline-block bg-slate-400/60 dark:bg-slate-500"
+              style={{ width: "0.05em", height: "0.66em", borderRadius: "1px", verticalAlign: "-0.05em" }}
+            />
+            {pad(now.getMinutes())}
+          </time>
+          <span className="font-mono text-[12px] tabular-nums text-slate-400/90">{pad(now.getSeconds())}</span>
+        </div>
+        <div className="mt-1 flex items-center gap-2 text-[9.5px] tracking-[0.14em] text-slate-500 dark:text-slate-400">
+          <span>{dateStr}</span>
+          <span aria-hidden="true" className="h-2 w-px bg-slate-400/40" />
+          <span>{week}</span>
+        </div>
+      </section>
+    );
+  }
   return (
     <section
       aria-label={`${dateStr} ${week}，${pad(now.getHours())} 时 ${pad(now.getMinutes())} 分 ${pad(now.getSeconds())} 秒`}
@@ -247,6 +274,7 @@ import SaveSkillDialog from "./components/SaveSkillDialog";
 import CredentialsPanel from "./components/CredentialsPanel";
 import DocLocalExtractConfig from "./components/DocLocalExtractConfig";
 import { saveSkill, getSkillById, loadSkills, frameAlignedTemplate } from "./lib/skills";
+import { registerLoopBridge, handleLoopBridgeCall } from "./lib/harnessLoopBridge";
 import { getBlockRules, addBlockRule, removeBlockRule, getHost, type BlockRule, SIDEBAR_AUTO_SELECTORS, getSidebarAutoCollapse, setSidebarAutoCollapse } from "./lib/blockRules";
 import { getAllCredentials, addCredential, removeCredential, type Credential } from "./lib/credentials";
 import type { ViewSide } from "./electron";
@@ -1346,6 +1374,8 @@ export default function App() {
   const [backendReady, setBackendReady] = useState(!window.electronAPI);
   // 任务类型：select=选择页，web=网页任务，ppt=幻灯片任务，cowork=协作任务
   const [taskType, setTaskType] = useState<"select" | "web" | "ppt" | "cowork">("select");
+  const taskTypeRef = useRef(taskType);
+  taskTypeRef.current = taskType;
   const switchTaskType = useCallback((t: "select" | "web" | "ppt" | "cowork") => {
     setTaskType(t);
   }, []);
@@ -1379,6 +1409,13 @@ export default function App() {
   const [showArchive, setShowArchive] = useState(false);
   const [leftPanelOpen, setLeftPanelOpen] = useState(true);
   const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
+  // ref 镜像面板开合：供空依赖回调（openHarnessDesk 等）读取最新值
+  const leftPanelOpenRef = useRef(leftPanelOpen);
+  leftPanelOpenRef.current = leftPanelOpen;
+  const bottomPanelOpenRef = useRef(bottomPanelOpen);
+  bottomPanelOpenRef.current = bottomPanelOpen;
+  // 进 HARNESS 清屏桌面前的侧栏/下栏开合快照：退出桌面时原样还原（不自动打开用户关着的面板）
+  const preDeskPanelsRef = useRef<{ left: boolean; bottom: boolean } | null>(null);
   const [hasRunOnce, setHasRunOnce] = useState(false);
   const [executionPanelOpen, setExecutionPanelOpen] = useState(false); // 右侧执行进度面板
   const [edgeButtonVisible, setEdgeButtonVisible] = useState(false); // 气泡消失后才显示侧边按钮
@@ -1398,6 +1435,8 @@ export default function App() {
   // ---------- HARNESS：入口是「桌面派单」，执行时用浮窗看步骤 ----------
   // 桌面流程草案是否打开（打开时收起大时钟，把屏幕让给流程核对）
   const [deskDraftOpen, setDeskDraftOpen] = useState(false);
+  // 主聊天框有内容：大时钟缩到左上方，把中央让给对话
+  const [deskChatActive, setDeskChatActive] = useState(false);
   // 顶栏 HARNESS 按钮：+1 表示"召唤一次桌面输入框"
   const [deskSummon, setDeskSummon] = useState(0);
   // 流程草案下移：占下栏「字段对比」那一栏，上方亮出两个浏览器面板
@@ -1411,22 +1450,32 @@ export default function App() {
   // 用户手动收起过的浮窗任务 id（同一个任务不再自动弹）
   const [harnessHudHidden, setHarnessHudHidden] = useState("");
 
-  /** 点 HARNESS：未开启时进清屏桌面并弹派单输入框；已开启时关闭（点一次开、再点一次关） */
+  /** 点 HARNESS：未开启时进清屏桌面并弹派单输入框；已开启时关闭（点一次开、再点一次关）。
+   *  关闭时恢复进桌面前的侧栏/下栏开合（用户自己关着的绝不自动打开）。 */
   const openHarnessDesk = useCallback(() => {
     if (deskVisibleRef.current) {
       setFocusBottomMode(false);
-      setLeftPanelOpen(true);
-      setBottomPanelOpen(true);
+      const prev = preDeskPanelsRef.current;
+      setLeftPanelOpen(prev?.left ?? false);
+      setBottomPanelOpen(prev?.bottom ?? false);
+      preDeskPanelsRef.current = null;
       setDeskDraftOpen(false);
       return;
     }
+    // 记住进桌面前的面板开合，退出时原样还原
+    preDeskPanelsRef.current = { left: leftPanelOpenRef.current, bottom: bottomPanelOpenRef.current };
     setFocusBottomMode(true);
     setLeftPanelOpen(false);
     setBottomPanelOpen(false);
     setDeskSummon((v) => v + 1);
   }, []);
 
-  // 轮询队列：拿到「正在执行的任务」，驱动浮窗与自动亮出浏览器
+  // 轮询队列：拿到「正在执行的任务」，驱动浮窗与自动亮出浏览器；
+  // 任务结束（或抛出追问）时记下 id，供「回 HARNESS 对话」effect 使用。
+  const [harnessFinished, setHarnessFinished] = useState<HarnessQueueTask | null>(null);
+  const harnessFinishedSeenRef = useRef("");
+  const harnessSeenRunningRef = useRef<Set<string>>(new Set());
+  const harnessPollMountedAtRef = useRef(Date.now());
   useEffect(() => {
     let alive = true;
     const tick = async () => {
@@ -1434,8 +1483,27 @@ export default function App() {
       try {
         const res = await api.harnessQueue();
         if (!alive) return;
-        const running = (res.tasks || []).find((t) => t.status === "running") || null;
+        const tasks = res.tasks || [];
+        const running = tasks.find((t) => t.status === "running") || null;
         setHarnessTask(running);
+        // 最近一张已结束 / 正等回答的卡片（追问也算需要回对话）。
+        // 只认「本会话见过它跑起来」或「结束时间晚于挂载」的卡片，避免启动时被历史卡片拉回桌面。
+        // 追问用 id+question 做签名：同一任务的第二次追问也要能再次拉回对话。
+        const attention = tasks.find((t) => {
+          if (t.ask && t.status === "running") {
+            return `${t.id}:${t.ask.question}` !== harnessFinishedSeenRef.current;
+          }
+          return (
+            t.id !== harnessFinishedSeenRef.current &&
+            (t.status === "done" || t.status === "error" || t.status === "canceled") &&
+            (harnessSeenRunningRef.current.has(t.id) || t.finished_at * 1000 > harnessPollMountedAtRef.current)
+          );
+        }) || null;
+        if (running) harnessSeenRunningRef.current.add(running.id);
+        if (attention) {
+          harnessFinishedSeenRef.current = attention.ask ? `${attention.id}:${attention.ask.question}` : attention.id;
+          setHarnessFinished(attention);
+        }
       } catch {
         /* 后端未就绪时静默 */
       }
@@ -1448,18 +1516,88 @@ export default function App() {
     };
   }, []);
 
-  // 任务开跑：退出清屏、亮出两个浏览器面板，让人能盯着光标一步步走
+  // 任务开跑：退出清屏、亮出两个浏览器面板，让人能盯着光标一步步走。
+  // 统一底座自动切换：HARNESS 收到 SLIDE / COWORK 任务时自动切到对应 STUDIO 继续任务；
+  // web 任务按对象侧别自动切换面板的 网页/Excel 视图，并把绑定网址装进对应侧。
   const lastRunningRef = useRef("");
   useEffect(() => {
     const id = harnessTask?.id || "";
     if (id && id !== lastRunningRef.current) {
       lastRunningRef.current = id;
+      // 离开清屏桌面去执行视图：还原进桌面前的侧栏/下栏开合。
+      // 不再无条件强开两个面板 —— 用户在桌面派单时它们本来就是关的，
+      // 跑完切回来又被强行打开（还触发整段毛玻璃重排动画，很卡）。
+      const prevPanels = preDeskPanelsRef.current;
+      if (prevPanels) {
+        setLeftPanelOpen(prevPanels.left);
+        setBottomPanelOpen(prevPanels.bottom);
+        preDeskPanelsRef.current = null;
+      }
       setFocusBottomMode(false);
       setDeskDraftOpen(false);
       setHarnessHudHidden("");
+      const studio = harnessTask?.studio || harnessTask?.plan?.studio || "web";
+      if (studio === "slide") {
+        setTaskType("ppt");
+      } else if (studio === "cowork" && !harnessTask?.web && !harnessTask?.excel) {
+        // 纯协作任务才去 COWORK STUDIO；带了网页/表格对象的协作任务留在浏览器面板执行
+        setTaskType("cowork");
+      } else {
+        setTaskType("web");
+        // 网页对象：切到绑定侧的网页视图并装载地址
+        const webSide = (harnessTask?.web?.side === "left" || harnessTask?.web?.side === "right")
+          ? harnessTask.web.side : null;
+        if (webSide && harnessTask?.web?.url) {
+          if (webSide === "left") { setLeftViewMode("web"); setLeftUrl(harnessTask.web.url); }
+          else { setRightViewMode("web"); setRightUrl(harnessTask.web.url); }
+        }
+        // Excel 对象：该侧面板自动切到表格视图（未载入时按路径直接载入）
+        const excelSide = (harnessTask?.excel?.side === "left" || harnessTask?.excel?.side === "right")
+          ? harnessTask.excel.side : null;
+        const excelPath = harnessTask?.excel?.path || "";
+        if (excelSide && excelPath) {
+          if (excelSide === "left") {
+            setLeftViewMode("excel");
+            void api.loadExcelFromPath("left", excelPath)
+              .then(() => refreshRecords())
+              .catch(() => {});
+          } else {
+            setRightViewMode("excel");
+            void api.loadExcelFromPath("right", excelPath)
+              .then((r) => setRightRecords(r.records))
+              .catch(() => {});
+          }
+        }
+      }
     }
     if (!id) lastRunningRef.current = "";
-  }, [harnessTask?.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [harnessTask?.id, harnessTask?.studio, harnessTask?.plan?.studio]);
+
+  // 任务结束 / 需要追问：自动跳回 HARNESS 桌面对话（清屏桌面 + 结果卡/追问卡就在那里）。
+  // 追问必须无条件拉回：任务在 web 视图跑时用户可能已切去 PPT/协作视图甚至选择页，
+  // 旧逻辑「web 视图不打断」会漏掉这些场景，导致 HARNESS 挂着等人而用户看不见问题。
+  useEffect(() => {
+    if (!harnessFinished) return;
+    const isAsk = !!harnessFinished.ask && harnessFinished.status === "running";
+    // 已经在 HARNESS 桌面上：追问卡就显示在眼前，不重复切换（也避免重写面板快照）
+    if (deskVisibleRef.current) return;
+    // 运行中的追问：无条件拉回桌面（旧逻辑「web 视图不打断」会漏掉用户已切去别的视图的情况）；
+    // 任务结束：仅当用户还停在执行视图（web）时拉回看结果，已主动切去 PPT/协作/选择页的不打扰。
+    if (!isAsk && taskTypeRef.current !== "web") return;
+    // 记住拉回桌面前的侧栏/下栏开合：退出桌面时原样还原（不自动打开用户关着的面板）
+    if (!preDeskPanelsRef.current) {
+      preDeskPanelsRef.current = { left: leftPanelOpenRef.current, bottom: bottomPanelOpenRef.current };
+    }
+    setTaskType("web");
+    setPlanDocked(false);
+    setDeskDraftOpen(false);
+    setFocusBottomMode(true);
+    setLeftPanelOpen(false);
+    setBottomPanelOpen(false);
+    setHarnessHudHidden("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [harnessFinished?.id, harnessFinished?.ask?.question]);
 
   // 清屏桌面是否正在显示（浮窗与桌面卡片不重复展示）
   const deskVisible = focusBottomMode && !leftPanelOpen && !bottomPanelOpen;
@@ -10816,6 +10954,156 @@ const lastDocRuntimeFileRef = useRef<{ dataUrl?: string; url?: string; filename:
   // 始终把最新版本的 runBatch 写入 ref，供 finishTeachingAndRunBatch 直接调用
   runBatchRef.current = runBatch;
 
+  // ============ HARNESS ↔ LOOP 桥：把 HARNESS 的 loop_* 工具接到真正的自动化引擎 ============
+  // 后端 LLM 只负责「摸清页面 → 固化模板」，执行全部走这里（与手工教学跑 CIRCLE 同一条链路）。
+  const loopBridgeStateRef = useRef({ cardPool, records, batchRunning, singleRunning, queueRunning, workflowTemplate, leftUrl, rightUrl });
+  loopBridgeStateRef.current = { cardPool, records, batchRunning, singleRunning, queueRunning, workflowTemplate, leftUrl, rightUrl };
+  const loopBridgeBusyRef = useRef(false);
+
+  useEffect(() => {
+    registerLoopBridge({
+      status: () => {
+        const s = loopBridgeStateRef.current;
+        return {
+          cards: s.cardPool.length,
+          excel_rows: s.records.length,
+          busy: s.batchRunning || s.singleRunning || s.queueRunning,
+          current_template: s.workflowTemplate ? { id: s.workflowTemplate.id, name: s.workflowTemplate.name, mode: s.workflowTemplate.mode } : null,
+          saved_templates: loadSkills().slice(0, 10).map((t) => ({ id: t.id, name: t.name, mode: t.mode })),
+          left_url: s.leftUrl, right_url: s.rightUrl,
+        };
+      },
+      makeCards: (startRow, endRow) => {
+        const s = loopBridgeStateRef.current;
+        if (s.records.length === 0) return { ok: false, error: "Excel 还没载入数据：先把表格载入面板" };
+        const start = Math.max(1, startRow) - 1;
+        const end = Math.min(s.records.length, endRow === Number.MAX_SAFE_INTEGER ? s.records.length : endRow) - 1;
+        if (end < start) return { ok: false, error: `行范围无效（数据共 ${s.records.length} 行）` };
+        const slice = s.records.slice(start, end + 1);
+        const newCards: ApplicantRecord[] = slice.map((r) => ({
+          ...r,
+          fields: { ...r.fields },
+          passport_fields: r.passport_fields ? { ...r.passport_fields } : undefined,
+          record_id: `${r.record_id}__${Math.random().toString(36).slice(2, 8)}`,
+        }));
+        generateCards(newCards);
+        return { ok: true, count: newCards.length, total: s.cardPool.length + newCards.length };
+      },
+      saveTemplate: (tpl) => {
+        saveSkill(tpl);
+        setSkillVersion((v) => v + 1);
+        setWorkflowTemplate(tpl);
+        workflowTemplateRef.current = tpl;
+        lastTemplateRef.current = tpl;
+        // 绑定到全部卡片（HARNESS 任务默认整表批量）
+        const now = Date.now();
+        setCardLoopMap((prev) => {
+          const next = { ...prev };
+          for (const c of loopBridgeStateRef.current.cardPool) {
+            next[c.record_id] = { loopId: tpl.id, loopName: tpl.name, setAt: now };
+          }
+          return next;
+        });
+      },
+      runFirst: async (tpl, record) => {
+        const s = loopBridgeStateRef.current;
+        if (s.batchRunning || s.singleRunning || s.queueRunning) {
+          return { ok: false, error: "当前有 LOOP 正在执行，等它结束再试" };
+        }
+        setSelectedId(record.record_id);
+        setExecRecordId(record.record_id);
+        setHasRunOnce(true);
+        setSingleRunning(true);
+        setLogSignal((n) => n + 1);
+        try {
+          const r = await executeTemplateForRecord(tpl, record, 0, undefined, { wrapWithVerify: tpl.mode !== "entry" });
+          return {
+            ok: r.success,
+            success: r.success,
+            error: r.error || undefined,
+            failed_order: r.failedOrder,
+            fills: (r.fills || []).slice(0, 30),
+            note: r.success ? "第一张卡片完整跑通（CIRCLE 全部步骤）。可以 loop_run_all 批量执行其余卡片。" : "试跑失败：按 error/failed_order 修模板或页面后重试",
+          };
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        } finally {
+          setSingleRunning(false);
+          setBatchMarkCursor(null);
+          window.electronAPI?.viewClearHighlight("left").catch(() => {});
+          window.electronAPI?.viewClearHighlight("right").catch(() => {});
+        }
+      },
+      runAll: async (tpl, targetIds) => {
+        const s = loopBridgeStateRef.current;
+        if (s.batchRunning || s.singleRunning || s.queueRunning) {
+          return { ok: false, error: "当前有 LOOP 正在执行，等它结束再试" };
+        }
+        const fn = runBatchRef.current;
+        if (!fn) return { ok: false, error: "LOOP 引擎未就绪" };
+        await fn(tpl, targetIds);
+        // runBatch 结束后从最新状态统计（batchResults 由 setState 更新，读 ref 快照可能滞后一拍，
+        // 这里等一个渲染帧后再取）
+        await new Promise((r) => setTimeout(r, 300));
+        const results = batchResultsRef.current;
+        let success = 0, failed = 0, skipped = 0;
+        const failures: Array<{ record: string; error: string }> = [];
+        for (const id of targetIds) {
+          const br = results[id];
+          if (!br) continue;
+          if (br.status === "success" || br.status === "review") success++;
+          else if (br.status === "skipped") skipped++;
+          else if (br.status === "failed") {
+            failed++;
+            failures.push({ record: id, error: br.error || `步骤 ${br.failedOrder ?? "?"} 失败` });
+          }
+        }
+        return {
+          ok: failed === 0,
+          total: targetIds.length,
+          success, failed, skipped,
+          failures: failures.slice(0, 10),
+          note: failed === 0
+            ? "批量执行完成（LOOP 引擎自动逐行重复 CIRCLE）"
+            : `批量执行完成但有 ${failed} 张失败，见 failures；可用 web_* 介入处理后重跑`,
+        };
+      },
+      getCards: () => loopBridgeStateRef.current.cardPool,
+      getTemplate: (id) => getSkillById(id),
+    });
+  }, [generateCards, executeTemplateForRecord]);
+
+  // batchResults 的 ref 镜像（runAll 统计用，避免闭包过期）
+  const batchResultsRef = useRef(batchResults);
+  batchResultsRef.current = batchResults;
+
+  // 桥轮询：领取 HARNESS 的 LOOP 代办 → 执行 → 回执。空闲 2s 一次，执行中由任务本身占用。
+  useEffect(() => {
+    let alive = true;
+    let timer = 0;
+    const tick = async () => {
+      if (!alive) return;
+      if (loopBridgeBusyRef.current) { timer = window.setTimeout(tick, 1000); return; }
+      try {
+        const r = await api.harnessBridgePending();
+        for (const call of r.calls || []) {
+          loopBridgeBusyRef.current = true;
+          let result: Record<string, unknown>;
+          try {
+            result = await handleLoopBridgeCall(call.tool, call.args || {});
+          } catch (e) {
+            result = { ok: false, error: e instanceof Error ? e.message : String(e) };
+          }
+          try { await api.harnessBridgeResult(call.id, result); } catch { /* 后端瞬断：工具侧会超时报错 */ }
+          loopBridgeBusyRef.current = false;
+        }
+      } catch { /* 后端未就绪时静默 */ }
+      if (alive) timer = window.setTimeout(tick, 1200);
+    };
+    timer = window.setTimeout(tick, 1500);
+    return () => { alive = false; window.clearTimeout(timer); };
+  }, []);
+
   // ============ 任务队列执行：按顺序执行队列中的所有任务 ============
   // 每个任务：切换到对应网页 URL → 导航 → 批量执行该组卡片
   const runQueue = useCallback(async () => {
@@ -16560,6 +16848,10 @@ type: info.type,
           onBack={() => switchTaskType("select")}
           onOpenSettings={() => setShowSettings(true)}
         />
+        {/* HARNESS 执行浮窗：slide 任务自动切到本视图后继续展示执行进度 */}
+        {!!harnessTask && harnessTask.id !== harnessHudHidden && (
+          <HarnessHud task={harnessTask} onClose={() => setHarnessHudHidden(harnessTask.id)} />
+        )}
         {settingsModal}
       </>
     );
@@ -16571,6 +16863,10 @@ type: info.type,
       <>
         <TaskWallpaperLayer on={wallpaperOn} color={wallpaperColor} custom={wallpaperCustom} useDefault={useDefaultWallpaper} brightness={wallpaperBrightness} theme={settings.theme} />
         <CoworkStudio onBack={() => switchTaskType("select")} />
+        {/* HARNESS 执行浮窗：cowork 任务自动切到本视图后继续展示执行进度 */}
+        {!!harnessTask && harnessTask.id !== harnessHudHidden && (
+          <HarnessHud task={harnessTask} onClose={() => setHarnessHudHidden(harnessTask.id)} />
+        )}
         {settingsModal}
       </>
     );
@@ -17300,16 +17596,21 @@ type: info.type,
             className={
               planDocked
                 ? "pointer-events-none absolute inset-0 z-0 opacity-0"
-                : "absolute inset-0 z-20 overflow-y-auto"
+                : "absolute inset-0 z-20 overflow-hidden"
             }
             aria-hidden={planDocked}
           >
-            <div className="flex min-h-full flex-col items-center justify-center px-6 py-10">
-              {/* 核对流程时把时钟让出来（屏幕矮的时候两者会互相挤） */}
-              {!deskDraftOpen && !planDocked && <BigClock />}
+            <div className={[
+              "relative flex h-full flex-col items-center px-6",
+              // 有对话：顶部与时钟日期行平行，输入框沉到下方；无对话：居中
+              deskChatActive ? "justify-start pb-8 pt-12" : "justify-center py-10",
+            ].join(" ")}>
+              {/* 核对流程时把时钟让出来；主聊天框有内容时时钟缩到左上方腾位置 */}
+              {!deskDraftOpen && !planDocked && <BigClock compact={deskChatActive} />}
               {/* 桌面任务调度台：按 / 召唤输入框 → 先出流程 → 核对后变成待执行卡片 */}
               <DeskTaskBoard
                 onDraftChange={setDeskDraftOpen}
+                onChatActiveChange={setDeskChatActive}
                 autoSummon={deskSummon}
                 onDockChange={handlePlanDockChange}
                 dockEl={planDockEl}

@@ -60,17 +60,8 @@ OCR_ENGINE_DEPS = [
 TOOLS_DIR = _USER_DATA_DIR / "tools"
 UMI_OCR_INSTALL_DIR = TOOLS_DIR / "Umi-OCR"
 
-# Remotion 视频渲染工具（npm 包，安装在独立目录）
-REMOTION_INSTALL_DIR = TOOLS_DIR / "remotion"
-REMOTION_PACKAGES = [
-    "remotion",
-    "@remotion/cli",
-    "@remotion/renderer",
-    "@remotion/bundler",
-    "react",
-    "react-dom",
-]
-REMOTION_MARKER_FILE = REMOTION_INSTALL_DIR / "node_modules" / "remotion" / "package.json"
+# 视频合成工具：ffmpeg（替代原 Remotion 方案——PPT 逐页导图 + TTS 配音 + ffmpeg 合成 MP4）
+# 检测/安装逻辑在 video_maker.py（HARNESS 视频工具同源复用）
 
 # OfficeCLI 文档操作工具（npm 包 @officecli/officecli，安装在独立目录）
 OFFICECLI_INSTALL_DIR = TOOLS_DIR / "officecli"
@@ -811,90 +802,20 @@ def download_and_install_umi_ocr_stream():
         yield event
 
 
-# ─── Remotion 视频渲染工具 ───────────────────────────────────────
+# ─── 视频合成工具（ffmpeg，替代 Remotion） ───────────────────────────────────────
 
-def check_remotion_installed() -> dict:
-    """检查 Remotion 是否已安装（通过 node_modules 中的标记文件）。"""
-    installed = REMOTION_MARKER_FILE.exists()
-    version = ""
-    if installed:
-        try:
-            import json
-            data = json.loads(REMOTION_MARKER_FILE.read_text(encoding="utf-8"))
-            version = data.get("version", "")
-        except Exception:
-            pass
-    return {
-        "installed": installed,
-        "path": str(REMOTION_INSTALL_DIR),
-        "version": version,
-    }
+def check_ffmpeg_installed() -> dict:
+    """检查 ffmpeg 是否可用（工具目录或 PATH）。"""
+    from .video_maker import check_ffmpeg_installed as _check
+
+    return _check()
 
 
-def install_remotion() -> tuple[bool, str]:
-    """通过 npm 在独立目录中安装 Remotion 及其渲染所需依赖。
+def install_ffmpeg() -> tuple[bool, str]:
+    """下载 ffmpeg 静态构建到工具目录（视频合成用，约 30-90MB）。"""
+    from .video_maker import install_ffmpeg as _install
 
-    Returns:
-        (success, message)
-    """
-    import shutil
-    import subprocess
-
-    npm = shutil.which("npm")
-    if not npm:
-        return False, "未找到 npm，请先安装 Node.js（建议 v18+）"
-
-    try:
-        REMOTION_INSTALL_DIR.mkdir(parents=True, exist_ok=True)
-
-        # 如果没有 package.json，先初始化
-        pkg_json = REMOTION_INSTALL_DIR / "package.json"
-        if not pkg_json.exists():
-            init = subprocess.run(
-                [npm, "init", "-y"],
-                cwd=str(REMOTION_INSTALL_DIR),
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if init.returncode != 0:
-                return False, f"npm init 失败：{init.stderr.strip() or init.stdout.strip()}"
-
-        # 安装 Remotion 及渲染依赖
-        install_cmd = [npm, "install", *REMOTION_PACKAGES]
-        result = subprocess.run(
-            install_cmd,
-            cwd=str(REMOTION_INSTALL_DIR),
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-
-        if result.returncode != 0:
-            err = (result.stderr or result.stdout or "").strip()
-            return False, f"npm install 失败：{err[-500:]}"
-
-        # 验证标记文件
-        if not REMOTION_MARKER_FILE.exists():
-            return False, "安装已完成但未找到 remotion 包文件，请检查网络或重试"
-
-        version = ""
-        try:
-            import json
-            data = json.loads(REMOTION_MARKER_FILE.read_text(encoding="utf-8"))
-            version = data.get("version", "")
-        except Exception:
-            pass
-
-        msg = "Remotion 安装成功"
-        if version:
-            msg += f"（v{version}）"
-        return True, msg
-
-    except subprocess.TimeoutExpired:
-        return False, "安装超时（超过 10 分钟），请检查网络后重试"
-    except Exception as e:
-        return False, f"安装 Remotion 时出错：{e}"
+    return _install()
 
 
 def check_officecli_installed() -> dict:
@@ -982,7 +903,7 @@ def get_all_deps_status() -> dict:
     python_deps = check_all_python_deps()
     ocr_engine_deps = check_ocr_engine_deps()
     umi_ocr = check_umi_ocr_installed()
-    remotion = check_remotion_installed()
+    ffmpeg = check_ffmpeg_installed()
     officecli = check_officecli_installed()
 
     python_all_installed = all(d["installed"] for d in python_deps)
@@ -1015,7 +936,7 @@ def get_all_deps_status() -> dict:
             **umi_ocr,
             "service_online": umi_online,
         },
-        "remotion": remotion,
+        "ffmpeg": ffmpeg,
         "officecli": officecli,
         "tools_dir": str(TOOLS_DIR),
     }

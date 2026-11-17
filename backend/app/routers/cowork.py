@@ -9,11 +9,7 @@
 """
 from __future__ import annotations
 
-import asyncio
-import json
-
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -129,49 +125,44 @@ def set_profile(req: ProfileIn):
     return {"profile": text}
 
 
-# ---- 任务派发（SSE 流式）----
+# ---- 任务派发（统一 HARNESS 底座）----
 
 @router.post("/dispatch")
 async def dispatch(req: DispatchIn):
-    """派发任务给选定客户端，SSE 实时推送进度。"""
+    """派发任务：统一交给 HARNESS 底座执行（不再各自派发外部 CLI 客户端）。
+
+    技能库 + 风格画像注入执行上下文；任务进入 HARNESS 队列（studio=cowork），
+    前端轮询队列即可看到进度并自动切换到 COWORK STUDIO。
+    client_ids 参数保留兼容旧前端，但不再使用。
+    """
     if not req.instruction.strip():
         raise HTTPException(400, "任务指令不能为空")
-    if not req.client_ids:
-        raise HTTPException(400, "请至少选择一个客户端")
 
-    queue: asyncio.Queue[dict] = asyncio.Queue()
-    loop = asyncio.get_event_loop()
+    from ..services.harness import scheduler
 
-    def _progress_cb(ev: dict) -> None:
-        loop.call_soon_threadsafe(queue.put_nowait, ev)
+    parts: list[str] = []
+    profile = cowork_service.get_profile()
+    if profile.strip():
+        parts.append(f"## 用户风格画像\n{profile.strip()[:2500]}")
+    all_skills = cowork_service.list_skills()
+    chosen = [s for s in all_skills if s.get("id") in req.skill_ids] or []
+    if chosen:
+        lines = ["## 技能规范"]
+        for s in chosen[:12]:
+            lines.append(f"- {s.get('name')}: {str(s.get('content') or '')[:600]}")
+        parts.append("\n".join(lines))
+    context_note = "\n\n".join(parts)[:6000]
 
-    async def _run() -> None:
-        try:
-            await cowork_service.dispatch_task(
-                instruction=req.instruction,
-                skill_ids=req.skill_ids,
-                client_ids=req.client_ids,
-                max_rounds=req.max_rounds,
-                timeout_per_client=req.timeout,
-                progress_cb=_progress_cb,
-            )
-        except Exception as e:
-            await queue.put({"type": "error", "message": str(e)})
-
-    loop.create_task(_run())
-
-    async def event_gen():
-        while True:
-            ev = await queue.get()
-            yield f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
-            if ev.get("type") in ("done", "error"):
-                break
-
-    return StreamingResponse(
-        event_gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    task = scheduler.enqueue(
+        instruction=req.instruction.strip(),
+        web=None,
+        excel=None,
+        slide=None,
+        studio="cowork",
+        context_note=context_note,
+        max_steps=60,
     )
+    return {"ok": True, "task": task.as_dict(), "engine": "harness"}
 
 
 # ---- 历史任务 ----

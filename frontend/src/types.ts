@@ -245,7 +245,7 @@ export interface UmiOcrStatus {
   service_online: boolean;
 }
 
-export interface RemotionStatus {
+export interface FfmpegStatus {
   installed: boolean;
   path: string;
   version: string;
@@ -263,7 +263,8 @@ export interface DepsStatus {
   ocr_engine_deps: PythonDepStatus[];
   ocr_engine_all_installed: boolean;
   umi_ocr: UmiOcrStatus;
-  remotion: RemotionStatus;
+  /** 视频合成引擎（替代原 Remotion：PPT 逐页导图 + TTS + ffmpeg 合成 MP4） */
+  ffmpeg: FfmpegStatus;
   officecli: OfficecliStatus;
   tools_dir: string;
 }
@@ -987,53 +988,6 @@ export interface CoworkClient {
   source: "custom" | "path" | "none";
 }
 
-export type CoworkDispatchEvent =
-  | { type: "status"; stage: string; message: string; round: number }
-  | { type: "client_start"; client_id: string; client_name: string }
-  | {
-      type: "client_done";
-      client_id: string;
-      status: "done" | "failed";
-      elapsed: number;
-      result_preview?: string;
-      result_file?: string;
-      /** 成品来源：file=客户端自写成果文件 / stdout=标准输出 */
-      origin?: "file" | "stdout";
-      error?: string;
-    }
-  | { type: "qc"; review: string; passed: boolean; feedback: string; round: number }
-  | { type: "done"; task: CoworkTask }
-  | { type: "error"; message: string };
-
-export interface CoworkAssignment {
-  client_id: string;
-  client_name: string;
-  prompt_file: string;
-  result_file: string;
-  status: "pending" | "running" | "done" | "failed" | "timeout";
-  result: string;
-  error: string;
-  started_at: number;
-  finished_at: number;
-  elapsed: number;
-}
-
-export interface CoworkTask {
-  id: string;
-  instruction: string;
-  skill_ids: string[];
-  client_ids: string[];
-  max_rounds: number;
-  status: string;
-  assignments: CoworkAssignment[];
-  qc_review: string;
-  qc_passed: boolean;
-  qc_feedback: string;
-  round: number;
-  final_result: string;
-  created_at: number;
-}
-
 /** 人工协作看板任务（支持指定本地文件提取） */
 export interface HumanCoworkTask {
   id: string;
@@ -1237,9 +1191,13 @@ export interface HarnessPlanStep {
     | "extract"
     | "write"
     | "verify"
-    | "wait";
+    | "wait"
+    | "render"
+    | "narrate"
+    | "compose"
+    | "export";
   /** 作用在哪个对象上 */
-  side: "web" | "excel";
+  side: "web" | "excel" | "slide" | "video" | "workspace";
   /** 人话目标：「左侧「学生管理」标签」 */
   target: string;
   /** 要填的值 / 抽取范围 / 写入位置 */
@@ -1255,9 +1213,12 @@ export interface HarnessPlan {
   questions: string[];
   changes?: string[];
   instruction?: string;
+  /** 任务所属 STUDIO（web / slide / cowork），前端据此自动切换视图 */
+  studio?: "web" | "slide" | "cowork";
   context?: {
     web?: { title: string; url: string; elements: number } | null;
     excel?: { file: string; sheets: string[]; rows: number } | null;
+    slide?: { file: string; slides: number } | null;
   };
 }
 
@@ -1265,8 +1226,12 @@ export interface HarnessPlan {
 export interface HarnessQueueTask {
   id: string;
   instruction: string;
-  web: { url: string; label: string; exclude_urls?: string[] } | null;
-  excel: { path: string; label: string } | null;
+  web: { url: string; label: string; exclude_urls?: string[]; side?: string } | null;
+  excel: { path: string; label: string; side?: string } | null;
+  /** SLIDE STUDIO 的 PPT 对象 */
+  slide?: { path: string; label: string } | null;
+  /** 任务所属 STUDIO：运行中时前端自动切换到对应视图 */
+  studio?: "web" | "slide" | "cowork";
   max_steps: number;
   vision: boolean;
   /** 用户确认过的执行流程 */
@@ -1285,6 +1250,19 @@ export interface HarnessQueueTask {
   web_label: string;
   excel_label: string;
   excel_path: string;
+  slide_label?: string;
+  slide_path?: string;
+  /** 对话记录条数（记录本体按卡片单独拉取） */
+  transcript_count?: number;
+}
+
+/** 卡片对话记录的一条（主聊天框按卡片展示） */
+export interface HarnessTranscriptEntry {
+  ts: number;
+  role: "user" | "agent" | "system";
+  kind: "instruction" | "thought" | "action" | "result" | "ask" | "answer" | "final" | "error" | "phase";
+  text: string;
+  step: number;
 }
 
 /** 一次工具调用的 UI 记录 */

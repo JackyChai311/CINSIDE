@@ -124,7 +124,7 @@ export default function PPTWorkflowPanel({
   // 批量编辑：文件勾选确认后才解封输入框
   const [batchConfirmed, setBatchConfirmed] = useState(false);
 
-  // 模式：create=PPT制作（文字新建），batch=批量编辑PPT，video=PPT转视频（暂未实现）
+  // 模式：create=PPT制作（文字新建），batch=批量编辑PPT，video=PPT转视频（HARNESS 底座：导图+TTS+ffmpeg）
   const [activeMode, setActiveMode] = useState<"create" | "batch" | "video">("create");
   // 幻灯片预览窗口数量（1/2/3）
   const [previewSlots, setPreviewSlots] = useState(1);
@@ -792,14 +792,79 @@ export default function PPTWorkflowPanel({
     setOutlineKey((k) => k + 1);
   }, [referenceBookmarks, activeStyle, styleCache]);
 
+  // ---- PPT 转视频：统一 HARNESS 底座（逐页导图 + TTS + ffmpeg，无 Remotion） ----
+  const [videoTask, setVideoTask] = useState<{
+    id: string;
+    instruction: string;
+    status: "queued" | "running" | "done" | "error" | "canceled";
+    steps: number;
+    actions: string[];
+    summary: string;
+  } | null>(null);
+  const videoPollRef = useRef<number | null>(null);
+
+  const stopVideoPoll = useCallback(() => {
+    if (videoPollRef.current !== null) {
+      window.clearInterval(videoPollRef.current);
+      videoPollRef.current = null;
+    }
+  }, []);
+  useEffect(() => stopVideoPoll, [stopVideoPoll]);
+
+  const dispatchVideoTask = useCallback(async (text: string) => {
+    setError(null);
+    // 视频源：优先取已勾选/已解析的第一个 PPT；没有也可以纯文字描述（HARNESS 会先做 PPT）
+    const pptPath =
+      selectedFiles.find((f) => /\.(pptx?|PPTX?)$/.test(f.file_path))?.file_path ||
+      fileSlides.find((f) => /\.(pptx?|PPTX?)$/.test(f.file_path))?.file_path ||
+      "";
+    try {
+      const res = await api.harnessEnqueue({
+        instruction: pptPath
+          ? `把 PPT「${pptPath}」做成讲解视频：${text}。逐页 slide_screenshot 导出画面，为每页写简短解说词并 video_tts 生成配音，最后 video_compose 合成 MP4 交付。`
+          : `制作一个讲解视频：${text}。先规划内容（必要时先产出 PPT），逐页导出画面 + TTS 配音，video_compose 合成 MP4 交付。`,
+        slide: pptPath ? { path: pptPath, label: pptPath.split(/[\\/]/).pop() || "PPT" } : null,
+        studio: "slide",
+        max_steps: 80,
+      });
+      if (!res.ok) throw new Error("安排失败");
+      const id = res.task.id;
+      setChatInput("");
+      setVideoTask({ id, instruction: text, status: "queued", steps: 0, actions: [], summary: "" });
+      stopVideoPoll();
+      videoPollRef.current = window.setInterval(async () => {
+        try {
+          const q = await api.harnessQueue();
+          const t = (q.tasks || []).find((x) => x.id === id);
+          if (!t) return;
+          setVideoTask({
+            id,
+            instruction: text,
+            status: t.status,
+            steps: t.steps || 0,
+            actions: t.actions || [],
+            summary: t.summary || t.error || "",
+          });
+          if (t.status === "done" || t.status === "error" || t.status === "canceled") {
+            stopVideoPoll();
+          }
+        } catch {
+          /* 后端瞬断不打扰 */
+        }
+      }, 2000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "视频任务安排失败");
+    }
+  }, [selectedFiles, fileSlides, stopVideoPoll]);
+
   // ---- 发送聊天消息 ----
   const handleSend = useCallback(() => {
     const text = chatInput.trim();
     if (!text) return;
 
     if (activeMode === "video") {
-      // PPT 转视频暂未实现
-      setError("PPT 转视频功能暂未开放，可先选择「PPT 制作」或「批量编辑 PPT」。");
+      // PPT 转视频：统一 HARNESS 底座（逐页导图 + TTS 配音 + ffmpeg 合成，无 Remotion）
+      void dispatchVideoTask(text);
       return;
     }
 
@@ -827,7 +892,7 @@ export default function PPTWorkflowPanel({
       // 已合并 → AI 修改
       runModify(text);
     }
-  }, [chatInput, activeMode, fileSlides.length, sections.length, mergedResult, runDetect, runModify, prepareAndDraftOutline]);
+  }, [chatInput, activeMode, fileSlides.length, sections.length, mergedResult, runDetect, runModify, prepareAndDraftOutline, dispatchVideoTask]);
 
   // ---- 输入框 @ 引用参考文件 ----
   const [mentionOpen, setMentionOpen] = useState(false);
@@ -976,7 +1041,7 @@ export default function PPTWorkflowPanel({
 
   // 输入框 placeholder
   const inputPlaceholder = useMemo(() => {
-    if (activeMode === "video") return "向 AI 描述要生成的视频内容（即将上线）…";
+    if (activeMode === "video") return "描述视频要求，例如：每页配 20 字解说，语速稍慢，合成 720p 视频…";
     if (activeMode === "create") return "输入主题或大纲，AI 帮你生成一份新 PPT…";
     if (activeMode === "batch" && !batchConfirmed) return "请先在上方勾选文件并确认，再开始对话…";
     if (fileSlides.length === 0) return "请先选择 PPT 文件，再告诉 AI 怎么批量编辑…";
@@ -1323,6 +1388,49 @@ export default function PPTWorkflowPanel({
                 />
               </AIMessage>
             </div>
+          )}
+
+          {/* ==== PPT 转视频：HARNESS 任务进度卡 ==== */}
+          {activeMode === "video" && videoTask && (
+            <AIMessage>
+              <div className="rounded-xl border border-violet-200 bg-violet-50/50 p-3 text-[12px] leading-relaxed">
+                <div className="mb-1 flex items-center gap-2 font-semibold text-slate-700">
+                  <Clapperboard size={14} className="text-violet-600" />
+                  视频任务 · HARNESS 底座
+                  <span className={`rounded-full px-2 py-[1px] text-[10px] font-medium ${
+                    videoTask.status === "done" ? "bg-emerald-100 text-emerald-700"
+                    : videoTask.status === "error" || videoTask.status === "canceled" ? "bg-rose-100 text-rose-700"
+                    : "bg-violet-100 text-violet-700"
+                  }`}>
+                    {videoTask.status === "queued" ? "排队中"
+                      : videoTask.status === "running" ? `执行中 · 第 ${videoTask.steps} 步`
+                      : videoTask.status === "done" ? "已完成"
+                      : videoTask.status === "error" ? "失败" : "已取消"}
+                  </span>
+                </div>
+                <div className="mb-1 text-slate-500">{videoTask.instruction}</div>
+                {videoTask.actions.length > 0 && (
+                  <ul className="mb-1 max-h-32 space-y-0.5 overflow-y-auto text-[11px] text-slate-600">
+                    {videoTask.actions.slice(-6).map((a, i) => (
+                      <li key={i} className="truncate">· {a}</li>
+                    ))}
+                  </ul>
+                )}
+                {videoTask.summary && (
+                  <div className="whitespace-pre-line rounded-lg bg-white/70 p-2 text-[11px] text-slate-700 ring-1 ring-slate-200/60">
+                    {videoTask.summary}
+                  </div>
+                )}
+                {(videoTask.status === "queued" || videoTask.status === "running") && (
+                  <button
+                    onClick={() => { void api.harnessQueueCancel(videoTask.id).catch(() => {}); }}
+                    className="mt-1.5 rounded-full bg-white px-2.5 py-0.5 text-[10px] font-medium text-rose-600 ring-1 ring-rose-200 hover:bg-rose-50"
+                  >
+                    停止任务
+                  </button>
+                )}
+              </div>
+            </AIMessage>
           )}
 
           {/* ==== 批量编辑：文件选择面板 ==== */}
@@ -1852,7 +1960,7 @@ export default function PPTWorkflowPanel({
               <span className="text-[10px] text-slate-500 truncate flex items-center gap-1">
                 {inputLocked && <Lock size={10} className="shrink-0" />}
                 {activeMode === "video"
-                  ? "可添加 PPT 预览幻灯片，或输入内容描述视频（即将上线）"
+                  ? "PPT 逐页导出画面 + TTS 配音 + ffmpeg 合成 MP4（HARNESS 底座执行，可选左侧 PPT 作为视频源）"
                   : activeMode === "create"
                   ? "直接输入主题或大纲，AI 生成新 PPT（可拖入 PPT/PDF/图片 作为参考）"
                   : inputLocked

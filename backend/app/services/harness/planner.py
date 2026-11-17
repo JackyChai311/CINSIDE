@@ -32,6 +32,10 @@ ACTIONS = [
     "write",
     "verify",
     "wait",
+    "render",
+    "narrate",
+    "compose",
+    "export",
 ]
 
 _ACTION_DOC = """- click   点击某个按钮/标签/链接
@@ -41,9 +45,13 @@ _ACTION_DOC = """- click   点击某个按钮/标签/链接
 - scroll  滚动页面去找目标
 - navigate 打开某个地址
 - extract 从页面抽取结构化数据（表格/列表/正文）
-- write   往 Excel 写数据（单元格、整列、追加行、新建工作表）
+- write   往 Excel 写数据（单元格、整列、追加行、新建工作表）；slide 任务=改 PPT 文字/加页；cowork 任务=写成果文件
 - verify  核对网页与表格是否一致
-- wait    等页面加载/等提示出现"""
+- wait    等页面加载/等提示出现
+- render  （slide）把某页 PPT 渲染成画面图片
+- narrate （slide）为某页生成 TTS 解说配音
+- compose （slide）把逐页画面+配音合成 MP4 视频
+- export  交付成果文件（PPT / 视频 / 协作文档）"""
 
 _PLAN_PROMPT = """你是 HARNESS 的**流程规划器**。用户给一个任务，你要把它拆成一条可读、可核对的执行流程。
 
@@ -72,7 +80,7 @@ _PLAN_PROMPT = """你是 HARNESS 的**流程规划器**。用户给一个任务�
 
 规则：
 1. **4~12 步**，每步只做一件事；能一步批量做的（比如一次抽取整表）不要拆成十步。
-2. `side` 只能是 `web`（网页侧）或 `excel`（表格侧），指明这步作用在哪个对象上。
+2. `side` 只能是 `web`（网页侧）/ `excel`（表格侧）/ `slide`（PPT）/ `video`（视频合成）/ `workspace`（协作成果文件），指明这步作用在哪个对象上。
 3. `target` 用人话指向具体元素（用上面事实里的按钮名/字段名/列名），不要写 CSS 选择器。
 4. `value` 写要填的值、抽取范围或写入位置；不需要就留空。
 5. `note` 写这一步的判断依据或失败风险，一句话即可。
@@ -139,7 +147,7 @@ def _normalize_plan(data: dict) -> dict:
         if action not in ACTIONS:
             action = "click"
         side = str(raw.get("side") or "").strip().lower()
-        if side not in ("web", "excel"):
+        if side not in ("web", "excel", "slide", "video", "workspace"):
             side = "web"
         steps.append(
             {
@@ -167,12 +175,14 @@ def _normalize_plan(data: dict) -> dict:
 # ---------- 观察：让计划贴着真实界面，而不是模型想象 ----------
 
 
-async def _observe_context(web: dict | None, excel: dict | None) -> tuple[str, dict]:
+async def _observe_context(
+    web: dict | None, excel: dict | None, slide: dict | None = None, studio: str = "web"
+) -> tuple[str, dict]:
     """返回（给模型看的事实文本，给前端看的观察摘要）。"""
     from ...config import settings
 
     facts: list[str] = []
-    meta: dict[str, Any] = {"web": None, "excel": None}
+    meta: dict[str, Any] = {"web": None, "excel": None, "slide": None}
 
     if web:
         endpoint = settings.effective_harness_cdp()
@@ -238,6 +248,44 @@ async def _observe_context(web: dict | None, excel: dict | None) -> tuple[str, d
         except ExcelError as e:
             facts.append(f"（读取表格失败：{e}）")
 
+    if slide:
+        from .slide import SlideError, SlideTarget
+
+        target_s = SlideTarget(
+            str(slide.get("path") or ""),
+            work_dir=runner._work_dir("plan"),  # noqa: SLF001
+            label=str(slide.get("label") or "PPT"),
+        )
+        try:
+            summary = await target_s.open()
+            titles = summary.get("titles") or []
+            lines = [
+                f"- PPT：{summary.get('file')}，共 {summary.get('slides')} 页",
+                f"- 各页标题：{'、'.join(str(t)[:30] for t in titles[:24])}",
+                f"- 正文摘要：{(summary.get('text_preview') or '')[:800]}",
+            ]
+            facts.append("\n".join(lines))
+            meta["slide"] = {
+                "file": summary.get("file") or "",
+                "slides": summary.get("slides") or 0,
+            }
+        except SlideError as e:
+            facts.append(f"（读取 PPT 失败：{e}）")
+
+    if studio == "slide":
+        from ..video_maker import find_ffmpeg
+
+        ffmpeg_ok = bool(find_ffmpeg())
+        facts.append(
+            "- 视频合成能力：逐页截图 + Windows TTS 配音 + ffmpeg 合成 MP4"
+            + ("（ffmpeg 已就绪）" if ffmpeg_ok else "（ffmpeg 未安装：计划里要提示用户到设置页一键下载）")
+        )
+    if studio == "cowork":
+        facts.append(
+            "- 协作工作区：本次任务在专属工作目录里产出成果文件（file_write 写入、file_export 交付），"
+            "没有网页/表格对象，不要规划 web/excel 步骤"
+        )
+
     if not facts:
         facts.append("（本次没有可用对象）")
     return "\n\n".join(facts), meta
@@ -262,8 +310,14 @@ async def _chat_plain(messages: list[dict]) -> str:
     return str(content)
 
 
-async def draft_plan(instruction: str, web: dict | None, excel: dict | None) -> dict:
-    context, meta = await _observe_context(web, excel)
+async def draft_plan(
+    instruction: str,
+    web: dict | None,
+    excel: dict | None,
+    slide: dict | None = None,
+    studio: str = "web",
+) -> dict:
+    context, meta = await _observe_context(web, excel, slide, studio)
     prompt = _PLAN_PROMPT.format(context=context, actions=_ACTION_DOC)
     content = await _chat_plain(
         [
@@ -273,6 +327,7 @@ async def draft_plan(instruction: str, web: dict | None, excel: dict | None) -> 
     )
     plan = _normalize_plan(_extract_json(content))
     plan["context"] = meta
+    plan["studio"] = studio
     return plan
 
 
@@ -281,8 +336,10 @@ async def revise_plan(
     request: str,
     web: dict | None,
     excel: dict | None,
+    slide: dict | None = None,
+    studio: str = "web",
 ) -> dict:
-    context, meta = await _observe_context(web, excel)
+    context, meta = await _observe_context(web, excel, slide, studio)
     current = {k: plan.get(k) for k in ("title", "steps", "risks", "questions")}
     prompt = _REVISE_PROMPT.format(
         context=context,
@@ -297,6 +354,7 @@ async def revise_plan(
     )
     new_plan = _normalize_plan(_extract_json(content))
     new_plan["context"] = meta
+    new_plan["studio"] = studio
     return new_plan
 
 
@@ -317,9 +375,14 @@ def plan_as_prompt(plan: dict) -> str:
         "write": "写入",
         "verify": "核对",
         "wait": "等待",
+        "render": "渲染画面",
+        "narrate": "生成配音",
+        "compose": "合成视频",
+        "export": "交付文件",
     }
+    sides = {"web": "网页", "excel": "表格", "slide": "PPT", "video": "视频", "workspace": "工作区"}
     for i, s in enumerate(steps, 1):
-        side = "网页" if s.get("side") != "excel" else "表格"
+        side = sides.get(str(s.get("side") or "web"), "网页")
         text = f"{i}. [{side}] {acts.get(s.get('action'), s.get('action'))}：{s.get('target') or ''}"
         if s.get("value"):
             text += f"（值/范围：{s['value']}）"

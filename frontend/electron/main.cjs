@@ -4494,14 +4494,16 @@ ipcMain.handle("harness-pages", () => {
   return out;
 });
 
-// 选择要交给 HARNESS 操控的表格文件（不复制、不改动，后端用工作副本读写）
+// 选择要交给 HARNESS 操控的表格 / 文档 / 图片文件（不复制、不改动，后端用工作副本读写）
 ipcMain.handle("harness-pick-excel", async () => {
   const { dialog } = require("electron");
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: "选择要交给 HARNESS 的表格文件",
+    title: "选择文件（表格进 Excel 对象；文档/图片直接开进浏览器面板）",
     properties: ["openFile"],
     filters: [
+      { name: "表格 / 文档 / 图片", extensions: ["xlsx", "xlsm", "csv", "doc", "docx", "pdf", "md", "txt", "jpg", "jpeg", "png"] },
       { name: "表格文件", extensions: ["xlsx", "xlsm", "csv"] },
+      { name: "文档与图片", extensions: ["doc", "docx", "pdf", "md", "txt", "jpg", "jpeg", "png"] },
       { name: "所有文件", extensions: ["*"] },
     ],
   });

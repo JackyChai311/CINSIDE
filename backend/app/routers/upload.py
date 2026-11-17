@@ -78,6 +78,47 @@ class ExcelSourceBody(BaseModel):
     filename: str = ""
 
 
+class ExcelLoadPathBody(BaseModel):
+    """按本地路径直接载入 Excel 到某一侧（HARNESS 派单对象用，免二次上传字节）。"""
+    side: str = "left"
+    path: str = ""
+
+
+@router.post("/upload/excel-load-path")
+async def load_excel_from_path(body: ExcelLoadPathBody):
+    """从本地路径读文件并解析到指定侧（与上传同一套解析/登记逻辑）。"""
+    if not body.path or not os.path.exists(body.path):
+        raise HTTPException(400, f"文件不存在：{body.path}")
+    try:
+        with open(body.path, "rb") as f:
+            content = f.read()
+    except OSError as e:
+        raise HTTPException(400, f"读取失败：{e}")
+    if not content:
+        raise HTTPException(400, "文件为空")
+    filename = os.path.basename(body.path)
+    try:
+        records, detected_map = await parse_bytes(content, filename)
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    except Exception as e:
+        raise HTTPException(400, f"解析失败: {e}")
+
+    if body.side == "right":
+        upsert_right_records(records)
+        RIGHT_SOURCE.clear()
+        RIGHT_SOURCE.update({"kind": "path", "path": body.path, "filename": filename, "detected_map": detected_map})
+    else:
+        upsert_records(records)
+        LEFT_SOURCE.clear()
+        LEFT_SOURCE.update({"kind": "path", "path": body.path, "filename": filename, "detected_map": detected_map})
+    return {
+        "count": len(records),
+        "records": [r.model_dump() for r in records],
+        "detected_column_map": detected_map,
+    }
+
+
 @router.post("/upload/excel-source")
 def set_excel_source(body: ExcelSourceBody):
     target = LEFT_SOURCE if body.side == "left" else RIGHT_SOURCE

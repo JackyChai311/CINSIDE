@@ -7,7 +7,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  CornerDownLeft,
   Crosshair,
   FileSpreadsheet,
   Globe,
@@ -33,6 +32,7 @@ import type {
   HarnessPlan,
   HarnessPlanStep,
   HarnessQueueTask,
+  HarnessTranscriptEntry,
 } from "../types";
 
 /**
@@ -96,6 +96,7 @@ function buildPlanProbeScript(target: string, token: string): string {
  */
 export default function DeskTaskBoard({
   onDraftChange,
+  onChatActiveChange,
   autoSummon = 0,
   onDockChange,
   dockEl,
@@ -105,6 +106,8 @@ export default function DeskTaskBoard({
 }: {
   /** 草案打开时通知父级（用于暂时收起大时钟，把屏幕让给流程核对） */
   onDraftChange?: (open: boolean) => void;
+  /** 主聊天框有内容时通知父级：大时钟缩到左上方腾位置 */
+  onChatActiveChange?: (active: boolean) => void;
   /** 每 +1 表示"从外部召唤一次输入框"（顶栏 HARNESS 按钮用） */
   autoSummon?: number;
   /** 草案下移去下栏（占「字段对比」那一栏）时通知父级：父级要亮出两个浏览器面板并腾出下栏 */
@@ -122,7 +125,6 @@ export default function DeskTaskBoard({
   /** 让某一侧的浏览器面板打开指定网址 */
   onOpenUrl?: (side: "left" | "right", url: string) => void;
 }) {
-  const [summoned, setSummoned] = useState(false);
   const [text, setText] = useState("");
   const [tasks, setTasks] = useState<HarnessQueueTask[]>([]);
   const [pages, setPages] = useState<HarnessPage[]>([]);
@@ -131,9 +133,19 @@ export default function DeskTaskBoard({
   const [pickedExcels, setPickedExcels] = useState<HarnessExcelSource[]>([]);
   const [webSide, setWebSide] = useState<"left" | "right" | "none">("left");
   const [excelPath, setExcelPath] = useState("");
+  // 表格/PDF 对象挂到哪一侧面板（执行时该侧自动切到对应视图）
+  const [excelSide, setExcelSide] = useState<"left" | "right">("left");
+  // 新挑的本地文件：表格选侧后进 Excel 下拉；文档/图片选侧后直接开进 BrowserPane
+  const [pickedFile, setPickedFile] = useState<{ path: string; name: string; kind: "excel" | "doc" } | null>(null);
+  // 本地文档/图片在 BrowserPane 的打开地址（按侧记录，作为网页对象参与任务）
+  const [localDocs, setLocalDocs] = useState<Partial<Record<"left" | "right", { name: string; url: string }>>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [answering, setAnswering] = useState<Record<string, string>>({});
+  // 主聊天框：当前选中的卡片（点卡片切换讨论记录）；空 = 自动跟随运行中/最新卡片
+  const [activeChatId, setActiveChatId] = useState("");
+  const [chatEntries, setChatEntries] = useState<HarnessTranscriptEntry[]>([]);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   // 流程草案：先给流程，用户核对/手改/让它改，确认后才变成待执行卡片
   const [draft, setDraft] = useState<HarnessPlan | null>(null);
@@ -292,6 +304,56 @@ export default function DeskTaskBoard({
     return () => window.clearInterval(timer);
   }, [refresh]);
 
+  // ---------- 主聊天框：跟随选中卡片（未手动选时自动跟运行中/最新卡片） ----------
+  const activeChatTask = useMemo(() => {
+    if (activeChatId) {
+      const picked = tasks.find((t) => t.id === activeChatId);
+      if (picked) return picked;
+    }
+    return tasks.find((t) => t.status === "running") || tasks[0] || null;
+  }, [activeChatId, tasks]);
+
+  // 主聊天框有内容 → 通知父级把大时钟缩到左上方腾位置
+  const chatHasContent = !!activeChatTask;
+  useEffect(() => {
+    onChatActiveChange?.(chatHasContent);
+  }, [chatHasContent, onChatActiveChange]);
+
+  // 拉取选中卡片的对话记录；运行中每秒刷新，已结束只拉一次
+  const chatTaskId = activeChatTask?.id || "";
+  const chatLive = activeChatTask?.status === "running" || activeChatTask?.status === "queued";
+  useEffect(() => {
+    if (!chatTaskId) {
+      setChatEntries([]);
+      return;
+    }
+    let alive = true;
+    const pull = async () => {
+      try {
+        const r = await api.harnessTranscript(chatTaskId);
+        if (alive) setChatEntries(r.entries || []);
+      } catch {
+        /* 后端瞬断不打扰 */
+      }
+    };
+    void pull();
+    if (!chatLive) return () => { alive = false; };
+    const timer = window.setInterval(() => void pull(), 1200);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [chatTaskId, chatLive]);
+
+  // 新消息自动滚到底（用户往上翻看历史时不强行拽回）
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const chatPinnedRef = useRef(true);
+  useEffect(() => {
+    if (chatPinnedRef.current) {
+      chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }, [chatEntries.length, chatTaskId]);
+
   // ---------- 对象清单（首次自动挑一侧；草案开着时定时刷新，但不改用户选的侧） ----------
   const loadTargets = useCallback(async (autoPickSide = true) => {
     try {
@@ -331,6 +393,11 @@ export default function DeskTaskBoard({
         const loaded = tg.excel_sources?.find((s) => s.editable) || tg.excel_sources?.[0];
         return loaded?.path || "";
       });
+      // 已载入表格默认跟随其所在侧（loaded-left / loaded-right）
+      setExcelSide((cur) => {
+        const loaded = tg.excel_sources?.find((s) => s.id === "loaded-left" || s.id === "loaded-right");
+        return loaded ? (loaded.id === "loaded-left" ? "left" : "right") : cur;
+      });
     } catch {
       /* 同上 */
     }
@@ -340,21 +407,18 @@ export default function DeskTaskBoard({
     void loadTargets();
   }, [loadTargets]);
 
-  // 草案开着时定时刷新对象清单：用户在上方面板把网页打开后，空白提示要及时消失
+  // 输入框常驻：定时刷新对象清单，用户在面板里新开网页/载入表格后下拉与侧别及时跟上
   useEffect(() => {
-    if (!draft) return;
     const timer = window.setInterval(() => void loadTargets(false), 2500);
     return () => window.clearInterval(timer);
-  }, [draft, loadTargets]);
+  }, [loadTargets]);
 
-  // ---------- 召唤 ----------
+  // ---------- 聚焦输入框（顶栏 HARNESS 按钮 / 按 /） ----------
   const summon = useCallback(() => {
-    setSummoned(true);
     setDraft(null);
     window.setTimeout(() => inputRef.current?.focus(), 30);
   }, []);
 
-  // 顶栏 HARNESS 按钮：直接把输入框弹出来
   useEffect(() => {
     if (autoSummon > 0) summon();
   }, [autoSummon, summon]);
@@ -367,72 +431,155 @@ export default function DeskTaskBoard({
       if (e.key === "/" && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         summon();
-      } else if (e.key === "Escape" && summoned) {
-        setSummoned(false);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [summon, summoned]);
+  }, [summon]);
 
-  /** 从磁盘挑表格：桌面端才有文件选择器 */
+  /** 从磁盘挑文件：表格进 Excel 下拉；文档/图片（WORD/PDF/MD/TXT/JPG/PNG）直接开进 BrowserPane */
   const pickLocalExcel = async () => {
     const api2 = window.electronAPI;
     if (!api2?.harnessPickExcel) return;
     const res = await api2.harnessPickExcel();
     if (res.canceled || !res.file) return;
-    const src: HarnessExcelSource = {
-      id: `local-${res.file.file_path}`,
-      label: "本地文件",
-      filename: res.file.file_name,
-      path: res.file.file_path,
-      kind: "path",
-      editable: true,
-    };
-    setPickedExcels((prev) =>
-      prev.some((p) => p.path === src.path) ? prev : [src, ...prev]
-    );
-    setExcelPath(src.path);
+    const isExcel = /\.(xlsx|xlsm|csv)$/i.test(res.file.file_name);
+    if (isExcel) {
+      const src: HarnessExcelSource = {
+        id: `local-${res.file.file_path}`,
+        label: "本地表格",
+        filename: res.file.file_name,
+        path: res.file.file_path,
+        kind: "path",
+        editable: true,
+      };
+      setPickedExcels((prev) =>
+        prev.some((p) => p.path === src.path) ? prev : [src, ...prev]
+      );
+      setExcelPath(src.path);
+      setPickedFile({ path: src.path, name: src.filename, kind: "excel" });
+      return;
+    }
+    // 文档/图片：不进两个下拉，直接在该侧 BrowserPane 打开（作为网页对象）
+    setPickedFile({ path: res.file.file_path, name: res.file.file_name, kind: "doc" });
+  };
+
+  /** 把对象 token 追加进输入框（去重：已存在同前缀 token 先移除，保证删掉后重选能放回） */
+  const appendToken = useCallback((token: string) => {
+    setText((cur) => {
+      // 移除同一对象的旧 token（@左·xxx / @右·xxx 前缀匹配到下一个空格）
+      const prefix = token.slice(0, token.indexOf("·") + 1);
+      const cleaned = cur
+        .split(/\s+/)
+        .filter((w) => !(w.startsWith(prefix) && w.length > prefix.length))
+        .join(" ")
+        .trim();
+      return `${cleaned}${cleaned ? " " : ""}${token} `;
+    });
+  }, []);
+
+  /** 选好侧别：表格进 Excel 对象；文档/图片直接开进该侧 BrowserPane（网页对象） */
+  const confirmPickedFileSide = (side: "left" | "right") => {
+    if (!pickedFile) return;
+    appendToken(`@${side === "left" ? "左" : "右"}·${pickedFile.name}`);
+    if (pickedFile.kind === "excel") {
+      setExcelSide(side);
+      setExcelPath(pickedFile.path);
+    } else {
+      // WORD/PDF/MD/TXT/JPG/PNG：file:// 地址直接在该侧面板打开，不进两个下拉
+      const url = "file:///" + pickedFile.path.replace(/\\/g, "/");
+      setLocalDocs((prev) => ({ ...prev, [side]: { name: pickedFile.name, url } }));
+      setWebSide(side);
+      onOpenUrl?.(side, url);
+    }
+    setPickedFile(null);
+    window.setTimeout(() => inputRef.current?.focus(), 30);
   };
 
   // ---------- 对象绑定（多次复用） ----------
   const objectsPayload = useCallback(
     () => ({
-      web: currentWeb
+      // 左下拉=网页对象（含本地文档/图片在该侧的 file:// 打开地址）
+      web: webSide !== "none"
         ? {
-            url: currentWeb.url,
-            label: currentWeb.side === "left" ? "数据源" : "学校系统",
-            exclude_urls: alivePages.filter((p) => p.side !== currentWeb.side).map((p) => p.url),
+            url: currentWeb?.url || localDocs[webSide]?.url || "",
+            label: `${webSide === "left" ? "左侧" : "右侧"}·${currentWeb?.title || localDocs[webSide]?.name || (webSide === "left" ? "数据源" : "学校系统")}`,
+            exclude_urls: alivePages.filter((p) => p.side !== webSide).map((p) => p.url),
+            side: webSide,
           }
         : null,
+      // 右下拉=纯 Excel 对象
       excel: currentExcel?.path
-        ? { path: currentExcel.path, label: currentExcel.filename }
+        ? { path: currentExcel.path, label: `${excelSide === "left" ? "左侧" : "右侧"}·${currentExcel.filename}`, side: excelSide }
         : null,
     }),
-    [currentWeb, alivePages, currentExcel]
+    [webSide, currentWeb, alivePages, currentExcel, excelSide, localDocs]
   );
 
   /**
-   * 第一步：只出流程，不执行。
-   * 让用户先看到「它打算点哪里、填哪里、写哪张表」，核对无误再变成卡片。
+   * 交代任务后直接开跑（不再先出流程等确认）：
+   * HARNESS 开荒名单第一条 → 固化工作流 → 工具批量回放其余 → 失败才介入。
+   * 流程草案仍可从卡片「查看确认过的流程」回看；想先核对流程时按住 Alt 回车。
    */
-  const makePlan = async (instructionArg?: string) => {
+  const makePlan = async (instructionArg?: string, previewOnly = false) => {
     const instruction = (instructionArg ?? text).trim();
     if (!instruction || drafting || busy) return;
-    if (!currentWeb && !currentExcel) {
-      setError("先绑定一个对象：网页或表格");
+    if (previewOnly) {
+      // Alt+Enter：旧行为，先出流程供核对
+      setDrafting(true);
+      setError("");
+      try {
+        const res = await api.harnessPlan({ instruction, ...objectsPayload() });
+        setDraft(res.plan);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setDrafting(false);
+      }
       return;
     }
-    setDrafting(true);
+    // 默认：直接入队开跑
+    setBusy(true);
     setError("");
     try {
-      const res = await api.harnessPlan({ instruction, ...objectsPayload() });
-      setDraft(res.plan);
+      const res = await api.harnessEnqueue({ instruction, ...objectsPayload() });
+      if (!res.ok) throw new Error("安排失败");
+      setText("");
+      setDraft(null);
+      setRevision("");
+      setActiveChatId(res.task.id);
+      await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setDrafting(false);
+      setBusy(false);
     }
+  };
+
+  /** 统一输入框发送：
+   *  - 当前卡片有追问 → 回答追问
+   *  - 当前卡片运行中且没有待执行的新指令 → 补充说明实时注入
+   *  - 其它情况 → 作为新任务直接开跑（输入框就是主聊天框的输入行） */
+  const sendFromMainInput = async (previewOnly = false) => {
+    const t = text.trim();
+    if (!t) return;
+    if (!previewOnly && activeChatTask) {
+      if (activeChatTask.ask && activeChatTask.status === "running") {
+        setText("");
+        await act(() => api.harnessQueueAnswer(activeChatTask.id, t));
+        return;
+      }
+      if (activeChatTask.status === "running") {
+        setText("");
+        setChatEntries((prev) => [
+          ...prev,
+          { ts: Date.now() / 1000, role: "user", kind: "answer", text: t, step: 0 },
+        ]);
+        await act(() => api.harnessQueueAnswer(activeChatTask.id, t));
+        return;
+      }
+    }
+    await makePlan(undefined, previewOnly);
   };
 
   // 第二步：让 HARNESS 按意见改流程
@@ -467,12 +614,12 @@ export default function DeskTaskBoard({
       const res = await api.harnessEnqueue({
         instruction,
         ...objectsPayload(),
+        studio: draft?.studio || "",
         plan: withPlan && draft ? draft : null,
       });
       if (!res.ok) throw new Error("安排失败");
       setText("");
       setDraft(null);
-      setSummoned(false);
       setRevision("");
       await refresh();
     } catch (e) {
@@ -551,7 +698,11 @@ export default function DeskTaskBoard({
   return (
     <div
       ref={rootRef}
-      className="pointer-events-auto mt-5 flex w-full max-w-[680px] flex-col items-center gap-3"
+      className={[
+        "pointer-events-auto flex w-full max-w-[680px] flex-col items-center gap-3",
+        // 有对话：撑满高度让输入框沉底；无对话：保持原位
+        activeChatTask ? "h-full" : "mt-5",
+      ].join(" ")}
     >
       {/* ===== 流程草案（核对 / 手改 / 让它改） ===== */}
       {draft ? (
@@ -560,105 +711,264 @@ export default function DeskTaskBoard({
         ) : (
           draftPanel
         )
-      ) : !summoned ? (
-        <button
-          onClick={summon}
-          className="group flex items-center gap-2 rounded-full border border-white/50 bg-[var(--panel-bg-top)] px-3.5 py-1.5 text-[11px] font-medium text-slate-500 shadow-[0_10px_30px_-18px_rgba(15,23,42,.6)] backdrop-blur-md transition-all hover:-translate-y-px hover:text-slate-800 dark:border-white/15 dark:text-slate-300 dark:hover:text-white"
-          title="按 / 也可以召唤"
+      ) : null}
+
+      {/* ===== 主聊天区：对话无框直接铺在桌面上，输入框保持框体 ===== */}
+      {/* 当前卡片头部（无框，有卡片才显示） */}
+      {activeChatTask && (
+        <div className="flex w-full items-center gap-2 px-1">
+          <Zap className="h-3.5 w-3.5 shrink-0 text-violet-500" />
+          <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold text-slate-700 dark:text-slate-200">
+            {activeChatTask.instruction}
+          </span>
+          <span className={[
+            "shrink-0 rounded-full px-2 py-[1px] text-[9px] font-medium",
+            activeChatTask.status === "running" ? "bg-sky-100/80 text-sky-700 dark:bg-sky-400/15 dark:text-sky-300"
+              : activeChatTask.status === "done" ? "bg-emerald-100/80 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-300"
+              : activeChatTask.status === "error" ? "bg-rose-100/80 text-rose-700 dark:bg-rose-400/15 dark:text-rose-300"
+              : "bg-slate-100/80 text-slate-500 dark:bg-white/10 dark:text-slate-300",
+          ].join(" ")}>
+            {activeChatTask.status === "running" ? `执行中 · 第 ${activeChatTask.steps} 步`
+              : activeChatTask.status === "queued" ? "排队中"
+              : activeChatTask.status === "done" ? "已完成"
+              : activeChatTask.status === "error" ? "失败" : "已取消"}
+          </span>
+          {activeChatId && (
+            <button
+              onClick={() => setActiveChatId("")}
+              className="shrink-0 rounded px-1.5 py-[1px] text-[9px] text-slate-400 hover:bg-white/60 hover:text-slate-600 dark:hover:bg-white/10"
+              title="取消固定，自动跟随运行中的任务"
+            >
+              自动跟随
+            </button>
+          )}
+        </div>
+      )}
+      {/* 消息流：无框，直接铺在桌面上；只有这里内部滚动，时钟/输入框不动 */}
+      {activeChatTask && (
+        <div
+          ref={chatScrollRef}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            chatPinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+          }}
+          className="flex min-h-[80px] w-full flex-1 flex-col gap-2 overflow-y-auto px-1 py-1"
         >
-          <Plus className="h-3.5 w-3.5" />
-          安排一个任务
-          <kbd className="ml-1 rounded border border-slate-300/70 px-1 text-[9px] font-normal text-slate-400 dark:border-white/20 dark:text-slate-400">
-            /
-          </kbd>
-        </button>
-      ) : (
-        <div className="w-full rounded-[22px] border border-white/50 bg-[var(--panel-bg-top)] p-2.5 shadow-[0_24px_60px_-30px_rgba(15,23,42,.65)] backdrop-blur-md dark:border-white/15">
-          <textarea
-            ref={inputRef}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void makePlan();
-              }
-            }}
-            rows={2}
-            placeholder="用一句话说清要它做什么，回车先生成流程。例如：把数据源网页里今天的申请逐条填进左边这张表。"
-            className="w-full resize-none bg-transparent px-1.5 py-1 text-[12.5px] leading-relaxed text-slate-800 placeholder:text-slate-400 focus:outline-none dark:text-slate-100 dark:placeholder:text-slate-500"
-          />
+          {chatEntries.length === 0 && (
+            <div className="py-6 text-center text-[10.5px] text-slate-400">
+              {activeChatTask.status === "queued" ? "排队中，轮到它就会在这里开始汇报…" : "暂无对话记录"}
+            </div>
+          )}
+          {chatEntries.map((m, i) => (
+            <ChatBubble key={`${m.ts}-${i}`} entry={m} />
+          ))}
+          {activeChatTask.status === "running" && !activeChatTask.ask && (
+            <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
+              <Loader2 className="h-3 w-3 animate-spin" /> 正在执行…
+            </div>
+          )}
+          <div ref={chatEndRef} />
+        </div>
+      )}
+      {/* 追问选项快捷回复（无框） */}
+      {activeChatTask?.ask && activeChatTask.status === "running" && (
+        <div className="flex w-full flex-wrap items-center gap-1 px-1">
+          <HelpCircle className="h-3 w-3 shrink-0 text-amber-600" />
+          {(activeChatTask.ask.options || []).map((opt) => (
+            <button
+              key={opt}
+              onClick={() => void act(() => api.harnessQueueAnswer(activeChatTask.id, opt))}
+              className="rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-medium text-amber-800 ring-1 ring-amber-300 hover:bg-amber-50 dark:bg-white/10 dark:text-amber-200"
+            >
+              {opt}
+            </button>
+          ))}
+        </div>
+      )}
+      {/* 统一输入框：保持框体设计，位置固定不随消息滚动；消息流已撑满中间，直接衔接 */}
+      <div className="w-full shrink-0 rounded-[22px] border border-white/50 bg-[var(--panel-bg-top)] p-2.5 shadow-[0_24px_60px_-30px_rgba(15,23,42,.65)] backdrop-blur-md dark:border-white/15">
+        <textarea
+          ref={inputRef}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void sendFromMainInput(e.altKey);
+            }
+          }}
+          rows={2}
+          placeholder={
+            activeChatTask?.ask ? "回答上面的追问，回车发送…"
+              : activeChatTask?.status === "running" ? "补充说明（实时传给执行中的 HARNESS），或交代新任务…"
+              : "用一句话说清要它做什么，回车直接开跑（HARNESS 开荒第一条后自动批量）。例如：把左边这张表的申请逐条填进右侧网页。"
+          }
+          className="w-full resize-none bg-transparent px-1.5 py-1 text-[12.5px] leading-relaxed text-slate-800 placeholder:text-slate-400 focus:outline-none dark:text-slate-100 dark:placeholder:text-slate-500"
+        />
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            {/* 网页对象 */}
+            {/* 左下拉=网页对象：左右 BrowserPane 已打开的网页 + 本地导入的文档/图片 */}
             <label className="flex items-center gap-1 rounded-full bg-white/70 px-2 py-1 text-[10px] text-slate-600 ring-1 ring-slate-200/80 dark:bg-white/10 dark:text-slate-200 dark:ring-white/10">
               <Globe className="h-3 w-3 text-sky-600 dark:text-sky-400" />
               <select
                 value={webSide}
-                onChange={(e) => setWebSide(e.target.value as "left" | "right" | "none")}
-                className="max-w-[128px] cursor-pointer truncate bg-transparent pr-0.5 focus:outline-none"
+                onChange={(e) => {
+                  const side = e.target.value as "left" | "right" | "none";
+                  setWebSide(side);
+                  if (side !== "none") {
+                    const p = alivePages.find((x) => x.side === side);
+                    appendToken(`@${side === "left" ? "左" : "右"}·${p?.title || localDocs[side]?.name || p?.url || "网页"}`);
+                  }
+                }}
+                className="max-w-[190px] cursor-pointer truncate bg-transparent pr-0.5 focus:outline-none"
               >
                 <option value="none">不用网页</option>
-                {alivePages.map((p) => (
-                  <option key={p.side} value={p.side}>
-                    {p.side === "left" ? "数据源" : "学校系统"}
-                  </option>
-                ))}
+                {/* 左右两侧始终可选：即使面板还没开网页，也先绑定侧别（执行时该侧自动装载） */}
+                <option value="left">
+                  左 · {alivePages.find((p) => p.side === "left")?.title || localDocs.left?.name || alivePages.find((p) => p.side === "left")?.url || "（未开网页）"}
+                </option>
+                <option value="right">
+                  右 · {alivePages.find((p) => p.side === "right")?.title || localDocs.right?.name || alivePages.find((p) => p.side === "right")?.url || "（未开网页）"}
+                </option>
               </select>
+              {/* token 被删掉时：点 ↩ 放回（原生 select 重选同值不触发 change） */}
+              {webSide !== "none" && (() => {
+                const p = alivePages.find((x) => x.side === webSide);
+                const token = `@${webSide === "left" ? "左" : "右"}·${p?.title || localDocs[webSide]?.name || p?.url || "网页"}`;
+                if (text.includes(token)) return null;
+                return (
+                  <button
+                    onClick={() => appendToken(token)}
+                    className="shrink-0 rounded px-1 text-[9px] font-semibold text-violet-600 hover:bg-violet-50 dark:text-violet-300 dark:hover:bg-violet-400/10"
+                    title="把网页引用放回输入框"
+                  >
+                    ↩
+                  </button>
+                );
+              })()}
             </label>
 
-            {/* Excel 对象 */}
+            {/* 右下拉=纯 Excel 对象：已载入的左右表格 + 本地挑的表格 */}
             <label className="flex items-center gap-1 rounded-full bg-white/70 px-2 py-1 text-[10px] text-slate-600 ring-1 ring-slate-200/80 dark:bg-white/10 dark:text-slate-200 dark:ring-white/10">
               <Table2 className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
               <select
                 value={excelPath}
-                onChange={(e) => setExcelPath(e.target.value)}
-                className="max-w-[150px] cursor-pointer truncate bg-transparent pr-0.5 focus:outline-none"
+                onChange={(e) => {
+                  const path = e.target.value;
+                  setExcelPath(path);
+                  const s = allExcelSources.find((x) => x.path === path);
+                  const side = s?.id === "loaded-right" ? "right" : s?.id === "loaded-left" ? "left" : excelSide;
+                  if (s?.id === "loaded-left") setExcelSide("left");
+                  else if (s?.id === "loaded-right") setExcelSide("right");
+                  if (s) appendToken(`@${side === "left" ? "左" : "右"}·${s.filename}`);
+                }}
+                className="max-w-[170px] cursor-pointer truncate bg-transparent pr-0.5 focus:outline-none"
               >
                 <option value="">不用表格</option>
-                {allExcelSources.map((s) => (
-                  <option key={s.id} value={s.path} disabled={!s.path}>
-                    {s.filename}
-                  </option>
-                ))}
+                {allExcelSources
+                  .filter((s) => /\.(xlsx|xlsm|csv)$/i.test(s.filename))
+                  .map((s) => (
+                    <option key={s.id} value={s.path} disabled={!s.path}>
+                      {s.id === "loaded-left" ? "左 · " : s.id === "loaded-right" ? "右 · " : ""}{s.filename}
+                    </option>
+                  ))}
               </select>
+              {/* 对象挂哪一侧：执行时该侧面板自动切到表格/PDF 视图 */}
+              {excelPath && (
+                <button
+                  onClick={() => {
+                    const next = excelSide === "left" ? "right" : "left";
+                    setExcelSide(next);
+                    if (currentExcel) appendToken(`@${next === "left" ? "左" : "右"}·${currentExcel.filename}`);
+                  }}
+                  className={[
+                    "shrink-0 rounded px-1 text-[9px] font-semibold transition-colors",
+                    excelSide === "left"
+                      ? "bg-sky-100 text-sky-700 dark:bg-sky-400/15 dark:text-sky-300"
+                      : "bg-amber-100 text-amber-700 dark:bg-amber-400/15 dark:text-amber-300",
+                  ].join(" ")}
+                  title="点击切换：这个对象显示在左侧还是右侧面板"
+                >
+                  {excelSide === "left" ? "左" : "右"}
+                </button>
+              )}
+              {/* token 被删掉时：点 ↩ 放回 */}
+              {excelPath && currentExcel && (() => {
+                const token = `@${excelSide === "left" ? "左" : "右"}·${currentExcel.filename}`;
+                if (text.includes(token)) return null;
+                return (
+                  <button
+                    onClick={() => appendToken(token)}
+                    className="shrink-0 rounded px-1 text-[9px] font-semibold text-violet-600 hover:bg-violet-50 dark:text-violet-300 dark:hover:bg-violet-400/10"
+                    title="把表格/PDF 引用放回输入框"
+                  >
+                    ↩
+                  </button>
+                );
+              })()}
             </label>
             {window.electronAPI?.harnessPickExcel && (
               <button
                 onClick={() => void pickLocalExcel()}
                 className="flex items-center gap-1 rounded-full bg-white/70 px-2 py-1 text-[10px] text-slate-600 ring-1 ring-slate-200/80 hover:bg-white dark:bg-white/10 dark:text-slate-200 dark:ring-white/10"
-                title="从磁盘挑一个表格（操作的是工作副本，原文件不会被改动）"
+                title="从磁盘挑文件：表格进右侧下拉；WORD/PDF/MD/TXT/图片直接开进 BrowserPane（挑完选左/右侧）"
               >
                 <FileSpreadsheet className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
                 本地
               </button>
             )}
-
-            <span className="ml-auto hidden text-[9px] text-slate-400 sm:inline">
-              Enter 生成流程 · Shift+Enter 换行 · Esc 收起
-            </span>
-            <button
-              onClick={() => void makePlan()}
-              disabled={drafting || !text.trim()}
-              className="flex items-center gap-1 rounded-full bg-slate-900 px-3 py-1 text-[11px] font-semibold text-white shadow-sm transition-all hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300 dark:bg-white dark:text-slate-900 dark:disabled:bg-white/20"
-            >
-              {drafting ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <CornerDownLeft className="h-3 w-3" />
-              )}
-              {drafting ? "生成流程…" : "生成流程"}
-            </button>
-            <button
-              onClick={() => {
-                setSummoned(false);
-                setError("");
-              }}
-              className="rounded-full p-1 text-slate-400 transition-colors hover:bg-white/60 hover:text-slate-700 dark:hover:bg-white/10"
-              title="收起"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
+            {/* 右侧动作组：整体靠右且不换行 */}
+            <div className="ml-auto flex shrink-0 items-center gap-1.5">
+              <button
+                onClick={() => void sendFromMainInput(true)}
+                disabled={drafting || busy || !text.trim()}
+                className="flex items-center gap-1 rounded-full bg-white/70 px-2.5 py-1 text-[10px] font-medium text-slate-600 ring-1 ring-slate-200/80 transition-all hover:bg-white disabled:opacity-50 dark:bg-white/10 dark:text-slate-200 dark:ring-white/10"
+                title="先出流程核对再执行（Alt+Enter）"
+              >
+                {drafting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
+                {drafting ? "生成中…" : "先看流程"}
+              </button>
+              <button
+                onClick={() => void sendFromMainInput()}
+                disabled={drafting || busy || !text.trim()}
+                className="flex items-center gap-1 rounded-full bg-slate-900 px-3 py-1 text-[11px] font-semibold text-white shadow-sm transition-all hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300 dark:bg-white dark:text-slate-900 dark:disabled:bg-white/20"
+              >
+                {busy ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Play className="h-3 w-3" />
+                )}
+                {busy ? "安排中…" : activeChatTask?.ask ? "回答追问" : activeChatTask?.status === "running" ? "发送" : "直接开跑"}
+              </button>
+            </div>
           </div>
+      </div>
+
+      {/* 新挑的本地表格/PDF：选左/右侧后 token 写进输入框 */}
+      {pickedFile && (
+        <div className="flex w-full items-center gap-2 rounded-xl bg-violet-50/90 px-2.5 py-1.5 text-[11px] text-violet-800 ring-1 ring-violet-200 dark:bg-violet-400/10 dark:text-violet-200 dark:ring-violet-400/20">
+          <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">
+            「{pickedFile.name}」放到哪一侧面板？
+          </span>
+          <button
+            onClick={() => confirmPickedFileSide("left")}
+            className="shrink-0 rounded-full bg-sky-600 px-2.5 py-0.5 text-[10px] font-semibold text-white hover:bg-sky-700"
+          >
+            左侧
+          </button>
+          <button
+            onClick={() => confirmPickedFileSide("right")}
+            className="shrink-0 rounded-full bg-amber-600 px-2.5 py-0.5 text-[10px] font-semibold text-white hover:bg-amber-700"
+          >
+            右侧
+          </button>
+          <button
+            onClick={() => setPickedFile(null)}
+            className="shrink-0 rounded p-0.5 opacity-60 hover:opacity-100"
+            title="取消"
+          >
+            <X className="h-3 w-3" />
+          </button>
         </div>
       )}
 
@@ -672,53 +982,65 @@ export default function DeskTaskBoard({
         </div>
       )}
 
-      {/* ===== 概览 ===== */}
+      {/* ===== 概览 + 卡片区：右侧竖排，选中卡片微微左凸 ===== */}
       {tasks.length > 0 && (
-        <div className="flex w-full items-center gap-2 px-1 text-[10px] text-slate-500 dark:text-slate-400">
-          <Zap className="h-3 w-3" />
-          <span>
-            {stats.running > 0 ? "1 个执行中" : "空闲"}
-            {stats.queued > 0 ? ` · ${stats.queued} 个待执行` : ""}
-            {tasks.length - stats.running - stats.queued > 0
-              ? ` · ${tasks.length - stats.running - stats.queued} 个已结束`
-              : ""}
-          </span>
-          {workerIdle && (
+        <div className="pointer-events-auto fixed right-3 top-1/2 z-30 flex max-h-[76vh] w-[320px] -translate-y-1/2 flex-col gap-2">
+          <div className="flex items-center gap-2 px-1 text-[10px] text-slate-500 dark:text-slate-400">
+            <Zap className="h-3 w-3" />
+            <span className="min-w-0 flex-1 truncate">
+              {stats.running > 0 ? "1 个执行中" : "空闲"}
+              {stats.queued > 0 ? ` · ${stats.queued} 待执行` : ""}
+            </span>
+            {workerIdle && (
+              <button
+                onClick={() => void act(() => api.harnessQueueResume())}
+                className="flex shrink-0 items-center gap-1 rounded-full bg-white/70 px-2 py-[2px] text-[9px] font-medium text-slate-600 ring-1 ring-slate-200/80 hover:bg-white dark:bg-white/10 dark:text-slate-200 dark:ring-white/10"
+                title="应用重启后队列会停下，点这里继续"
+              >
+                <Play className="h-2.5 w-2.5" />
+                继续
+              </button>
+            )}
             <button
-              onClick={() => void act(() => api.harnessQueueResume())}
-              className="flex items-center gap-1 rounded-full bg-white/70 px-2 py-[2px] text-[9px] font-medium text-slate-600 ring-1 ring-slate-200/80 hover:bg-white dark:bg-white/10 dark:text-slate-200 dark:ring-white/10"
-              title="应用重启后队列会停下，点这里继续"
+              onClick={() => void act(() => api.harnessQueueClear())}
+              className="shrink-0 text-[9px] text-slate-400 transition-colors hover:text-rose-600"
             >
-              <Play className="h-2.5 w-2.5" />
-              继续执行
+              清理
             </button>
-          )}
-          <button
-            onClick={() => void act(() => api.harnessQueueClear())}
-            className="ml-auto text-[9px] text-slate-400 transition-colors hover:text-rose-600"
-          >
-            清理已结束
-          </button>
-        </div>
-      )}
-
-      {/* ===== 卡片区 ===== */}
-      {tasks.length > 0 && (
-        <div className="flex max-h-[38vh] w-full flex-wrap justify-center gap-2 overflow-y-auto px-0.5 pb-1">
-          {tasks.map((t) => (
-            <TaskCard
-              key={t.id}
-              task={t}
-              answerDraft={answering[t.id] || ""}
-              onAnswerDraft={(v) => setAnswering((prev) => ({ ...prev, [t.id]: v }))}
-              onAnswer={(text2) => {
-                setAnswering((prev) => ({ ...prev, [t.id]: "" }));
-                void act(() => api.harnessQueueAnswer(t.id, text2));
+          </div>
+          <div className="flex flex-col gap-2 overflow-y-auto py-1 pl-3 pr-0.5">
+            {tasks.map((t) => (
+              <TaskCard
+                key={t.id}
+                task={t}
+                active={activeChatTask?.id === t.id}
+                onSelect={() => setActiveChatId(t.id)}
+                answerDraft={answering[t.id] || ""}
+                onAnswerDraft={(v) => setAnswering((prev) => ({ ...prev, [t.id]: v }))}
+                onAnswer={(text2) => {
+                  setAnswering((prev) => ({ ...prev, [t.id]: "" }));
+                  void act(() => api.harnessQueueAnswer(t.id, text2));
+                }}
+                onCancel={() => void act(() => api.harnessQueueCancel(t.id))}
+                onDiscard={() => void act(() => api.harnessQueueDiscard(t.id))}
+              />
+            ))}
+            {/* 添加新任务：清空当前对话固定，聚焦下方派单输入框设计新任务 */}
+            <button
+              onClick={() => {
+                setActiveChatId("");
+                setText("");
+                setDraft(null);
+                setRevision("");
+                window.setTimeout(() => inputRef.current?.focus(), 30);
               }}
-              onCancel={() => void act(() => api.harnessQueueCancel(t.id))}
-              onDiscard={() => void act(() => api.harnessQueueDiscard(t.id))}
-            />
-          ))}
+              className="flex shrink-0 items-center justify-center gap-1.5 rounded-[14px] border border-dashed border-slate-300/80 bg-white/40 px-3 py-2 text-[10.5px] font-medium text-slate-500 transition-colors hover:border-violet-400 hover:bg-violet-50/60 hover:text-violet-700 dark:border-white/15 dark:bg-white/5 dark:text-slate-400 dark:hover:border-violet-400/60 dark:hover:bg-violet-400/10 dark:hover:text-violet-300"
+              title="在下方输入框设计一个新任务，回车入队"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              添加新任务
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -736,7 +1058,20 @@ const ACTION_LABEL: Record<HarnessPlanStep["action"], string> = {
   write: "写入",
   verify: "核对",
   wait: "等待",
+  render: "渲染画面",
+  narrate: "生成配音",
+  compose: "合成视频",
+  export: "交付文件",
 };
+
+const SIDE_LABEL: Record<HarnessPlanStep["side"], string> = {
+  web: "网页",
+  excel: "表格",
+  slide: "PPT",
+  video: "视频",
+  workspace: "工作区",
+};
+const SIDE_ORDER: HarnessPlanStep["side"][] = ["web", "excel", "slide", "video", "workspace"];
 
 /**
  * 流程草案面板：把 HARNESS 打算怎么做一条条摊开给用户核对。
@@ -926,17 +1261,21 @@ function DraftPanel({
               </span>
               <button
                 onClick={() =>
-                  onPatchStep(i, { side: s.side === "excel" ? "web" : "excel" })
+                  onPatchStep(i, { side: SIDE_ORDER[(SIDE_ORDER.indexOf(s.side) + 1) % SIDE_ORDER.length] })
                 }
                 className={[
                   "shrink-0 rounded px-1 text-[9px] font-medium transition-colors",
                   s.side === "excel"
                     ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-400/15 dark:text-emerald-300"
+                    : s.side === "slide" || s.side === "video"
+                    ? "bg-violet-100 text-violet-700 hover:bg-violet-200 dark:bg-violet-400/15 dark:text-violet-300"
+                    : s.side === "workspace"
+                    ? "bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-400/15 dark:text-amber-300"
                     : "bg-sky-100 text-sky-700 hover:bg-sky-200 dark:bg-sky-400/15 dark:text-sky-300",
                 ].join(" ")}
-                title="点一下切换：网页 / 表格"
+                title="点一下切换作用对象：网页 / 表格 / PPT / 视频 / 工作区"
               >
-                {s.side === "excel" ? "表格" : "网页"}
+                {SIDE_LABEL[s.side] || "网页"}
               </button>
               <select
                 value={s.action}
@@ -1016,6 +1355,10 @@ function DraftPanel({
                   <Crosshair className="h-2.5 w-2.5" />
                   {s.side === "excel"
                     ? "表格步骤：在下方表格里核对位置"
+                    : s.side === "slide" || s.side === "video"
+                    ? "PPT/视频步骤：由 HARNESS 在 SLIDE STUDIO 执行"
+                    : s.side === "workspace"
+                    ? "协作步骤：成果写入工作区文件"
                     : "已在上方网页定位；悬停其它步骤可逐个看"}
                 </div>
               </div>
@@ -1146,6 +1489,8 @@ const STATUS_META: Record<
 
 function TaskCard({
   task,
+  active = false,
+  onSelect,
   answerDraft,
   onAnswerDraft,
   onAnswer,
@@ -1153,6 +1498,10 @@ function TaskCard({
   onDiscard,
 }: {
   task: HarnessQueueTask;
+  /** 是否是主聊天框当前展示的卡片 */
+  active?: boolean;
+  /** 点击卡片：主聊天框切换到该卡片的讨论记录 */
+  onSelect?: () => void;
   answerDraft: string;
   onAnswerDraft: (v: string) => void;
   onAnswer: (text: string) => void;
@@ -1164,11 +1513,14 @@ function TaskCard({
 
   return (
     <div
+      onClick={onSelect}
       className={[
-        "group relative flex w-full flex-col gap-1.5 rounded-[18px] border bg-[var(--panel-bg-top)] p-2.5 backdrop-blur-md transition-shadow sm:w-[326px]",
-        live
-          ? "border-sky-300/80 shadow-[0_0_0_1px_rgba(56,189,248,.35),0_18px_40px_-28px_rgba(2,132,199,.8)] dark:border-sky-400/40"
-          : "border-white/50 shadow-[0_14px_36px_-26px_rgba(15,23,42,.6)] dark:border-white/12",
+        "group relative flex w-full cursor-pointer flex-col gap-1.5 rounded-[18px] border bg-[var(--panel-bg-top)] p-2.5 backdrop-blur-md transition-all duration-200",
+        active
+          ? "-translate-x-2.5 border-violet-400/80 shadow-[0_0_0_1px_rgba(139,92,246,.4),0_18px_40px_-28px_rgba(109,40,217,.7)] dark:border-violet-400/50"
+          : live
+          ? "border-sky-300/80 shadow-[0_0_0_1px_rgba(56,189,248,.35),0_18px_40px_-28px_rgba(2,132,199,.8)] hover:-translate-x-1 dark:border-sky-400/40"
+          : "border-white/50 shadow-[0_14px_36px_-26px_rgba(15,23,42,.6)] hover:-translate-x-1 hover:border-violet-200 dark:border-white/12 dark:hover:border-violet-400/30",
       ].join(" ")}
     >
       <div className="flex items-center gap-1.5">
@@ -1194,7 +1546,7 @@ function TaskCard({
         <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
           {task.status === "queued" && (
             <button
-              onClick={onCancel}
+              onClick={(e) => { e.stopPropagation(); onCancel(); }}
               className="rounded p-1 text-slate-400 hover:bg-white/70 hover:text-rose-600 dark:hover:bg-white/10"
               title="取消"
             >
@@ -1203,7 +1555,7 @@ function TaskCard({
           )}
           {live && (
             <button
-              onClick={onCancel}
+              onClick={(e) => { e.stopPropagation(); onCancel(); }}
               className="rounded p-1 text-slate-400 hover:bg-white/70 hover:text-rose-600 dark:hover:bg-white/10"
               title="停止"
             >
@@ -1212,7 +1564,7 @@ function TaskCard({
           )}
           {!live && task.status !== "queued" && (
             <button
-              onClick={onDiscard}
+              onClick={(e) => { e.stopPropagation(); onDiscard(); }}
               className="rounded p-1 text-slate-400 hover:bg-white/70 hover:text-slate-700 dark:hover:bg-white/10"
               title="从桌面移除"
             >
@@ -1264,7 +1616,7 @@ function TaskCard({
       )}
 
       {task.plan?.steps?.length ? (
-        <details className="group/plan">
+        <details className="group/plan" onClick={(e) => e.stopPropagation()}>
           <summary className="flex cursor-pointer list-none items-center gap-1 text-[9px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">
             <ArrowRight className="h-2.5 w-2.5 transition-transform group-open/plan:rotate-90" />
             查看确认过的流程（{task.plan.steps.length} 步）
@@ -1274,7 +1626,7 @@ function TaskCard({
               <div key={s.id || i} className="flex gap-1 text-[9px] leading-relaxed text-slate-500 dark:text-slate-400">
                 <span className="shrink-0 text-slate-400">{i + 1}.</span>
                 <span className="shrink-0 text-slate-400">
-                  [{s.side === "excel" ? "表格" : "网页"}]
+                  [{SIDE_LABEL[s.side] || "网页"}]
                 </span>
                 <span className="min-w-0 break-words">{s.target}</span>
               </div>
@@ -1316,7 +1668,7 @@ function TaskCard({
       )}
 
       {task.ask && (
-        <div className="rounded-md bg-amber-50 px-1.5 py-1 dark:bg-amber-400/10">
+        <div className="rounded-md bg-amber-50 px-1.5 py-1 dark:bg-amber-400/10" onClick={(e) => e.stopPropagation()}>
           <div className="text-[9.5px] leading-relaxed text-amber-900 dark:text-amber-200">
             {task.ask.question}
           </div>
@@ -1342,6 +1694,50 @@ function TaskCard({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** 主聊天框里的一条消息：用户右侧深色，HARNESS 左侧浅色，系统事件居中细字 */
+function ChatBubble({ entry }: { entry: HarnessTranscriptEntry }) {
+  const time = new Date(entry.ts * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  if (entry.role === "system" && (entry.kind === "phase" || entry.kind === "result")) {
+    return (
+      <div className="self-center text-center text-[9px] leading-relaxed text-slate-400 dark:text-slate-500">
+        {entry.text}
+      </div>
+    );
+  }
+  if (entry.role === "user") {
+    return (
+      <div className="flex max-w-[85%] flex-col items-end gap-0.5 self-end">
+        <div className="whitespace-pre-line text-right text-[12px] font-medium leading-relaxed text-slate-800 dark:text-slate-100">
+          {entry.text}
+        </div>
+        <span className="text-[8.5px] text-slate-400">{entry.kind === "instruction" ? "任务" : "我"} · {time}</span>
+      </div>
+    );
+  }
+  // agent：无框纯文字，靠颜色区分类型（ask 琥珀 / final 绿 / error 红 / action 紫标 / thought 灰）
+  const textCls =
+    entry.kind === "ask" ? "text-amber-700 dark:text-amber-300"
+      : entry.kind === "final" ? "text-emerald-700 dark:text-emerald-300"
+      : entry.kind === "error" ? "text-rose-700 dark:text-rose-300"
+      : entry.kind === "thought" ? "text-slate-500 dark:text-slate-400"
+      : "text-slate-700 dark:text-slate-200";
+  const label =
+    entry.kind === "action" ? `第 ${entry.step} 步 · 动作`
+      : entry.kind === "thought" ? "思考"
+      : entry.kind === "ask" ? "追问"
+      : entry.kind === "final" ? "完成汇报"
+      : entry.kind === "error" ? "出错" : "HARNESS";
+  return (
+    <div className="flex max-w-[85%] flex-col items-start gap-0.5 self-start">
+      <div className={`whitespace-pre-line text-[11.5px] leading-relaxed ${textCls}`}>
+        {entry.kind === "action" && <span className="mr-1 inline-flex translate-y-[1px]"><Zap className="h-2.5 w-2.5 text-violet-500" /></span>}
+        {entry.text}
+      </div>
+      <span className="text-[8.5px] text-slate-400">{label} · {time}</span>
     </div>
   );
 }

@@ -4,7 +4,6 @@ import type {
   ApplicantRecord,
   ArchivePayload,
   CoworkClient,
-  CoworkDispatchEvent,
   CoworkSkill,
   DepsStatus,
   DocumentConvertResult,
@@ -17,6 +16,7 @@ import type {
   HarnessPlan,
   HarnessQueueTask,
   HarnessStatus,
+  HarnessTranscriptEntry,
   HumanCoworkTask,
   PPTFileSlides,
   PPTOutlineSlide,
@@ -280,11 +280,11 @@ export const api = {
       { method: "POST" },
       300000
     ),
-  installRemotion: () =>
+  installFfmpeg: () =>
     jsonFetch<{ ok: boolean; message: string }>(
-      `${BASE}/config/install-remotion`,
+      `${BASE}/config/install-ffmpeg`,
       { method: "POST" },
-      300000
+      600000
     ),
   installOfficecli: () =>
     jsonFetch<{ ok: boolean; message: string }>(
@@ -418,6 +418,18 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ side, path, filename }),
     }),
+
+  /** 按本地路径直接把 Excel 载入某一侧面板（HARNESS 派单对象用） */
+  loadExcelFromPath: (side: "left" | "right", path: string) =>
+    jsonFetch<{ count: number; records: ApplicantRecord[]; detected_column_map: Record<string, string> }>(
+      `${BASE}/upload/excel-load-path`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ side, path }),
+      },
+      60000
+    ),
 
   /** 导出 Excel：把内存中（修正后）的字段值写回文件；本地路径=原地写回，否则下载副本 */
   exportExcel: async (side: "left" | "right"): Promise<{ mode: "inplace" | "download"; path?: string; filename?: string; note?: string }> => {
@@ -864,48 +876,22 @@ export const api = {
       body: JSON.stringify(append ? { append: text } : { text }),
     }),
 
-  /** SSE 派发任务，逐条推送品控进度 */
-  coworkDispatch: async (
-    params: {
-      instruction: string;
-      skill_ids: string[];
-      client_ids: string[];
-      max_rounds?: number;
-      timeout?: number;
-    },
-    onEvent: (ev: CoworkDispatchEvent) => void
-  ): Promise<void> => {
-    const resp = await apiFetch(`${BASE}/cowork/dispatch`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params),
-    });
-    if (!resp.ok || !resp.body) {
-      throw new Error(`派发失败: HTTP ${resp.status}`);
-    }
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split("\n\n");
-      buffer = parts.pop() || "";
-      for (const part of parts) {
-        const line = part.trim();
-        if (!line.startsWith("data:")) continue;
-        try {
-          const ev = JSON.parse(line.slice(5).trim());
-          if (ev.type === "error") throw new Error(ev.message || "任务失败");
-          if (ev.type === "done") return;
-          onEvent(ev as CoworkDispatchEvent);
-        } catch (e) {
-          if (e instanceof Error && e.message !== "Unexpected end of JSON input") throw e;
-        }
+  /** 派发任务：统一交给 HARNESS 底座（进入队列，studio=cowork），返回队列卡片 */
+  coworkDispatch: (params: {
+    instruction: string;
+    skill_ids: string[];
+    client_ids?: string[];
+    max_rounds?: number;
+    timeout?: number;
+  }) =>
+    jsonFetch<{ ok: boolean; task: HarnessQueueTask; engine: string }>(
+      `${BASE}/cowork/dispatch`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(params),
       }
-    }
-  },
+    ),
 
   /** 历史任务列表 */
   coworkListTasks: (limit = 20) =>
@@ -1111,8 +1097,10 @@ export const api = {
   /** 让 HARNESS 先出流程：观察真实页面与表格结构后返回步骤清单（不执行） */
   harnessPlan: (params: {
     instruction: string;
-    web?: { url: string; label?: string; exclude_urls?: string[] } | null;
-    excel?: { path: string; label?: string } | null;
+    web?: { url: string; label?: string; exclude_urls?: string[]; side?: string } | null;
+    excel?: { path: string; label?: string; side?: string } | null;
+    slide?: { path: string; label?: string } | null;
+    studio?: "web" | "slide" | "cowork" | "";
   }) =>
     jsonFetch<{ ok: boolean; plan: HarnessPlan }>(`${BASE}/harness/plan`, {
       method: "POST",
@@ -1125,8 +1113,10 @@ export const api = {
     plan: HarnessPlan;
     request: string;
     instruction?: string;
-    web?: { url: string; label?: string; exclude_urls?: string[] } | null;
-    excel?: { path: string; label?: string } | null;
+    web?: { url: string; label?: string; exclude_urls?: string[]; side?: string } | null;
+    excel?: { path: string; label?: string; side?: string } | null;
+    slide?: { path: string; label?: string } | null;
+    studio?: "web" | "slide" | "cowork" | "";
   }) =>
     jsonFetch<{ ok: boolean; plan: HarnessPlan }>(`${BASE}/harness/plan/revise`, {
       method: "POST",
@@ -1139,8 +1129,11 @@ export const api = {
   /** 安排一个任务：立刻变成一张待执行卡片，按顺序自动执行 */
   harnessEnqueue: (params: {
     instruction: string;
-    web?: { url: string; label?: string; exclude_urls?: string[] } | null;
-    excel?: { path: string; label?: string } | null;
+    web?: { url: string; label?: string; exclude_urls?: string[]; side?: string } | null;
+    excel?: { path: string; label?: string; side?: string } | null;
+    slide?: { path: string; label?: string } | null;
+    studio?: "web" | "slide" | "cowork" | "";
+    context_note?: string;
     max_steps?: number;
     vision?: boolean;
     plan?: HarnessPlan | null;
@@ -1153,6 +1146,12 @@ export const api = {
 
   /** 队列里的全部卡片 */
   harnessQueue: () => jsonFetch<{ tasks: HarnessQueueTask[] }>(`${BASE}/harness/queue`),
+
+  /** 卡片的对话记录（主聊天框按卡片切换展示） */
+  harnessTranscript: (id: string) =>
+    jsonFetch<{ ok: boolean; task_id: string; entries: HarnessTranscriptEntry[] }>(
+      `${BASE}/harness/queue/${id}/transcript`
+    ),
 
   /** 取消（排队中→直接作废；运行中→请求停止） */
   harnessQueueCancel: (id: string) =>
@@ -1180,6 +1179,22 @@ export const api = {
   /** 让队列重新跑起来（应用重启后手工恢复） */
   harnessQueueResume: () =>
     jsonFetch<{ ok: boolean }>(`${BASE}/harness/queue/resume`, { method: "POST" }),
+
+  // ---------- LOOP 桥：HARNESS 工具 → 前端真正的自动化引擎 ----------
+
+  /** 领取 HARNESS 发来的 LOOP 代办请求 */
+  harnessBridgePending: () =>
+    jsonFetch<{ ok: boolean; calls: Array<{ id: string; tool: string; args: Record<string, unknown> }>; waiting: boolean }>(
+      `${BASE}/harness/bridge/pending`, undefined, 8000,
+    ),
+
+  /** 回执 LOOP 代办结果 */
+  harnessBridgeResult: (id: string, result: Record<string, unknown>) =>
+    jsonFetch<{ ok: boolean }>(`${BASE}/harness/bridge/result`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, result }),
+    }, 15000),
 };
 
 export type VerifyEvent =

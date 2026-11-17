@@ -23,7 +23,7 @@ import {
     FolderCog,
 } from "lucide-react";
 import { api } from "../../api/client";
-import type { CoworkSkill, CoworkClient, CoworkDispatchEvent, CoworkTask } from "../../types";
+import type { CoworkSkill, CoworkClient } from "../../types";
 
 type TimelineItem = {
     id: string;
@@ -56,11 +56,9 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
 
     // 选中状态
     const [selectedSkills, setSelectedSkills] = useState<Set<string>>(new Set());
-    const [selectedClients, setSelectedClients] = useState<Set<string>>(new Set());
 
     // 任务
     const [instruction, setInstruction] = useState("");
-    const [maxRounds, setMaxRounds] = useState(2);
     const [running, setRunning] = useState(false);
     const [timeline, setTimeline] = useState<TimelineItem[]>([]);
     const [finalResult, setFinalResult] = useState("");
@@ -82,8 +80,6 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
             setSkills(sk.skills);
             setClients(cl.clients);
             setProfile(pf.profile);
-            // 默认选中可用的客户端
-            setSelectedClients(new Set(cl.clients.filter((c) => c.available).map((c) => c.id)));
         } catch (e) {
             setError(e instanceof Error ? e.message : "加载失败");
         }
@@ -141,14 +137,6 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
             return n;
         });
     };
-    const toggleClient = (id: string) => {
-        setSelectedClients((prev) => {
-            const n = new Set(prev);
-            if (n.has(id)) n.delete(id);
-            else n.add(id);
-            return n;
-        });
-    };
 
     // ---- 客户端位置设置 ----
     const startEditPath = (c: CoworkClient) => {
@@ -162,7 +150,6 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
         try {
             const res = await api.coworkSetClientPath(pathEditingId, clear ? "" : pathDraft);
             setClients(res.clients);
-            setSelectedClients(new Set(res.clients.filter((c) => c.available).map((c) => c.id)));
             setPathEditingId(null);
             setPathDraft("");
         } catch (e) {
@@ -178,10 +165,9 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
         setProfileEditing(false);
     };
 
-    // ---- 派发任务 ----
+    // ---- 派发任务（统一 HARNESS 底座：进入队列，轮询卡片进度） ----
     const dispatch = async () => {
         if (!instruction.trim() || running) return;
-        if (selectedClients.size === 0) { setError("请至少选择一个客户端"); return; }
         setRunning(true);
         setError("");
         setTimeline([]);
@@ -190,55 +176,51 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
         setQcPassed(null);
         setCurrentRound(0);
 
-        addLog({ kind: "status", label: "中央 AI 已接收任务", detail: instruction.slice(0, 80), status: "running" });
+        addLog({ kind: "status", label: "HARNESS 已接收任务", detail: instruction.slice(0, 80), status: "running" });
 
         try {
-            await api.coworkDispatch(
-                {
-                    instruction,
-                    skill_ids: Array.from(selectedSkills),
-                    client_ids: Array.from(selectedClients),
-                    max_rounds: maxRounds,
-                },
-                (ev: CoworkDispatchEvent) => {
-                    if (ev.type === "status") {
-                        setCurrentRound(ev.round);
-                        const icon = ev.stage === "qc" ? "品控中" : ev.stage === "retry" ? "迭代" : ev.stage === "done" ? "完成" : ev.message;
-                        addLog({
-                            kind: "status",
-                            label: icon,
-                            detail: ev.message,
-                            round: ev.round,
-                            status: ev.stage === "done" ? "ok" : ev.stage === "error" ? "fail" : "running",
-                        });
-                    } else if (ev.type === "client_start") {
-                        addLog({ kind: "client_start", label: ev.client_name, detail: "开始执行…", status: "running" });
-                    } else if (ev.type === "client_done") {
-                        addLog({
-                            kind: "client_done",
-                            label: ev.client_id,
-                            detail: ev.status === "done"
-                                ? `完成（${ev.elapsed.toFixed(1)}s · 成品${ev.origin === "file" ? "已写入成果文件" : "取自标准输出"}）${ev.result_preview ? "— " + ev.result_preview.slice(0, 60) : ""}`
-                                : `失败：${ev.error || ""}`,
-                            status: ev.status === "done" ? "ok" : "fail",
-                        });
-                    } else if (ev.type === "qc") {
-                        setQcReview(ev.review);
-                        setQcPassed(ev.passed);
-                        addLog({
-                            kind: "qc",
-                            label: ev.passed ? "品控通过" : "品控未通过",
-                            detail: ev.review.slice(0, 200) + (ev.feedback ? `\n修正意见：${ev.feedback.slice(0, 150)}` : ""),
-                            status: ev.passed ? "ok" : "fail",
-                            round: ev.round,
-                        });
-                    } else if (ev.type === "done") {
-                        const task = ev.task as CoworkTask;
-                        setFinalResult(task.final_result || "");
-                        setRunning(false);
+            const res = await api.coworkDispatch({
+                instruction,
+                skill_ids: Array.from(selectedSkills),
+            });
+            const taskId = res.task.id;
+            addLog({ kind: "status", label: "已入队", detail: `任务卡片 ${taskId} · 由 HARNESS 底座统一执行`, status: "ok" });
+            let lastActionCount = 0;
+            // 轮询队列卡片：动作摘要逐条上屏，结束后展示交付说明
+            while (true) {
+                await new Promise((r) => setTimeout(r, 1500));
+                const q = await api.harnessQueue();
+                const t = (q.tasks || []).find((x) => x.id === taskId);
+                if (!t) continue;
+                setCurrentRound(t.steps || 0);
+                const actions = t.actions || [];
+                if (actions.length > lastActionCount) {
+                    for (const a of actions.slice(lastActionCount)) {
+                        addLog({ kind: "client_start", label: "HARNESS", detail: a, status: "ok" });
+                    }
+                    lastActionCount = actions.length;
+                }
+                if (t.ask) {
+                    const answer = window.prompt(t.ask.question, t.ask.options?.[0] || "");
+                    if (answer !== null) {
+                        await api.harnessQueueAnswer(taskId, answer);
+                        addLog({ kind: "status", label: "已回答追问", detail: answer.slice(0, 80), status: "ok" });
                     }
                 }
-            );
+                if (t.status === "done" || t.status === "error" || t.status === "canceled") {
+                    setQcPassed(t.status === "done");
+                    setQcReview(t.status === "done" ? "任务完成" : `任务结束：${t.status}`);
+                    setFinalResult(t.summary || t.error || "（无交付说明）");
+                    addLog({
+                        kind: "qc",
+                        label: t.status === "done" ? "执行完成" : "执行结束",
+                        detail: (t.summary || t.error || "").slice(0, 200),
+                        status: t.status === "done" ? "ok" : "fail",
+                    });
+                    setRunning(false);
+                    break;
+                }
+            }
         } catch (e) {
             setError(e instanceof Error ? e.message : "派发失败");
             setRunning(false);
@@ -254,11 +236,11 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
                 <button className="ais-back" onClick={onBack}><ArrowLeft size={16} /></button>
                 <div className="ais-title">
                     <Cpu size={18} />
-                    <span>AI 协作 · 中央 AI</span>
+                    <span>AI 协作 · HARNESS 底座</span>
                 </div>
                 <div className="ais-topbar-right">
                     <span className="ais-round-badge" style={{ opacity: currentRound ? 1 : 0 }}>
-                        第 {currentRound} 轮
+                        第 {currentRound} 步
                     </span>
                     <button className="ais-refresh" onClick={loadAll} title="刷新客户端与技能">
                         <RefreshCw size={14} />
@@ -349,13 +331,12 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
                         {sideTab === "clients" && (
                             <div className="ais-clients">
                                 <p className="ais-side-hint">
-                                    选择要派发任务的本机编码客户端。未检测到时可用「设置位置」手动指定可执行文件路径，设置后优先于 PATH 自动检测。
+                                    任务已统一由 HARNESS 底座执行，不再派发外部编码客户端。此处仅展示本机客户端检测状态（可用于环境参考）；「设置位置」可手动指定可执行文件路径。
                                 </p>
                                 {clients.map((c) => (
                                     <div key={c.id} className="ais-client-wrap">
                                         <div
-                                            className={`ais-client-item ${c.available ? "available" : "unavailable"} ${selectedClients.has(c.id) ? "selected" : ""}`}
-                                            onClick={() => c.available && toggleClient(c.id)}
+                                            className={`ais-client-item ${c.available ? "available" : "unavailable"}`}
                                         >
                                             <div className="ais-client-status">
                                                 {c.available ? <CheckCircle2 size={16} className="ais-ok" /> : <XCircle size={16} className="ais-no" />}
@@ -460,7 +441,7 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
                         <textarea
                             value={instruction}
                             onChange={(e) => setInstruction(e.target.value)}
-                            placeholder="描述你要完成的任务，例如：「用 React 写一个待办清单组件，带本地存储，代码要有类型注解」。中央 AI 会组装技能与风格后派发给选中的客户端。"
+                            placeholder="描述你要完成的任务，例如：「用 React 写一个待办清单组件，带本地存储，代码要有类型注解」。HARNESS 底座会注入勾选的技能与风格画像，在协作工作区里产出成果文件并交付。"
                             rows={3}
                             disabled={running}
                         />
@@ -470,25 +451,15 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
                                     const s = skills.find((x) => x.id === id);
                                     return s ? <span key={id} className="ais-chip ais-chip-skill"><BookOpen size={10} />{s.name}</span> : null;
                                 })}
-                                {Array.from(selectedClients).map((id) => {
-                                    const c = clients.find((x) => x.id === id);
-                                    return c ? <span key={id} className="ais-chip ais-chip-client"><Cpu size={10} />{c.name}</span> : null;
-                                })}
                             </div>
                             <div className="ais-task-actions">
-                                <label className="ais-rounds">
-                                    品控轮次
-                                    <select value={maxRounds} onChange={(e) => setMaxRounds(Number(e.target.value))} disabled={running}>
-                                        <option value={1}>1</option>
-                                        <option value={2}>2</option>
-                                        <option value={3}>3</option>
-                                        <option value={5}>5</option>
-                                    </select>
-                                </label>
+                                <span className="ais-rounds" title="统一由 HARNESS 底座执行，不再派发外部客户端">
+                                    HARNESS 底座
+                                </span>
                                 <button
                                     className="ais-dispatch"
                                     onClick={dispatch}
-                                    disabled={running || !instruction.trim() || selectedClients.size === 0}
+                                    disabled={running || !instruction.trim()}
                                 >
                                     {running ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
                                     {running ? "执行中…" : "派发任务"}
@@ -504,8 +475,8 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
                         {timeline.length === 0 && !running && (
                             <div className="ais-welcome">
                                 <Sparkles size={32} className="ais-welcome-icon" />
-                                <h3>中央 AI 已就绪</h3>
-                                <p>在左侧勾选要应用的技能和执行客户端，输入任务后点击"派发任务"。<br />中央 AI 会并行派发、收集产出、自动品控，不合格则带反馈迭代。</p>
+                                <h3>HARNESS 已就绪</h3>
+                                <p>在左侧勾选要应用的技能，输入任务后点击"派发任务"。<br />HARNESS 底座统一执行：注入技能与风格画像，在协作工作区产出成果文件并交付到下载目录。</p>
                             </div>
                         )}
 
@@ -537,7 +508,7 @@ export default function AIStudio({ onBack }: { onBack: () => void }) {
                             <div className={`ais-qc ${qcPassed ? "pass" : "fail"}`}>
                                 <div className="ais-qc-head">
                                     <Shield size={15} />
-                                    <span>中央 AI 品控评语</span>
+                                    <span>执行结论</span>
                                     {qcPassed !== null && (
                                         <span className={`ais-qc-badge ${qcPassed ? "pass" : "fail"}`}>
                                             {qcPassed ? "通过" : "需修改"}

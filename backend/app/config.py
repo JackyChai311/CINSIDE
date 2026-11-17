@@ -213,8 +213,9 @@ class Settings:
     browser_use_cdp_url: str = field(default_factory=lambda: _env("BROWSER_USE_CDP_URL", ""))
 
     # === HARNESS（双对象 Computer Use） ===
-    # 单任务最大步数：一步 = 一次 LLM 决策 + 一次工具调用
-    harness_max_steps: int = field(default_factory=lambda: int(_env("HARNESS_MAX_STEPS", "40")))
+    # 单任务最大步数：一步 = 一次 LLM 决策 + 一次工具调用。
+    # 观察/询问用户等辅助动作不计步（见 runner），实际执行预算比这个数字更宽。
+    harness_max_steps: int = field(default_factory=lambda: int(_env("HARNESS_MAX_STEPS", "120")))
     # 是否把网页截图作为图像回传给模型（需要支持看图的模型；纯文本模型开了会报错）
     harness_vision: bool = field(default_factory=lambda: _env_bool("HARNESS_VISION", False))
     # HARNESS 连接 BrowserView 的 CDP 端点；留空则继承 browser_use_cdp_url

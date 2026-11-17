@@ -300,6 +300,7 @@ _OBSERVE_JS = (
     viewport: { w: innerWidth, h: innerHeight },
     scroll: {
       x: Math.round(scrollX), y: Math.round(scrollY),
+      max_x: Math.round(Math.max(0, (document.documentElement.scrollWidth || 0) - innerWidth)),
       max_y: Math.round(Math.max(0, (document.documentElement.scrollHeight || 0) - innerHeight)),
     },
     focused: (() => {
@@ -453,13 +454,57 @@ _SCROLL_JS = (
     target = document.querySelector('[data-cinside-ref="' + ref + '"]');
     if (target) target.scrollIntoView({ block: dir === 'up' ? 'start' : 'end', behavior: 'instant' });
   }
-  const dy = dir === 'up' ? -amount : amount;
-  if (!target) window.scrollBy({ top: dy, left: 0, behavior: 'instant' });
+  const horiz = dir === 'left' || dir === 'right';
+  const delta = (dir === 'up' || dir === 'left') ? -amount : amount;
+  if (!target) {
+    // 横向优先滚「真正能横滚的容器」（表格套在 overflow 容器里时 window 本身不动），找不到才滚 window
+    let scrolled = false;
+    if (horiz) {
+      const cx = innerWidth / 2, cy = innerHeight / 2;
+      let node = document.elementFromPoint(cx, cy);
+      while (node && node !== document.body && node !== document.documentElement) {
+        const st = getComputedStyle(node);
+        if (/(auto|scroll)/.test(st.overflowX) && node.scrollWidth > node.clientWidth + 4) {
+          node.scrollLeft += delta;
+          scrolled = true;
+          break;
+        }
+        node = node.parentElement;
+      }
+    }
+    if (!scrolled) {
+      window.scrollBy(horiz ? { left: delta, top: 0, behavior: 'instant' } : { top: delta, left: 0, behavior: 'instant' });
+    }
+  }
   return {
     ok: true,
+    scroll_x: Math.round(scrollX),
     scroll_y: Math.round(scrollY),
+    max_x: Math.round(Math.max(0, (document.documentElement.scrollWidth || 0) - innerWidth)),
     max_y: Math.round(Math.max(0, (document.documentElement.scrollHeight || 0) - innerHeight)),
   };
+})()
+"""
+)
+
+# 自动缩放：把页面宽度收进视口（消除横向滚动），高度放不下就靠上下滚动看。
+# 只缩不放（factor<=1），比例本来就合适（差值<2%）就不动。
+_AUTOFIT_JS = (
+    "(() => {"
+    + _PRELUDE
+    + r"""
+  const cur = __CURRENT__ || 1;
+  // body.style.zoom 作用在 body 上：documentElement.scrollWidth 不折算，body.scrollWidth 已折算成 CSS px。
+  // 以 body 实测宽为准：未缩放布局宽 = bodyW / cur；目标 zoom = 视口宽 / 布局宽（只缩不放）。
+  const bodyW = document.body ? (document.body.scrollWidth || 0) : 0;
+  const docW = Math.max(bodyW, document.documentElement.scrollWidth || 0);
+  const vw = innerWidth;
+  if (!vw || !docW) return { ok: true, changed: false, reason: '无法测量页面尺寸' };
+  const layoutW = (bodyW || docW) / cur;
+  let target = Math.min(1, vw / layoutW);
+  target = Math.max(0.5, Math.round(target * 100) / 100);
+  if (Math.abs(target - cur) < 0.02) return { ok: true, changed: false, zoom: cur, layout_width: Math.round(layoutW), viewport: vw };
+  return { ok: true, changed: true, zoom: target, from: cur, layout_width: Math.round(layoutW), viewport: vw };
 })()
 """
 )
@@ -646,6 +691,45 @@ class WebTarget:
         page = await self.page()
         res = await page.evaluate(_js(_SCROLL_JS, dir=direction, amount=int(amount), ref=ref or ""))
         return res if isinstance(res, dict) else {"ok": False, "error": "滚动失败"}
+
+    async def autofit_zoom(self) -> dict:
+        """把页面缩放到「宽度正好放进视口」的比例；本来就合适就不动。
+
+        用 document.body.style.zoom（Chromium 原生 CSS zoom）实现：
+        与 BrowserPane 的 webContents.setZoomFactor 观感一致，且 CDP 可直接执行、
+        不依赖 Electron IPC。只缩不放（factor<=1，下限 0.5），避免把小页面放大变形。
+        """
+        page = await self.page()
+        # 先读当前 harness 设置的 zoom（body.style.zoom），没设过按 1 算
+        current = await page.evaluate(
+            "(() => { const z = parseFloat(document.body && document.body.style.zoom || '1'); return isFinite(z) && z > 0 ? z : 1; })()"
+        )
+        cur = float(current) if isinstance(current, (int, float)) else 1.0
+        res = await page.evaluate(_js(_AUTOFIT_JS, current=cur))
+        if not isinstance(res, dict) or not res.get("ok"):
+            return {"ok": False, "error": (res or {}).get("error", "缩放测量失败")}
+        if res.get("changed"):
+            factor = float(res.get("zoom") or 1.0)
+            await page.evaluate(
+                "(() => { document.body.style.zoom = " + json.dumps(factor) + "; return true; })()"
+            )
+            res["applied"] = factor
+            # CSS zoom 会改变布局尺寸，稍等重排完成再复核一次：
+            # 响应式页面缩放后可能又冒出新的溢出，最多再补两轮收敛
+            await asyncio.sleep(0.3)
+            for _ in range(2):
+                again = await page.evaluate(_js(_AUTOFIT_JS, current=factor))
+                if not isinstance(again, dict) or not again.get("changed"):
+                    break
+                factor = float(again.get("zoom") or factor)
+                if factor < 0.5:
+                    break
+                await page.evaluate(
+                    "(() => { document.body.style.zoom = " + json.dumps(factor) + "; return true; })()"
+                )
+                res["applied"] = factor
+                await asyncio.sleep(0.3)
+        return res
 
     async def navigate(self, url: str) -> dict:
         page = await self.page()

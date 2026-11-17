@@ -48,7 +48,7 @@ KNOWN_PATHS = frozenset(
         "/api/config/install-ocr-engine-deps",
         "/api/config/install-officecli",
         "/api/config/install-python-deps",
-        "/api/config/install-remotion",
+        "/api/config/install-ffmpeg",
         "/api/config/launch-umi-ocr",
         "/api/config/list-models",
         "/api/config/open-umi-ocr-folder",
@@ -145,7 +145,8 @@ def test_all_routers_are_actually_mounted():
     from app.routers import archive, config, cowork, document, plugin, ppt, upload, verify, ws
 
     total = sum(len(m.router.routes) for m in (upload, verify, config, document, ppt, cowork, archive, plugin, ws))
-    assert total == 93, f"router 内路由总数应为 93，实际 {total}"
+    # 94 = 93 + /api/upload/excel-load-path（HARNESS 派单对象按路径载入表格）
+    assert total == 94, f"router 内路由总数应为 94，实际 {total}"
 
 
 # ============ 基础端点响应结构 ============
@@ -247,12 +248,12 @@ def test_deps_status_response_shape():
     r = client.get("/api/config/deps-status")
     assert r.status_code == 200
     assert sorted(r.json().keys()) == [
+        "ffmpeg",
         "ocr_engine_all_installed",
         "ocr_engine_deps",
         "officecli",
         "python_all_installed",
         "python_deps",
-        "remotion",
         "tools_dir",
         "umi_ocr",
     ]

@@ -29,7 +29,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..config import settings
-from ..services.harness import planner, runner, scheduler
+from ..services.harness import frontend_bridge, planner, runner, scheduler
 from ..services.harness.cdp import CDPError, list_targets
 from ..services.harness.excel_book import ExcelError, ExcelTarget
 
@@ -46,17 +46,26 @@ class WebTargetIn(BaseModel):
     url: str = ""
     label: str = "网页"
     exclude_urls: list[str] = Field(default_factory=list)
+    side: str = ""  # left / right：绑定的是哪一侧 BrowserPane（执行时前端自动切换视图）
 
 
 class ExcelTargetIn(BaseModel):
     path: str = ""
     label: str = "Excel"
+    side: str = ""  # left / right：执行时该侧面板自动切到 Excel 视图
+
+
+class SlideTargetIn(BaseModel):
+    path: str = ""
+    label: str = "PPT"
 
 
 class RunIn(BaseModel):
     instruction: str = Field(..., description="自然语言任务")
     web: Optional[WebTargetIn] = None
     excel: Optional[ExcelTargetIn] = None
+    slide: Optional[SlideTargetIn] = None
+    studio: str = ""  # web / slide / cowork；留空自动分类
     max_steps: Optional[int] = None
     vision: Optional[bool] = None
 
@@ -71,6 +80,9 @@ class QueueIn(BaseModel):
     instruction: str = Field(..., description="自然语言任务")
     web: Optional[WebTargetIn] = None
     excel: Optional[ExcelTargetIn] = None
+    slide: Optional[SlideTargetIn] = None
+    studio: str = ""  # web / slide / cowork；留空自动分类（前端据此自动切换 STUDIO）
+    context_note: str = ""  # cowork 技能与风格（服务端也会自动补充技能库/画像）
     max_steps: Optional[int] = None
     vision: Optional[bool] = None
     # 用户确认过的流程；带上就按流程执行
@@ -83,6 +95,8 @@ class PlanIn(BaseModel):
     instruction: str = Field(..., description="自然语言任务")
     web: Optional[WebTargetIn] = None
     excel: Optional[ExcelTargetIn] = None
+    slide: Optional[SlideTargetIn] = None
+    studio: str = ""
 
 
 class PlanReviseIn(BaseModel):
@@ -93,6 +107,8 @@ class PlanReviseIn(BaseModel):
     instruction: str = ""
     web: Optional[WebTargetIn] = None
     excel: Optional[ExcelTargetIn] = None
+    slide: Optional[SlideTargetIn] = None
+    studio: str = ""
 
 
 # ---------- 自检 / 对象发现 ----------
@@ -246,8 +262,16 @@ async def run_task(body: RunIn):
     instruction = (body.instruction or "").strip()
     if not instruction:
         raise HTTPException(400, "任务描述不能为空")
-    if not body.web and not body.excel:
-        raise HTTPException(400, "请至少选中一个对象（网页或 Excel）")
+
+    studio = body.studio if body.studio in ("web", "slide", "cowork") else ""
+    if not studio:
+        studio = await runner.classify_studio(
+            instruction,
+            has_slide=bool(body.slide),
+            has_web_or_excel=bool(body.web or body.excel),
+        )
+    if not body.web and not body.excel and not body.slide and studio != "cowork":
+        raise HTTPException(400, "请至少选中一个对象（网页 / Excel / PPT），或交给协作工作区")
 
     endpoint = settings.effective_harness_cdp()
     if body.web and not endpoint:
@@ -256,6 +280,10 @@ async def run_task(body: RunIn):
         raise HTTPException(400, "Excel 对象缺少文件路径")
     if body.excel and not os.path.exists(body.excel.path):
         raise HTTPException(400, f"Excel 文件不存在：{body.excel.path}")
+    if body.slide and not body.slide.path:
+        raise HTTPException(400, "PPT 对象缺少文件路径")
+    if body.slide and not os.path.exists(body.slide.path):
+        raise HTTPException(400, f"PPT 文件不存在：{body.slide.path}")
 
     # 同一时刻只允许一个 HARNESS 任务：两个任务同时操控同一个 BrowserView 会互相打架
     if runner.ACTIVE:
@@ -273,7 +301,10 @@ async def run_task(body: RunIn):
         if body.web
         else None,
         excel=runner.ExcelBinding(path=body.excel.path, label=body.excel.label) if body.excel else None,
-        max_steps=max(1, min(body.max_steps or settings.harness_max_steps, 120)),
+        slide=runner.SlideBinding(path=body.slide.path, label=body.slide.label) if body.slide else None,
+        studio=studio,
+        context_note=(_cowork_context("") if studio == "cowork" else ""),
+        max_steps=max(1, min(body.max_steps or settings.harness_max_steps, 500)),
         vision=settings.harness_vision if body.vision is None else bool(body.vision),
     )
 
@@ -355,13 +386,22 @@ async def _autofill_web(web: WebTargetIn) -> WebTargetIn:
 def _web_dict(web: Optional[WebTargetIn]) -> dict | None:
     if not web:
         return None
-    return {"url": web.url, "label": web.label or "网页", "exclude_urls": web.exclude_urls}
+    return {
+        "url": web.url,
+        "label": web.label or "网页",
+        "exclude_urls": web.exclude_urls,
+        "side": web.side if web.side in ("left", "right") else "",
+    }
 
 
 def _excel_dict(excel: Optional[ExcelTargetIn]) -> dict | None:
     if not excel:
         return None
-    return {"path": excel.path, "label": excel.label or "Excel"}
+    return {
+        "path": excel.path,
+        "label": excel.label or "Excel",
+        "side": excel.side if excel.side in ("left", "right") else "",
+    }
 
 
 @router.post("/plan")
@@ -370,17 +410,31 @@ async def make_plan(body: PlanIn):
     instruction = (body.instruction or "").strip()
     if not instruction:
         raise HTTPException(400, "任务描述不能为空")
-    if not body.web and not body.excel:
-        raise HTTPException(400, "请至少绑定一个对象（网页或 Excel）")
+    studio = body.studio if body.studio in ("web", "slide", "cowork") else ""
+    if not studio:
+        studio = await runner.classify_studio(
+            instruction,
+            has_slide=bool(body.slide),
+            has_web_or_excel=bool(body.web or body.excel),
+        )
+    if not body.web and not body.excel and not body.slide and studio != "cowork":
+        raise HTTPException(400, "请至少绑定一个对象（网页 / Excel / PPT），或交给协作工作区")
     if body.web:
         body.web = await _autofill_web(body.web)
+    slide_dict = (
+        {"path": body.slide.path, "label": body.slide.label or "PPT"} if body.slide else None
+    )
     try:
-        plan = await planner.draft_plan(instruction, _web_dict(body.web), _excel_dict(body.excel))
+        plan = await planner.draft_plan(
+            instruction, _web_dict(body.web), _excel_dict(body.excel),
+            slide=slide_dict, studio=studio,
+        )
     except RuntimeError as e:
         raise HTTPException(400, str(e)) from e
     except Exception as e:  # noqa: BLE001 - 规划失败要让用户看到原因
         raise HTTPException(500, f"生成流程失败：{type(e).__name__}: {e}") from e
     plan["instruction"] = instruction
+    plan["studio"] = studio
     return {"ok": True, "plan": plan}
 
 
@@ -394,9 +448,14 @@ async def revise_plan(body: PlanReviseIn):
         body.web = await _autofill_web(body.web)
     current = dict(body.plan or {})
     current["instruction"] = body.instruction or current.get("instruction") or ""
+    studio = body.studio or str(current.get("studio") or "web")
+    slide_dict = (
+        {"path": body.slide.path, "label": body.slide.label or "PPT"} if body.slide else None
+    )
     try:
         plan = await planner.revise_plan(
-            current, request, _web_dict(body.web), _excel_dict(body.excel)
+            current, request, _web_dict(body.web), _excel_dict(body.excel),
+            slide=slide_dict, studio=studio,
         )
     except RuntimeError as e:
         raise HTTPException(400, str(e)) from e
@@ -408,12 +467,15 @@ async def revise_plan(body: PlanReviseIn):
 
 @router.post("/queue")
 async def queue_add(body: QueueIn):
-    """安排一个任务：立刻变成一张待执行卡片，按顺序自动跑。"""
+    """安排一个任务：立刻变成一张待执行卡片，按顺序自动跑。
+
+    统一底座：网页 / SLIDE STUDIO（PPT+视频）/ COWORK STUDIO（协作产出）
+    都进同一条队列；studio 留空时自动分类，前端轮询到运行中的卡片会
+    自动切换到对应 STUDIO 视图。
+    """
     instruction = (body.instruction or "").strip()
     if not instruction:
         raise HTTPException(400, "任务描述不能为空")
-    if not body.web and not body.excel:
-        raise HTTPException(400, "请至少绑定一个对象（网页或 Excel），否则 HARNESS 无从下手")
 
     if body.web:
         endpoint = settings.effective_harness_cdp()
@@ -425,11 +487,31 @@ async def queue_add(body: QueueIn):
             raise HTTPException(400, "Excel 对象缺少文件路径")
         if not os.path.exists(body.excel.path):
             raise HTTPException(400, f"Excel 文件不存在：{body.excel.path}")
+    if body.slide:
+        if not body.slide.path:
+            raise HTTPException(400, "PPT 对象缺少文件路径")
+        if not os.path.exists(body.slide.path):
+            raise HTTPException(400, f"PPT 文件不存在：{body.slide.path}")
+
+    studio = body.studio if body.studio in ("web", "slide", "cowork") else ""
+    if not studio:
+        studio = await runner.classify_studio(
+            instruction,
+            has_slide=bool(body.slide),
+            has_web_or_excel=bool(body.web or body.excel),
+        )
+    # slide 任务没绑 PPT 也允许（从零做视频/新 PPT 由模型走 cowork 式产出或 ask_user）
+    context_note = body.context_note or ""
+    if studio == "cowork":
+        context_note = _cowork_context(context_note)
 
     task = scheduler.enqueue(
         instruction=instruction,
         web=_web_dict(body.web),
         excel=_excel_dict(body.excel),
+        slide=({"path": body.slide.path, "label": body.slide.label or "PPT"} if body.slide else None),
+        studio=studio,
+        context_note=context_note,
         max_steps=body.max_steps,
         vision=body.vision,
         plan=body.plan if isinstance(body.plan, dict) else None,
@@ -437,9 +519,38 @@ async def queue_add(body: QueueIn):
     return {"ok": True, "task": task.as_dict()}
 
 
+def _cowork_context(extra: str) -> str:
+    """协作任务：把技能库全部技能 + 用户风格画像组装进执行上下文。"""
+    parts: list[str] = []
+    try:
+        from ..services import cowork_service
+
+        profile = cowork_service.get_profile()
+        if profile.strip():
+            parts.append(f"## 用户风格画像\n{profile.strip()[:2500]}")
+        skills = cowork_service.list_skills()
+        if skills:
+            lines = ["## 技能规范"]
+            for s in skills[:12]:
+                content = str(s.get("content") or "")[:600]
+                lines.append(f"- {s.get('name')}: {content}")
+            parts.append("\n".join(lines))
+    except Exception:  # noqa: BLE001 - 技能库读取失败不阻断任务
+        pass
+    if extra.strip():
+        parts.append(extra.strip()[:2000])
+    return "\n\n".join(parts)[:6000]
+
+
 @router.get("/queue")
 def queue_list():
     return {"tasks": scheduler.list_tasks()}
+
+
+@router.get("/queue/{task_id}/transcript")
+def queue_transcript(task_id: str):
+    """卡片的对话记录：主聊天框按卡片切换展示（思考/动作/追问/回答/结论）。"""
+    return {"ok": True, "task_id": task_id, "entries": scheduler.get_transcript(task_id)}
 
 
 @router.post("/queue/resume")
@@ -467,3 +578,24 @@ def queue_answer(task_id: str, body: AnswerIn):
 @router.delete("/queue/{task_id}")
 def queue_discard(task_id: str):
     return scheduler.discard(task_id)
+
+
+# ---------- 前端 LOOP 执行器桥（HARNESS 工具 → CINSIDE 真正的自动化引擎） ----------
+
+
+class BridgeResultIn(BaseModel):
+    id: str
+    result: dict = Field(default_factory=dict)
+
+
+@router.get("/bridge/pending")
+def bridge_pending():
+    """前端执行器轮询：领取 HARNESS 发来的 LOOP 代办请求。"""
+    return {"ok": True, "calls": frontend_bridge.take_pending(), "waiting": frontend_bridge.has_waiters()}
+
+
+@router.post("/bridge/result")
+def bridge_result(body: BridgeResultIn):
+    """前端执行器回执：按请求 id 完成对应工具的等待。"""
+    ok = frontend_bridge.submit_result(body.id, body.result)
+    return {"ok": ok}

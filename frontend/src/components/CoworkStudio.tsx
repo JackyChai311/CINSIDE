@@ -47,11 +47,11 @@ export default function CoworkStudio({ onBack }: { onBack: () => void }) {
                                 <Bot size={16} />
                                 AI 协作
                             </h2>
-                            <p>中央 AI 作为品控大脑，保存你的技能与风格，调用 Codex / Claude Code / Trae / 千问等客户端并行执行，自动品控与迭代。</p>
+                            <p>统一 HARNESS 底座执行：注入你的技能与风格画像，在协作工作区产出成果文件（报告 / 代码 / 文案），自动交付到下载目录。</p>
                             <div className="cw-card-tags">
                                 <span><Sparkles size={10} /> 技能库</span>
-                                <span>多 Agent 派发</span>
-                                <span>自动品控</span>
+                                <span>HARNESS 底座</span>
+                                <span>成果文件交付</span>
                             </div>
                         </div>
                     </button>
